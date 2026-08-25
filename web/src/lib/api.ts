@@ -116,6 +116,8 @@ export interface Approval {
   /** What the role wrote when it handed the work on. */
   body?: string
   commit?: string
+  /** The approval that performs the merge, rather than one between roles. */
+  terminal?: boolean
   createdAt: string
 }
 

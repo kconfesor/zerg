@@ -17,6 +17,39 @@ const emit = defineEmits<{
 }>()
 
 const notesOpen = ref<Record<string, boolean>>({})
+
+/** Which files are expanded, keyed approvalId::path. */
+const fileOpen = ref<Record<string, boolean>>({})
+
+const key = (id: string, path: string) => `${id}::${path}`
+
+/**
+ * Whether a file starts open, which depends on what the gate is asking.
+ *
+ * At a hand-off the document is the work, so it opens. At the gate that
+ * performs the merge you approved that document already, and the question has
+ * become what the code does — so the spec starts collapsed and the code starts
+ * open. A reader who wants it back is one click away; a reader who wants the
+ * diff should not scroll through a spec to reach it.
+ */
+function defaultOpen(a: { id: string; terminal?: boolean }, f: ChangedFile): boolean {
+  const k = key(a.id, f.path)
+  if (k in fileOpen.value) return fileOpen.value[k]
+  return a.terminal ? !isDoc(f) : true
+}
+
+function toggleFile(a: { id: string; terminal?: boolean }, f: ChangedFile) {
+  const k = key(a.id, f.path)
+  fileOpen.value = { ...fileOpen.value, [k]: !defaultOpen(a, f) }
+}
+
+/** Added and removed counts, so a collapsed file still states its size. */
+function stat(f: ChangedFile): string {
+  const lines = (f.diff ?? '').split('\n')
+  const add = lines.filter((l) => l.startsWith('+') && !l.startsWith('+++')).length
+  const del = lines.filter((l) => l.startsWith('-') && !l.startsWith('---')).length
+  return `+${add} −${del}`
+}
 const diffs = ref<
   Record<string, { open: boolean; files: ChangedFile[]; range?: boolean; base?: string; error?: string }>
 >({})
@@ -171,19 +204,34 @@ function empty(a: Attention | null): boolean {
             :key="f.path"
             class="mb-3 border last:mb-0"
           >
-            <div class="hairline-b flex items-center gap-2 px-2 py-1">
+            <!-- The header is the toggle. A file you are not reading should
+                 cost one line, not a screen. -->
+            <button
+              type="button"
+              class="hairline-b hover:bg-muted focus-visible:outline-ring flex w-full items-center gap-2 px-2 py-1 text-left focus-visible:outline-2 focus-visible:-outline-offset-2"
+              @click="toggleFile(a, f)"
+            >
+              <ChevronRight
+                :size="12"
+                :class="['shrink-0 transition-transform', defaultOpen(a, f) ? 'rotate-90' : '']"
+                aria-hidden="true"
+              />
               <Badge variant="outline">{{ f.status }}</Badge>
-              <code class="min-w-0 truncate text-[11px]">{{ f.path }}</code>
-            </div>
+              <code class="min-w-0 flex-1 truncate text-[11px]">{{ f.path }}</code>
+              <span class="text-muted-foreground shrink-0 font-mono text-[10px] tabular-nums">
+                {{ stat(f) }}
+              </span>
+              <span v-if="isDoc(f)" class="text-muted-foreground shrink-0 text-[10px]">doc</span>
+            </button>
 
             <!-- A document, rendered. This is the thing being approved; showing
                  it as a diff makes the reader reconstruct it line by line. -->
             <div
-              v-if="isDoc(f)"
+              v-if="isDoc(f) && defaultOpen(a, f)"
               class="md max-h-[26rem] overflow-y-auto px-3 py-2 text-xs leading-relaxed"
               v-html="renderMarkdown(f.content ?? '')"
             />
-            <div v-else class="max-h-96 overflow-y-auto py-1">
+            <div v-else-if="defaultOpen(a, f)" class="max-h-96 overflow-y-auto py-1">
               <DiffView v-if="f.diff" :diff="f.diff" />
               <p v-else class="text-muted-foreground px-2 text-[11px]">(no diff)</p>
             </div>
