@@ -377,9 +377,14 @@ async function saveRole(role: RoleTemplate) {
     await api.updateRole(role)
     await loadGlobals()
     await refresh()
+    // What to do next depends on whether anything is running. There is no
+    // per-role restart — start and stop act on the whole swarm — so naming a
+    // control that does not exist sends people looking for it.
     banner.value = {
       tone: 'ok',
-      text: `Saved ${role.name}. Restart the role for it to take effect.`,
+      text: status.value.running
+        ? `Saved ${role.name}. Stop and start the swarm for it to take effect.`
+        : `Saved ${role.name}. It takes effect the next time you start.`,
     }
   } catch (err) {
     fail(err)
