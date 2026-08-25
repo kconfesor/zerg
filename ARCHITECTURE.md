@@ -282,6 +282,29 @@ zerg answers it in two pieces:
 
 The prerequisite list shrinks accordingly: Go and a logged-in harness. No tmux, no babashka, no zsh.
 
+### 7.5 Transports
+
+Four channels, each carrying what it is good at. "One WebSocket for everything" is a common instinct
+and a bad one — it reinvents request/response correlation, status codes, caching and range requests,
+all of which HTTP already has.
+
+| Channel | Transport | Carries |
+|---|---|---|
+| agent ↔ overmind | **unix socket** | `zerg next/done/send/ask`; never leaves the machine |
+| cockpit → overmind | **HTTP/REST** | commands: create task, edit role, approve, start, stop |
+| overmind → cockpit | **WebSocket** | the live typed event stream, and pty bytes during takeover |
+| artifact bytes | **plain HTTP** | files, images, downloads — see §13 |
+
+Commands are request/response with a status code and a body, so they belong on REST: a rejected
+approval is a `409`, not a hand-rolled correlation id and an error frame invented for the occasion.
+
+The WebSocket is multiplexed by channel id, so events and a takeover pty share one connection and one
+auth path. On connect the client sends the last event id it saw and the server replays forward from
+`events` — the same mechanism that makes a browser reload cost a replay rather than a rescrape
+(§10.1). SSE would serve the event half equally well, and its built-in `Last-Event-ID` maps neatly
+onto that table; WebSocket wins only because takeover needs bidirectional bytes anyway, and one
+mechanism beats two.
+
 Runs before every spawn. Each check yields `ok` or `blocked(reason, remedy)`. A blocked role renders
 in **Attention** with both — never as an idle pane that happens to be doing nothing.
 
@@ -603,7 +626,69 @@ Because roles are global (§4.1) and rollups carry `project_id`, the same querie
 projects: cost per project, which project a role earns its keep in, whether a prompt change helped
 everywhere or only in one repo. That falls out of the schema rather than needing a second one.
 
-## 13. Stack
+## 13. Artifacts — planned
+
+*Not in the first build. Recorded now because it constrains the transport and storage decisions
+above, and those are cheaper to get right than to retrofit.*
+
+An artifact is anything an agent produces that a human wants to look at: a generated file, a
+screenshot, a chart, a report, a diff — or a **running service**, a dev server the agent started that
+you want to click and see.
+
+### 13.1 Why not the WebSocket
+
+The event stream is the wrong pipe for bytes. A 4 MB screenshot over WebSocket means base64
+(+33% and a CPU cost at both ends), hand-rolled chunking, no browser caching, no range requests, and
+it head-of-line blocks the live events behind it. Every one of those is solved by an HTTP GET.
+
+So artifacts are ordinary HTTP resources. The event stream carries only the *announcement* — a small
+`artifact` event with an id, kind and label — and the cockpit fetches bytes when the user asks for
+them.
+
+### 13.2 Producing one
+
+```
+zerg artifact add ./report.html --label "Coverage report"
+zerg artifact add ./shot.png    --label "Login screen"
+zerg artifact serve --port 5173 --label "Dev server"
+```
+
+Files are stored content-addressed under `~/.zerg/artifacts/<sha256>`, which dedupes the same output
+across tasks and survives worktree cleanup. `serve` registers a port rather than bytes.
+
+```sql
+artifacts (id, project_id, task_id, role, kind,      -- file | image | service | diff
+           label, sha256, mime, bytes, port, created_at, pinned)
+```
+
+### 13.3 Serving
+
+- `GET /artifacts/{id}` — bytes, correct `Content-Type`, `ETag` = sha256, immutable caching, range
+  requests. The browser does what browsers already do well.
+- `GET /artifacts/{id}/preview` — inline render for the kinds that have one: images, text, diffs.
+- `GET /proxy/{id}/*` — reverse-proxies a `service` artifact, so an app bound to `127.0.0.1:5173`
+  is reachable from the cockpit without CORS, without exposing the port, and without the user
+  hunting for which port an agent happened to pick.
+
+### 13.4 The security constraint that shapes 13.3
+
+A `service` artifact is **agent-generated code running in a browser**. Reverse-proxying it onto the
+cockpit's own origin would give it same-origin access to cockpit state, session storage and the
+command API — an agent bug, or a prompt injection in a file it read, could drive the orchestrator.
+
+So proxied services are served from a **separate origin** (a distinct loopback port), embedded in a
+sandboxed iframe, and never share the cockpit's origin or credentials. This is the reason `/proxy`
+is specified as a reverse proxy on its own origin rather than a path on the main one, and it is
+easier to build that way from the start than to unpick later.
+
+### 13.5 Retention
+
+Artifacts are the largest tier by bytes and slot into the §12.1 policy: content-addressed storage
+dedupes, artifacts of completed tasks age out with their events on the same rolling window, and
+`pinned` exempts anything worth keeping. A pinned artifact keeps its bytes even after its task's
+transcript is gone.
+
+## 14. Stack
 
 Versions verified against npm dist-tags and `proxy.golang.org` on 2026-08-24.
 
@@ -639,7 +724,7 @@ Versions verified against npm dist-tags and `proxy.golang.org` on 2026-08-24.
 
 ---
 
-## 14. Build order
+## 15. Build order
 
 1. **store + config + role CRUD API** — roles as rows, seeded with coder and qa.
 2. **nydus + board** against an in-memory harness stub — prove leases, claims, acks, terminal merge
