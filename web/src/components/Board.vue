@@ -27,7 +27,7 @@ function compactTokens(n: number): string {
 function money(n: number): string {
   return n >= 1 ? `$${n.toFixed(2)}` : `$${n.toFixed(3)}`
 }
-import { Bell, Eye, EyeOff, MessageCircleQuestion } from '@lucide/vue'
+import { Bell, Eye, EyeOff, MessageCircleQuestion, ScrollText, Square, Trash2 } from '@lucide/vue'
 import { Badge } from '@/components/ui/badge'
 
 const props = defineProps<{
@@ -45,6 +45,9 @@ const emit = defineEmits<{
   review: [task: Task]
   hide: [task: Task]
   unhide: [task: Task]
+  stop: [task: Task]
+  activity: [task: Task]
+  remove: [task: Task]
 }>()
 
 /** Lanes are the enabled roles in pipeline order, then the Done well. */
@@ -136,7 +139,16 @@ const byLane = computed(() => {
               <!-- lane says who holds the card, state says whether they are
                    actually working it. Showing only the lane makes a card read
                    as claimed the instant it is delivered. -->
-              <Badge :variant="task.state === 'working' ? 'default' : 'outline'">
+              <Badge
+                :variant="task.state === 'working' ? 'default' : 'outline'"
+                class="gap-1"
+              >
+                <!-- The same pulse a live role wears in the rail, so the board
+                     has one vocabulary for "this is moving" rather than a
+                     second animation that has to be learned. A still badge and
+                     a working one otherwise differ only in fill, which is a
+                     colour difference and not something you catch in passing. -->
+                <span v-if="task.state === 'working'" class="pulse-dot size-1.5 rounded-full bg-current" />
                 {{ task.state }}
               </Badge>
               <!-- The card that is holding everything up says so on itself.
@@ -160,8 +172,45 @@ const byLane = computed(() => {
               <Badge v-if="task.reworkCount > 0" variant="secondary" :title="`sent backward ${task.reworkCount} times`">
                 ↩ {{ task.reworkCount }}
               </Badge>
-              <span v-if="task.activeMs > 0" class="tabular text-muted-foreground ml-auto text-[10px]">
+              <span v-if="task.activeMs > 0" class="tabular text-muted-foreground text-[10px]">
                 {{ duration(task.activeMs) }}
+              </span>
+
+              <!-- Card controls. On the badge row rather than a footer of their
+                   own: a card is a dense object and a second row of chrome on
+                   every one of them costs more than it gives.
+                   Buttons rather than the wrapper's click, so they do not open
+                   the card as well — and .stop on each, because the whole card
+                   body is clickable. -->
+              <span class="ml-auto flex items-center gap-0.5">
+                <button
+                  v-if="task.state === 'queued' || task.state === 'working'"
+                  type="button"
+                  title="Stop — no agent picks this up again"
+                  aria-label="Stop this task"
+                  class="text-muted-foreground hover:bg-muted hover:text-destructive focus-visible:outline-ring grid size-5 place-items-center transition-colors focus-visible:outline-2"
+                  @click.stop="emit('stop', task)"
+                >
+                  <Square :size="11" aria-hidden="true" />
+                </button>
+                <button
+                  type="button"
+                  title="Activity for this task"
+                  aria-label="Show this task's activity"
+                  class="text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-ring grid size-5 place-items-center transition-colors focus-visible:outline-2"
+                  @click.stop="emit('activity', task)"
+                >
+                  <ScrollText :size="11" aria-hidden="true" />
+                </button>
+                <button
+                  type="button"
+                  title="Delete this task and its transcript"
+                  aria-label="Delete this task"
+                  class="text-muted-foreground hover:bg-destructive/10 hover:text-destructive focus-visible:outline-ring grid size-5 place-items-center transition-colors focus-visible:outline-2"
+                  @click.stop="emit('remove', task)"
+                >
+                  <Trash2 :size="11" aria-hidden="true" />
+                </button>
               </span>
             </div>
 

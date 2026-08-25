@@ -237,6 +237,9 @@
 .md p { margin: 0; }
 .md p + p { margin-top: 0.35rem; }
 .md ul { margin: 0.25rem 0; }
-.md pre { white-space: pre; }
+.md pre { white-space: pre; overflow-x: auto; }
+/* A table is why a spec is worth reading and the widest thing in one. It
+   scrolls inside its own box rather than pushing the panel out of shape. */
+.md table { width: max-content; min-width: 100%; }
 .md code { font-family: inherit; }
 .md a { color: var(--primary); }

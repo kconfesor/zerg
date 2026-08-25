@@ -18,7 +18,13 @@ import { renderMarkdown } from '@/lib/markdown'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 
-const props = defineProps<{ projectId: string; roles: string[] }>()
+const props = defineProps<{
+  projectId: string
+  roles: string[]
+  /** Show only this task's events. The stream has always supported it; there
+   *  was no way to ask for it from the board. */
+  task?: string
+}>()
 
 const events = ref<ActivityEvent[]>([])
 const roleFilter = ref<string>('')
@@ -59,7 +65,7 @@ function connect() {
       },
       onError: (m) => (streamError.value = m),
     },
-    { role: roleFilter.value || undefined },
+    { role: roleFilter.value || undefined, task: props.task || undefined },
   )
 }
 
@@ -105,7 +111,7 @@ function onScroll() {
   follow.value = el.scrollHeight - el.scrollTop - el.clientHeight < 40
 }
 
-watch(() => [props.projectId, roleFilter.value], connect, { immediate: true })
+watch(() => [props.projectId, roleFilter.value, props.task], connect, { immediate: true })
 onBeforeUnmount(() => {
   stream?.close()
   if (frame) cancelAnimationFrame(frame)

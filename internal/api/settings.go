@@ -320,3 +320,39 @@ func (s *Server) setTaskHidden(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, task)
 }
+
+// stopTask parks a card so nothing picks it up again.
+func (s *Server) stopTask(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	task, err := s.db.GetTask(r.Context(), id)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if err := s.db.StopTask(r.Context(), task.ProjectID, id); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	updated, err := s.db.GetTask(r.Context(), id)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, updated)
+}
+
+// deleteTask removes a card and the transcript that only makes sense beside it.
+// Usage rows are kept — see store.DeleteTask.
+func (s *Server) deleteTask(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	task, err := s.db.GetTask(r.Context(), id)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if err := s.db.DeleteTask(r.Context(), task.ProjectID, id); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}

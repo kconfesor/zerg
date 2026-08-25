@@ -144,7 +144,7 @@ function empty(a: Attention | null): boolean {
            was the first thing missing from this card. -->
       <div v-if="a.body" class="mb-2.5">
         <div
-          class="md text-xs leading-relaxed"
+          class="md min-w-0 overflow-x-auto text-xs leading-relaxed"
           :class="notesOpen[a.id] ? '' : 'line-clamp-4'"
           v-html="renderMarkdown(a.body)"
         />
@@ -228,7 +228,7 @@ function empty(a: Attention | null): boolean {
                  it as a diff makes the reader reconstruct it line by line. -->
             <div
               v-if="isDoc(f) && defaultOpen(a, f)"
-              class="md max-h-[26rem] overflow-y-auto px-3 py-2 text-xs leading-relaxed"
+              class="md max-h-[26rem] min-w-0 overflow-auto px-3 py-2 text-xs leading-relaxed"
               v-html="renderMarkdown(f.content ?? '')"
             />
             <div v-else-if="defaultOpen(a, f)" class="max-h-96 overflow-y-auto py-1">
@@ -270,7 +270,7 @@ function empty(a: Attention | null): boolean {
            collapsed the paragraph breaks too, which is what turned a structured
            question into a wall. The renderer escapes before it builds any tag,
            so nothing an agent read out of the repository becomes markup. -->
-      <div class="md mb-2.5 text-xs leading-relaxed break-words" v-html="renderMarkdown(c.question)" />
+      <div class="md mb-2.5 min-w-0 overflow-x-auto text-xs leading-relaxed break-words" v-html="renderMarkdown(c.question)" />
       <div class="flex gap-2">
         <Input
           v-model="answers[c.id]"

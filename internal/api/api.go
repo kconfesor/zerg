@@ -121,6 +121,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/tasks/{id}", s.taskDetail)
 	mux.HandleFunc("GET /api/tasks/{id}/usage", s.taskUsage)
 	mux.HandleFunc("PUT /api/tasks/{id}/hidden", s.setTaskHidden)
+	mux.HandleFunc("POST /api/tasks/{id}/stop", s.stopTask)
+	mux.HandleFunc("DELETE /api/tasks/{id}", s.deleteTask)
 	mux.HandleFunc("GET /api/approvals/{id}/diff", s.approvalDiff)
 	mux.HandleFunc("POST /api/approvals/{id}/approve", s.approve)
 	mux.HandleFunc("POST /api/approvals/{id}/reject", s.reject)

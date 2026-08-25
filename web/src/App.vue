@@ -82,6 +82,36 @@ watch(showHidden, (v) => localStorage.setItem('zerg.showHidden', String(v)))
 const hiddenCount = computed(() => tasks.value.filter((t) => t.hidden).length)
 
 /** Put a finished card away, or bring it back. */
+/** Which task Activity is filtered to, if any. */
+const activityTask = ref<Task | null>(null)
+const confirmDeleteTask = ref<Task | null>(null)
+
+function showTaskActivity(task: Task) {
+  activityTask.value = task
+  router.push(viewPath(current.value?.id, 'activity'))
+}
+
+/** Park a card. Nothing picks it up again; its history stays. */
+async function stopTask(task: Task) {
+  try {
+    await api.stopTask(task.id)
+    await refresh()
+  } catch (err) {
+    fail(err)
+  }
+}
+
+async function removeTask(task: Task) {
+  try {
+    await api.deleteTask(task.id)
+    confirmDeleteTask.value = null
+    if (activityTask.value?.id === task.id) activityTask.value = null
+    await refresh()
+  } catch (err) {
+    fail(err)
+  }
+}
+
 async function setHidden(task: Task, hidden: boolean) {
   const updated = await api.setTaskHidden(task.id, hidden)
   const i = tasks.value.findIndex((t) => t.id === task.id)
@@ -592,6 +622,9 @@ watch(current, () => (banner.value = null))
                 @review="() => (attentionOpen = true)"
                 @hide="(t: Task) => setHidden(t, true)"
                 @unhide="(t: Task) => setHidden(t, false)"
+                @stop="stopTask"
+                @activity="showTaskActivity"
+                @remove="(t: Task) => (confirmDeleteTask = t)"
               /></div>
           </template>
 
@@ -634,12 +667,23 @@ watch(current, () => (banner.value = null))
           <template v-else-if="view === 'activity'">
             <PageHeader
               title="Activity"
-              subtitle="Every tool call, message and turn, as the agents emit them."
-            />
+              :subtitle="
+                activityTask
+                  ? `Everything recorded for “${activityTask.name}”.`
+                  : 'Every tool call, message and turn, as the agents emit them.'
+              "
+            >
+              <template v-if="activityTask" #actions>
+                <Button variant="outline" size="sm" @click="activityTask = null">
+                  Show every task
+                </Button>
+              </template>
+            </PageHeader>
             <div class="pt-4">
               <Activity
                 :project-id="current?.id ?? ''"
                 :roles="team.filter((r) => r.enabled).map((r) => r.name)"
+                :task="activityTask?.id"
               />
             </div>
           </template>
@@ -711,8 +755,35 @@ watch(current, () => (banner.value = null))
 
     <!-- Opening a card. The name is the thing that follows this work through
          the whole pipeline, which is worth saying where it is being typed. -->
+    <!-- Deleting takes the transcript with it, so it says what goes and what
+         stays. The spend stays: the money was real, and a cost total that fell
+         when a card was tidied away would disagree with the bill. -->
+    <Dialog :open="!!confirmDeleteTask" @update:open="(v) => !v && (confirmDeleteTask = null)">
+      <DialogContent class="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Delete “{{ confirmDeleteTask?.name }}”?</DialogTitle>
+          <DialogDescription>
+            The card and everything recorded against it — its messages, its approvals and its
+            whole transcript — are deleted. What it cost stays in the project's usage, because it
+            was spent. Commits the agents made stay on their branches; nothing touches the
+            repository.
+          </DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button variant="outline" @click="confirmDeleteTask = null">Cancel</Button>
+          <Button variant="destructive" @click="removeTask(confirmDeleteTask!)">Delete</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
     <Dialog v-model:open="attentionOpen">
-      <DialogContent class="max-h-[85vh] overflow-y-auto sm:max-w-2xl">
+      <!-- Wider than the other dialogs: a spec is the widest thing this app
+           shows, and its behaviour tables are the point of reading it.
+           min-w-0 because DialogContent is a grid, and a grid child defaults to
+           min-width:auto — it refuses to shrink below its content and overflows
+           the panel instead of scrolling inside it, which is what cut the right
+           side off a wide table. -->
+      <DialogContent class="max-h-[85vh] min-w-0 overflow-y-auto sm:max-w-4xl">
         <DialogHeader>
           <DialogTitle>Waiting on you</DialogTitle>
           <DialogDescription>

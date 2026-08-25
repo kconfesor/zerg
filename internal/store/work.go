@@ -760,3 +760,85 @@ func (db *DB) SetTaskHidden(ctx context.Context, id string, hidden bool) error {
 	}
 	return nil
 }
+
+// StopTask parks a card: no agent will pick it up again, and its history stays.
+//
+// The lease is expired and every route that has not been delivered is closed,
+// because a card whose state says stopped while its route still says queued is
+// a card that starts again two seconds later. Commits already made stay in the
+// role's branch — they are git's, not zerg's to remove.
+func (db *DB) StopTask(ctx context.Context, projectID, taskID string) error {
+	tx, err := db.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("beginning stop: %w", err)
+	}
+	defer tx.Rollback()
+
+	res, err := tx.ExecContext(ctx,
+		`UPDATE tasks SET state = ? WHERE id = ? AND project_id = ? AND state IN (?, ?)`,
+		TaskRejected, taskID, projectID, TaskQueued, TaskWorking)
+	if err != nil {
+		return fmt.Errorf("stopping task: %w", err)
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return err
+	} else if n == 0 {
+		return invalid("that card is not queued or being worked on")
+	}
+
+	// Close its undelivered routes so nothing claims it.
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE routes SET state = ?
+		  WHERE state IN (?, ?)
+		    AND message_id IN (SELECT id FROM messages WHERE task_id = ?)`,
+		RouteDone, RouteQueued, RouteHeld, taskID); err != nil {
+		return fmt.Errorf("closing routes: %w", err)
+	}
+
+	// And release any lease covering them, or the holder keeps its claim until
+	// the deadline and the board shows work in flight that has been stopped.
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE leases SET expired_at = ?
+		  WHERE acked_at IS NULL AND expired_at IS NULL AND project_id = ?
+		    AND id IN (SELECT li.lease_id FROM lease_items li
+		                 JOIN messages m ON m.id = li.message_id
+		                WHERE m.task_id = ?)`,
+		now, projectID, taskID); err != nil {
+		return fmt.Errorf("releasing the lease: %w", err)
+	}
+	return tx.Commit()
+}
+
+// DeleteTask removes a card and the record that only makes sense beside it.
+//
+// Messages, routes and approvals go by foreign key. Events are deleted
+// explicitly: they are reachable only through their task, so leaving them
+// behind is keeping bytes nobody can read.
+//
+// Usage rows are kept, orphaned. The money was spent, and a project total that
+// dropped when a card was tidied away would be a cost report that quietly
+// disagrees with the bill.
+func (db *DB) DeleteTask(ctx context.Context, projectID, taskID string) error {
+	tx, err := db.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("beginning delete: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM events WHERE task_id = ? AND project_id = ?`, taskID, projectID); err != nil {
+		return fmt.Errorf("deleting the transcript: %w", err)
+	}
+	res, err := tx.ExecContext(ctx,
+		`DELETE FROM tasks WHERE id = ? AND project_id = ?`, taskID, projectID)
+	if err != nil {
+		return fmt.Errorf("deleting task: %w", err)
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return err
+	} else if n == 0 {
+		return ErrNotFound
+	}
+	return tx.Commit()
+}

@@ -247,6 +247,8 @@ export const api = {
     }),
 
   taskDetail: (id: string) => call<TaskDetail>(`/tasks/${id}`),
+  stopTask: (id: string) => call<Task>(`/tasks/${id}/stop`, { method: 'POST' }),
+  deleteTask: (id: string) => call<void>(`/tasks/${id}`, { method: 'DELETE' }),
   setTaskHidden: (id: string, hidden: boolean) =>
     call<Task>(`/tasks/${id}/hidden`, { method: 'PUT', body: JSON.stringify({ hidden }) }),
   approvalDiff: (id: string) =>
@@ -348,7 +350,7 @@ export function streamActivity(
      *  to say so, which is why this is not the same as a dropped socket. */
     onError?: (message: string) => void
   },
-  opts: { role?: string; limit?: number } = {},
+  opts: { role?: string; limit?: number; task?: string } = {},
 ): ActivityStream {
   const RETRY_MIN = 500
   const RETRY_MAX = 15_000
@@ -379,7 +381,13 @@ export function streamActivity(
       // a resumed connection states its cursor, and so later message types
       // share one envelope.
       ws.send(
-        JSON.stringify({ type: 'subscribe', after, role: opts.role, limit: opts.limit }),
+        JSON.stringify({
+          type: 'subscribe',
+          after,
+          role: opts.role,
+          task: opts.task,
+          limit: opts.limit,
+        }),
       )
     }
 
