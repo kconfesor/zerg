@@ -140,6 +140,11 @@ func runUp(args []string) error {
 	// failure it was built to prevent.
 	event.LogEvents(ctx, bus, log)
 
+	// And something has to keep what the turns cost. Usage is reported once,
+	// as it happens, and cannot be recovered later — an unrecorded turn is
+	// unrecorded permanently.
+	event.RecordUsage(ctx, bus, db, log)
+
 	agents := agent.NewServer(db, nyd, log)
 	socket := filepath.Join(stateDir, "agent.sock")
 	if err := agents.Listen(socket); err != nil {

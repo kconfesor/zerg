@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/konfessor/zerg/internal/adapter"
 	"github.com/konfessor/zerg/internal/nydus"
@@ -90,6 +91,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/projects/{id}/tasks", s.listTasks)
 	mux.HandleFunc("POST /api/projects/{id}/tasks", s.newTask)
 	mux.HandleFunc("GET /api/projects/{id}/attention", s.attention)
+	mux.HandleFunc("GET /api/projects/{id}/usage", s.usage)
+	mux.HandleFunc("GET /api/tasks/{id}/usage", s.taskUsage)
 	mux.HandleFunc("POST /api/approvals/{id}/approve", s.approve)
 	mux.HandleFunc("POST /api/approvals/{id}/reject", s.reject)
 	mux.HandleFunc("POST /api/clarifications/{id}/answer", s.answer)
@@ -582,4 +585,53 @@ func orEmpty[T any](s []T) []T {
 		return []T{}
 	}
 	return s
+}
+
+// ── usage ─────────────────────────────────────────────────────────────────
+
+// usage totals a project's spend, grouped by role, provider or model.
+//
+// The three groupings answer three different questions and the dashboard shows
+// all of them: which stage of the pipeline costs the most, which provider the
+// money goes to, and whether an expensive model is earning its price.
+func (s *Server) usage(w http.ResponseWriter, r *http.Request) {
+	groupBy := r.URL.Query().Get("by")
+	if groupBy == "" {
+		groupBy = "role"
+	}
+
+	var since time.Time
+	if raw := r.URL.Query().Get("since"); raw != "" {
+		t, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			writeError(w, http.StatusBadRequest,
+				fmt.Sprintf("since must be an RFC3339 timestamp: %v", err))
+			return
+		}
+		since = t
+	}
+
+	if !store.ValidUsageGrouping(groupBy) {
+		writeError(w, http.StatusBadRequest,
+			fmt.Sprintf("cannot group usage by %q; use role, provider or model", groupBy))
+		return
+	}
+
+	totals, err := s.db.UsageByGroup(r.Context(), r.PathValue("id"), groupBy, since)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, orEmpty(totals))
+}
+
+// taskUsage totals one card across every role and every lap it made. With the
+// rework counter beside it, this is what a round trip actually cost.
+func (s *Server) taskUsage(w http.ResponseWriter, r *http.Request) {
+	total, err := s.db.UsageForTask(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, total)
 }
