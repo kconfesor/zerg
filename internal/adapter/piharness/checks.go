@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/konfessor/zerg/internal/adapter"
@@ -21,6 +22,7 @@ func (a *Adapter) Checks() []adapter.Check {
 		a.configParsesCheck(),
 		a.credentialsCheck(),
 		a.modelAvailableCheck(),
+		a.extensionsLoadableCheck(),
 	}
 }
 
@@ -188,3 +190,60 @@ func configDirFor(spec adapter.Spec) string {
 	}
 	return userConfigDir()
 }
+
+// extensionsLoadableCheck compares the Node that pi will run under with the one
+// its extensions were installed into.
+//
+// This is the incident that cost the most time to diagnose, and it presents as
+// pi's extension tree being "broken": npm installs global packages under the
+// active Node version, so switching versions leaves the extensions resolvable
+// only from the version that installed them. The symptom is a module-resolution
+// failure that reads like a corrupt install.
+//
+// A warning rather than a block. Extensions are most of what makes pi useful,
+// but a role can still work without them, and refusing to start over a
+// mismatch would be a worse trade than saying so.
+func (*Adapter) extensionsLoadableCheck() adapter.Check {
+	return adapter.Check{
+		Name: "extensions_loadable",
+		Run: func(ctx adapter.Ctx, spec adapter.Spec) adapter.Result {
+			out, err := exec.CommandContext(ctx, binary, "list").CombinedOutput()
+			if err != nil {
+				return adapter.Result{
+					Reason: fmt.Sprintf("pi could not list its extensions: %v", err),
+					Remedy: "run `pi list` by hand to see what it says",
+				}
+			}
+			// Nothing installed is a fine state, not a finding.
+			installed := nodeVersionRe.FindAllStringSubmatch(string(out), -1)
+			if len(installed) == 0 {
+				return adapter.Result{OK: true, Detail: "no version-scoped extensions"}
+			}
+
+			node, err := exec.CommandContext(ctx, "node", "-v").Output()
+			if err != nil {
+				return adapter.Result{OK: true, Detail: "node not on PATH; skipped"}
+			}
+			running := strings.TrimSpace(string(node))
+
+			for _, m := range installed {
+				if m[1] != running {
+					return adapter.Result{
+						Warn: true,
+						Reason: fmt.Sprintf(
+							"extensions were installed under Node %s but pi will run under %s, so they will not resolve",
+							m[1], running),
+						Remedy: fmt.Sprintf(
+							"switch to Node %s (nvm use %s) before starting the daemon, or reinstall the extensions under %s",
+							m[1], m[1], running),
+					}
+				}
+			}
+			return adapter.Result{OK: true, Detail: "extensions match the running node"}
+		},
+	}
+}
+
+// nodeVersionRe pulls the Node version out of an nvm-style install path, which
+// is what `pi list` prints for a globally installed extension.
+var nodeVersionRe = regexp.MustCompile(`/versions/node/(v[0-9]+\.[0-9]+\.[0-9]+)/`)

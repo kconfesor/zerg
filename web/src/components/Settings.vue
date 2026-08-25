@@ -59,17 +59,17 @@ const HARNESS_OPTIONS: Record<string, { flag: string[]; label: string; why: stri
     {
       flag: ['--no-extensions'],
       label: 'Disable extensions',
-      why: 'A broken extension tree is one of the hangs preflight exists to catch, and an orchestrated role needs none of them.',
+      why: 'Off by default — extensions are most of what makes pi useful. Worth turning on only to isolate a fault. If they fail to load it is usually a Node version mismatch, which Readiness reports with the version to switch to.',
     },
     {
       flag: ['--no-context-files'],
       label: 'Ignore AGENTS.md and CLAUDE.md',
-      why: 'The role runs on the prompt zerg composed, rather than that plus whatever happens to be lying in the repository.',
+      why: 'Off by default. Those files are the repository telling an agent its conventions, which is usually what you want; turn this on only when they conflict with the role prompt.',
     },
     {
       flag: ['--no-skills'],
       label: 'Disable skills',
-      why: 'Same reasoning as extensions: fewer things between the role prompt and the work.',
+      why: 'Off by default, for the same reason as extensions.',
     },
   ],
 }
@@ -416,7 +416,7 @@ const loopback = computed(() => {
             </CardTitle>
             <CardDescription class="text-[11px]">
               Applied to every role using this harness. A role's own args are added after these, so
-              a role can override any of them.
+              a role can override any of them. Anything not ticked is simply not passed.
             </CardDescription>
           </CardHeader>
           <CardContent class="flex flex-col gap-3">

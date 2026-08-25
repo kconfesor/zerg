@@ -117,15 +117,19 @@ type HarnessOptions struct {
 //   - claude --strict-mcp-config: without it every agent inherits the
 //     operator's own MCP servers. On the first real run that gave a code
 //     reviewer a live handle to a staging database.
-//   - pi --no-extensions: a broken extension tree is one of the four hangs that
-//     preflight exists for, and an orchestrated role needs none of them.
-//   - pi --no-context-files: stops AGENTS.md and CLAUDE.md discovery, so the
-//     role runs on the prompt zerg composed rather than that plus whatever is
-//     lying in the repository. claude has no equivalent switch.
+//
+// pi gets no flags by default, and the reason is worth recording. An earlier
+// version disabled its extensions, on the strength of one incident where they
+// failed to load — which turned out to be a Node version mismatch, not
+// extensions being unreliable. Extensions are most of what makes pi useful, and
+// turning them off tailnet-wide to work around a local environment fault is
+// fixing the wrong thing. The fault belongs in preflight, where it is now
+// (piharness extensions_loadable), and the switches remain available for anyone
+// who wants them.
 func DefaultHarnessFlags() map[string]HarnessOptions {
 	return map[string]HarnessOptions{
 		"claude": {Flags: []string{"--permission-mode", "bypassPermissions", "--strict-mcp-config"}},
-		"pi":     {Flags: []string{"--no-extensions", "--no-context-files"}},
+		"pi":     {Flags: nil},
 	}
 }
 
