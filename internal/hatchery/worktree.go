@@ -46,9 +46,10 @@ func (h *Hatchery) EnsureRepo(ctx context.Context, baseBranch string) error {
 			return fmt.Errorf("initialising a repository in %s: %w", h.repoPath, err)
 		}
 	}
-	if err := h.ensureIgnored(); err != nil {
+	if err := h.ensureIgnored(ctx); err != nil {
 		return err
 	}
+	h.clearLegacyIgnore(ctx)
 
 	if _, err := git(ctx, h.repoPath, "rev-parse", "--verify", "HEAD"); err == nil {
 		return nil // already has history
@@ -64,8 +65,43 @@ func (h *Hatchery) EnsureRepo(ctx context.Context, baseBranch string) error {
 
 // ensureIgnored keeps worktrees out of the project's own history. Without this
 // the first role to commit would add every other role's checkout to the repo.
-func (h *Hatchery) ensureIgnored() error {
-	path := filepath.Join(h.repoPath, ".gitignore")
+//
+// The rule goes in .git/info/exclude, not .gitignore, because .worktrees/ is
+// zerg's business and not a fact about the project. .gitignore is the
+// project's file: it is tracked, it is reviewed, and it belongs in the
+// project's history.
+//
+// This was originally written to .gitignore, uncommitted, which broke every
+// first task on a real project. Cargo, npm, pip and go all produce a
+// .gitignore, so the first hand-off carried a commit adding one, and
+// `merge --ff-only` refuses to overwrite an untracked file of the same name:
+//
+//	error: The following untracked working tree files would be overwritten
+//	by merge: .gitignore
+//
+// Deterministic, not a race, and unfixable by the agent that hit it — the
+// reviewer that found it correctly refused to touch the operator's checkout
+// and escalated instead. info/exclude is per-repository, never committed,
+// applies to every linked worktree, and cannot collide with a tracked file.
+func (h *Hatchery) ensureIgnored(ctx context.Context) error {
+	// --git-common-dir, not --git-dir: inside a linked worktree the latter is
+	// that worktree's private directory, whose info/exclude the other
+	// worktrees would not read.
+	common, err := git(ctx, h.repoPath, "rev-parse", "--git-common-dir")
+	if err != nil {
+		return fmt.Errorf("locating the git directory: %w", err)
+	}
+	gitDir := strings.TrimSpace(common)
+	if !filepath.IsAbs(gitDir) {
+		gitDir = filepath.Join(h.repoPath, gitDir)
+	}
+
+	dir := filepath.Join(gitDir, "info")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("creating %s: %w", dir, err)
+	}
+	path := filepath.Join(dir, "exclude")
+
 	existing, err := os.ReadFile(path)
 	if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("reading %s: %w", path, err)
@@ -85,6 +121,34 @@ func (h *Hatchery) ensureIgnored() error {
 		return fmt.Errorf("writing %s: %w", path, err)
 	}
 	return nil
+}
+
+// clearLegacyIgnore removes the .gitignore earlier versions wrote, so a project
+// created before the rule moved is not blocked forever by a file it never
+// asked for.
+//
+// Only when it is untracked and says nothing but the worktrees entry: anything
+// else is the project's own file, and zerg does not edit those.
+func (h *Hatchery) clearLegacyIgnore(ctx context.Context) {
+	path := filepath.Join(h.repoPath, ".gitignore")
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	var lines []string
+	for _, line := range strings.Split(string(body), "\n") {
+		if s := strings.TrimSpace(line); s != "" {
+			lines = append(lines, s)
+		}
+	}
+	if len(lines) != 1 || lines[0] != WorktreesDir+"/" {
+		return
+	}
+	// Tracked means the project adopted it; it is theirs now.
+	if _, err := git(ctx, h.repoPath, "ls-files", "--error-unmatch", ".gitignore"); err == nil {
+		return
+	}
+	os.Remove(path)
 }
 
 // EnsureWorktree creates (or reuses) a role's worktree and returns its path.

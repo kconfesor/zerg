@@ -45,14 +45,20 @@ func TestEnsureRepoInitialisesAndCommits(t *testing.T) {
 
 // Without this, the first role to commit would add every other role's entire
 // checkout to the project's history.
+// Worktrees must be excluded, and the exclusion must not sit in the project's
+// own .gitignore — see TestWorktreeRuleDoesNotBlockAnIncomingGitignore for what
+// that cost. The check that matters is git's answer, not the file's contents.
 func TestWorktreesAreGitIgnored(t *testing.T) {
-	_, dir := newProject(t)
-	body, err := os.ReadFile(filepath.Join(dir, ".gitignore"))
-	if err != nil {
-		t.Fatalf("reading .gitignore: %v", err)
+	h, dir := newProject(t)
+	ctx := context.Background()
+	if _, err := h.EnsureWorktree(ctx, "coder", "main"); err != nil {
+		t.Fatalf("EnsureWorktree: %v", err)
 	}
-	if !strings.Contains(string(body), WorktreesDir+"/") {
-		t.Errorf(".gitignore does not exclude worktrees:\n%s", body)
+	if _, err := git(ctx, dir, "check-ignore", WorktreesDir+"/"); err != nil {
+		t.Errorf("git does not ignore %s/: %v", WorktreesDir, err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".gitignore")); !os.IsNotExist(err) {
+		t.Error("zerg wrote a .gitignore into the project")
 	}
 }
 
@@ -68,12 +74,22 @@ func TestEnsureRepoPreservesAnExistingGitignore(t *testing.T) {
 		t.Fatalf("EnsureRepo: %v", err)
 	}
 
+	// The project's .gitignore is theirs and must come through untouched.
 	body, _ := os.ReadFile(filepath.Join(dir, ".gitignore"))
 	if !strings.Contains(string(body), "node_modules/") {
 		t.Error("the project's own ignore rules were discarded")
 	}
-	if !strings.Contains(string(body), WorktreesDir+"/") {
-		t.Error("the worktree rule was not added")
+	if strings.Contains(string(body), WorktreesDir+"/") {
+		t.Error("zerg's rule was written into the project's .gitignore")
+	}
+
+	// It belongs in info/exclude, which is per-repository and never committed.
+	excl, err := os.ReadFile(filepath.Join(dir, ".git", "info", "exclude"))
+	if err != nil {
+		t.Fatalf("reading info/exclude: %v", err)
+	}
+	if !strings.Contains(string(excl), WorktreesDir+"/") {
+		t.Error("the worktree rule was not added to info/exclude")
 	}
 }
 
@@ -221,5 +237,103 @@ func TestRemoveWorktreeKeepsTheBranch(t *testing.T) {
 	// Removing what is not there is not an error.
 	if err := h.RemoveWorktree(ctx, "coder"); err != nil {
 		t.Errorf("removing an absent worktree failed: %v", err)
+	}
+}
+
+// The rule used to be written to an uncommitted .gitignore, which collides with
+// the .gitignore that cargo, npm, pip and go all generate: the first hand-off
+// carries a commit adding one, and merge refuses to overwrite an untracked file
+// of the same name. Deterministic on every real project, and invisible to the
+// old test, which only checked the rule was written somewhere.
+func TestWorktreeRuleDoesNotBlockAnIncomingGitignore(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	ctx := context.Background()
+	dir := t.TempDir()
+
+	// The repository already has history, which is the case that matters and
+	// the one the first version of this test missed. On an empty directory
+	// EnsureRepo lays down an initial commit and sweeps its own .gitignore
+	// into it, leaving the file tracked and harmless; a project that already
+	// has a commit gets the file written and left untracked, and that is what
+	// blocks the merge. Real projects are adopted, not created.
+	if _, err := git(ctx, dir, "init", "-q", "-b", "main"); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+	for _, args := range [][]string{
+		{"config", "user.email", "test@example.com"},
+		{"config", "user.name", "Test"},
+		{"commit", "-q", "--allow-empty", "-m", "Initial commit"},
+	} {
+		if _, err := git(ctx, dir, args...); err != nil {
+			t.Fatalf("git %v: %v", args, err)
+		}
+	}
+
+	h := New(dir)
+	if err := h.EnsureRepo(ctx, "main"); err != nil {
+		t.Fatalf("EnsureRepo: %v", err)
+	}
+	if _, err := h.EnsureWorktree(ctx, "coder", "main"); err != nil {
+		t.Fatalf("EnsureWorktree: %v", err)
+	}
+
+	// The coder does what `cargo init` does: adds a .gitignore and commits it.
+	tree := h.Path("coder")
+	if err := os.WriteFile(filepath.Join(tree, ".gitignore"), []byte("/target\n"), 0o644); err != nil {
+		t.Fatalf("writing the role's .gitignore: %v", err)
+	}
+	for _, args := range [][]string{{"add", "-A"}, {"commit", "-q", "-m", "cargo init"}} {
+		if _, err := git(ctx, tree, args...); err != nil {
+			t.Fatalf("git %v: %v", args, err)
+		}
+	}
+	sha, err := h.HeadCommit(ctx, "coder")
+	if err != nil {
+		t.Fatalf("HeadCommit: %v", err)
+	}
+
+	// Integration into the base branch must not be blocked by zerg's own file.
+	if _, err := git(ctx, dir, "merge", "--ff-only", strings.TrimSpace(sha)); err != nil {
+		t.Fatalf("integration blocked by zerg's own ignore file: %v", err)
+	}
+}
+
+// A project created before the rule moved still carries the stray file and
+// would be blocked by it forever. It is removed only when untracked and saying
+// nothing else; anything more is the project's own file.
+func TestLegacyIgnoreIsClearedOnlyWhenItIsOurs(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	ctx := context.Background()
+	dir := t.TempDir()
+	h := New(dir)
+	if err := h.EnsureRepo(ctx, "main"); err != nil {
+		t.Fatalf("EnsureRepo: %v", err)
+	}
+
+	// Untracked, but carrying the project's rules too: not ours to remove.
+	mixed := WorktreesDir + "/\nnode_modules/\n"
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte(mixed), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.EnsureRepo(ctx, "main"); err != nil {
+		t.Fatalf("EnsureRepo (second): %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".gitignore")); err != nil {
+		t.Error("removed a .gitignore that carried the project's own rules")
+	}
+
+	// Untracked and saying only our entry: ours, and it must go.
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte(WorktreesDir+"/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.EnsureRepo(ctx, "main"); err != nil {
+		t.Fatalf("EnsureRepo (third): %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".gitignore")); !os.IsNotExist(err) {
+		t.Error("the stray file we wrote was left in place")
 	}
 }
