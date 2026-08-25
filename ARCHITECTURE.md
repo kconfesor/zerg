@@ -66,18 +66,27 @@ the agent-facing client (§7).
 
 This is the part that most differs from the predecessor.
 
-### 4.1 Two scopes
+### 4.1 Library, team, runtime
 
-**Global** — `~/.zerg/zerg.db`. Your team of roles, defined once, reused across every project.
-Adding a project is two clicks and your roles are already there.
+Three layers, and the separation is what makes "configure once" and "every project is different"
+both true at the same time.
 
-**Per-project** — runtime state (tasks, messages, leases, events, cost) keyed by `project_id` in the
-same database. On disk, a project contains only git artifacts: `<repo>/.worktrees/<role>`.
+**Role library** — global, in `~/.zerg/zerg.db`. A catalog of role *templates*: what a planner is,
+what a reviewer is, what prompt each carries. Ships with a set of built-ins (§4.5); you edit them and
+add your own. Editing a template is editing the idea of that role everywhere.
 
-Nothing zerg writes is meant to be hand-edited. There is no file to copy between machines and no
-snapshot to go stale.
+**Project team** — per project. You pick which roles from the library this project uses, drag them
+into order, and optionally override a field or two for this repo alone. A Rust service and a docs
+site want different teams from the same library.
 
-### 4.2 A role, in full
+**Runtime** — per project: tasks, messages, leases, events, cost. On disk a project holds only git
+artifacts, `<repo>/.worktrees/<role>`.
+
+The middle layer is what earlier drafts were missing. Global-only roles meant every project shared
+one pipeline; per-project-only roles meant rewriting the same prompt in every repo. Selection makes
+the override a natural field on the join rather than a patch bolted onto the side.
+
+### 4.2 A role template, in full
 
 Everything below is a form field in the UI. There is no other way to set any of it, by design.
 
@@ -90,9 +99,12 @@ Everything below is a form field in the UI. There is no other way to set any of 
 | receive | select | `task` (one at a time) or `batch` |
 | batch policy | number + duration | `max_items`, `max_age` — only when receive is `batch` |
 | prompt | editor | this role's instructions |
-| position | drag handle | order in the pipeline |
-| enabled | toggle | disabled roles are skipped in the chain |
 | gate | select | `none` or `approval` — hold this role's handoffs for a human |
+
+When a template is added to a project, three more fields exist on that project only: **position**
+(drag to order), **enabled**, and **overrides** for model and args. Overriding is explicit and
+visible — a role showing an override is badged in the team list, so a project that quietly drifted
+from the library is legible rather than mysterious.
 
 Plus one **shared instructions** document, global, applied to every role. That single editable
 document replaces swarm-forge's `constitution.prompt` + `constitution/articles/*.prompt` layering.
@@ -117,20 +129,43 @@ runs.
 Consequence: edit a prompt in the UI, restart the role, and the change is live. This is the direct
 fix for the snapshot staleness that silently produced a Clojure calculator when the config said Rust.
 
-### 4.5 Defaults
+### 4.5 The built-in library
 
-A fresh install seeds two roles, ready to run:
+Eight templates ship, covering every shape swarm-forge split across `two-pack`, `four-pack` and
+`six-pack` — except here they are rows in a picker, not branches of the orchestrator you have to
+check out.
 
-| # | name | harness | model | receive | prompt |
-|---|---|---|---|---|---|
-| 1 | `coder` | claude | `sonnet` | task | implement the task, write tests, commit |
-| 2 | `reviewer` | claude | `opus` | batch | review the change, run tests, report or hand back |
+| Template | Model | Receive | Gate | Does |
+|---|---|---|---|---|
+| `planner` | opus | task | **approval** | turns intent into a written spec, then waits for a human |
+| `coder` | sonnet | task | — | implements the spec, writes tests, commits |
+| `reviewer` | opus | batch | — | reviews the change against the spec, runs tests, reports or hands back |
+| `cleaner` | sonnet | batch | — | behavior-preserving cleanup, duplication, dead code |
+| `architect` | opus | batch | — | module boundaries, dependency direction, structural drift |
+| `hardener` | sonnet | batch | — | edge cases, error paths, mutation-style probing |
+| `security` | opus | batch | — | input handling, secrets, dependency and injection review |
+| `docs` | sonnet | batch | — | README, API docs, changelog |
 
-The reviewer runs a stronger model than the coder on purpose: catching a wrong change is harder than
-making a plausible one, and it is the last gate before work reaches the base branch.
+Reviewing roles run the stronger model on purpose: catching a wrong change is harder than making a
+plausible one.
 
-`reviewer` is last, therefore terminal. Both are ordinary rows — rename them, replace them, add four
-more. There are no presets and nothing is special-cased.
+**A new project starts with `coder` → `reviewer` selected** — enough to be useful in two clicks.
+Everything else is one checkbox away, and none of it is special-cased: a built-in is an ordinary row
+you can edit, duplicate, or delete.
+
+### 4.6 The planner and the approval gate
+
+`planner` is the answer to "write the spec, then let me approve it before anything happens", and it
+needs no new machinery — it is a template with `gate: approval`, a field roles already have.
+
+The flow: planner writes the spec and commits it, then queues its handoff downstream. The gate holds
+that handoff. **Attention** shows the task with a link to the spec itself — a `file` artifact
+(§13) rendered inline, not a filename you go hunting for — with **Approve** and **Reject**.
+Approving delivers the handoff and moves the card; rejecting returns it to the planner with your note
+attached, and nothing downstream ever saw it.
+
+The gate is a field, not a role, so it composes: put `approval` on `architect` when a project needs
+structural changes signed off, or on nothing at all for a repo you are happy to let run unattended.
 
 ---
 
@@ -367,14 +402,16 @@ Adapters declare which env var relocates their config.
 SQLite, WAL, single writer inside the overmind.
 
 ```sql
--- global config, edited exclusively through the UI
-roles       (id, name, harness, model, args, receive, batch_max_items, batch_max_age,
-             prompt, position, enabled, gate, created_at, updated_at)
-settings    (key, value)          -- shared instructions, preferences
-projects    (id, path, name, base_branch, last_opened_at)
+-- global library, edited exclusively through the UI
+role_templates (id, name, harness, model, args, receive,
+                batch_max_items, batch_max_age, prompt, gate,
+                builtin, created_at, updated_at)
+settings       (key, value)       -- shared instructions, preferences
+projects       (id, path, name, base_branch, last_opened_at)
 
--- optional per-project role overrides (phase 2; the price of global roles)
-role_overrides (project_id, role_id, model, enabled)
+-- which templates this project uses, in what order, with what overrides
+project_roles  (project_id, template_id, position, enabled,
+                model_override, args_override)
 
 -- per-project runtime
 sessions    (id, project_id, started_at, ended_at, end_reason)
@@ -427,11 +464,13 @@ plain `//go:embed dist` silently skips Vite's `.vite/` manifest directory.
 - **Readiness** — the preflight panel (§8.1). One row per enabled role, every check with its status
   and an inline remedy, a **Re-check** button, and a **Start** that stays disabled until the team can
   actually work.
-- **Team** — the role list. Drag to reorder; the last enabled role wears a `terminal` badge. Add,
-  duplicate, disable, delete.
+- **Team** — two columns. Left, the **library**: every template with a checkbox. Right, **this
+  project's pipeline**: the selected roles, drag to reorder, last enabled one wearing a `terminal`
+  badge, any overridden role badged as such. Checking a box adds a role; dragging orders it.
 - **Role editor** — every field in §4.2. Harness select, model combobox populated from the live
-  harness catalog, prompt editor, batch policy. Saving a field on a running role restarts just that
-  cerebrate.
+  harness catalog, prompt editor, batch policy, gate. Editing a **template** changes that role
+  everywhere; editing a project's copy sets an **override** and says so. Saving a field on a running
+  role restarts just that cerebrate.
 - **Shared instructions** — one editor, applies to all roles.
 
 **Observe**
@@ -750,7 +789,7 @@ Two notes on that file:
 
 ## 15. Build order
 
-1. **store + config + role CRUD API** — roles as rows, seeded with coder and reviewer.
+1. **store + role library + project team API** — templates as rows with the eight built-ins seeded; a new project selects coder and reviewer.
 2. **nydus + board** against an in-memory harness stub — prove leases, claims, acks, terminal merge
    with zero LLM calls.
 3. **adapter interface + claude adapter + preflight**, including the readiness gate — a team that

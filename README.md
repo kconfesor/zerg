@@ -34,7 +34,7 @@ and tells you what to fix — it never runs a login flow or touches an auth file
 
 ## Defaults
 
-A fresh install seeds two roles — `coder` (sonnet) and `reviewer` (opus) — ready to run. They are ordinary rows: rename
+A library of eight role templates ships — planner, coder, reviewer, cleaner, architect, hardener, security, docs. A new project selects `coder` (sonnet) → `reviewer` (opus) and runs. They are ordinary rows: rename
 them, replace them, add four more. Nothing is special-cased.
 
 ## Layout
