@@ -186,12 +186,15 @@ func (o *Overmind) Status(ctx context.Context, projectID string) ([]Status, erro
 // from the same windows. Reporting it per role showed a gauge under whichever
 // role had most recently taken a turn and nothing under the others, which reads
 // as one role having headroom the rest lack.
+// Keyed by provider, not harness: two harnesses can front the same account,
+// and one harness can front several providers with unrelated limits.
 type Quotas map[string]*QuotaReport
 
 // QuotaReport struct
 type QuotaReport struct {
-	Plan    string        `json:"plan,omitempty"`
-	Windows []QuotaWindow `json:"windows"`
+	Provider string        `json:"provider"`
+	Plan     string        `json:"plan,omitempty"`
+	Windows  []QuotaWindow `json:"windows"`
 	// SeenAt is when this was last learned. A gauge with no age is a gauge you
 	// cannot tell is stale.
 	SeenAt time.Time `json:"seenAt"`
@@ -207,7 +210,7 @@ func quotaReport(q *adapter.Quota, seen time.Time) *QuotaReport {
 	if q == nil || len(q.Windows) == 0 {
 		return nil
 	}
-	out := &QuotaReport{Plan: q.Plan, SeenAt: seen}
+	out := &QuotaReport{Provider: q.Provider, Plan: q.Plan, SeenAt: seen}
 	for _, w := range q.Windows {
 		win := QuotaWindow{Label: w.Label(), Used: w.Used}
 		if !w.ResetsAt.IsZero() {
@@ -239,12 +242,15 @@ func (o *Overmind) Quotas(projectID string) Quotas {
 		if q == nil {
 			continue
 		}
-		h := c.Harness()
-		if prev, ok := seen[h]; ok && !at.After(prev) {
+		key := q.Provider
+		if key == "" {
+			key = c.Harness() // a harness that did not say; better than dropping it
+		}
+		if prev, ok := seen[key]; ok && !at.After(prev) {
 			continue
 		}
-		seen[h] = at
-		out[h] = quotaReport(q, at)
+		seen[key] = at
+		out[key] = quotaReport(q, at)
 	}
 	if len(out) == 0 {
 		return nil

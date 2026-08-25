@@ -325,8 +325,12 @@ func (w QuotaWindow) Label() string {
 // Separate from the throttle in Throttle: this is the gauge before the wall,
 // and it is what stops a run being planned into a window that cannot hold it.
 type Quota struct {
-	Plan    string // "prolite", "max", … when the provider names it
-	Windows []QuotaWindow
+	// Provider is whose account these windows belong to — "openai-codex",
+	// "anthropic". Not the harness: pi fronts several providers, and a
+	// ChatGPT window says nothing about the deepseek key beside it.
+	Provider string
+	Plan     string // "prolite", "max", … when the provider names it
+	Windows  []QuotaWindow
 }
 
 // Tightest returns the window closest to being spent, which is the one that

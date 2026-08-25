@@ -1035,6 +1035,16 @@ undocumented, so every failure is soft — a gauge that cannot be read must neve
 stop a role from running, and the last good reading is kept with its timestamp
 rather than blanked.
 
+**The gauge is keyed by provider, not harness.** A ChatGPT window says nothing
+about the deepseek key beside it, and pi fronts both; equally, two harnesses
+authenticated to one account should show one gauge rather than double-report it.
+Harness is only the fallback when an adapter does not name a provider.
+
+It lives in the sidebar, under the roles that spend it, rather than the top bar.
+On a phone that bar already carries the project, the alerts and the run control,
+and a gauge is something you go and look at rather than something that has to be
+in your eye.
+
 **Windows are identified by length, not name.** claude names them; the ChatGPT
 endpoint returns a `primary_window` and a `secondary_window` with only a
 `limit_window_seconds` each — and on a live account the *primary* was the 7-day

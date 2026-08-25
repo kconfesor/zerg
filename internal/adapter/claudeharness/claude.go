@@ -565,7 +565,7 @@ func quotaFrom(w wire) *adapter.Quota {
 	if w.RateLimitInfo == nil || len(w.RateLimitInfo.UnifiedWindows) == 0 {
 		return nil
 	}
-	q := &adapter.Quota{}
+	q := &adapter.Quota{Provider: providerName}
 	for name, win := range w.RateLimitInfo.UnifiedWindows {
 		d := windowLength(name)
 		if d == 0 {
@@ -626,7 +626,7 @@ func (*Adapter) Quota(ctx context.Context) (adapter.Quota, bool, error) {
 		return adapter.Quota{}, false, fmt.Errorf("claude /usage: %w", err)
 	}
 
-	var q adapter.Quota
+	q := adapter.Quota{Provider: providerName}
 	for _, line := range strings.Split(string(out), "\n") {
 		m := usageLine.FindStringSubmatch(strings.TrimSpace(line))
 		if m == nil {

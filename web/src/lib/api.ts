@@ -106,6 +106,8 @@ export interface RoleStatus {
 }
 
 export interface QuotaReport {
+  /** Whose account these windows belong to: "openai-codex", "anthropic". */
+  provider: string
   plan?: string
   windows: QuotaWindow[]
   /** When this was last learned, so a stale gauge can say so. */
@@ -123,7 +125,7 @@ export interface QuotaWindow {
 export interface SwarmStatus {
   running: boolean
   roles: RoleStatus[]
-  /** Subscription headroom per harness. One account serves every role on it. */
+  /** Subscription headroom, keyed by provider — one account, many roles. */
   quotas?: Record<string, QuotaReport>
 }
 

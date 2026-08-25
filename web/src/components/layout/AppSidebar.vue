@@ -10,6 +10,7 @@ import {
   Users,
 } from '@lucide/vue'
 import type { RoleStatus, SwarmStatus } from '@/lib/api'
+import QuotaBars from '@/components/QuotaBars.vue'
 
 import type { View } from '@/router'
 
@@ -57,6 +58,13 @@ function resumesIn(iso?: string): string {
   if (mins < 60) return `in ${mins}m`
   return `in ${Math.floor(mins / 60)}h ${mins % 60}m`
 }
+/** One entry per provider, ordered so the list is stable across polls. */
+const quotas = computed(() =>
+  Object.entries(props.status.quotas ?? {})
+    .map(([provider, report]) => ({ provider, report }))
+    .sort((a, b) => a.provider.localeCompare(b.provider)),
+)
+
 function live(r: RoleStatus): boolean {
   return r.state === 'working'
 }
@@ -158,6 +166,23 @@ function live(r: RoleStatus): boolean {
           </p>
         </li>
       </ul>
+
+      <!-- What each account has left, under the roles that spend it. Here
+           rather than the top bar: on a phone the bar is already carrying the
+           project, the alerts and the run control, and a gauge is something you
+           go and look at rather than something that has to be in your eye. -->
+      <div v-if="quotas.length" class="hairline-t px-3 py-2.5">
+        <p class="text-muted-foreground mb-1.5 text-[10px] font-semibold tracking-wide uppercase">
+          Plan usage
+        </p>
+        <div v-for="q in quotas" :key="q.provider" class="mb-2 last:mb-0">
+          <p class="text-muted-foreground/80 mb-1 truncate text-[10px]">
+            {{ q.report.provider || q.provider
+            }}<span v-if="q.report.plan"> · {{ q.report.plan }}</span>
+          </p>
+          <QuotaBars :quota="q.report" />
+        </div>
+      </div>
     </div>
     <div v-else class="flex-1" />
 

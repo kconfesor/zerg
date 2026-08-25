@@ -638,7 +638,7 @@ func (*Adapter) Quota(ctx context.Context) (adapter.Quota, bool, error) {
 		return adapter.Quota{}, false, fmt.Errorf("chatgpt usage: %w", err)
 	}
 
-	q := adapter.Quota{Plan: body.PlanType}
+	q := adapter.Quota{Provider: "openai-codex", Plan: body.PlanType}
 	// Which of the two is the five-hour and which the week is not fixed: on a
 	// live account the primary window was the 7-day one. The length is the
 	// only reliable identity, so neither position nor name is trusted.
