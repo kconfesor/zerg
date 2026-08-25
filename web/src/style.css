@@ -186,6 +186,41 @@
   .tabular { font-variant-numeric: tabular-nums; }
 }
 
+@layer base {
+  /*
+   * Anything you can press says so.
+   *
+   * Tailwind v4 stopped setting cursor:pointer on buttons — the reset follows
+   * the browser default, which is an arrow — and shadcn made it a build-time
+   * choice that was not taken here. The result is an interface where nothing
+   * looks clickable until you click it.
+   *
+   * Set globally rather than on the Button component, because most of the
+   * pressable things in this app are not that component: card controls, the
+   * markdown toolbar, the model list, and every trigger reka-ui renders for a
+   * select, a dialog or a switch. A rule per component would have to be
+   * remembered for each new one.
+   *
+   * Disabled keeps the arrow: a pointer over a control that will not respond
+   * promises something it cannot do.
+   */
+  button:not(:disabled),
+  [role="button"]:not([aria-disabled="true"]),
+  [role="switch"]:not([aria-disabled="true"]),
+  [role="option"],
+  [role="menuitem"],
+  [role="tab"],
+  summary,
+  label[for]:not(:has(input:disabled)) {
+    cursor: pointer;
+  }
+
+  button:disabled,
+  [aria-disabled="true"] {
+    cursor: default;
+  }
+}
+
 @layer components {
   /* A live swarm should be visible from across the room. */
   .pulse-dot {
