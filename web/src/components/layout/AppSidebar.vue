@@ -1,5 +1,14 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import {
+  Activity as ActivityIcon,
+  Bell,
+  Columns3,
+  MessageSquare,
+  Settings as SettingsIcon,
+  ShieldCheck,
+  Users,
+} from '@lucide/vue'
 import type { RoleStatus, SwarmStatus } from '@/lib/api'
 
 export type View = 'board' | 'activity' | 'chat' | 'team' | 'attention' | 'readiness' | 'settings'
@@ -15,14 +24,17 @@ const props = defineProps<{
 }>()
 const emit = defineEmits<{ navigate: [view: View]; close: [] }>()
 
+// Icons are picked for what the view does, not for decoration: lanes for the
+// board, a pulse for the live stream, a bell for the one screen that is
+// waiting on a person.
 const nav = computed(() => [
-  { key: 'board' as const, label: 'Board', count: props.taskCount },
-  { key: 'activity' as const, label: 'Activity', count: 0 },
-  { key: 'chat' as const, label: 'Chat', count: 0 },
-  { key: 'team' as const, label: 'Team', count: 0 },
-  { key: 'attention' as const, label: 'Attention', count: props.attentionCount },
-  { key: 'readiness' as const, label: 'Readiness', count: 0 },
-  { key: 'settings' as const, label: 'Settings', count: 0 },
+  { key: 'board' as const, label: 'Board', icon: Columns3, count: props.taskCount },
+  { key: 'activity' as const, label: 'Activity', icon: ActivityIcon, count: 0 },
+  { key: 'chat' as const, label: 'Chat', icon: MessageSquare, count: 0 },
+  { key: 'team' as const, label: 'Team', icon: Users, count: 0 },
+  { key: 'attention' as const, label: 'Attention', icon: Bell, count: props.attentionCount },
+  { key: 'readiness' as const, label: 'Readiness', icon: ShieldCheck, count: 0 },
+  { key: 'settings' as const, label: 'Settings', icon: SettingsIcon, count: 0 },
 ])
 
 /** Role state drives a colour and a word. Never colour alone. */
@@ -50,8 +62,8 @@ function live(r: RoleStatus): boolean {
   >
     <!-- Identity, and whether anything is running at all. -->
     <div class="hairline-b flex items-center gap-2.5 px-3 py-3">
-      <img src="/logo-icon.svg" alt="zerg logo" class="size-6 shrink-0 rounded-md" />
-      <span class="text-sm font-bold tracking-tight">zerg</span>
+      <img src="/logo-icon.svg" alt="" class="size-9 shrink-0 rounded-lg" />
+      <span class="text-base font-bold tracking-tight">zerg</span>
       <span
         v-if="status.running"
         class="ml-auto flex items-center gap-1.5 text-[10px] font-semibold tracking-wider text-[var(--status-good)] uppercase"
@@ -67,7 +79,7 @@ function live(r: RoleStatus): boolean {
         v-for="item in nav"
         :key="item.key"
         :class="[
-          'group flex items-center gap-2 px-2 py-1.5 text-left text-xs transition-colors',
+          'group flex items-center gap-2 px-2 py-2 text-left text-xs transition-colors',
           'focus-visible:outline-ring focus-visible:outline-2 focus-visible:-outline-offset-2',
           view === item.key
             ? 'bg-primary/12 text-foreground font-semibold'
@@ -75,11 +87,18 @@ function live(r: RoleStatus): boolean {
         ]"
         @click="emit('navigate', item.key), emit('close')"
       >
+        <!-- The active rail stays. An icon changing colour is a weaker signal
+             than a mark at the edge, and it is the one cue that survives at a
+             glance down the column. -->
         <span
-          :class="[
-            'h-3.5 w-px shrink-0',
-            view === item.key ? 'bg-primary' : 'bg-transparent',
-          ]"
+          :class="['h-4 w-px shrink-0', view === item.key ? 'bg-primary' : 'bg-transparent']"
+        />
+        <component
+          :is="item.icon"
+          :size="15"
+          :stroke-width="view === item.key ? 2.25 : 1.75"
+          class="shrink-0"
+          aria-hidden="true"
         />
         {{ item.label }}
         <span
