@@ -328,3 +328,120 @@ func (db *DB) ListPendingApprovals(ctx context.Context, projectID string) ([]App
 	}
 	return out, rows.Err()
 }
+
+// ── clarifications ────────────────────────────────────────────────────────
+
+// Clarification states.
+const (
+	ClarificationOpen      = "open"
+	ClarificationAnswered  = "answered"
+	ClarificationCancelled = "cancelled"
+)
+
+// Clarification is an agent's question waiting on a human.
+type Clarification struct {
+	ID         string     `json:"id"`
+	ProjectID  string     `json:"projectId"`
+	TaskID     *string    `json:"taskId,omitempty"`
+	Role       string     `json:"role"`
+	Question   string     `json:"question"`
+	Answer     *string    `json:"answer,omitempty"`
+	State      string     `json:"state"`
+	CreatedAt  time.Time  `json:"createdAt"`
+	AnsweredAt *time.Time `json:"answeredAt,omitempty"`
+}
+
+// AskClarification records a question and returns it.
+func (db *DB) AskClarification(ctx context.Context, projectID, role, question string, taskID *string) (*Clarification, error) {
+	if question == "" {
+		return nil, invalid("a clarification needs a question")
+	}
+	c := &Clarification{
+		ID: NewID(), ProjectID: projectID, TaskID: taskID, Role: role,
+		Question: question, State: ClarificationOpen, CreatedAt: time.Now().UTC(),
+	}
+	_, err := db.sql.ExecContext(ctx,
+		`INSERT INTO clarifications (id, project_id, task_id, role, question, state, created_at)
+		 VALUES (?,?,?,?,?,?,?)`,
+		c.ID, c.ProjectID, c.TaskID, c.Role, c.Question, c.State,
+		c.CreatedAt.Format(time.RFC3339Nano))
+	if err != nil {
+		return nil, fmt.Errorf("recording clarification: %w", err)
+	}
+	return c, nil
+}
+
+// AnswerClarification records a human's answer.
+func (db *DB) AnswerClarification(ctx context.Context, id, answer string) error {
+	res, err := db.sql.ExecContext(ctx,
+		`UPDATE clarifications SET answer = ?, state = ?, answered_at = ?
+		 WHERE id = ? AND state = ?`,
+		answer, ClarificationAnswered, time.Now().UTC().Format(time.RFC3339Nano),
+		id, ClarificationOpen)
+	if err != nil {
+		return fmt.Errorf("answering clarification %s: %w", id, err)
+	}
+	return mustAffect(res, fmt.Sprintf("open clarification %s", id))
+}
+
+// GetClarification reads one question and whatever answer it has.
+func (db *DB) GetClarification(ctx context.Context, id string) (*Clarification, error) {
+	row := db.sql.QueryRowContext(ctx,
+		`SELECT id, project_id, task_id, role, question, answer, state, created_at, answered_at
+		 FROM clarifications WHERE id = ?`, id)
+	c, err := scanClarification(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("clarification %s: %w", id, ErrNotFound)
+	}
+	return c, err
+}
+
+// ListOpenClarifications returns what Attention must show.
+func (db *DB) ListOpenClarifications(ctx context.Context, projectID string) ([]Clarification, error) {
+	rows, err := db.sql.QueryContext(ctx,
+		`SELECT id, project_id, task_id, role, question, answer, state, created_at, answered_at
+		 FROM clarifications WHERE project_id = ? AND state = ? ORDER BY created_at`,
+		projectID, ClarificationOpen)
+	if err != nil {
+		return nil, fmt.Errorf("listing clarifications: %w", err)
+	}
+	defer rows.Close()
+
+	var out []Clarification
+	for rows.Next() {
+		c, err := scanClarification(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *c)
+	}
+	return out, rows.Err()
+}
+
+func scanClarification(s scanner) (*Clarification, error) {
+	var (
+		c        Clarification
+		taskID   sql.NullString
+		answer   sql.NullString
+		created  string
+		answered sql.NullString
+	)
+	if err := s.Scan(&c.ID, &c.ProjectID, &taskID, &c.Role, &c.Question,
+		&answer, &c.State, &created, &answered); err != nil {
+		return nil, err
+	}
+	if taskID.Valid {
+		c.TaskID = &taskID.String
+	}
+	if answer.Valid {
+		c.Answer = &answer.String
+	}
+	var err error
+	if c.CreatedAt, err = time.Parse(time.RFC3339Nano, created); err != nil {
+		return nil, err
+	}
+	if c.AnsweredAt, err = nullTime(answered); err != nil {
+		return nil, err
+	}
+	return &c, nil
+}

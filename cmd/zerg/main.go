@@ -42,6 +42,17 @@ func run(args []string) error {
 	switch args[0] {
 	case "up":
 		return runUp(args[1:])
+
+	// The agent-facing verbs. These run inside a spawned agent and reach the
+	// overmind over the unix socket named in its environment.
+	case "next":
+		return runNext(args[1:])
+	case "done":
+		return runDone(args[1:])
+	case "send":
+		return runSend(args[1:])
+	case "ask":
+		return runAsk(args[1:])
 	case "help", "-h", "--help":
 		usage()
 		return nil
@@ -56,6 +67,13 @@ func usage() {
 
   zerg up [--addr host:port] [--db path] [--verbose]
       Run the overmind and serve the cockpit.
+
+Run by agents, not by you:
+
+  zerg next [--wait 30s]              claim work
+  zerg done --lease <id>              acknowledge it
+  zerg send --to <role> --commit HEAD --task <id>
+  zerg ask "<question>"               ask the operator
 
 Everything is configured in the cockpit; there are no config files.
 `)
