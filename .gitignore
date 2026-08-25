@@ -1,0 +1,12 @@
+# build output
+/zerg
+/dist/
+web/dist/
+web/node_modules/
+
+# runtime state
+.zerg/
+.worktrees/
+
+# os
+.DS_Store
