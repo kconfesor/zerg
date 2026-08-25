@@ -45,6 +45,14 @@ type Adapter interface {
 	// chatter and rate-limit notices that carry no semantics.
 	Parse(line []byte) ([]Event, error)
 
+	// EncodeTurn renders one turn as the bytes this harness expects on stdin.
+	//
+	// The two supported harnesses disagree completely — claude wants an SDK
+	// user message, pi wants {"type":"prompt","message":...} — so this cannot
+	// live in the supervisor. Both shapes were verified by driving a live
+	// process over a pipe, not inferred.
+	EncodeTurn(text string) ([]byte, error)
+
 	Capabilities() Caps
 }
 

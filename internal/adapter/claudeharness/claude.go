@@ -375,3 +375,21 @@ func deref(p *string) string {
 	}
 	return *p
 }
+
+// EncodeTurn renders a turn as an SDK user message, the shape
+// --input-format stream-json accepts. Verified against 2.1.243 by writing it
+// to a live process and reading the answer back.
+func (*Adapter) EncodeTurn(text string) ([]byte, error) {
+	msg := map[string]any{
+		"type": "user",
+		"message": map[string]any{
+			"role":    "user",
+			"content": []map[string]any{{"type": "text", "text": text}},
+		},
+	}
+	b, err := json.Marshal(msg)
+	if err != nil {
+		return nil, fmt.Errorf("claude: encoding turn: %w", err)
+	}
+	return append(b, '\n'), nil
+}

@@ -329,3 +329,14 @@ func userConfigDir() string {
 	}
 	return filepath.Join(home, ".pi", "agent")
 }
+
+// EncodeTurn renders a turn as an rpc prompt command. Verified against 0.74.2:
+// this shape answers {"type":"response","command":"prompt","success":true},
+// while several plausible alternatives are rejected outright.
+func (*Adapter) EncodeTurn(text string) ([]byte, error) {
+	b, err := json.Marshal(map[string]any{"type": "prompt", "message": text})
+	if err != nil {
+		return nil, fmt.Errorf("pi: encoding turn: %w", err)
+	}
+	return append(b, '\n'), nil
+}

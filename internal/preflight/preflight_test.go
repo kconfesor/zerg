@@ -23,6 +23,7 @@ func (f *fake) Checks() []adapter.Check                         { return f.check
 func (f *fake) Capabilities() adapter.Caps                      { return adapter.Caps{} }
 func (f *fake) ListModels(adapter.Ctx) ([]adapter.Model, error) { return nil, nil }
 func (f *fake) Parse([]byte) ([]adapter.Event, error)           { return nil, nil }
+func (f *fake) EncodeTurn(s string) ([]byte, error)             { return []byte(s + "\n"), nil }
 func (f *fake) Command(context.Context, adapter.Spec) (*exec.Cmd, error) {
 	return exec.Command("true"), nil
 }
