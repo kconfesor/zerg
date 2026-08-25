@@ -356,3 +356,46 @@ func (s *Server) deleteTask(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
+
+// resetChat ends a conversation and removes its worktree and transcript.
+func (s *Server) resetChat(w http.ResponseWriter, r *http.Request) {
+	if s.chatMgr == nil {
+		s.fail(w, r, fmt.Errorf("chat is not available in this build"))
+		return
+	}
+	if err := s.chatMgr.Reset(r.Context(), r.PathValue("id")); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// setChatAgent chooses what answers questions. Empty values mean inherit from
+// the terminal role, which is the default.
+func (s *Server) setChatAgent(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Harness string `json:"harness"`
+		Model   string `json:"model"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.fail(w, r, fmt.Errorf("reading request: %w", err))
+		return
+	}
+	if req.Harness != "" {
+		if _, err := s.registry.Get(req.Harness); err != nil {
+			s.fail(w, r, err)
+			return
+		}
+	}
+	project, err := s.db.SetChatAgent(r.Context(), r.PathValue("id"), req.Harness, req.Model)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	// The running session was built from the old choice, so end it. The next
+	// question starts one that matches what the setting now says.
+	if s.chatMgr != nil {
+		s.chatMgr.Stop(r.PathValue("id"))
+	}
+	writeJSON(w, http.StatusOK, project)
+}

@@ -634,7 +634,14 @@ watch(current, () => (banner.value = null))
               title="Chat"
               subtitle="Ask about the project. This agent reads it and answers; it takes no work."
             />
-            <div class="pt-4"><Chat :project-id="current?.id ?? null" /></div>
+            <div class="pt-4">
+              <Chat
+                :project="current"
+                :harnesses="harnesses"
+                :models="models"
+                @updated="(p: Project) => (current = p)"
+              />
+            </div>
           </template>
 
           <!-- Projects -->

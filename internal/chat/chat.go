@@ -135,8 +135,20 @@ func (m *Manager) ensure(ctx context.Context, projectID string) (*session, error
 			pick = r
 		}
 	}
+
+	// An explicit choice wins. Inheriting the terminal role is a good default —
+	// it is the role that reads everything — and a poor rule, because it is
+	// also usually the most expensive model on the team, and asking where a
+	// function lives does not need it.
+	if project.ChatHarness != "" {
+		pick.Harness = project.ChatHarness
+		pick.Model = project.ChatModel
+	} else if project.ChatModel != "" {
+		pick.Model = project.ChatModel
+	}
 	if pick.Harness == "" {
-		return nil, fmt.Errorf("this project has no enabled roles, so there is no harness to chat with")
+		return nil, fmt.Errorf(
+			"no harness to chat with: this project has no enabled roles, and no chat harness is set")
 	}
 
 	ad, err := m.registry.Get(pick.Harness)
@@ -208,4 +220,30 @@ func (m *Manager) Running(projectID string) bool {
 	defer m.mu.Unlock()
 	s, ok := m.sessions[projectID]
 	return ok && s.cer.State() != cerebrate.StateFailed
+}
+
+// Reset ends a chat and removes what it left behind.
+//
+// The worktree is the reason this exists: chat gets its own checkout so a
+// question can never touch the operator's, and that checkout accumulates
+// whatever the conversation did — built artefacts, scratch files, a branch that
+// has drifted from base. Stopping the session leaves all of it.
+//
+// The transcript goes too. It is a conversation rather than a record of work:
+// nothing downstream refers to it, and a chat you have deliberately ended is
+// not one whose history you wanted.
+func (m *Manager) Reset(ctx context.Context, projectID string) error {
+	m.Stop(projectID)
+
+	project, err := m.db.GetProject(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	if err := hatchery.New(project.Path).RemoveWorktree(ctx, Role); err != nil {
+		return fmt.Errorf("removing the chat worktree: %w", err)
+	}
+	if err := m.db.DeleteRoleEvents(ctx, projectID, Role); err != nil {
+		return fmt.Errorf("clearing the conversation: %w", err)
+	}
+	return nil
 }

@@ -48,6 +48,9 @@ export interface Project {
   baseBranch: string
   /** How finished work reaches the base branch. */
   integration: Integration
+  /** What answers questions in Chat. Empty inherits the terminal role. */
+  chatHarness?: string
+  chatModel?: string
   createdAt: string
   lastOpenedAt?: string
 }
@@ -247,6 +250,13 @@ export const api = {
     }),
 
   taskDetail: (id: string) => call<TaskDetail>(`/tasks/${id}`),
+  resetChat: (projectId: string) =>
+    call<void>(`/projects/${projectId}/chat`, { method: 'DELETE' }),
+  setChatAgent: (projectId: string, harness: string, model: string) =>
+    call<Project>(`/projects/${projectId}/chat-agent`, {
+      method: 'PUT',
+      body: JSON.stringify({ harness, model }),
+    }),
   stopTask: (id: string) => call<Task>(`/tasks/${id}/stop`, { method: 'POST' }),
   deleteTask: (id: string) => call<void>(`/tasks/${id}`, { method: 'DELETE' }),
   setTaskHidden: (id: string, hidden: boolean) =>

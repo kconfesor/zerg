@@ -133,6 +133,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/projects/{id}/sweep", s.sweep)
 	mux.HandleFunc("PUT /api/projects/{id}/integration", s.setIntegration)
 	mux.HandleFunc("POST /api/projects/{id}/chat", s.askChat)
+	mux.HandleFunc("DELETE /api/projects/{id}/chat", s.resetChat)
+	mux.HandleFunc("PUT /api/projects/{id}/chat-agent", s.setChatAgent)
 	mux.HandleFunc("GET /api/settings/shared-instructions", s.getSharedInstructions)
 	mux.HandleFunc("PUT /api/settings/shared-instructions", s.setSharedInstructions)
 

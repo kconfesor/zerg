@@ -164,3 +164,14 @@ func (db *DB) PruneEvents(ctx context.Context, before time.Time) (int64, error) 
 	}
 	return res.RowsAffected()
 }
+
+// DeleteRoleEvents removes one role's events in a project. Used to end a chat:
+// its transcript is a conversation, not a record of work, and nothing
+// downstream refers to it.
+func (db *DB) DeleteRoleEvents(ctx context.Context, projectID, role string) error {
+	if _, err := db.sql.ExecContext(ctx,
+		`DELETE FROM events WHERE project_id = ? AND role = ?`, projectID, role); err != nil {
+		return fmt.Errorf("deleting %s events: %w", role, err)
+	}
+	return nil
+}

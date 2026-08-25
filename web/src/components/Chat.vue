@@ -7,8 +7,34 @@
  * its own: messages persist, survive a reload, and resume after a dropped
  * connection because they are events, and events already do all three.
  */
-import { nextTick, onBeforeUnmount, ref, watch } from 'vue'
-import { api, streamActivity, type ActivityEvent, type ActivityStream } from '@/lib/api'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import {
+  api,
+  streamActivity,
+  type ActivityEvent,
+  type ActivityStream,
+  type Model,
+  type Project,
+} from '@/lib/api'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Trash2 } from '@lucide/vue'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 import { renderMarkdown } from '@/lib/markdown'
 import {
   InputGroup,
@@ -17,7 +43,15 @@ import {
   InputGroupTextarea,
 } from '@/components/ui/input-group'
 
-const props = defineProps<{ projectId: string | null }>()
+const props = defineProps<{
+  project: Project | null
+  harnesses: string[]
+  models: Record<string, Model[]>
+}>()
+const emit = defineEmits<{ updated: [project: Project] }>()
+
+/** The project id, which is all the stream and the ask endpoint need. */
+const projectId = computed(() => props.project?.id ?? null)
 
 /** Only these two roles are part of the conversation. Everything else on the
  *  stream is the pipeline working, which belongs in Activity. */
@@ -74,8 +108,62 @@ function accept(e: ActivityEvent) {
 function connect() {
   stream?.close()
   lines.value = []
-  if (!props.projectId) return
-  stream = streamActivity(props.projectId, { onEvent: accept, onCaughtUp: scrollToEnd })
+  if (!projectId.value) return
+  stream = streamActivity(projectId.value, { onEvent: accept, onCaughtUp: scrollToEnd })
+}
+
+/** The effective harness: what is set, or the team's. */
+const harness = ref(props.project?.chatHarness ?? '')
+const model = ref(props.project?.chatModel ?? '')
+const modelListOpen = ref(false)
+const confirmReset = ref(false)
+
+watch(
+  () => props.project,
+  (p) => {
+    harness.value = p?.chatHarness ?? ''
+    model.value = p?.chatModel ?? ''
+  },
+)
+
+/** Narrowed to what has been typed, matched anywhere in the id so "sol" finds
+ *  "openai-codex/gpt-5.6-sol". Same behaviour as the role editor's. */
+const matchingModels = computed(() => {
+  const all = props.models[harness.value] ?? []
+  const q = model.value.trim().toLowerCase()
+  const hits = q ? all.filter((m) => m.ID.toLowerCase().includes(q)) : all
+  return hits.slice(0, 50)
+})
+
+function chooseModel(id: string) {
+  model.value = id
+  modelListOpen.value = false
+  setAgent(harness.value, id)
+}
+
+async function setAgent(h: string, m: string) {
+  if (!projectId.value) return
+  if (h === (props.project?.chatHarness ?? '') && m === (props.project?.chatModel ?? '')) return
+  harness.value = h
+  try {
+    // The running session was built from the old choice, so the daemon ends it;
+    // the next question starts one that matches.
+    emit('updated', await api.setChatAgent(projectId.value, h, m))
+    lines.value = []
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : String(e)
+  }
+}
+
+async function resetChat() {
+  if (!projectId.value) return
+  try {
+    await api.resetChat(projectId.value)
+    confirmReset.value = false
+    lines.value = []
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : String(e)
+  }
 }
 
 function scrollToEnd() {
@@ -87,11 +175,11 @@ function scrollToEnd() {
 
 async function send() {
   const text = draft.value.trim()
-  if (!text || !props.projectId) return
+  if (!text || !projectId.value) return
   sending.value = true
   error.value = ''
   try {
-    await api.chat(props.projectId, text)
+    await api.chat(projectId.value, text)
     draft.value = ''
     // The agent's first output can be a minute away on a large repository, so
     // say it is working rather than leaving the panel looking inert.
@@ -111,12 +199,70 @@ function onKeydown(ev: KeyboardEvent) {
   }
 }
 
-watch(() => props.projectId, connect, { immediate: true })
+watch(projectId, connect, { immediate: true })
 onBeforeUnmount(() => stream?.close())
 </script>
 
 <template>
   <div class="flex flex-col gap-3">
+    <!-- Which agent answers, and the way to start over. Both belong here: the
+         choice is about this conversation, and the reset is destructive enough
+         that it should not be somewhere you press by accident. -->
+    <div class="flex flex-wrap items-end gap-2">
+      <div class="flex flex-col gap-1">
+        <Label class="text-[10px]">Harness</Label>
+        <Select :model-value="harness" @update:model-value="(v) => setAgent(String(v), model)">
+          <SelectTrigger size="sm" class="w-36"><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="">inherit from the team</SelectItem>
+            <SelectItem v-for="h in harnesses" :key="h" :value="h">{{ h }}</SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
+
+      <div class="relative flex flex-col gap-1">
+        <Label class="text-[10px]">Model</Label>
+        <Input
+          v-model="model"
+          class="h-8 w-56 text-xs"
+          autocomplete="off"
+          placeholder="harness default"
+          @focus="modelListOpen = true"
+          @input="modelListOpen = true"
+          @keydown.escape="modelListOpen = false"
+          @blur="setAgent(harness, model)"
+        />
+        <div
+          v-if="modelListOpen && matchingModels.length"
+          class="bg-popover absolute top-full z-50 mt-1 max-h-56 w-full overflow-y-auto border shadow-md"
+        >
+          <button
+            v-for="m in matchingModels"
+            :key="m.ID"
+            type="button"
+            class="hover:bg-muted flex w-full items-center gap-2 px-2 py-1.5 text-left text-xs"
+            @mousedown.prevent="chooseModel(m.ID)"
+          >
+            <span class="min-w-0 flex-1 truncate font-mono">{{ m.ID }}</span>
+            <span v-if="m.Provider" class="text-muted-foreground shrink-0 text-[10px]">
+              {{ m.Provider }}
+            </span>
+          </button>
+        </div>
+      </div>
+
+      <Button
+        variant="outline"
+        size="sm"
+        class="ml-auto gap-1.5"
+        :disabled="!projectId"
+        @click="confirmReset = true"
+      >
+        <Trash2 :size="13" aria-hidden="true" />
+        End this chat
+      </Button>
+    </div>
+
     <div
       ref="viewport"
       class="bg-card h-[58vh] overflow-y-auto border p-3 md:h-[60vh]"
@@ -182,6 +328,23 @@ onBeforeUnmount(() => stream?.close())
         </InputGroupButton>
       </InputGroupAddon>
     </InputGroup>
+    <Dialog v-model:open="confirmReset">
+      <DialogContent class="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>End this chat?</DialogTitle>
+          <DialogDescription>
+            The conversation is deleted and the chat worktree is removed, along with anything the
+            agent left in it. Your own checkout and every role's worktree are untouched, and no
+            task history is affected. The next question starts a fresh one.
+          </DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button variant="outline" @click="confirmReset = false">Cancel</Button>
+          <Button variant="destructive" @click="resetChat">End it</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
     <p class="text-muted-foreground text-[11px]">
       Runs in its own worktree with no access to the work queue, so a question cannot disturb
       anything in flight.

@@ -61,7 +61,8 @@ func (db *DB) CreateProject(ctx context.Context, path, name, baseBranch string) 
 // surfaces what you were last working on.
 func (db *DB) ListProjects(ctx context.Context) ([]Project, error) {
 	rows, err := db.sql.QueryContext(ctx,
-		`SELECT id, path, name, base_branch, integration, created_at, last_opened_at
+		`SELECT id, path, name, base_branch, integration, created_at, last_opened_at,
+		        chat_harness, chat_model
 		 FROM projects ORDER BY COALESCE(last_opened_at, created_at) DESC`)
 	if err != nil {
 		return nil, fmt.Errorf("listing projects: %w", err)
@@ -82,7 +83,8 @@ func (db *DB) ListProjects(ctx context.Context) ([]Project, error) {
 // GetProject looks a project up by id.
 func (db *DB) GetProject(ctx context.Context, id string) (*Project, error) {
 	row := db.sql.QueryRowContext(ctx,
-		`SELECT id, path, name, base_branch, integration, created_at, last_opened_at FROM projects WHERE id = ?`, id)
+		`SELECT id, path, name, base_branch, integration, created_at, last_opened_at,
+		        chat_harness, chat_model FROM projects WHERE id = ?`, id)
 	p, err := scanProject(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("project %s: %w", id, ErrNotFound)
@@ -275,7 +277,8 @@ func scanProject(s scanner) (*Project, error) {
 		created    string
 		lastOpened sql.NullString
 	)
-	if err := s.Scan(&p.ID, &p.Path, &p.Name, &p.BaseBranch, &p.Integration, &created, &lastOpened); err != nil {
+	if err := s.Scan(&p.ID, &p.Path, &p.Name, &p.BaseBranch, &p.Integration, &created, &lastOpened,
+		&p.ChatHarness, &p.ChatModel); err != nil {
 		return nil, err
 	}
 	var err error
@@ -323,6 +326,21 @@ func (db *DB) SetIntegration(ctx context.Context, projectID, mode string) (*Proj
 	if _, err := db.sql.ExecContext(ctx,
 		`UPDATE projects SET integration = ? WHERE id = ?`, mode, projectID); err != nil {
 		return nil, fmt.Errorf("setting integration mode: %w", err)
+	}
+	return db.GetProject(ctx, projectID)
+}
+
+// SetChatAgent chooses what answers questions in Chat.
+//
+// Empty for either means inherit from the terminal role, which is the default
+// and a reasonable one — it just should not be the only option, since the
+// reviewer is usually the most expensive model on the team and asking where a
+// function lives does not need it.
+func (db *DB) SetChatAgent(ctx context.Context, projectID, harness, model string) (*Project, error) {
+	if _, err := db.sql.ExecContext(ctx,
+		`UPDATE projects SET chat_harness = ?, chat_model = ? WHERE id = ?`,
+		harness, model, projectID); err != nil {
+		return nil, fmt.Errorf("setting the chat agent: %w", err)
 	}
 	return db.GetProject(ctx, projectID)
 }

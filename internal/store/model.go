@@ -53,6 +53,11 @@ type Project struct {
 	Integration  string     `json:"integration"`
 	CreatedAt    time.Time  `json:"createdAt"`
 	LastOpenedAt *time.Time `json:"lastOpenedAt,omitempty"`
+
+	// ChatHarness and ChatModel override what answers questions in Chat.
+	// Empty means inherit from the terminal role, which is the default.
+	ChatHarness string `json:"chatHarness,omitempty"`
+	ChatModel   string `json:"chatModel,omitempty"`
 }
 
 // ProjectRole is one template's membership in one project's pipeline. Position
