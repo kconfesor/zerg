@@ -43,9 +43,9 @@ function resetsIn(iso?: string): string {
       <span class="text-muted-foreground w-5 shrink-0 text-[10px]">{{ w.label }}</span>
       <!-- The track is always full width, so a short bar reads as room left
            rather than as a bar that failed to draw. -->
-      <span class="bg-muted h-1 min-w-8 flex-1 overflow-hidden rounded-full">
+      <span class="bg-muted h-1 min-w-8 flex-1 overflow-hidden">
         <span
-          :class="['block h-full rounded-full transition-[width]',
+          :class="['block h-full transition-[width]',
                    w === tightest ? tone(w.used) : 'bg-muted-foreground/40']"
           :style="{ width: `${Math.min(100, Math.max(2, w.used * 100))}%` }"
         />

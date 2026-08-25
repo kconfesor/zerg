@@ -93,7 +93,11 @@
   --chart-3: oklch(0.591 0.293 322.896);
   --chart-4: oklch(0.518 0.253 323.949);
   --chart-5: oklch(0.452 0.211 324.591);
-  --radius: 0.625rem;
+  /* Square by design. Kept as a token rather than deleted because shadcn
+     components are generated against it: with a radius here, every component
+     added by the CLI arrives rounded and has to be corrected by hand, and one
+     that is missed is the odd one out. Zero makes the default correct. */
+  --radius: 0;
   --sidebar: oklch(0.985 0 0);
   --sidebar-foreground: oklch(0.145 0.008 326);
   --sidebar-primary: oklch(0.591 0.293 322.896);

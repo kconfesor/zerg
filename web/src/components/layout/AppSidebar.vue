@@ -83,7 +83,7 @@ function live(r: RoleStatus): boolean {
   >
     <!-- Identity, and whether anything is running at all. -->
     <div class="hairline-b flex min-h-[var(--topbar)] shrink-0 items-center gap-2.5 px-3">
-      <img src="/logo-icon.svg" alt="" class="size-9 shrink-0 rounded-lg" />
+      <img src="/logo-icon.svg" alt="" class="size-9 shrink-0" />
       <span class="text-base font-bold tracking-tight">zerg</span>
       <span
         v-if="status.running"
