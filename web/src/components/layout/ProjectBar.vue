@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { Project, SwarmStatus } from '@/lib/api'
+import { Bell, Play, Square } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 import UsageSummary from '@/components/layout/UsageSummary.vue'
 import {
@@ -17,9 +18,11 @@ const props = defineProps<{
   // Bumped when work completes, so the figure is not stale the moment it
   // matters most — right after a run that cost something.
   usageKey?: number
+  attentionCount: number
 }>()
 const emit = defineEmits<{
   menu: []
+  attention: []
   openProject: [project: Project]
   start: []
   stop: []
@@ -73,6 +76,26 @@ function liveCount(s: SwarmStatus): number {
     </span>
 
     <div class="ml-auto flex items-center gap-3">
+      <!-- Something is waiting on a person. It sits in the bar rather than
+           behind a nav item, because it interrupts whatever you are reading
+           instead of being somewhere you have to remember to go. -->
+      <Button
+        v-if="attentionCount"
+        size="icon-sm"
+        variant="ghost"
+        class="relative text-[var(--status-warning)]"
+        :title="`${attentionCount} waiting on you`"
+        :aria-label="`${attentionCount} waiting on you`"
+        @click="emit('attention')"
+      >
+        <Bell :size="15" aria-hidden="true" />
+        <span
+          class="bg-[var(--status-warning)] text-background absolute -top-0.5 -right-0.5 grid size-3.5 place-items-center rounded-full text-[9px] font-bold"
+        >
+          {{ attentionCount }}
+        </span>
+      </Button>
+
       <!-- Spend sits beside the agents that incur it, so it is noticed rather
            than gone looking for. -->
       <UsageSummary :project-id="current?.id ?? null" :refresh-key="usageKey" />
@@ -87,11 +110,28 @@ function liveCount(s: SwarmStatus): number {
       </span>
       <span v-else class="text-muted-foreground hidden text-[11px] sm:inline">no agents running</span>
 
-      <Button v-if="!status.running" size="sm" :disabled="!current" @click="emit('start')">
-        Start<span class="hidden sm:inline"> agents</span>
+      <!-- An icon, with the words in the tooltip and the aria label. The pair
+           reads as one control at a glance, and on a phone it stops the bar
+           wrapping for a verb. -->
+      <Button
+        v-if="!status.running"
+        size="icon-sm"
+        :disabled="!current"
+        title="Start agents"
+        aria-label="Start agents"
+        @click="emit('start')"
+      >
+        <Play :size="14" aria-hidden="true" />
       </Button>
-      <Button v-else size="sm" variant="destructive" @click="emit('stop')">
-        Stop<span class="hidden sm:inline"> agents</span>
+      <Button
+        v-else
+        size="icon-sm"
+        variant="destructive"
+        title="Stop agents"
+        aria-label="Stop agents"
+        @click="emit('stop')"
+      >
+        <Square :size="13" aria-hidden="true" />
       </Button>
     </div>
   </div>

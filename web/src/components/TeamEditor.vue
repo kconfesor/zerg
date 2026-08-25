@@ -39,23 +39,22 @@ const editing = ref<RoleTemplate | null>(null)
 const open = ref(false)
 const custom = ref(false)
 
-/** What the Select shows: a catalogued id, or the Custom sentinel when the
- *  role runs something the harness never listed. */
-const modelChoice = computed(() => {
-  const m = editing.value?.model ?? ''
-  if (custom.value || !m) return custom.value ? '__custom__' : ''
-  const known = (props.models[editing.value!.harness] ?? []).some((x) => x.ID === m)
-  return known ? m : '__custom__'
+const modelListOpen = ref(false)
+
+/** The catalog narrowed to what has been typed, matched anywhere in the id so
+ *  "sol" finds "openai-codex/gpt-5.6-sol". */
+const matchingModels = computed(() => {
+  const all = props.models[editing.value?.harness ?? ''] ?? []
+  const q = (editing.value?.model ?? '').trim().toLowerCase()
+  const hits = q ? all.filter((m) => m.ID.toLowerCase().includes(q)) : all
+  // Capped: a list longer than the popover can show is a list nobody reads to
+  // the end of, and the filter is the way through it.
+  return hits.slice(0, 50)
 })
 
-function pickModel(value: unknown) {
-  const v = String(value ?? '')
-  if (v === '__custom__') {
-    custom.value = true
-    return
-  }
-  custom.value = false
-  if (editing.value) editing.value.model = v
+function chooseModel(id: string) {
+  if (editing.value) editing.value.model = id
+  modelListOpen.value = false
 }
 
 const selectedIds = computed(() => new Set(props.team.map((r) => r.id)))
@@ -217,23 +216,43 @@ function save() {
         </div>
 
         <div class="flex flex-col gap-1.5">
-          <Label>Model</Label>
-          <Select :model-value="modelChoice" @update:model-value="pickModel">
-            <SelectTrigger class="w-full"><SelectValue placeholder="harness default" /></SelectTrigger>
-            <SelectContent>
-              <SelectItem v-for="m in models[editing.harness] ?? []" :key="m.ID" :value="m.ID">
-                {{ m.ID }}
-              </SelectItem>
-              <SelectItem value="__custom__">Custom…</SelectItem>
-            </SelectContent>
-          </Select>
-          <Input
-            v-if="modelChoice === '__custom__'"
-            v-model="editing.model"
-            placeholder="openai-codex/gpt-5.6-sol"
-          />
+          <Label for="model">Model</Label>
+          <!-- Typed, not picked from a list. pi reports dozens of models, and
+               scrolling a dropdown to find one is slower than typing three
+               characters of it. What is typed is also what is used, so a model
+               a catalog has not heard of still works — the list narrows, it
+               does not constrain. -->
+          <div class="relative">
+            <Input
+              id="model"
+              v-model="editing.model"
+              autocomplete="off"
+              placeholder="harness default"
+              @focus="modelListOpen = true"
+              @input="modelListOpen = true"
+              @keydown.escape="modelListOpen = false"
+            />
+            <div
+              v-if="modelListOpen && matchingModels.length"
+              class="bg-popover absolute z-50 mt-1 max-h-56 w-full overflow-y-auto border shadow-md"
+            >
+              <button
+                v-for="m in matchingModels"
+                :key="m.ID"
+                type="button"
+                class="hover:bg-muted flex w-full items-center gap-2 px-2 py-1.5 text-left text-xs"
+                @mousedown.prevent="chooseModel(m.ID)"
+              >
+                <span class="min-w-0 flex-1 truncate font-mono">{{ m.ID }}</span>
+                <span v-if="m.Provider" class="text-muted-foreground shrink-0 text-[10px]">
+                  {{ m.Provider }}
+                </span>
+              </button>
+            </div>
+          </div>
           <span class="text-muted-foreground text-xs">
-            A working model can be absent from a catalog, so custom ids are allowed.
+            {{ (models[editing.harness] ?? []).length }} listed by {{ editing.harness }}. A working
+            model can be absent from a catalog, so anything you type is accepted.
           </span>
         </div>
 

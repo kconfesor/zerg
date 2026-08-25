@@ -115,6 +115,7 @@ type Approval struct {
 	Note      *string   `json:"note,omitempty"`
 	CreatedAt time.Time `json:"createdAt"`
 	TaskName  string    `json:"taskName,omitempty"`
+	TaskID    string    `json:"taskId,omitempty"`
 	FromRole  string    `json:"fromRole,omitempty"`
 
 	// Body is what the sending role wrote when it handed the work on, and
@@ -386,7 +387,8 @@ const messageCols = `id, project_id, task_id, from_role, kind, priority,
 func (db *DB) ListPendingApprovals(ctx context.Context, projectID string) ([]Approval, error) {
 	rows, err := db.sql.QueryContext(ctx,
 		`SELECT a.id, a.project_id, a.message_id, a.state, a.note, a.created_at,
-		        COALESCE(t.name, ''), m.from_role, m.body, COALESCE(m.commit_sha, '')
+		        COALESCE(t.name, ''), COALESCE(m.task_id, ''), m.from_role,
+		        m.body, COALESCE(m.commit_sha, '')
 		 FROM approvals a
 		 JOIN messages m ON m.id = a.message_id
 		 LEFT JOIN tasks t ON t.id = m.task_id
@@ -405,7 +407,7 @@ func (db *DB) ListPendingApprovals(ctx context.Context, projectID string) ([]App
 			created string
 		)
 		if err := rows.Scan(&a.ID, &a.ProjectID, &a.MessageID, &a.State, &note,
-			&created, &a.TaskName, &a.FromRole, &a.Body, &a.Commit); err != nil {
+			&created, &a.TaskName, &a.TaskID, &a.FromRole, &a.Body, &a.Commit); err != nil {
 			return nil, err
 		}
 		if note.Valid {

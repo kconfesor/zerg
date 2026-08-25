@@ -13,13 +13,15 @@
 import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 
 /** The view names, which double as the path segments. */
+// Attention is deliberately not a route. What is waiting on a person
+// interrupts whatever you are reading; sending you to another page to see it,
+// and back again afterwards, loses your place both ways.
 export const VIEWS = [
   'board',
   'projects',
   'activity',
   'chat',
   'team',
-  'attention',
   'readiness',
   'settings',
 ] as const

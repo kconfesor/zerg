@@ -111,12 +111,15 @@ export interface Approval {
   messageId: string
   state: string
   taskName?: string
+  taskId?: string
   fromRole?: string
   createdAt: string
 }
 
 export interface Clarification {
   id: string
+  /** The card this question is about, so the board can mark it. */
+  taskId?: string
   role: string
   question: string
   state: string

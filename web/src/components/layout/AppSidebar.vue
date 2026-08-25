@@ -2,7 +2,6 @@
 import { computed } from 'vue'
 import {
   Activity as ActivityIcon,
-  Bell,
   Columns3,
   FolderGit2,
   MessageSquare,
@@ -17,7 +16,6 @@ import type { View } from '@/router'
 const props = defineProps<{
   view: View
   status: SwarmStatus
-  attentionCount: number
   taskCount: number
   projectCount: number
   /** Whether the drawer is showing. Ignored at md and above, where the rail
@@ -35,7 +33,6 @@ const nav = computed(() => [
   { key: 'activity' as const, label: 'Activity', icon: ActivityIcon, count: 0 },
   { key: 'chat' as const, label: 'Chat', icon: MessageSquare, count: 0 },
   { key: 'team' as const, label: 'Team', icon: Users, count: 0 },
-  { key: 'attention' as const, label: 'Attention', icon: Bell, count: props.attentionCount },
   { key: 'readiness' as const, label: 'Readiness', icon: ShieldCheck, count: 0 },
   { key: 'settings' as const, label: 'Settings', icon: SettingsIcon, count: 0 },
 ])
@@ -108,9 +105,7 @@ function live(r: RoleStatus): boolean {
           v-if="item.count"
           :class="[
             'tabular ml-auto px-1 text-[10px] font-semibold',
-            item.key === 'attention'
-              ? 'bg-[var(--status-warning)]/15 text-[var(--status-warning)]'
-              : 'text-muted-foreground',
+            'text-muted-foreground',
           ]"
           >{{ item.count }}</span
         >

@@ -13,6 +13,7 @@ import {
   type SwarmStatus,
   type Task,
 } from '@/lib/api'
+import { Bell } from '@lucide/vue'
 import Attention from '@/components/Attention.vue'
 import Activity from '@/components/Activity.vue'
 import Board from '@/components/Board.vue'
@@ -58,6 +59,22 @@ const navOpen = ref(false)
 
 /** The task whose history is open, if any. */
 const openTask = ref<Task | null>(null)
+
+/** Whatever is waiting on a person, shown over the page rather than instead of
+ *  it. It arrives while you are reading something else, and going to another
+ *  screen and back loses your place twice. */
+const attentionOpen = ref(false)
+
+/** Which cards are the ones waiting, so the board can mark them rather than
+ *  leaving you to work out which of five is holding the pipeline. */
+const attentionTaskIds = computed(() => {
+  const a = attention.value
+  if (!a) return []
+  return [
+    ...a.approvals.map((x) => x.taskId),
+    ...a.clarifications.map((x) => x.taskId),
+  ].filter((id): id is string => !!id)
+})
 
 /**
  * True until the first load settles.
@@ -389,7 +406,9 @@ watch(current, () => (banner.value = null))
         :current="current"
         :status="status"
         :usage-key="usageKey"
+        :attention-count="attentionCount"
         @menu="navOpen = true"
+        @attention="attentionOpen = true"
         @open-project="open"
         @start="start"
         @stop="stop"
@@ -407,16 +426,15 @@ watch(current, () => (banner.value = null))
         {{ banner.text }}
       </p>
 
-      <!-- Something waiting on a human follows you between views. A count in
-           the sidebar is easy to walk past; this is not. -->
+      <!-- Still here as well as the bell: a count in a corner is easy to walk
+           past, and this is the one thing that stops the pipeline. -->
       <button
-        v-if="attentionCount && view !== 'attention'"
-        class="hairline-b flex shrink-0 items-center gap-2 bg-[var(--status-warning)]/10 px-[var(--gutter)] py-2 text-left text-xs text-[var(--status-warning)] transition-colors hover:bg-[var(--status-warning)]/15"
-        @click="go('attention')"
+        v-if="attentionCount"
+        class="hairline-b flex w-full items-center gap-2 bg-[var(--status-warning)]/10 px-[var(--gutter)] py-2 text-left text-xs text-[var(--status-warning)]"
+        @click="attentionOpen = true"
       >
-        <span class="pulse-dot size-1.5 rounded-full bg-current" />
-        <span class="tabular font-semibold">{{ attentionCount }}</span>
-        {{ attentionCount === 1 ? 'item needs' : 'items need' }} you
+        <Bell :size="14" aria-hidden="true" />
+        {{ attentionCount }} waiting on a decision
         <span class="ml-auto opacity-70">Review →</span>
       </button>
 
@@ -450,7 +468,12 @@ watch(current, () => (banner.value = null))
                 <Button @click="composing = true">New task</Button>
               </template>
             </PageHeader>
-            <div class="pt-4"><Board :team="team" :tasks="tasks" @open="(t) => (openTask = t)" /></div>
+            <div class="pt-4"><Board
+                :team="team"
+                :tasks="tasks"
+                :needs-attention="attentionTaskIds"
+                @open="(t) => (openTask = t)"
+              /></div>
           </template>
 
           <!-- Chat -->
@@ -521,26 +544,6 @@ watch(current, () => (banner.value = null))
             </div>
           </template>
 
-          <!-- Attention -->
-          <template v-else-if="view === 'attention'">
-            <PageHeader
-              title="Attention"
-              :subtitle="
-                attentionCount
-                  ? `${attentionCount} waiting on a decision`
-                  : 'Everything waiting on a human appears here'
-              "
-            />
-            <div class="pt-4">
-              <Attention
-                :attention="attention"
-                @approve="act.approve"
-                @reject="act.reject"
-                @answer="act.answer"
-              />
-            </div>
-          </template>
-
           <!-- Readiness -->
           <template v-else>
             <PageHeader
@@ -589,6 +592,23 @@ watch(current, () => (banner.value = null))
 
     <!-- Opening a card. The name is the thing that follows this work through
          the whole pipeline, which is worth saying where it is being typed. -->
+    <Dialog v-model:open="attentionOpen">
+      <DialogContent class="max-h-[85vh] overflow-y-auto sm:max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>Waiting on you</DialogTitle>
+          <DialogDescription>
+            Nothing downstream moves until these are decided.
+          </DialogDescription>
+        </DialogHeader>
+        <Attention
+          :attention="attention"
+          @approve="act.approve"
+          @reject="act.reject"
+          @answer="act.answer"
+        />
+      </DialogContent>
+    </Dialog>
+
     <TaskDetail :task="openTask" @close="openTask = null" />
 
     <Dialog v-model:open="composing">

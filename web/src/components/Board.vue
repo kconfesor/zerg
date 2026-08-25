@@ -27,9 +27,15 @@ function compactTokens(n: number): string {
 function money(n: number): string {
   return n >= 1 ? `$${n.toFixed(2)}` : `$${n.toFixed(3)}`
 }
+import { Bell } from '@lucide/vue'
 import { Badge } from '@/components/ui/badge'
 
-const props = defineProps<{ team: ResolvedRole[]; tasks: Task[] }>()
+const props = defineProps<{
+  team: ResolvedRole[]
+  tasks: Task[]
+  /** Ids of tasks with something waiting on a person. */
+  needsAttention?: string[]
+}>()
 const emit = defineEmits<{ open: [task: Task] }>()
 
 /** Lanes are the enabled roles in pipeline order, then the Done well. */
@@ -105,6 +111,18 @@ const byLane = computed(() => {
                    as claimed the instant it is delivered. -->
               <Badge :variant="task.state === 'working' ? 'default' : 'outline'">
                 {{ task.state }}
+              </Badge>
+              <!-- The card that is holding everything up says so on itself.
+                   A count in the header tells you something is waiting; this
+                   tells you which one. -->
+              <Badge
+                v-if="needsAttention?.includes(task.id)"
+                variant="secondary"
+                class="gap-1 text-[var(--status-warning)]"
+                title="waiting on you"
+              >
+                <Bell :size="10" aria-hidden="true" />
+                waiting
               </Badge>
               <Badge v-if="task.reworkCount > 0" variant="secondary" :title="`sent backward ${task.reworkCount} times`">
                 ↩ {{ task.reworkCount }}
