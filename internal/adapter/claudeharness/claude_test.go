@@ -359,3 +359,50 @@ func TestTurnEndDoesNotRepeatTheFinalMessage(t *testing.T) {
 		}
 	}
 }
+
+// The registry holds one adapter per harness, but claude latches the model a
+// turn actually used — the result event carrying usage does not name it. Shared,
+// three concurrent claude roles overwrite each other's latch and usage rows are
+// attributed to whichever wrote last, which is not a data race and silently
+// corrupts the number the cost dashboard exists to answer.
+func TestEachSessionLatchesItsOwnModel(t *testing.T) {
+	shared := New()
+
+	a := adapter.ForSession(shared)
+	b := adapter.ForSession(shared)
+	if a == b {
+		t.Fatal("two sessions received the same instance")
+	}
+
+	// Each reads its own stream naming a different model.
+	for _, tc := range []struct {
+		on    adapter.Adapter
+		model string
+	}{{a, "claude-opus-5"}, {b, "claude-sonnet-5"}} {
+		line := `{"type":"assistant","message":{"model":"` + tc.model + `","content":[]}}`
+		if _, err := tc.on.Parse([]byte(line)); err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+	}
+
+	// A usage event names the model that produced it, from that session's latch.
+	usage := func(on adapter.Adapter) string {
+		evs, err := on.Parse([]byte(`{"type":"result","subtype":"success","usage":{"output_tokens":1}}`))
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		for _, e := range evs {
+			if e.Kind == adapter.EventUsage {
+				return e.Model
+			}
+		}
+		return ""
+	}
+
+	if got := usage(a); got != "claude-opus-5" {
+		t.Errorf("session A attributed usage to %q, want claude-opus-5", got)
+	}
+	if got := usage(b); got != "claude-sonnet-5" {
+		t.Errorf("session B attributed usage to %q, want claude-sonnet-5", got)
+	}
+}

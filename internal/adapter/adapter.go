@@ -359,6 +359,31 @@ type QuotaReporter interface {
 	Quota(ctx context.Context) (Quota, bool, error)
 }
 
+// SessionScoped is implemented by adapters that keep per-session state.
+//
+// The registry holds one instance per harness, which is right for the parts
+// that are configuration — capabilities, the model catalogue, how to build a
+// command. It is wrong for anything latched from a running stream: claude
+// records the model and billing mode a turn actually used, because the event
+// carrying usage does not name them, and with one shared instance three
+// concurrent claude roles overwrite each other's. No data race — the values are
+// atomics — but every usage row can be attributed to whichever role wrote last,
+// which silently corrupts the one number the cost dashboard exists to answer.
+//
+// Adapters with no such state do not implement this and are used as they are.
+type SessionScoped interface {
+	// NewSession returns an instance owned by one agent process.
+	NewSession() Adapter
+}
+
+// forSession returns a private instance when the adapter needs one.
+func ForSession(a Adapter) Adapter {
+	if s, ok := a.(SessionScoped); ok {
+		return s.NewSession()
+	}
+	return a
+}
+
 // Throttler is implemented by adapters that can recognise their harness
 // refusing work on quota.
 //

@@ -328,15 +328,13 @@ func (s *Server) send(w http.ResponseWriter, r *http.Request) {
 	// wrong value reports itself rather than arriving as a foreign-key
 	// violation from inside the router.
 	if req.TaskID != "" {
-		if _, err := s.db.GetTask(r.Context(), req.TaskID); err != nil {
-			task, nameErr := s.db.GetTaskByName(r.Context(), id.ProjectID, req.TaskID)
-			if nameErr != nil {
-				writeError(w, http.StatusNotFound,
-					fmt.Sprintf("no task with id or name %q in this project", req.TaskID))
-				return
-			}
-			req.TaskID = task.ID
+		resolved, err := s.resolveTask(r.Context(), id.ProjectID, req.TaskID)
+		if err != nil {
+			writeError(w, http.StatusNotFound,
+				fmt.Sprintf("no task with id or name %q in this project", req.TaskID))
+			return
 		}
+		req.TaskID = resolved
 	}
 
 	// The sender is the token's role. There is no --from to forge.
@@ -381,9 +379,18 @@ func (s *Server) ask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A question is filed against a card, so the card has to be one of this
+	// project's. Unvalidated, an agent could attach its question to another
+	// project's task and put it in the wrong operator's queue.
 	var taskID *string
 	if req.TaskID != "" {
-		taskID = &req.TaskID
+		resolved, err := s.resolveTask(r.Context(), id.ProjectID, req.TaskID)
+		if err != nil {
+			writeError(w, http.StatusNotFound,
+				fmt.Sprintf("no task with id or name %q in this project", req.TaskID))
+			return
+		}
+		taskID = &resolved
 	}
 	c, err := s.db.AskClarification(r.Context(), id.ProjectID, id.Role, req.Question, taskID)
 	if err != nil {
@@ -454,4 +461,22 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 
 func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
+}
+
+// resolveTask turns whatever an agent passed as --task into an id belonging to
+// that agent's own project.
+//
+// Agents are told the task name, and the name is what every handoff carries,
+// so either form is accepted. Both are looked up inside the project: a global
+// lookup would let one project's agent name another's card, and the id would
+// then flow into routing and task updates unchecked.
+func (s *Server) resolveTask(ctx context.Context, projectID, ref string) (string, error) {
+	if t, err := s.db.GetTaskIn(ctx, projectID, ref); err == nil {
+		return t.ID, nil
+	}
+	t, err := s.db.GetTaskByName(ctx, projectID, ref)
+	if err != nil {
+		return "", err
+	}
+	return t.ID, nil
 }

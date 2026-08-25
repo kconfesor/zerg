@@ -383,3 +383,47 @@ func mustDir(t *testing.T, name string) string {
 	}
 	return dir
 }
+
+// A token scopes an agent to one project, and a task id must be scoped the
+// same way. The lookup used to be global: any valid id was accepted, so an
+// agent in project A could hand off against project B's card, and the id then
+// travelled into routing and task updates unchecked.
+func TestAnAgentCannotNameAnotherProjectsTask(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+
+	// A second project with a card of its own.
+	other, err := f.db.CreateProject(ctx, mustDir(t, "other"), "", "")
+	if err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+	if err := f.db.SelectDefaultTeam(ctx, other.ID); err != nil {
+		t.Fatalf("SelectDefaultTeam: %v", err)
+	}
+	foreign, err := f.db.CreateTask(ctx, other.ID, "Theirs", "not yours", "coder")
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+
+	c := f.client(t, "coder")
+
+	// The id is real, and belongs to someone else.
+	if _, err := c.Send(ctx, SendArgs{To: "reviewer", Kind: "note", TaskID: foreign.ID, Body: "x"}); err == nil {
+		t.Error("send accepted a task id from another project")
+	}
+	if _, err := c.Ask(ctx, "which one?", foreign.ID, 0); err == nil {
+		t.Error("ask accepted a task id from another project")
+	}
+
+	// The agent's own project still works by id and by name.
+	mine, err := f.db.CreateTask(ctx, f.project.ID, "Mine", "yours", "coder")
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	if _, err := c.Send(ctx, SendArgs{To: "reviewer", Kind: "note", TaskID: mine.ID, Body: "by id"}); err != nil {
+		t.Errorf("send rejected this project's task by id: %v", err)
+	}
+	if _, err := c.Send(ctx, SendArgs{To: "reviewer", Kind: "note", TaskID: "Mine", Body: "by name"}); err != nil {
+		t.Errorf("send rejected this project's task by name: %v", err)
+	}
+}

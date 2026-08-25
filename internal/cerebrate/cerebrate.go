@@ -104,6 +104,10 @@ type Cerebrate struct {
 	state    State
 	lastErr  string
 	restarts int
+	// session is this process's own adapter instance, so state latched from
+	// one agent's stream cannot be read as another's. Replaced at every spawn.
+	session adapter.Adapter
+
 	// throttledUntil is when a spent provider quota is expected to lift.
 	throttledUntil time.Time
 	// lastStreamErr is the most recent error the agent's own output carried,
@@ -348,6 +352,14 @@ func (c *Cerebrate) Run(ctx context.Context) error {
 // runOnce spawns the agent and reads it until the process exits. It reports
 // whether the failure was fatal and how long the process lasted.
 func (c *Cerebrate) runOnce(ctx context.Context) (fatal bool, ranFor time.Duration, err error) {
+	// A private instance for this process. claude latches the model and
+	// billing mode a turn actually used, and a shared instance would let three
+	// concurrent roles overwrite each other's.
+	a := adapter.ForSession(c.cfg.Adapter)
+	c.mu.Lock()
+	c.session = a
+	c.mu.Unlock()
+
 	spec := adapter.Spec{
 		Role:     c.cfg.Role.Name,
 		Worktree: c.cfg.Worktree,
@@ -366,7 +378,7 @@ func (c *Cerebrate) runOnce(ctx context.Context) (fatal bool, ranFor time.Durati
 	// Preflight runs before every spawn, not only at Start: a token expires, a
 	// binary is upgraded, another tool rewrites a shared config.
 	if c.cfg.Preflight != nil {
-		if err := c.cfg.Preflight.CheckRole(ctx, spec, c.cfg.Adapter); err != nil {
+		if err := c.cfg.Preflight.CheckRole(ctx, spec, a); err != nil {
 			c.setState(StateBlocked, err.Error())
 			c.publish(adapter.Event{Kind: adapter.EventError, Text: err.Error()})
 			// Blocked is not fatal: a human fixing the remedy should be picked
@@ -381,7 +393,7 @@ func (c *Cerebrate) runOnce(ctx context.Context) (fatal bool, ranFor time.Durati
 	}
 	spec.SystemFile = promptFile
 
-	cmd, err := c.cfg.Adapter.Command(ctx, spec)
+	cmd, err := a.Command(ctx, spec)
 	if err != nil {
 		return true, 0, err // a command that cannot be built will not build next time either
 	}
@@ -453,7 +465,7 @@ func (c *Cerebrate) readStream(stdout io.Reader) error {
 
 	var fatal error
 	for scanner.Scan() {
-		events, err := c.cfg.Adapter.Parse(scanner.Bytes())
+		events, err := c.sessionAdapter().Parse(scanner.Bytes())
 		if err != nil {
 			// An unparseable line is worth knowing about but is not grounds to
 			// kill a working agent: harnesses print things adapters have not
@@ -557,7 +569,7 @@ func (c *Cerebrate) Submit(text string) error {
 		return fmt.Errorf("%s is not running", c.cfg.Role.Name)
 	}
 
-	payload, err := c.cfg.Adapter.EncodeTurn(text)
+	payload, err := c.sessionAdapter().EncodeTurn(text)
 	if err != nil {
 		return err
 	}
@@ -704,4 +716,16 @@ func (c *Cerebrate) waitOutThrottle(ctx context.Context, t adapter.Throttle) boo
 	case <-time.After(wait):
 		return true
 	}
+}
+
+// sessionAdapter is this process's own instance, falling back to the shared
+// one before the first spawn.
+func (c *Cerebrate) sessionAdapter() adapter.Adapter {
+	c.mu.RLock()
+	a := c.session
+	c.mu.RUnlock()
+	if a == nil {
+		return c.cfg.Adapter
+	}
+	return a
 }

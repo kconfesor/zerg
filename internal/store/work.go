@@ -179,6 +179,25 @@ const taskCols = `id, project_id, session_id, name, body, lane, state,
 const taskColsT = `t.id, t.project_id, t.session_id, t.name, t.body, t.lane, t.state,
 	t.created_at, t.first_claimed_at, t.completed_at, t.active_ms, t.rework_count, t.hidden`
 
+// GetTaskIn resolves a task that must belong to this project.
+//
+// GetTask is global, which is right for the cockpit — it addresses a task by
+// id and already knows the project — and wrong for anything an agent supplies.
+// An agent names a task from inside one project, so the project is part of the
+// identity, not context to be assumed.
+func (db *DB) GetTaskIn(ctx context.Context, projectID, id string) (*Task, error) {
+	row := db.sql.QueryRowContext(ctx,
+		`SELECT `+taskCols+` FROM tasks WHERE id = ? AND project_id = ?`, id, projectID)
+	t, err := scanTask(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reading task %s: %w", id, err)
+	}
+	return t, nil
+}
+
 func (db *DB) GetTask(ctx context.Context, id string) (*Task, error) {
 	row := db.sql.QueryRowContext(ctx, `SELECT `+taskCols+` FROM tasks WHERE id = ?`, id)
 	t, err := scanTask(row)

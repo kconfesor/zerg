@@ -57,6 +57,10 @@ func New() *Adapter {
 	return a
 }
 
+// NewSession gives one agent process its own latch. Everything else on the
+// adapter is configuration and is safe to share.
+func (*Adapter) NewSession() adapter.Adapter { return New() }
+
 // latchModel records the model actually serving this session. Called wherever
 // the harness names one, since the result event does not.
 func (a *Adapter) latchModel(model string) {
