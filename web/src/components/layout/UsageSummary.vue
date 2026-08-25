@@ -105,7 +105,7 @@ const tiers = [
       </Button>
     </PopoverTrigger>
 
-    <PopoverContent class="w-[26rem]" align="end">
+    <PopoverContent class="w-[calc(100vw-1.5rem)] max-w-[26rem]" align="end">
       <p v-if="failed" class="text-destructive text-xs">Could not read usage.</p>
 
       <template v-else>

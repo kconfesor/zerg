@@ -64,10 +64,10 @@ web/               Vue 3 + Vite + shadcn-vue cockpit
 
 ## Stack
 
-Go 1.27 · stdlib `net/http` · modernc.org/sqlite (cgo-free, so `CGO_ENABLED=0` and a static binary)
+Go 1.27 · stdlib `net/http` · modernc.org/sqlite (cgo-free, so `CGO_ENABLED=0` and a static binary) · coder/websocket
 Vue 3.5 · Vite 8 · shadcn-vue 2.8 (reka-ui) · Tailwind 4 · TypeScript 6 (pinned) · pnpm
 
-`modernc.org/sqlite` is the only non-stdlib Go dependency. Pinned versions and their gotchas:
+`modernc.org/sqlite` and `coder/websocket` are the only non-stdlib Go dependencies. Pinned versions and their gotchas:
 [ARCHITECTURE.md §14](ARCHITECTURE.md#14-stack).
 
 ## Prerequisites
@@ -90,6 +90,25 @@ go build -o zerg ./cmd/zerg
 ```
 
 Then point it at a repo, pick a team, run preflight, and start.
+
+### From a phone
+
+The cockpit is responsive: below 768px the nav becomes a drawer, board lanes
+stack, and the activity stream puts its timestamps above each line rather than
+beside them.
+
+It binds to loopback by default. To reach it from another device, bind the one
+interface you want — over Tailscale, that is the tailnet address:
+
+```sh
+./zerg up --addr $(tailscale ip -4):7717
+```
+
+**The cockpit has no authentication.** Anything that can route to that port can
+start agents, read every transcript, and see which repositories are being worked
+on. On a tailnet that is your own devices, which is the point; `--addr 0.0.0.0`
+also hands it to whatever else shares the local network. The daemon says which
+of the two you have chosen at startup.
 
 ## Tests
 

@@ -19,6 +19,7 @@ const props = defineProps<{
   usageKey?: number
 }>()
 const emit = defineEmits<{
+  menu: []
   openProject: [project: Project]
   addProject: []
   start: []
@@ -36,6 +37,17 @@ function liveCount(s: SwarmStatus): number {
        agents belongs beside the repository they will work in, not filed under
        navigation where "Start" has no visible object. -->
   <div class="hairline-b bg-[var(--surface-sunken)]/60 flex flex-wrap items-center gap-x-3 gap-y-2 px-[var(--gutter)] py-2.5">
+    <!-- Only below md, where the rail is a drawer rather than always present. -->
+    <Button
+      size="icon-sm"
+      variant="ghost"
+      class="md:hidden"
+      aria-label="Open navigation"
+      @click="emit('menu')"
+    >
+      ☰
+    </Button>
+
     <Select
       v-if="projects.length"
       :model-value="current?.id"
@@ -51,7 +63,11 @@ function liveCount(s: SwarmStatus): number {
       +
     </Button>
 
-    <span v-if="current" class="text-muted-foreground truncate text-[11px]" :title="current.path">
+    <span
+      v-if="current"
+      class="text-muted-foreground hidden truncate text-[11px] lg:inline"
+      :title="current.path"
+    >
       {{ current.path }} · {{ current.baseBranch }}
     </span>
 
@@ -66,14 +82,16 @@ function liveCount(s: SwarmStatus): number {
         class="flex items-center gap-1.5 text-[11px] font-medium text-[var(--status-good)]"
       >
         <span class="pulse-dot size-1.5 rounded-full bg-current" />
-        {{ liveCount(status) }} of {{ status.roles.length }} agents live
+        {{ liveCount(status) }}/{{ status.roles.length }}<span class="hidden sm:inline"> agents live</span>
       </span>
-      <span v-else class="text-muted-foreground text-[11px]">no agents running</span>
+      <span v-else class="text-muted-foreground hidden text-[11px] sm:inline">no agents running</span>
 
       <Button v-if="!status.running" size="sm" :disabled="!current" @click="emit('start')">
-        Start agents
+        Start<span class="hidden sm:inline"> agents</span>
       </Button>
-      <Button v-else size="sm" variant="destructive" @click="emit('stop')">Stop agents</Button>
+      <Button v-else size="sm" variant="destructive" @click="emit('stop')">
+        Stop<span class="hidden sm:inline"> agents</span>
+      </Button>
     </div>
   </div>
 </template>

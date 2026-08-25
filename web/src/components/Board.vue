@@ -24,11 +24,15 @@ const byLane = computed(() => {
   <!-- Lanes share the width when there are few and scroll sideways when there
        are many. The page itself never scrolls horizontally. -->
   <div class="-mx-[var(--gutter)] overflow-x-auto px-[var(--gutter)] pb-2">
-    <div class="flex items-start gap-3">
+    <!-- Lanes sit side by side where there is room and stack where there is
+         not. basis-full below sm rather than a width: flex-1 overrides width
+         but respects basis, so without it lanes would silently share a phone
+         row — tolerable at three roles, 45px each at eight. -->
+    <div class="flex flex-wrap items-start gap-3">
       <section
         v-for="(lane, i) in lanes"
         :key="lane"
-        class="rise flex min-w-56 max-w-96 flex-1 basis-60 flex-col"
+        class="rise flex min-w-0 flex-1 basis-full flex-col sm:min-w-56 sm:max-w-96 sm:basis-60"
         :style="{ animationDelay: `${i * 40}ms` }"
       >
         <!-- A lane header that reads as a column, not floating text. -->

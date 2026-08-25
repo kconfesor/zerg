@@ -202,6 +202,7 @@ func runUp(args []string) error {
 
 	log.Info("overmind up", "url", "http://"+ln.Addr().String(), "db", *dbPath, "socket", socket)
 	fmt.Printf("Cockpit: http://%s\n", ln.Addr().String())
+	warnIfReachable(*addr)
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -219,6 +220,39 @@ func runUp(args []string) error {
 		defer cancel()
 		return srv.Shutdown(shutdownCtx)
 	}
+}
+
+// warnIfReachable says so, once, when the cockpit is listening somewhere other
+// than loopback.
+//
+// There is no authentication on the cockpit. Anything that can reach the port
+// can start agents, read every transcript, and see the paths of the
+// repositories being worked on. On loopback that is the same trust boundary as
+// the shell it was launched from; on any other interface it is not, and the
+// difference is worth one line at startup rather than a discovery later.
+//
+// Binding to a private-network interface such as Tailscale is a reasonable
+// thing to want — a phone on the tailnet is still your own device. Binding
+// 0.0.0.0 also exposes it to whatever else shares the local network.
+func warnIfReachable(addr string) {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return
+	}
+	switch host {
+	case "", "127.0.0.1", "::1", "localhost":
+		return
+	}
+	if host == "0.0.0.0" || host == "::" {
+		fmt.Fprintln(os.Stderr,
+			"warning: listening on every interface, and the cockpit has no authentication.\n"+
+				"         Anything that can reach this port can start agents and read every\n"+
+				"         transcript. Prefer binding one interface, e.g. --addr <tailscale-ip>:7717")
+		return
+	}
+	fmt.Fprintf(os.Stderr,
+		"note: reachable at %s beyond this machine. The cockpit has no authentication,\n"+
+			"      so treat anything that can route to it as trusted.\n", addr)
 }
 
 // defaultHarness is what a freshly seeded library points its roles at.

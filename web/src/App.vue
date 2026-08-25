@@ -38,6 +38,24 @@ const projects = ref<Project[]>([])
 const current = ref<Project | null>(null)
 const view = ref<View>('board')
 
+/** The nav drawer, which only exists below md. */
+const navOpen = ref(false)
+
+/**
+ * Board polling, with the same backoff discipline the event stream has.
+ *
+ * A fixed interval keeps firing into a daemon that is not there: restarting it
+ * produced a dozen failed requests in ten seconds while the socket, which backs
+ * off, made three. The queue is durable and the stream carries anything urgent,
+ * so a slow retry costs a slightly stale screen and nothing else.
+ *
+ * self-scheduling rather than setInterval, because an interval cannot change
+ * its own period and would also stack requests if one ever outlived a tick.
+ */
+const POLL_BASE = 2000
+const POLL_MAX = 30_000
+let pollDelay = POLL_BASE
+
 /** Board ticks between usage refreshes. At a 2s board poll this is ~10s. */
 const USAGE_EVERY = 5
 const usageKey = ref(0)
@@ -82,6 +100,15 @@ const boardSubtitle = computed(() => {
   if (!n) return 'No cards yet. Open one to give the agents something to do.'
   return `${n} ${n === 1 ? 'card' : 'cards'} · ${working.value} being worked`
 })
+
+function schedulePoll(delay: number) {
+  window.clearTimeout(timer)
+  timer = window.setTimeout(async () => {
+    await refresh()
+    // Jitter so several open tabs do not land on the same tick.
+    schedulePoll(pollDelay + Math.random() * pollDelay * 0.2)
+  }, delay)
+}
 
 function fail(err: unknown) {
   banner.value = { tone: 'bad', text: err instanceof Error ? err.message : String(err) }
@@ -134,6 +161,7 @@ async function refresh() {
     // transient one: an error the user's own click produced is still theirs
     // to read.
     if (banner.value?.transient) banner.value = null
+    pollDelay = POLL_BASE
 
     // Usage moves only when an agent finishes a turn, and it is a summary
     // rather than a live counter, so it is refreshed on a slower cadence than
@@ -141,6 +169,7 @@ async function refresh() {
     if (++usageTicks % USAGE_EVERY === 0) usageKey.value++
   } catch {
     pollerLostContact()
+    pollDelay = Math.min(pollDelay * 2, POLL_MAX)
   }
 }
 
@@ -273,21 +302,30 @@ const act = {
 onMounted(async () => {
   await loadGlobals()
   if (projects.value.length) await open(projects.value[0])
-  // Polling until the event stream lands. The queue is durable, so a missed
-  // tick costs nothing but a slightly stale screen.
-  timer = window.setInterval(refresh, 2000)
+  schedulePoll(0)
 })
-onUnmounted(() => window.clearInterval(timer))
+onUnmounted(() => window.clearTimeout(timer))
 watch(current, () => (banner.value = null))
 </script>
 
 <template>
   <div class="flex h-full">
+    <!-- A tap outside the drawer closes it, which is what every phone user
+         tries first. Inert above md, where the drawer does not exist. -->
+    <div
+      v-if="navOpen"
+      class="fixed inset-0 z-40 bg-black/50 md:hidden"
+      aria-hidden="true"
+      @click="navOpen = false"
+    />
+
     <AppSidebar
       :view="view"
       :status="status"
       :attention-count="attentionCount"
       :task-count="tasks.length"
+      :open="navOpen"
+      @close="navOpen = false"
       @navigate="(v) => (view = v)"
     />
 
@@ -297,6 +335,7 @@ watch(current, () => (banner.value = null))
         :current="current"
         :status="status"
         :usage-key="usageKey"
+        @menu="navOpen = true"
         @open-project="open"
         @add-project="addingProject = true"
         @start="start"

@@ -158,7 +158,7 @@ const roleCounts = computed(() => {
 
     <div
       ref="viewport"
-      class="bg-card h-[62vh] overflow-y-auto border font-mono text-xs leading-relaxed"
+      class="bg-card h-[70vh] overflow-y-auto border font-mono text-[11px] leading-relaxed md:h-[62vh] md:text-xs"
       @scroll="onScroll"
     >
       <p v-if="!events.length" class="text-muted-foreground p-4">
@@ -169,12 +169,15 @@ const roleCounts = computed(() => {
         <li
           v-for="e in events"
           :key="e.id"
-          class="hover:bg-muted/40 flex gap-2 px-3 py-0.5"
+          class="hover:bg-muted/40 flex flex-col px-2 py-0.5 md:flex-row md:gap-2 md:px-3"
           :class="e.kind === 'error' ? 'bg-destructive/10' : ''"
         >
-          <span class="text-muted-foreground shrink-0 tabular-nums">{{ time(e.at) }}</span>
-          <span class="shrink-0 font-semibold" :style="{ color: roleHue(e.role) }">
-            {{ e.role }}
+          <!-- Time and role sit above the content on a phone and beside it on a
+               desktop. Kept in the row, they leave a dead left column and squeeze
+               a wrapped message into a third of the width. -->
+          <span class="flex shrink-0 gap-2">
+            <span class="text-muted-foreground tabular-nums">{{ time(e.at) }}</span>
+            <span class="font-semibold" :style="{ color: roleHue(e.role) }">{{ e.role }}</span>
           </span>
 
           <!-- One line per kind. Tool calls show what ran; usage shows the

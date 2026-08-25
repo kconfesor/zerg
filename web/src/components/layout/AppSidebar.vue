@@ -9,8 +9,11 @@ const props = defineProps<{
   status: SwarmStatus
   attentionCount: number
   taskCount: number
+  /** Whether the drawer is showing. Ignored at md and above, where the rail
+   *  is always part of the layout. */
+  open: boolean
 }>()
-const emit = defineEmits<{ navigate: [view: View] }>()
+const emit = defineEmits<{ navigate: [view: View]; close: [] }>()
 
 const nav = computed(() => [
   { key: 'board' as const, label: 'Board', count: props.taskCount },
@@ -34,7 +37,14 @@ function live(r: RoleStatus): boolean {
 
 <template>
   <aside
-    class="bg-[var(--surface-sunken)] hairline-r flex w-[var(--rail)] shrink-0 flex-col"
+    :class="[
+      'bg-[var(--surface-sunken)] hairline-r flex w-[var(--rail)] shrink-0 flex-col',
+      // Below md the rail would take most of a phone screen, so it slides in
+      // over the content instead of pushing it into a column too narrow to
+      // read. Above md it is an ordinary part of the layout and never moves.
+      'max-md:fixed max-md:inset-y-0 max-md:left-0 max-md:z-50 max-md:transition-transform',
+      open ? 'max-md:translate-x-0' : 'max-md:-translate-x-full',
+    ]"
   >
     <!-- Identity, and whether anything is running at all. -->
     <div class="hairline-b flex items-center gap-2 px-3 py-3">
@@ -64,7 +74,7 @@ function live(r: RoleStatus): boolean {
             ? 'bg-primary/12 text-foreground font-semibold'
             : 'text-muted-foreground hover:bg-muted hover:text-foreground',
         ]"
-        @click="emit('navigate', item.key)"
+        @click="emit('navigate', item.key), emit('close')"
       >
         <span
           :class="[
