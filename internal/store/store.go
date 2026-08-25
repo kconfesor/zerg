@@ -17,12 +17,18 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-//go:embed schema.sql
-var schemaSQL string
+//go:embed schema_001.sql
+var schema001 string
 
-// schemaVersion is compared against SQLite's user_version pragma. Bump it and
-// add a migration when the schema changes.
-const schemaVersion = 1
+//go:embed schema_002.sql
+var schema002 string
+
+// migrations are applied in order; a database at user_version N has had the
+// first N of them run. To change the schema, append a file and a line here —
+// never edit one that has shipped.
+var migrations = []string{schema001, schema002}
+
+func schemaVersion() int { return len(migrations) }
 
 // DB is the handle every other package takes.
 type DB struct {
@@ -80,28 +86,31 @@ func (db *DB) migrate(ctx context.Context) error {
 		return fmt.Errorf("reading schema version: %w", err)
 	}
 
-	if version > schemaVersion {
+	target := schemaVersion()
+	if version > target {
 		return fmt.Errorf("database schema is version %d, this build understands %d — upgrade zerg",
-			version, schemaVersion)
+			version, target)
 	}
-	if version == schemaVersion {
+	if version == target {
 		return nil
 	}
 
+	// All outstanding migrations in one transaction: a half-migrated database
+	// is worse than an unmigrated one.
 	tx, err := db.sql.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("beginning migration: %w", err)
 	}
 	defer tx.Rollback()
 
-	if version == 0 {
-		if _, err := tx.ExecContext(ctx, schemaSQL); err != nil {
-			return fmt.Errorf("applying schema: %w", err)
+	for i := version; i < target; i++ {
+		if _, err := tx.ExecContext(ctx, migrations[i]); err != nil {
+			return fmt.Errorf("applying migration %d: %w", i+1, err)
 		}
 	}
 
 	// PRAGMA does not accept a bind parameter.
-	if _, err := tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", schemaVersion)); err != nil {
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", target)); err != nil {
 		return fmt.Errorf("recording schema version: %w", err)
 	}
 	return tx.Commit()

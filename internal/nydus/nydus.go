@@ -1,0 +1,805 @@
+// Package nydus routes work between roles.
+//
+// Everything here is a transaction against SQLite, which is the point. The
+// predecessor coordinated through files across N worktrees: delivery was a
+// loop of copies that could half-complete, claiming was check-then-move with
+// no lock, and a lost wake-up stalled a pipeline permanently with no timer and
+// no retry. Those are not bugs in that design so much as the design.
+package nydus
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/konfessor/zerg/internal/store"
+)
+
+// DefaultLease is how long a role may hold work before it returns to the queue.
+const DefaultLease = 20 * time.Minute
+
+// Integrator merges the terminal role's commit into the project's base branch.
+// The orchestrator owns integration, not whichever agent happened to be last.
+type Integrator interface {
+	Merge(ctx context.Context, projectPath, baseBranch, commit string) error
+}
+
+// Nydus is the transport. It is safe for concurrent use: every operation that
+// changes queue state does so inside one transaction.
+type Nydus struct {
+	db         *store.DB
+	integrator Integrator
+	leaseFor   time.Duration
+	now        func() time.Time
+}
+
+type Option func(*Nydus)
+
+// WithLease overrides the lease duration.
+func WithLease(d time.Duration) Option { return func(n *Nydus) { n.leaseFor = d } }
+
+// WithClock replaces the clock, so lease expiry is testable without sleeping.
+func WithClock(f func() time.Time) Option { return func(n *Nydus) { n.now = f } }
+
+// WithIntegrator supplies the merge strategy for terminal completion.
+func WithIntegrator(i Integrator) Option { return func(n *Nydus) { n.integrator = i } }
+
+func New(db *store.DB, opts ...Option) *Nydus {
+	n := &Nydus{
+		db:       db,
+		leaseFor: DefaultLease,
+		now:      func() time.Time { return time.Now().UTC() },
+	}
+	for _, o := range opts {
+		o(n)
+	}
+	return n
+}
+
+// ── starting work ─────────────────────────────────────────────────────────
+
+// NewTask opens a card and queues it for the first enabled role.
+func (n *Nydus) NewTask(ctx context.Context, projectID, name, body string) (*store.Task, error) {
+	team, err := n.db.ResolveTeam(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	first, ok := firstEnabled(team)
+	if !ok {
+		return nil, errNoEnabledRoles(projectID)
+	}
+
+	task, err := n.db.CreateTask(ctx, projectID, name, body, first.Name)
+	if err != nil {
+		return nil, err
+	}
+
+	// The opening message comes from the operator, not from a role.
+	_, err = n.send(ctx, sendReq{
+		ProjectID: projectID,
+		TaskID:    &task.ID,
+		FromRole:  "operator",
+		ToRoles:   []string{first.Name},
+		Kind:      store.KindNote,
+		Priority:  50,
+		Body:      body,
+		gate:      store.GateNone, // the operator does not gate their own request
+	})
+	if err != nil {
+		return nil, err
+	}
+	return task, nil
+}
+
+// ── sending ───────────────────────────────────────────────────────────────
+
+// SendRequest is what a role asks for when it hands work on.
+type SendRequest struct {
+	TaskID   string
+	Kind     string // handoff or note; defaults to handoff
+	Priority int    // 0 uses 50
+	Commit   string // required for a handoff
+	Body     string
+
+	// To names the recipient. Leaving it empty means "this task is finished",
+	// which only the terminal role may say.
+	To string
+}
+
+// Send routes work from one role onward.
+//
+// A handoff from a gated role is held rather than queued: the recipient never
+// sees it until a human approves. The predecessor's equivalent moved the card
+// and told the sender it had queued successfully, then sat in a directory that
+// nothing pointed at.
+func (n *Nydus) Send(ctx context.Context, projectID, fromRole string, req SendRequest) (*store.Message, error) {
+	team, err := n.db.ResolveTeam(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	sender, ok := roleNamed(team, fromRole)
+	if !ok {
+		return nil, invalid("role %q is not on this project's team", fromRole)
+	}
+
+	kind := req.Kind
+	if kind == "" {
+		kind = store.KindHandoff
+	}
+	if kind == store.KindHandoff && req.Commit == "" {
+		return nil, invalid("a handoff must carry a commit; it points at committed state rather than a diff")
+	}
+
+	// An empty recipient means completion, and completion is the terminal
+	// role's word alone. Anyone else omitting --to has made a mistake worth
+	// reporting rather than guessing about.
+	if req.To == "" {
+		if !sender.Terminal {
+			return nil, invalid("role %q must name a recipient; only the terminal role finishes a task", fromRole)
+		}
+		return n.complete(ctx, projectID, sender, req)
+	}
+
+	if _, ok := roleNamed(team, req.To); !ok {
+		return nil, invalid("role %q is not on this project's team", req.To)
+	}
+
+	priority := req.Priority
+	if priority == 0 {
+		priority = 50
+	}
+	var taskID *string
+	if req.TaskID != "" {
+		taskID = &req.TaskID
+	}
+
+	return n.send(ctx, sendReq{
+		ProjectID: projectID,
+		TaskID:    taskID,
+		FromRole:  fromRole,
+		ToRoles:   []string{req.To},
+		Kind:      kind,
+		Priority:  priority,
+		Commit:    req.Commit,
+		Body:      req.Body,
+		gate:      sender.Gate,
+	})
+}
+
+type sendReq struct {
+	ProjectID string
+	TaskID    *string
+	FromRole  string
+	ToRoles   []string
+	Kind      string
+	Priority  int
+	Commit    string
+	Body      string
+	terminal  bool
+	gate      string
+}
+
+func (n *Nydus) send(ctx context.Context, req sendReq) (*store.Message, error) {
+	now := n.now()
+	msg := &store.Message{
+		ID:        store.NewID(),
+		ProjectID: req.ProjectID,
+		TaskID:    req.TaskID,
+		FromRole:  req.FromRole,
+		Kind:      req.Kind,
+		Priority:  req.Priority,
+		Body:      req.Body,
+		Terminal:  req.terminal,
+		CreatedAt: now,
+	}
+	if req.Commit != "" {
+		c := req.Commit
+		msg.CommitSHA = &c
+	}
+
+	tx, err := n.db.SQL().BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("beginning send: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO messages (id, project_id, task_id, from_role, kind, priority,
+		   commit_sha, body, terminal, created_at)
+		 VALUES (?,?,?,?,?,?,?,?,?,?)`,
+		msg.ID, msg.ProjectID, msg.TaskID, msg.FromRole, msg.Kind, msg.Priority,
+		msg.CommitSHA, msg.Body, msg.Terminal, now.Format(time.RFC3339Nano)); err != nil {
+		return nil, fmt.Errorf("recording message: %w", err)
+	}
+
+	// A gated handoff is held; everything else is immediately claimable. The
+	// message and its routes are written together, so there is no window in
+	// which a message exists with nobody to deliver it to.
+	state := store.RouteQueued
+	if req.gate == store.GateApproval && req.Kind == store.KindHandoff {
+		state = store.RouteHeld
+	}
+	for _, to := range req.ToRoles {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO routes (message_id, to_role, state, enqueued_at) VALUES (?,?,?,?)`,
+			msg.ID, to, state, now.Format(time.RFC3339Nano)); err != nil {
+			return nil, fmt.Errorf("routing to %s: %w", to, err)
+		}
+	}
+
+	if state == store.RouteHeld {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO approvals (id, project_id, message_id, state, created_at)
+			 VALUES (?,?,?,?,?)`,
+			store.NewID(), req.ProjectID, msg.ID, store.ApprovalPending,
+			now.Format(time.RFC3339Nano)); err != nil {
+			return nil, fmt.Errorf("opening approval: %w", err)
+		}
+	} else if req.TaskID != nil {
+		// The card follows the work. State stays "queued" until the recipient
+		// claims it, so the board distinguishes waiting from being worked on —
+		// which is the honest version of what the predecessor showed.
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE tasks SET lane = ?, state = ? WHERE id = ?`,
+			req.ToRoles[0], store.TaskQueued, *req.TaskID); err != nil {
+			return nil, fmt.Errorf("moving card: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("committing send: %w", err)
+	}
+	return msg, nil
+}
+
+// complete finishes a task: the overmind merges the terminal commit into the
+// base branch and the card lands in Done.
+func (n *Nydus) complete(ctx context.Context, projectID string, sender store.ResolvedRole, req SendRequest) (*store.Message, error) {
+	if req.TaskID == "" {
+		return nil, invalid("completing a task requires its id")
+	}
+	task, err := n.db.GetTask(ctx, req.TaskID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Merge before recording completion. If integration fails the card stays
+	// where it is and the error reaches the operator, rather than the board
+	// claiming success over a branch that never moved.
+	if n.integrator != nil && req.Commit != "" {
+		project, err := n.db.GetProject(ctx, projectID)
+		if err != nil {
+			return nil, err
+		}
+		if err := n.integrator.Merge(ctx, project.Path, project.BaseBranch, req.Commit); err != nil {
+			return nil, fmt.Errorf("merging %s into %s: %w", req.Commit, project.BaseBranch, err)
+		}
+	}
+
+	now := n.now()
+	msg := &store.Message{
+		ID: store.NewID(), ProjectID: projectID, TaskID: &task.ID,
+		FromRole: sender.Name, Kind: store.KindHandoff, Priority: 50,
+		Body: req.Body, Terminal: true, CreatedAt: now,
+	}
+	if req.Commit != "" {
+		c := req.Commit
+		msg.CommitSHA = &c
+	}
+
+	tx, err := n.db.SQL().BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("beginning completion: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO messages (id, project_id, task_id, from_role, kind, priority,
+		   commit_sha, body, terminal, created_at)
+		 VALUES (?,?,?,?,?,?,?,?,?,?)`,
+		msg.ID, msg.ProjectID, msg.TaskID, msg.FromRole, msg.Kind, msg.Priority,
+		msg.CommitSHA, msg.Body, true, now.Format(time.RFC3339Nano)); err != nil {
+		return nil, fmt.Errorf("recording completion: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE tasks SET lane = ?, state = ?, completed_at = ? WHERE id = ?`,
+		store.LaneDone, store.TaskDone, now.Format(time.RFC3339Nano), task.ID); err != nil {
+		return nil, fmt.Errorf("closing card: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("committing completion: %w", err)
+	}
+	return msg, nil
+}
+
+// ── claiming ──────────────────────────────────────────────────────────────
+
+// Claim takes work for a role, returning nil when the queue is empty.
+//
+// Selection and the state change happen in one transaction, so two concurrent
+// claims can never take the same message. The predecessor listed a directory
+// and then moved a file, so two runs picked the same item and the loser threw
+// a stack trace — or, in batch mode, split the queue into two directories that
+// every later call then refused to touch, with no recovery path.
+func (n *Nydus) Claim(ctx context.Context, projectID, role string) (*store.Lease, error) {
+	team, err := n.db.ResolveTeam(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	r, ok := roleNamed(team, role)
+	if !ok {
+		return nil, invalid("role %q is not on this project's team", role)
+	}
+
+	tx, err := n.db.SQL().BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("beginning claim: %w", err)
+	}
+	defer tx.Rollback()
+
+	// A role holding an open lease is resuming, not claiming again: handing it
+	// a second unit while the first is unacknowledged is how work gets lost.
+	if open, err := openLease(ctx, tx, projectID, role); err != nil {
+		return nil, err
+	} else if open != nil {
+		items, err := leaseItems(ctx, tx, open.ID)
+		if err != nil {
+			return nil, err
+		}
+		open.Items = items
+		if err := tx.Commit(); err != nil {
+			return nil, err
+		}
+		return open, nil
+	}
+
+	rows, err := tx.QueryContext(ctx,
+		`SELECT `+prefixedMessageCols+`, r.enqueued_at
+		 FROM routes r JOIN messages m ON m.id = r.message_id
+		 WHERE r.to_role = ? AND r.state = ? AND m.project_id = ?
+		 ORDER BY m.priority ASC, m.created_at ASC`,
+		role, store.RouteQueued, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("reading queue: %w", err)
+	}
+
+	type candidate struct {
+		msg        store.Message
+		enqueuedAt time.Time
+	}
+	var candidates []candidate
+	for rows.Next() {
+		var enq sql.NullString
+		m, err := scanMessageRow(rows, &enq)
+		if err != nil {
+			rows.Close()
+			return nil, err
+		}
+		at, err := parseNull(enq)
+		if err != nil {
+			rows.Close()
+			return nil, err
+		}
+		candidates = append(candidates, candidate{msg: *m, enqueuedAt: at})
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(candidates) == 0 {
+		return nil, nil // no work; not an error
+	}
+
+	// Task mode takes one. Batch mode takes the head plus everything sharing
+	// its priority, bounded by both max_items and max_age — an unbounded batch
+	// starves a higher-priority item that arrives a millisecond late.
+	take := []store.Message{candidates[0].msg}
+	if r.Receive == store.ReceiveBatch {
+		head := candidates[0]
+		maxAge := time.Duration(r.BatchMaxAgeSec) * time.Second
+		for _, c := range candidates[1:] {
+			if len(take) >= r.BatchMaxItems {
+				break
+			}
+			if c.msg.Priority != head.msg.Priority {
+				break
+			}
+			if c.enqueuedAt.Sub(head.enqueuedAt) > maxAge {
+				break
+			}
+			take = append(take, c.msg)
+		}
+	}
+
+	now := n.now()
+	lease := &store.Lease{
+		ID: store.NewID(), ProjectID: projectID, Role: role,
+		GrantedAt: now, ExpiresAt: now.Add(n.leaseFor), Items: take,
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO leases (id, project_id, role, granted_at, expires_at) VALUES (?,?,?,?,?)`,
+		lease.ID, projectID, role, now.Format(time.RFC3339Nano),
+		lease.ExpiresAt.Format(time.RFC3339Nano)); err != nil {
+		return nil, fmt.Errorf("granting lease: %w", err)
+	}
+
+	for _, m := range take {
+		// The guard on state is what makes the claim atomic: a concurrent
+		// claimer that got here first leaves this update affecting zero rows.
+		res, err := tx.ExecContext(ctx,
+			`UPDATE routes SET state = ?, delivered_at = ?
+			 WHERE message_id = ? AND to_role = ? AND state = ?`,
+			store.RouteClaimed, now.Format(time.RFC3339Nano), m.ID, role, store.RouteQueued)
+		if err != nil {
+			return nil, fmt.Errorf("claiming message: %w", err)
+		}
+		if affected, err := res.RowsAffected(); err != nil {
+			return nil, err
+		} else if affected == 0 {
+			return nil, errRaced
+		}
+
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO lease_items (lease_id, message_id, to_role) VALUES (?,?,?)`,
+			lease.ID, m.ID, role); err != nil {
+			return nil, fmt.Errorf("recording lease item: %w", err)
+		}
+
+		if m.TaskID != nil {
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE tasks SET state = ?,
+				   first_claimed_at = COALESCE(first_claimed_at, ?)
+				 WHERE id = ? AND state != ?`,
+				store.TaskWorking, now.Format(time.RFC3339Nano), *m.TaskID, store.TaskDone); err != nil {
+				return nil, fmt.Errorf("marking task working: %w", err)
+			}
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("committing claim: %w", err)
+	}
+	return lease, nil
+}
+
+// errRaced means another claimer took the work between selection and update.
+// The caller retries; the transaction rolled back, so nothing half-applied.
+var errRaced = errors.New("nydus: another claimer took this work")
+
+// ── acknowledging ─────────────────────────────────────────────────────────
+
+// Ack closes a lease. It is idempotent: acknowledging twice is not an error,
+// because an agent that crashed after acking and retried on restart should not
+// be told it did something wrong.
+func (n *Nydus) Ack(ctx context.Context, leaseID string) error {
+	tx, err := n.db.SQL().BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("beginning ack: %w", err)
+	}
+	defer tx.Rollback()
+
+	var (
+		projectID string
+		grantedAt string
+		acked     sql.NullString
+		expired   sql.NullString
+	)
+	err = tx.QueryRowContext(ctx,
+		`SELECT project_id, granted_at, acked_at, expired_at FROM leases WHERE id = ?`, leaseID).
+		Scan(&projectID, &grantedAt, &acked, &expired)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("lease %s: %w", leaseID, store.ErrNotFound)
+	}
+	if err != nil {
+		return fmt.Errorf("reading lease: %w", err)
+	}
+	if acked.Valid {
+		return nil // already acknowledged
+	}
+	if expired.Valid {
+		return invalid("lease %s expired and its work was returned to the queue", leaseID)
+	}
+
+	now := n.now()
+	granted, err := time.Parse(time.RFC3339Nano, grantedAt)
+	if err != nil {
+		return fmt.Errorf("lease %s has an unreadable granted_at: %w", leaseID, err)
+	}
+
+	if _, err := tx.ExecContext(ctx, `UPDATE leases SET acked_at = ? WHERE id = ?`,
+		now.Format(time.RFC3339Nano), leaseID); err != nil {
+		return fmt.Errorf("closing lease: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE routes SET state = ?
+		 WHERE (message_id, to_role) IN (SELECT message_id, to_role FROM lease_items WHERE lease_id = ?)`,
+		store.RouteDone, leaseID); err != nil {
+		return fmt.Errorf("closing routes: %w", err)
+	}
+
+	// Worked time accrues per lease, so a task's active_ms stays separable from
+	// its wall time and a blocked pipeline is visible as the gap between them.
+	activeMS := now.Sub(granted).Milliseconds()
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE tasks SET active_ms = active_ms + ?
+		 WHERE id IN (
+		   SELECT DISTINCT m.task_id FROM lease_items li
+		   JOIN messages m ON m.id = li.message_id
+		   WHERE li.lease_id = ? AND m.task_id IS NOT NULL)`,
+		activeMS, leaseID); err != nil {
+		return fmt.Errorf("recording worked time: %w", err)
+	}
+
+	return tx.Commit()
+}
+
+// ExpireLeases returns unacknowledged work to the queue and reports how many
+// leases lapsed. Without this a crashed agent takes its work with it, which is
+// exactly how the predecessor stalled.
+func (n *Nydus) ExpireLeases(ctx context.Context) (int, error) {
+	now := n.now()
+
+	tx, err := n.db.SQL().BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("beginning expiry: %w", err)
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.QueryContext(ctx,
+		`SELECT id FROM leases WHERE acked_at IS NULL AND expired_at IS NULL AND expires_at < ?`,
+		now.Format(time.RFC3339Nano))
+	if err != nil {
+		return 0, fmt.Errorf("finding lapsed leases: %w", err)
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+
+	for _, id := range ids {
+		if _, err := tx.ExecContext(ctx, `UPDATE leases SET expired_at = ? WHERE id = ?`,
+			now.Format(time.RFC3339Nano), id); err != nil {
+			return 0, fmt.Errorf("expiring lease: %w", err)
+		}
+		// Back to queued, not lost. The message is unchanged, so whoever picks
+		// it up next sees exactly what the previous holder saw.
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE routes SET state = ?, delivered_at = NULL
+			 WHERE state = ?
+			   AND (message_id, to_role) IN (SELECT message_id, to_role FROM lease_items WHERE lease_id = ?)`,
+			store.RouteQueued, store.RouteClaimed, id); err != nil {
+			return 0, fmt.Errorf("requeueing work: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE tasks SET state = ?
+			 WHERE state = ? AND id IN (
+			   SELECT DISTINCT m.task_id FROM lease_items li
+			   JOIN messages m ON m.id = li.message_id
+			   WHERE li.lease_id = ? AND m.task_id IS NOT NULL)`,
+			store.TaskQueued, store.TaskWorking, id); err != nil {
+			return 0, fmt.Errorf("resetting task state: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("committing expiry: %w", err)
+	}
+	return len(ids), nil
+}
+
+// ── approvals ─────────────────────────────────────────────────────────────
+
+// Approve releases a held handoff to its recipient.
+func (n *Nydus) Approve(ctx context.Context, approvalID string) error {
+	return n.decide(ctx, approvalID, store.ApprovalApproved, "")
+}
+
+// Reject returns a held handoff to its sender with a note, and nothing
+// downstream ever saw it.
+func (n *Nydus) Reject(ctx context.Context, approvalID, note string) error {
+	return n.decide(ctx, approvalID, store.ApprovalRejected, note)
+}
+
+func (n *Nydus) decide(ctx context.Context, approvalID, decision, note string) error {
+	tx, err := n.db.SQL().BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("beginning decision: %w", err)
+	}
+	defer tx.Rollback()
+
+	var (
+		messageID string
+		state     string
+		taskID    sql.NullString
+		fromRole  string
+	)
+	err = tx.QueryRowContext(ctx,
+		`SELECT a.message_id, a.state, m.task_id, m.from_role
+		 FROM approvals a JOIN messages m ON m.id = a.message_id
+		 WHERE a.id = ?`, approvalID).Scan(&messageID, &state, &taskID, &fromRole)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("approval %s: %w", approvalID, store.ErrNotFound)
+	}
+	if err != nil {
+		return fmt.Errorf("reading approval: %w", err)
+	}
+	if state != store.ApprovalPending {
+		return invalid("approval %s was already %s", approvalID, state)
+	}
+
+	now := n.now().Format(time.RFC3339Nano)
+	var notePtr *string
+	if note != "" {
+		notePtr = &note
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE approvals SET state = ?, note = ?, decided_at = ? WHERE id = ?`,
+		decision, notePtr, now, approvalID); err != nil {
+		return fmt.Errorf("recording decision: %w", err)
+	}
+
+	if decision == store.ApprovalApproved {
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE routes SET state = ?, enqueued_at = ? WHERE message_id = ? AND state = ?`,
+			store.RouteQueued, now, messageID, store.RouteHeld); err != nil {
+			return fmt.Errorf("releasing handoff: %w", err)
+		}
+		// Only now does the card move: an approval gate that moved the card on
+		// send would show work sitting with a role that cannot see it.
+		if taskID.Valid {
+			var toRole string
+			if err := tx.QueryRowContext(ctx,
+				`SELECT to_role FROM routes WHERE message_id = ? LIMIT 1`, messageID).Scan(&toRole); err != nil {
+				return fmt.Errorf("finding recipient: %w", err)
+			}
+			if _, err := tx.ExecContext(ctx, `UPDATE tasks SET lane = ?, state = ? WHERE id = ?`,
+				toRole, store.TaskQueued, taskID.String); err != nil {
+				return fmt.Errorf("moving card: %w", err)
+			}
+		}
+	} else {
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE routes SET state = ? WHERE message_id = ? AND state = ?`,
+			store.RouteRejected, messageID, store.RouteHeld); err != nil {
+			return fmt.Errorf("rejecting handoff: %w", err)
+		}
+		// The card goes back to whoever wrote it, with the note attached.
+		if taskID.Valid {
+			if _, err := tx.ExecContext(ctx, `UPDATE tasks SET lane = ?, state = ? WHERE id = ?`,
+				fromRole, store.TaskQueued, taskID.String); err != nil {
+				return fmt.Errorf("returning card: %w", err)
+			}
+		}
+	}
+
+	return tx.Commit()
+}
+
+// ── helpers ───────────────────────────────────────────────────────────────
+
+const prefixedMessageCols = `m.id, m.project_id, m.task_id, m.from_role, m.kind,
+	m.priority, m.commit_sha, m.body, m.terminal, m.created_at`
+
+func scanMessageRow(rows *sql.Rows, extra *sql.NullString) (*store.Message, error) {
+	var (
+		m         store.Message
+		taskID    sql.NullString
+		commitSHA sql.NullString
+		created   string
+		terminal  int
+	)
+	if err := rows.Scan(&m.ID, &m.ProjectID, &taskID, &m.FromRole, &m.Kind, &m.Priority,
+		&commitSHA, &m.Body, &terminal, &created, extra); err != nil {
+		return nil, err
+	}
+	if taskID.Valid {
+		m.TaskID = &taskID.String
+	}
+	if commitSHA.Valid {
+		m.CommitSHA = &commitSHA.String
+	}
+	m.Terminal = terminal != 0
+	var err error
+	if m.CreatedAt, err = time.Parse(time.RFC3339Nano, created); err != nil {
+		return nil, err
+	}
+	return &m, nil
+}
+
+func parseNull(ns sql.NullString) (time.Time, error) {
+	if !ns.Valid {
+		return time.Time{}, nil
+	}
+	return time.Parse(time.RFC3339Nano, ns.String)
+}
+
+func openLease(ctx context.Context, tx *sql.Tx, projectID, role string) (*store.Lease, error) {
+	var (
+		l       store.Lease
+		granted string
+		expires string
+	)
+	err := tx.QueryRowContext(ctx,
+		`SELECT id, project_id, role, granted_at, expires_at FROM leases
+		 WHERE project_id = ? AND role = ? AND acked_at IS NULL AND expired_at IS NULL
+		 ORDER BY granted_at LIMIT 1`, projectID, role).
+		Scan(&l.ID, &l.ProjectID, &l.Role, &granted, &expires)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("checking for an open lease: %w", err)
+	}
+	if l.GrantedAt, err = time.Parse(time.RFC3339Nano, granted); err != nil {
+		return nil, err
+	}
+	if l.ExpiresAt, err = time.Parse(time.RFC3339Nano, expires); err != nil {
+		return nil, err
+	}
+	return &l, nil
+}
+
+func leaseItems(ctx context.Context, tx *sql.Tx, leaseID string) ([]store.Message, error) {
+	rows, err := tx.QueryContext(ctx,
+		`SELECT `+prefixedMessageCols+`, NULL
+		 FROM lease_items li JOIN messages m ON m.id = li.message_id
+		 WHERE li.lease_id = ? ORDER BY m.priority, m.created_at`, leaseID)
+	if err != nil {
+		return nil, fmt.Errorf("reading lease items: %w", err)
+	}
+	defer rows.Close()
+
+	var out []store.Message
+	for rows.Next() {
+		var ignored sql.NullString
+		m, err := scanMessageRow(rows, &ignored)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *m)
+	}
+	return out, rows.Err()
+}
+
+func firstEnabled(team []store.ResolvedRole) (store.ResolvedRole, bool) {
+	for _, r := range team {
+		if r.Enabled {
+			return r, true
+		}
+	}
+	return store.ResolvedRole{}, false
+}
+
+func roleNamed(team []store.ResolvedRole, name string) (store.ResolvedRole, bool) {
+	for _, r := range team {
+		if r.Name == name && r.Enabled {
+			return r, true
+		}
+	}
+	return store.ResolvedRole{}, false
+}
+
+type validationError struct{ msg string }
+
+func (e *validationError) Error() string { return e.msg }
+func (e *validationError) Validation()   {}
+
+func invalid(format string, args ...any) error {
+	return &validationError{msg: fmt.Sprintf(format, args...)}
+}
+
+func errNoEnabledRoles(projectID string) error {
+	return invalid("project %s has no enabled roles; select at least one before starting work", projectID)
+}
