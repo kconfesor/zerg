@@ -17,6 +17,7 @@ import Attention from '@/components/Attention.vue'
 import Activity from '@/components/Activity.vue'
 import Board from '@/components/Board.vue'
 import Chat from '@/components/Chat.vue'
+import MarkdownEditor from '@/components/MarkdownEditor.vue'
 import Settings from '@/components/Settings.vue'
 import ReadinessPanel from '@/components/Readiness.vue'
 import TeamEditor from '@/components/TeamEditor.vue'
@@ -26,7 +27,6 @@ import PageHeader from '@/components/layout/PageHeader.vue'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { Textarea } from '@/components/ui/textarea'
 import {
   Dialog,
   DialogContent,
@@ -551,18 +551,19 @@ watch(current, () => (banner.value = null))
         <div class="flex flex-col gap-3">
           <div class="flex flex-col gap-1.5">
             <Label>Name</Label>
-            <Input v-model="taskName" placeholder="Expression parser" autofocus />
+            <Input v-model="taskName" autofocus />
             <span class="text-muted-foreground text-[11px]">
               Short and distinct — every role refers to the task by this name.
             </span>
           </div>
           <div class="flex flex-col gap-1.5">
             <Label>What to do</Label>
-            <Textarea
-              v-model="taskBody"
-              rows="6"
-              placeholder="Support + - * / with precedence and parentheses. Error on divide by zero. Keep the existing tests passing."
-            />
+            <!-- Markdown, not rich text: this goes to an agent as text, and
+                 Markdown is what it reads. A WYSIWYG would send it tags to
+                 read past. -->
+            <div class="border">
+              <MarkdownEditor v-model="taskBody" :rows="8" />
+            </div>
             <span class="text-muted-foreground text-[11px]">
               This is the whole brief — the agent has the repository and nothing else. Concrete
               cases and what must not break are worth more than length.
