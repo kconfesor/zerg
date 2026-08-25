@@ -67,6 +67,9 @@ Pinned versions and their gotchas: [ARCHITECTURE.md §12](ARCHITECTURE.md#12-sta
 - **Node 24.19.0** — pinned in `.nvmrc`; `create-vue` requires `^22.18.0 || >=24.12.0`
 - At least one agent harness logged in: `claude` and/or `pi`
 
+No tmux, no babashka, no zsh. Agents are child processes of the daemon, not tmux sessions — see
+[ARCHITECTURE.md §7.4](ARCHITECTURE.md#74-no-tmux).
+
 ## Build order
 
 Milestones 1–2 are deliberately LLM-free — the coordination layer is testable, and worth testing,

@@ -247,9 +247,40 @@ role degraded. This is the answer to "lost wake-up ⇒ permanent stall, no timer
 - **control** — notes, operator answers, cancellations. Out-of-band, never occupies a lease, never
   blocks work.
 
----
+### 7.4 No tmux
 
-## 8. Preflight
+swarm-forge is built on tmux: one session per role, a project-scoped socket, `send-keys` for
+delivery, `capture-pane` for the UI. zerg uses none of it. Agents are ordinary child processes of the
+daemon, supervised with `os/exec`.
+
+Every job tmux was doing has a better owner once agents emit structured events:
+
+| tmux was providing | Now |
+|---|---|
+| process supervision | `os/exec` + cerebrate. Real exit codes and signals, restart with backoff — instead of a session that stays "alive" around a process returning HTTP 400 on every turn |
+| somewhere for the TUI to live | Nothing to host in structured mode. Takeover allocates a pty directly (`creack/pty`); tmux was never needed for that |
+| the delivery channel (`send-keys`) | Structured input over a pipe (§10.2) |
+| the observation channel (`capture-pane`) | The typed event stream (§10.1) |
+| per-project isolation via a socket path | The daemon owns every child; there is no shared namespace to collide in |
+| **surviving the operator's terminal closing** | See below — the one job that still needs an answer |
+
+That last row is the only real loss, and tmux's version of it was weaker than it looked: it keeps a
+*process* alive, which does nothing when the orchestrator has lost its *state*. swarm-forge's daemon
+terminated cleanly on a missing socket file — logging "stopped", removing its pid, indistinguishable
+from a normal shutdown — while agents sat there alive and idle and mail piled up in outboxes with no
+error surfaced anywhere.
+
+zerg answers it in two pieces:
+
+- **`zerg up --detach`** runs the daemon detached from the invoking shell, with a launchd/systemd
+  unit for machines that want it always-on. Closing a terminal is not an event the system notices.
+- **Restart is a first-class path, not a recovery hack.** If the daemon does die, its children die
+  with it; on restart, leases have expired, so claimed-but-unacked work is already back in the queue.
+  Roles respawn and resume their harness session (`claude --resume`, `pi --session`), so context
+  survives even though the process did not. Nothing has to be reattached, and nothing is silently
+  half-delivered.
+
+The prerequisite list shrinks accordingly: Go and a logged-in harness. No tmux, no babashka, no zsh.
 
 Runs before every spawn. Each check yields `ok` or `blocked(reason, remedy)`. A blocked role renders
 in **Attention** with both — never as an idle pane that happens to be doing nothing.
