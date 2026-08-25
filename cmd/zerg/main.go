@@ -163,7 +163,7 @@ func runUp(args []string) error {
 	// And something has to keep it. Both events and usage are reported once, as
 	// they happen, and cannot be recovered later — an unrecorded turn is
 	// unrecorded permanently.
-	event.Record(ctx, bus, db, log)
+	recorder := event.Record(ctx, bus, db, log)
 
 	// Settings live in the database like everything else, so the cockpit can
 	// change them. The flag stays as an override for one run, which is what you
@@ -222,7 +222,7 @@ func runUp(args []string) error {
 	srv := &http.Server{
 		Handler: api.New(api.Deps{
 			DB: db, Log: log, Registry: registry,
-			Overmind: over, Nydus: nyd, Bus: bus, Applied: cfg.Addr, Chat: chatMgr,
+			Overmind: over, Nydus: nyd, Bus: bus, Recorder: recorder, Applied: cfg.Addr, Chat: chatMgr,
 		}).Routes(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}

@@ -68,6 +68,16 @@ type Preflighter interface {
 
 // Config is everything a cerebrate needs. Every field originates in the
 // database or is derived from it; nothing is read from a config file.
+// Refreshed is what a role looks like in the database right now.
+type Refreshed struct {
+	Role         store.ResolvedRole
+	SystemPrompt string
+	HarnessFlags []string
+	// Gone is true when the role is no longer part of the team. The supervisor
+	// stops rather than respawning something the operator has removed.
+	Gone bool
+}
+
 type Config struct {
 	ProjectID string
 	Role      store.ResolvedRole
@@ -83,10 +93,21 @@ type Config struct {
 	// HarnessFlags apply to every role on this harness, from settings.
 	HarnessFlags []string
 
-	// SystemPrompt is composed fresh by the caller from shared instructions
-	// plus the role prompt, so an edit is live on restart and no stale copy
-	// can survive in a worktree.
+	// SystemPrompt is composed from shared instructions plus the role prompt.
+	// It is the value to use when Refresh is nil or fails.
 	SystemPrompt string
+
+	// Refresh re-reads this role from the database immediately before each
+	// spawn.
+	//
+	// ARCHITECTURE §4.4 says configuration is resolved at every spawn, and
+	// without this it was resolved once when the swarm started: a role that
+	// crashed and respawned came back with the prompt, model and flags it had
+	// an hour ago, silently, which is the same class of failure as the config
+	// snapshot that once produced a Clojure calculator from a Rust spec.
+	//
+	// Nil leaves the Config values in place, which is what the tests use.
+	Refresh func(context.Context) (Refreshed, error)
 
 	Bus         *event.Bus
 	Log         *slog.Logger
@@ -352,6 +373,25 @@ func (c *Cerebrate) Run(ctx context.Context) error {
 // runOnce spawns the agent and reads it until the process exits. It reports
 // whether the failure was fatal and how long the process lasted.
 func (c *Cerebrate) runOnce(ctx context.Context) (fatal bool, ranFor time.Duration, err error) {
+	// Configuration as the database has it now, not as it was when the swarm
+	// started. A role that crashes and respawns must come back as currently
+	// configured, or an edit silently applies to some roles and not others.
+	if c.cfg.Refresh != nil {
+		fresh, err := c.cfg.Refresh(ctx)
+		switch {
+		case err != nil:
+			// Keep going with what we have: a database hiccup should not take
+			// a working role down, and the next respawn tries again.
+			c.cfg.Log.Warn("re-reading role configuration", "role", c.cfg.Role.Name, "err", err)
+		case fresh.Gone:
+			return true, 0, fmt.Errorf("role %s is no longer part of this team", c.cfg.Role.Name)
+		default:
+			c.cfg.Role = fresh.Role
+			c.cfg.SystemPrompt = fresh.SystemPrompt
+			c.cfg.HarnessFlags = fresh.HarnessFlags
+		}
+	}
+
 	// A private instance for this process. claude latches the model and
 	// billing mode a turn actually used, and a shared instance would let three
 	// concurrent roles overwrite each other's.

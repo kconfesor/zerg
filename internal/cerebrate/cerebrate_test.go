@@ -458,3 +458,73 @@ func waitFor(t *testing.T, cond func() bool, timeout time.Duration, msg string) 
 	}
 	t.Fatal(msg)
 }
+
+// ARCHITECTURE §4.4 says configuration is resolved at every spawn. It was
+// resolved once, when the swarm started, so a role that crashed came back with
+// the prompt and model it had when the swarm went up — silently, and only for
+// the roles that happened to crash. That is the config-snapshot failure §6
+// records, in a slower form.
+func TestARespawnPicksUpEditedConfiguration(t *testing.T) {
+	// Exits immediately, so it respawns.
+	a := &scriptedAdapter{script: `exit 1`}
+
+	var mu sync.Mutex
+	prompt := "first"
+	seen := []string{}
+
+	c, _ := newCerebrate(t, a, func(cfg *Config) {
+		cfg.SystemPrompt = "first"
+		cfg.Refresh = func(context.Context) (Refreshed, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			seen = append(seen, prompt)
+			return Refreshed{Role: cfg.Role, SystemPrompt: prompt}, nil
+		}
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go c.Run(ctx)
+
+	waitFor(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(seen) >= 1
+	}, 20*time.Second, "the role never spawned")
+
+	// The operator edits the prompt while it is running.
+	mu.Lock()
+	prompt = "second"
+	mu.Unlock()
+
+	waitFor(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, p := range seen {
+			if p == "second" {
+				return true
+			}
+		}
+		return false
+	}, 30*time.Second, "a respawn reused the configuration from start-up")
+}
+
+// A role removed from the team must not come back on the next respawn.
+func TestARoleRemovedFromTheTeamStopsInsteadOfRespawning(t *testing.T) {
+	a := &scriptedAdapter{script: `exit 1`}
+	c, _ := newCerebrate(t, a, func(cfg *Config) {
+		cfg.Refresh = func(context.Context) (Refreshed, error) {
+			return Refreshed{Gone: true}, nil
+		}
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go c.Run(ctx)
+
+	waitFor(t, func() bool { return c.State() == StateFailed }, 20*time.Second,
+		"a role removed from the team kept respawning")
+	if a.Spawns() != 0 {
+		t.Errorf("spawned %d times after removal, want 0", a.Spawns())
+	}
+}

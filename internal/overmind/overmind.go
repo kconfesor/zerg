@@ -407,6 +407,7 @@ func (o *Overmind) Start(ctx context.Context, projectID string) error {
 			BinDir:       binDir,
 			HarnessFlags: cfg.FlagsFor(role.Harness),
 			SystemPrompt: composePrompt(shared, role.Prompt),
+			Refresh:      o.refreshRole(projectID, role.Name),
 			Bus:          o.bus,
 			Log:          o.log,
 			Preflight:    o.preflight,
@@ -570,6 +571,43 @@ func (o *Overmind) sharedInstructions(ctx context.Context) (string, error) {
 		return "", err
 	}
 	return text, nil
+}
+
+// refreshRole re-reads one role from the database, for the supervisor to call
+// before each spawn.
+//
+// The team is resolved again rather than the template alone, because what
+// matters is this project's view of the role: its position, whether it is still
+// enabled, and any model or argument override.
+func (o *Overmind) refreshRole(projectID, name string) func(context.Context) (cerebrate.Refreshed, error) {
+	return func(ctx context.Context) (cerebrate.Refreshed, error) {
+		team, err := o.db.ResolveTeam(ctx, projectID)
+		if err != nil {
+			return cerebrate.Refreshed{}, err
+		}
+		for _, r := range team {
+			if r.Name != name {
+				continue
+			}
+			if !r.Enabled {
+				return cerebrate.Refreshed{Gone: true}, nil
+			}
+			shared, err := o.sharedInstructions(ctx)
+			if err != nil {
+				return cerebrate.Refreshed{}, err
+			}
+			cfg, err := o.db.GetConfig(ctx)
+			if err != nil {
+				return cerebrate.Refreshed{}, err
+			}
+			return cerebrate.Refreshed{
+				Role:         r,
+				SystemPrompt: composePrompt(shared, r.Prompt),
+				HarnessFlags: cfg.FlagsFor(r.Harness),
+			}, nil
+		}
+		return cerebrate.Refreshed{Gone: true}, nil
+	}
 }
 
 // composePrompt joins the shared instructions to a role's own.

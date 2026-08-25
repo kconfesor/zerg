@@ -137,6 +137,12 @@ runs.
 Consequence: edit a prompt in the UI, restart the role, and the change is live. This is the direct
 fix for the snapshot staleness that silently produced a Clojure calculator when the config said Rust.
 
+"Every spawn" is literal, and for a while it was not. Configuration was resolved once when the swarm
+started, so a role that crashed and respawned came back with the prompt, model and flags it had when
+the swarm went up — silently, and only for the roles that happened to crash. The supervisor now
+re-reads the role from the database immediately before each spawn, and a role no longer on the team
+stops instead of respawning.
+
 ### 4.4.1 What zerg injects, and what it leaves alone
 
 An orchestrator that edits the repository it is orchestrating is a bad neighbour. The boundary:
@@ -558,6 +564,15 @@ usage_turns (id, project_id, task_id, role, ts,
              cost_source,         -- 'harness' | 'computed'
              billing)             -- 'metered' | 'subscription'
 ```
+
+**The recorder does not share the bus's semantics.** The event bus drops when a subscriber's buffer
+fills, which is right for a browser and wrong for the writer of the usage rows the cost accounting is
+made of: measured, a 5,000-event burst against the old inline recorder stored 1,025 of them and lost
+the rest without a word. The bus channel is now drained into an unbounded queue by a reader that does
+nothing else, and the database writes happen behind it — so a backlog costs memory, which is visible
+and bounded by the run, rather than rows, which are not recoverable. `/api/health` reports the
+queue depth, peak, drops and write failures, and answers `degraded` rather than `ok` when the record
+has gaps.
 
 `events` being append-only gives the cockpit free time travel: the UI is a projection, so a reload
 replays rather than re-scrapes. Ids are monotonic ULIDs, which makes one value serve as primary key,

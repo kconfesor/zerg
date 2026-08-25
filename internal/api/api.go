@@ -32,6 +32,7 @@ type Server struct {
 	over     *overmind.Overmind
 	nyd      *nydus.Nydus
 	bus      *event.Bus
+	recorder *event.Recorder
 
 	// applied is the address this process actually bound, so the UI can tell a
 	// saved setting from a running one.
@@ -53,6 +54,9 @@ type Deps struct {
 	// rather than serving an empty stream that looks like a quiet project.
 	Bus *event.Bus
 
+	// Recorder is optional; health reports its lag and losses when present.
+	Recorder *event.Recorder
+
 	// Applied is the address the daemon bound at startup.
 	Applied string
 
@@ -68,6 +72,7 @@ func New(d Deps) *Server {
 	return &Server{
 		db: d.DB, log: d.Log, registry: d.Registry,
 		preflt: pf, over: d.Overmind, nyd: d.Nydus, bus: d.Bus, applied: d.Applied, chatMgr: d.Chat,
+		recorder: d.Recorder,
 	}
 }
 
@@ -141,8 +146,20 @@ func (s *Server) Routes() http.Handler {
 
 // ── health ────────────────────────────────────────────────────────────────
 
+// health reports whether the record is keeping up, not only that the process
+// is answering. A recorder silently behind is exactly the failure that used to
+// be invisible: transcripts and usage rows go missing while every endpoint
+// reports ok.
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	body := map[string]any{"status": "ok"}
+	if s.recorder != nil {
+		st := s.recorder.Stats()
+		body["recorder"] = st
+		if st.Dropped > 0 || st.Failed > 0 {
+			body["status"] = "degraded"
+		}
+	}
+	writeJSON(w, http.StatusOK, body)
 }
 
 // ── roles ─────────────────────────────────────────────────────────────────

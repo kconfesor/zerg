@@ -4,26 +4,131 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"sync"
+	"sync/atomic"
 
 	"github.com/kconfesor/zerg/internal/adapter"
 	"github.com/kconfesor/zerg/internal/store"
 )
 
-// Record persists the event stream: every event for replay, and usage
+// recorderBuffer is the bus subscription's depth. Kept generous, but it is no
+// longer what protects the records: the reader below drains it into an
+// unbounded queue immediately, so the channel is empty again within
+// microseconds of a burst arriving.
+const recorderBuffer = 4096
+
+// queueWarn is the depth at which a backlog stops being a burst and starts
+// being a problem worth saying out loud.
+const queueWarn = 10_000
+
+// Recorder persists the event stream: every event for replay, and usage
 // separately for cost.
 //
 // Both come off one subscription rather than two, so a usage event resolves
 // which card it belongs to once instead of twice, and the two records can never
 // disagree about the order they arrived in.
 //
-// What it must not do is slow an agent down. A recorder is an ordinary bus
-// subscriber — a write that fails is logged, never retried, and never blocks.
-// A missing row is a gap in a transcript; blocking the bus to avoid one would
-// stall the run that produced it.
-func Record(ctx context.Context, bus *Bus, db *store.DB, log *slog.Logger) {
-	ch, cancel := bus.Subscribe(1024)
+// What it must not do is slow an agent down — blocking the bus would let a
+// stalled writer halt the run it is watching, trading an observability problem
+// for a liveness one. But it also must not share the browser's semantics. The
+// bus drops when a subscriber's buffer fills, and this subscriber writes the
+// usage rows the cost accounting is made of: a burst, or one slow SQLite
+// commit, silently cost real money from the record.
+//
+// So the channel is drained into an unbounded queue by a reader that does
+// nothing else, and the database writes happen behind it. The bus never waits
+// on a disk write, and a backlog costs memory — which is visible and bounded by
+// the run — rather than rows, which are not recoverable.
+type Recorder struct {
+	mu     sync.Mutex
+	queue  []Event
+	wake   chan struct{}
+	closed bool
+
+	queued  atomic.Int64 // current depth, for health
+	dropped atomic.Int64 // events the bus never handed over
+	written atomic.Int64
+	failed  atomic.Int64
+	peak    atomic.Int64
+}
+
+// Stats is what the health endpoint reports. A gap in the record should be a
+// number someone can see rather than something inferred from a story that stops
+// making sense.
+type Stats struct {
+	Queued  int64 `json:"queued"`
+	Peak    int64 `json:"peakQueued"`
+	Dropped int64 `json:"dropped"`
+	Written int64 `json:"written"`
+	Failed  int64 `json:"failed"`
+}
+
+func (r *Recorder) Stats() Stats {
+	return Stats{
+		Queued:  r.queued.Load(),
+		Peak:    r.peak.Load(),
+		Dropped: r.dropped.Load(),
+		Written: r.written.Load(),
+		Failed:  r.failed.Load(),
+	}
+}
+
+func (r *Recorder) push(ev Event) {
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return
+	}
+	r.queue = append(r.queue, ev)
+	depth := int64(len(r.queue))
+	r.mu.Unlock()
+
+	r.queued.Store(depth)
+	if depth > r.peak.Load() {
+		r.peak.Store(depth)
+	}
+	select {
+	case r.wake <- struct{}{}:
+	default:
+	}
+}
+
+// take removes up to n events. It returns nil when the queue is empty.
+func (r *Recorder) take(n int) []Event {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.queue) == 0 {
+		return nil
+	}
+	if n > len(r.queue) {
+		n = len(r.queue)
+	}
+	batch := r.queue[:n:n]
+	r.queue = r.queue[n:]
+	r.queued.Store(int64(len(r.queue)))
+	return batch
+}
+
+// Record starts the recorder and returns it, so health can read its counters.
+func Record(ctx context.Context, bus *Bus, db *store.DB, log *slog.Logger) *Recorder {
+	r := &Recorder{wake: make(chan struct{}, 1)}
+	ch, cancel := bus.Subscribe(recorderBuffer)
+
+	// The reader does nothing but move events off the bus, so the only way to
+	// lose one is for the whole process to fall behind by 4096 events while
+	// doing no database work at all.
 	go func() {
 		defer cancel()
+		defer func() {
+			r.mu.Lock()
+			r.closed = true
+			r.mu.Unlock()
+			select {
+			case r.wake <- struct{}{}:
+			default:
+			}
+		}()
+		before := bus.Dropped()
 		for {
 			select {
 			case <-ctx.Done():
@@ -35,27 +140,77 @@ func Record(ctx context.Context, bus *Bus, db *store.DB, log *slog.Logger) {
 				if ev.ProjectID == "" {
 					continue
 				}
-				// Which card the work belonged to, through the role's lease. A
-				// miss is ordinary — agents emit events before claiming
-				// anything — and never a reason to drop the row.
-				//
-				// This is a three-table join per event. At observed volumes
-				// (~20 events per turn) that is nothing against a local WAL
-				// database; if it ever shows up, the fix is a short-TTL cache
-				// keyed by role, not dropping the attribution.
-				taskID, err := db.CurrentTaskFor(ctx, ev.ProjectID, ev.Role)
-				if err != nil {
-					log.Debug("event: could not attribute to a task",
-						"role", ev.Role, "err", err)
-				}
-
-				recordEvent(ctx, db, log, ev, taskID)
-				if ev.Kind == adapter.EventUsage {
-					recordUsage(ctx, db, log, ev, taskID)
+				r.push(ev)
+				if now := bus.Dropped(); now > before {
+					r.dropped.Add(now - before)
+					log.Warn("event bus dropped records before the recorder saw them",
+						"dropped", now-before)
+					before = now
 				}
 			}
 		}
 	}()
+
+	// The writer. Separate goroutine so a slow commit delays persistence and
+	// nothing else.
+	go func() {
+		for {
+			batch := r.take(256)
+			if batch == nil {
+				r.mu.Lock()
+				done := r.closed
+				r.mu.Unlock()
+				if done {
+					return
+				}
+				select {
+				case <-ctx.Done():
+					// Drain what is already queued: these are rows an agent
+					// has already produced, and the run is over, so nothing is
+					// waiting on this.
+					for rest := r.take(256); rest != nil; rest = r.take(256) {
+						r.write(context.WithoutCancel(ctx), db, log, rest)
+					}
+					return
+				case <-r.wake:
+				}
+				continue
+			}
+			if depth := r.queued.Load(); depth > queueWarn {
+				log.Warn("event recorder is falling behind", "queued", depth)
+			}
+			r.write(ctx, db, log, batch)
+		}
+	}()
+
+	return r
+}
+
+// write persists one batch.
+func (r *Recorder) write(ctx context.Context, db *store.DB, log *slog.Logger, batch []Event) {
+	for _, ev := range batch {
+		func() {
+			// Which card the work belonged to, through the role's lease. A
+			// miss is ordinary — agents emit events before claiming
+			// anything — and never a reason to drop the row.
+			//
+			// This is a three-table join per event. At observed volumes
+			// (~20 events per turn) that is nothing against a local WAL
+			// database; if it ever shows up, the fix is a short-TTL cache
+			// keyed by role, not dropping the attribution.
+			taskID, err := db.CurrentTaskFor(ctx, ev.ProjectID, ev.Role)
+			if err != nil {
+				log.Debug("event: could not attribute to a task",
+					"role", ev.Role, "err", err)
+			}
+
+			recordEvent(ctx, db, log, ev, taskID)
+			if ev.Kind == adapter.EventUsage {
+				recordUsage(ctx, db, log, ev, taskID)
+			}
+			r.written.Add(1)
+		}()
+	}
 }
 
 func recordEvent(ctx context.Context, db *store.DB, log *slog.Logger, ev Event, taskID *string) {
