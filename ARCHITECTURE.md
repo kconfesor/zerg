@@ -204,6 +204,54 @@ base branch. Integration belongs to the orchestrator, not to whichever agent hap
 | Daemon reads socket/roles outside its try block | A deleted socket file terminates the transport *cleanly* — logs "stopped", removes its pid, indistinguishable from normal shutdown | Supervised components with health endpoints |
 | Nothing checks the harness before launching | 40 minutes lost to a triplicated `~/.codex/config.toml`, a CLI too old for its model, an unanswered trust dialog, a broken extension tree | **Preflight** (§8) |
 
+### 6.1 What the first real run broke
+
+The table above was written before an agent had ever run. Every entry in it
+came from watching the predecessor fail. This section comes from watching
+*this* system fail, on its first live task, and it is kept because the entries
+share a shape the original list does not have.
+
+The predecessor's failures were mostly **loud**: a stack trace, a stall, an
+`AMBIGUOUS_TASK_STATE` with no recovery. Zerg's first failures were all
+**quiet** — the board went green over work that had not happened.
+
+| Mechanism | Failure | Fix |
+|---|---|---|
+| `Merged: m.CommitSHA != nil` in the work envelope | Nothing ever merged a hand-off into the recipient's worktree. The flag was inferred from the commit's presence, and the shared instructions said "do not merge it again" on that authority. A reviewer opened an empty tree twice | `Claim` merges into the role's worktree and reports the attempt's result |
+| `--commit HEAD` stored as the literal string | `HEAD` names the tip of whichever tree resolves it. The coder's "my commit" became "main's tip" at the project root, where `merge --ff-only HEAD` is a no-op that returns success. A task reached Done with the base branch untouched | Refs resolved to absolute shas in the *sender's* worktree, at `Send` |
+| `if req.Commit != ""` guarding the completion merge | An absent commit meant "integrate nothing, mark it done" — the same green board over an unmoved branch, by a second route | Completion requires the commit to integrate |
+| `--task` bound straight to a `REFERENCES tasks(id)` column | Agents are given a task *name* and told to keep it. Passing it back produced `FOREIGN KEY constraint failed` from inside the router — the agent read that as "the recipient role is invalid" and asked an operator | `--task` accepts either form; a miss reports itself |
+| Work envelope carried the payload but not the pipeline | An agent had no way to know who receives its output, so it guessed | Envelope carries `next` and `terminal`; the orchestrator resolves the team |
+| Agents inherit the operator's `~/.claude` | claude reads OAuth from the keychain and will not start with a relocated config dir, so agents get the operator's MCP servers, plugins and hooks. A code-review agent held a live handle to a staging database, and an output-style plugin had it writing essays in output tokens | `--strict-mcp-config` removes the servers. Plugins and hooks still leak; `--bare` would stop them but also disables keychain reads |
+
+**The pattern.** Five of the six are the same mistake: *a value that names an
+outcome was derived from a proxy for that outcome rather than from the outcome
+itself.* `merged` from the presence of a commit. Integration success from a
+merge that was skipped. A ref's meaning from the tree that happened to read it.
+
+Each one is individually obvious in hindsight and none was visible from the
+outside, because the proxy and the fact agree in every case you would think to
+check by hand. They diverge only under a real agent, in a real worktree, doing
+real work — which is why they all surfaced within one task and none had
+surfaced before.
+
+**The test lesson is the sharper half.** The hand-off merge had a unit test. It
+asserted:
+
+    a handoff carrying a commit must say it was already merged
+
+It read the same derived field the code wrote, so it restated the
+implementation and could never contradict it. It stayed green through a
+release in which no merge existed anywhere in the codebase.
+
+Its replacement builds a real repository, commits in the sender's worktree, and
+asks *git* whether the commit is an ancestor of the recipient's HEAD and
+whether the file is on disk. The rule this establishes, and the reason these
+notes exist: **a test for an effect must observe the effect in the system that
+was supposed to change, not read back the field the code set.** Each
+replacement test here was run against the reintroduced bug and confirmed to
+fail before being kept.
+
 ---
 
 ## 7. Component model
