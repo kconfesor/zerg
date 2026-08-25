@@ -56,9 +56,16 @@ export interface Task {
   lane: string
   state: 'queued' | 'working' | 'done' | 'rejected'
   createdAt: string
+  /** When a role first picked it up, which is when work actually began. */
+  firstClaimedAt?: string
   completedAt?: string
   activeMs: number
   reworkCount: number
+  /** Total tokens and cost across every role and every lap. */
+  tokens: number
+  costUsd: number
+  /** The most recent thing an agent did on this card. */
+  doing?: string
 }
 
 export interface CheckResult {

@@ -63,6 +63,17 @@ type Task struct {
 	// pipeline. Rework is legitimate; an unbounded amount of it is a loop
 	// nobody is paying attention to.
 	ReworkCount int `json:"reworkCount"`
+
+	// Tokens and CostUSD are what this card has cost across every role and
+	// every lap. A board that shows only a lane says nothing about the price
+	// of what it is showing.
+	Tokens  int64   `json:"tokens"`
+	CostUSD float64 `json:"costUsd"`
+
+	// Doing is the most recent thing an agent did on this card, for cards
+	// being worked. "working" for four minutes is indistinguishable from
+	// stuck; "running cargo test" is not.
+	Doing string `json:"doing,omitempty"`
 }
 
 type Message struct {
@@ -151,6 +162,12 @@ func (db *DB) CreateTask(ctx context.Context, projectID, name, body, lane string
 const taskCols = `id, project_id, session_id, name, body, lane, state,
 	created_at, first_claimed_at, completed_at, active_ms, rework_count`
 
+// taskColsT is the same list qualified to the tasks table, for the queries that
+// join. Unqualified names resolve today and would become ambiguous the moment a
+// joined table gained a column of the same name.
+const taskColsT = `t.id, t.project_id, t.session_id, t.name, t.body, t.lane, t.state,
+	t.created_at, t.first_claimed_at, t.completed_at, t.active_ms, t.rework_count`
+
 func (db *DB) GetTask(ctx context.Context, id string) (*Task, error) {
 	row := db.sql.QueryRowContext(ctx, `SELECT `+taskCols+` FROM tasks WHERE id = ?`, id)
 	t, err := scanTask(row)
@@ -162,8 +179,33 @@ func (db *DB) GetTask(ctx context.Context, id string) (*Task, error) {
 
 // ListTasks returns a project's board, newest first.
 func (db *DB) ListTasks(ctx context.Context, projectID string) ([]Task, error) {
+	// Totals and the latest activity come back with the tasks rather than in a
+	// request per card: a board with twenty cards would otherwise make
+	// twenty-one round trips every two seconds.
 	rows, err := db.sql.QueryContext(ctx,
-		`SELECT `+taskCols+` FROM tasks WHERE project_id = ? ORDER BY created_at DESC`, projectID)
+		`SELECT `+taskColsT+`,
+		        COALESCE(u.tokens, 0), COALESCE(u.cost, 0),
+		        COALESCE(e.doing, '')
+		 FROM tasks t
+		 LEFT JOIN (
+		     SELECT task_id,
+		            SUM(input_tokens + cache_read_tokens + cache_write_tokens + output_tokens) AS tokens,
+		            SUM(cost_usd) AS cost
+		       FROM usage_turns GROUP BY task_id
+		 ) u ON u.task_id = t.id
+		 LEFT JOIN (
+		     SELECT task_id,
+		            -- The newest event that says something a person can read.
+		            -- Ids are monotonic, so MAX(id) is the latest.
+		            (SELECT CASE WHEN kind = 'tool_call' THEN COALESCE(NULLIF(tool, ''), 'working')
+		                         ELSE text END
+		               FROM events e2
+		              WHERE e2.task_id = e1.task_id
+		                AND kind IN ('tool_call', 'message')
+		              ORDER BY id DESC LIMIT 1) AS doing
+		       FROM events e1 GROUP BY task_id
+		 ) e ON e.task_id = t.id
+		 WHERE t.project_id = ? ORDER BY t.created_at DESC`, projectID)
 	if err != nil {
 		return nil, fmt.Errorf("listing tasks: %w", err)
 	}
@@ -171,13 +213,33 @@ func (db *DB) ListTasks(ctx context.Context, projectID string) ([]Task, error) {
 
 	var out []Task
 	for rows.Next() {
-		t, err := scanTask(rows)
+		t, err := scanTaskWithSummary(rows)
 		if err != nil {
 			return nil, err
 		}
 		out = append(out, *t)
 	}
 	return out, rows.Err()
+}
+
+// scanTaskWithSummary reads a task plus the totals and activity the board shows.
+func scanTaskWithSummary(s scanner) (*Task, error) {
+	var (
+		t           Task
+		sessionID   sql.NullString
+		created     string
+		firstClaim  sql.NullString
+		completedAt sql.NullString
+	)
+	if err := s.Scan(&t.ID, &t.ProjectID, &sessionID, &t.Name, &t.Body, &t.Lane, &t.State,
+		&created, &firstClaim, &completedAt, &t.ActiveMS, &t.ReworkCount,
+		&t.Tokens, &t.CostUSD, &t.Doing); err != nil {
+		return nil, err
+	}
+	if err := fillTaskTimes(&t, sessionID, created, firstClaim, completedAt); err != nil {
+		return nil, err
+	}
+	return &t, nil
 }
 
 func scanTask(s scanner) (*Task, error) {
@@ -192,20 +254,29 @@ func scanTask(s scanner) (*Task, error) {
 		&created, &firstClaim, &completedAt, &t.ActiveMS, &t.ReworkCount); err != nil {
 		return nil, err
 	}
+	if err := fillTaskTimes(&t, sessionID, created, firstClaim, completedAt); err != nil {
+		return nil, err
+	}
+	return &t, nil
+}
+
+// fillTaskTimes parses the stored timestamps onto a task. Shared by both
+// scanners so the two cannot come to disagree about how a time is read.
+func fillTaskTimes(t *Task, sessionID sql.NullString, created string, firstClaim, completedAt sql.NullString) error {
 	if sessionID.Valid {
 		t.SessionID = &sessionID.String
 	}
 	var err error
 	if t.CreatedAt, err = time.Parse(time.RFC3339Nano, created); err != nil {
-		return nil, fmt.Errorf("task %s has an unreadable created_at: %w", t.ID, err)
+		return fmt.Errorf("task %s has an unreadable created_at: %w", t.ID, err)
 	}
 	if t.FirstClaimedAt, err = nullTime(firstClaim); err != nil {
-		return nil, err
+		return err
 	}
 	if t.CompletedAt, err = nullTime(completedAt); err != nil {
-		return nil, err
+		return err
 	}
-	return &t, nil
+	return nil
 }
 
 func nullTime(ns sql.NullString) (*time.Time, error) {

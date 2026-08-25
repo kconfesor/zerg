@@ -2,6 +2,31 @@
 import { computed } from 'vue'
 import type { ResolvedRole, Task } from '@/lib/api'
 import { duration } from '@/lib/utils'
+
+/**
+ * "3m ago" rather than a timestamp. On a board the useful question is how long
+ * something has been sitting, and a clock time makes you do that subtraction
+ * yourself.
+ */
+function ago(iso?: string): string {
+  if (!iso) return ''
+  const secs = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000)
+  if (secs < 60) return 'just now'
+  if (secs < 3600) return `${Math.floor(secs / 60)}m ago`
+  if (secs < 86400) return `${Math.floor(secs / 3600)}h ago`
+  return `${Math.floor(secs / 86400)}d ago`
+}
+
+function compactTokens(n: number): string {
+  if (!n) return ''
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
+  if (n >= 1_000) return `${Math.round(n / 1000)}k`
+  return String(n)
+}
+
+function money(n: number): string {
+  return n >= 1 ? `$${n.toFixed(2)}` : `$${n.toFixed(3)}`
+}
 import { Badge } from '@/components/ui/badge'
 
 const props = defineProps<{ team: ResolvedRole[]; tasks: Task[] }>()
@@ -63,7 +88,17 @@ const byLane = computed(() => {
             ]"
             @click="emit('open', task)"
           >
-            <div class="mb-2 text-xs leading-snug font-medium break-words">{{ task.name }}</div>
+            <div class="mb-1.5 text-xs leading-snug font-medium break-words">{{ task.name }}</div>
+
+            <!-- What is happening right now. "working" for four minutes is
+                 indistinguishable from stuck; the tool it just ran is not. -->
+            <p
+              v-if="task.state === 'working' && task.doing"
+              class="text-muted-foreground mb-1.5 truncate font-mono text-[10px]"
+              :title="task.doing"
+            >
+              {{ task.doing }}
+            </p>
             <div class="flex flex-wrap items-center gap-1.5">
               <!-- lane says who holds the card, state says whether they are
                    actually working it. Showing only the lane makes a card read
@@ -76,6 +111,24 @@ const byLane = computed(() => {
               </Badge>
               <span v-if="task.activeMs > 0" class="tabular text-muted-foreground ml-auto text-[10px]">
                 {{ duration(task.activeMs) }}
+              </span>
+            </div>
+
+            <!-- When, and what it cost. Both were only discoverable by opening
+                 the card, which is the wrong place for the number that tells
+                 you whether to open it. -->
+            <div
+              v-if="task.tokens || task.completedAt || task.firstClaimedAt"
+              class="text-muted-foreground mt-1.5 flex flex-wrap items-center gap-x-2 text-[10px]"
+            >
+              <span v-if="task.state === 'done' && task.completedAt">
+                done {{ ago(task.completedAt) }}
+              </span>
+              <span v-else-if="task.firstClaimedAt">started {{ ago(task.firstClaimedAt) }}</span>
+              <span v-else>queued {{ ago(task.createdAt) }}</span>
+
+              <span v-if="task.tokens" class="tabular ml-auto">
+                {{ compactTokens(task.tokens) }} · {{ money(task.costUsd) }}
               </span>
             </div>
           </button>
