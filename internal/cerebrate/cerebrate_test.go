@@ -180,7 +180,7 @@ func TestPublishesEventsAndReachesReady(t *testing.T) {
 		t.Error("events need ids to be replayable")
 	}
 
-	waitFor(t, func() bool { return c.State() == StateReady }, 3*time.Second,
+	waitFor(t, func() bool { return c.State() == StateReady }, 15*time.Second,
 		"cerebrate never reached ready")
 }
 
@@ -194,7 +194,7 @@ func TestRestartsAfterExit(t *testing.T) {
 	defer cancel()
 	go c.Run(ctx)
 
-	waitFor(t, func() bool { return a.Spawns() >= 3 }, 5*time.Second,
+	waitFor(t, func() bool { return a.Spawns() >= 3 }, 15*time.Second,
 		"the agent was not restarted after exiting")
 	if c.Restarts() == 0 {
 		t.Error("restarts were not counted")
@@ -214,7 +214,7 @@ func TestBackoffGrowsBetweenRestarts(t *testing.T) {
 
 	start := time.Now()
 	go c.Run(ctx)
-	waitFor(t, func() bool { return a.Spawns() >= 4 }, 8*time.Second,
+	waitFor(t, func() bool { return a.Spawns() >= 4 }, 24*time.Second,
 		"the agent did not restart enough times to observe backoff")
 	elapsed := time.Since(start)
 
@@ -265,7 +265,7 @@ func TestBlockedPreflightPreventsSpawnAndRecovers(t *testing.T) {
 	defer cancel()
 	go c.Run(ctx)
 
-	waitFor(t, func() bool { return c.State() == StateBlocked }, 3*time.Second,
+	waitFor(t, func() bool { return c.State() == StateBlocked }, 15*time.Second,
 		"a blocked preflight did not block the role")
 	if a.Spawns() != 0 {
 		t.Errorf("spawned %d times despite a blocked preflight, want 0", a.Spawns())
@@ -277,7 +277,7 @@ func TestBlockedPreflightPreventsSpawnAndRecovers(t *testing.T) {
 	// Blocked is not fatal. Fixing the cause should be picked up without a
 	// manual restart.
 	pf.allow()
-	waitFor(t, func() bool { return c.State() == StateReady }, 5*time.Second,
+	waitFor(t, func() bool { return c.State() == StateReady }, 15*time.Second,
 		"the role did not recover once preflight passed")
 }
 
@@ -303,7 +303,7 @@ func TestSubmitWritesTheEncodedTurn(t *testing.T) {
 	waitFor(t, func() bool {
 		b, err := os.ReadFile(out)
 		return err == nil && strings.Contains(string(b), "do the thing")
-	}, 5*time.Second, "the submitted turn never reached the agent's stdin")
+	}, 15*time.Second, "the submitted turn never reached the agent's stdin")
 
 	b, _ := os.ReadFile(out)
 	// Encoding belongs to the adapter, because the harnesses disagree entirely.
@@ -392,7 +392,7 @@ func TestCancellingStopsCleanly(t *testing.T) {
 	done := make(chan struct{})
 	go func() { c.Run(ctx); close(done) }()
 
-	waitFor(t, func() bool { return c.State() == StateReady }, 5*time.Second, "never became ready")
+	waitFor(t, func() bool { return c.State() == StateReady }, 15*time.Second, "never became ready")
 	cancel()
 
 	select {
@@ -422,7 +422,7 @@ func TestSystemPromptIsWrittenOutsideTheWorktree(t *testing.T) {
 	go c.Run(ctx)
 
 	path := filepath.Join(stateDir, "coder.system.md")
-	waitFor(t, func() bool { _, err := os.Stat(path); return err == nil }, 4*time.Second,
+	waitFor(t, func() bool { _, err := os.Stat(path); return err == nil }, 15*time.Second,
 		"the composed prompt was never written")
 
 	body, err := os.ReadFile(path)
@@ -437,6 +437,13 @@ func TestSystemPromptIsWrittenOutsideTheWorktree(t *testing.T) {
 	}
 }
 
+// waitFor polls until a condition holds, and gives up generously.
+//
+// The bound is wall-clock, and these tests share a machine that may be running
+// several agent processes. A tight bound turns "the laptop was busy" into a
+// test failure, which teaches people to re-run rather than to read — and the
+// generous bound costs nothing when the condition holds, because this returns
+// the instant it does.
 func waitFor(t *testing.T, cond func() bool, timeout time.Duration, msg string) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)

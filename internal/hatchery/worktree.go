@@ -339,7 +339,32 @@ type ChangedFile struct {
 // spec, a design note — the diff is the document with a plus in front of every
 // line, and the thing you actually want to read is the document.
 func (h *Hatchery) ChangedFiles(ctx context.Context, sha string, maxBytes int) ([]ChangedFile, error) {
-	out, err := git(ctx, h.repoPath, "show", "--format=", "--name-status", sha)
+	return h.changed(ctx, sha, "", maxBytes)
+}
+
+// RangeFiles returns everything between base and sha — what would land if the
+// commit were merged.
+//
+// This is the question at the final gate, and it is a different question from
+// "what did the last role write". A task takes several commits across several
+// roles, and approving the last one while seeing only its diff is approving a
+// merge on the strength of its final paragraph.
+//
+// base...sha, three dots: the changes on sha's side since the two diverged,
+// not everything that happened on base meanwhile. Two dots would show the base
+// branch's own progress as if this task had made it.
+func (h *Hatchery) RangeFiles(ctx context.Context, base, sha string, maxBytes int) ([]ChangedFile, error) {
+	return h.changed(ctx, sha, base, maxBytes)
+}
+
+func (h *Hatchery) changed(ctx context.Context, sha, base string, maxBytes int) ([]ChangedFile, error) {
+	var out string
+	var err error
+	if base != "" {
+		out, err = git(ctx, h.repoPath, "diff", "--name-status", base+"..."+sha)
+	} else {
+		out, err = git(ctx, h.repoPath, "show", "--format=", "--name-status", sha)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("listing what %s changed: %w", sha, err)
 	}
@@ -361,10 +386,15 @@ func (h *Hatchery) ChangedFiles(ctx context.Context, sha string, maxBytes int) (
 		}
 		// The diff comes too: content alone cannot show what changed in a file
 		// that already existed.
-		if d, err := git(ctx, h.repoPath, "show", "--format=", "--patch", sha, "--", f.Path); err == nil {
-			if maxBytes <= 0 || len(d) <= maxBytes {
-				f.Diff = d
-			}
+		var d string
+		var derr error
+		if base != "" {
+			d, derr = git(ctx, h.repoPath, "diff", base+"..."+sha, "--", f.Path)
+		} else {
+			d, derr = git(ctx, h.repoPath, "show", "--format=", "--patch", sha, "--", f.Path)
+		}
+		if derr == nil && (maxBytes <= 0 || len(d) <= maxBytes) {
+			f.Diff = d
 		}
 		files = append(files, f)
 	}

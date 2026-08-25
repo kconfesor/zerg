@@ -218,7 +218,8 @@ export const api = {
     }),
 
   taskDetail: (id: string) => call<TaskDetail>(`/tasks/${id}`),
-  approvalDiff: (id: string) => call<{ files: ChangedFile[] }>(`/approvals/${id}/diff`),
+  approvalDiff: (id: string) =>
+    call<{ files: ChangedFile[]; range: boolean; base: string }>(`/approvals/${id}/diff`),
   setIntegration: (id: string, integration: Integration) =>
     call<Project>(`/projects/${id}/integration`, {
       method: 'PUT',

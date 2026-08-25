@@ -253,12 +253,28 @@ func (s *Server) approvalDiff(w http.ResponseWriter, r *http.Request) {
 	// — which is not how anyone reads a document they are being asked to
 	// approve.
 	const maxFile = 256 * 1024
-	files, err := hatchery.New(project.Path).ChangedFiles(r.Context(), approval.Commit, maxFile)
+	hat := hatchery.New(project.Path)
+
+	// The final gate asks a different question. A hand-off between roles is
+	// about what that role just wrote; the approval that lands the work is
+	// about everything that would reach the base branch, which is usually
+	// several commits by several roles.
+	var files []hatchery.ChangedFile
+	if approval.Terminal {
+		files, err = hat.RangeFiles(r.Context(), project.BaseBranch, approval.Commit, maxFile)
+	} else {
+		files, err = hat.ChangedFiles(r.Context(), approval.Commit, maxFile)
+	}
 	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"files": files})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"files": files,
+		// So the view can say whether this is one commit or a merge.
+		"range": approval.Terminal,
+		"base":  project.BaseBranch,
+	})
 }
 
 // openProject records that a project was opened, so the picker and the initial

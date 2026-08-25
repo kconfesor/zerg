@@ -124,6 +124,12 @@ type Approval struct {
 	// something they cannot read.
 	Body   string `json:"body,omitempty"`
 	Commit string `json:"commit,omitempty"`
+
+	// Terminal marks the approval that lands the work. It changes what the
+	// reader needs to see: for a hand-off between roles, the question is what
+	// that role just wrote; for this one, it is everything about to reach the
+	// base branch, which is usually more than one commit.
+	Terminal bool `json:"terminal"`
 }
 
 type Session struct {
@@ -388,7 +394,7 @@ func (db *DB) ListPendingApprovals(ctx context.Context, projectID string) ([]App
 	rows, err := db.sql.QueryContext(ctx,
 		`SELECT a.id, a.project_id, a.message_id, a.state, a.note, a.created_at,
 		        COALESCE(t.name, ''), COALESCE(m.task_id, ''), m.from_role,
-		        m.body, COALESCE(m.commit_sha, '')
+		        m.body, COALESCE(m.commit_sha, ''), m.terminal
 		 FROM approvals a
 		 JOIN messages m ON m.id = a.message_id
 		 LEFT JOIN tasks t ON t.id = m.task_id
@@ -402,14 +408,17 @@ func (db *DB) ListPendingApprovals(ctx context.Context, projectID string) ([]App
 	var out []Approval
 	for rows.Next() {
 		var (
-			a       Approval
-			note    sql.NullString
-			created string
+			a        Approval
+			note     sql.NullString
+			created  string
+			terminal int
 		)
 		if err := rows.Scan(&a.ID, &a.ProjectID, &a.MessageID, &a.State, &note,
-			&created, &a.TaskName, &a.TaskID, &a.FromRole, &a.Body, &a.Commit); err != nil {
+			&created, &a.TaskName, &a.TaskID, &a.FromRole, &a.Body, &a.Commit,
+			&terminal); err != nil {
 			return nil, err
 		}
+		a.Terminal = terminal != 0
 		if note.Valid {
 			a.Note = &note.String
 		}
@@ -674,25 +683,27 @@ func (db *DB) GetApproval(ctx context.Context, id string) (*Approval, error) {
 	row := db.sql.QueryRowContext(ctx,
 		`SELECT a.id, a.project_id, a.message_id, a.state, a.note, a.created_at,
 		        COALESCE(t.name, ''), COALESCE(m.task_id, ''), m.from_role,
-		        m.body, COALESCE(m.commit_sha, '')
+		        m.body, COALESCE(m.commit_sha, ''), m.terminal
 		   FROM approvals a
 		   JOIN messages m ON m.id = a.message_id
 		   LEFT JOIN tasks t ON t.id = m.task_id
 		  WHERE a.id = ?`, id)
 
 	var (
-		a       Approval
-		note    sql.NullString
-		created string
+		a        Approval
+		note     sql.NullString
+		created  string
+		terminal int
 	)
 	err := row.Scan(&a.ID, &a.ProjectID, &a.MessageID, &a.State, &note, &created,
-		&a.TaskName, &a.TaskID, &a.FromRole, &a.Body, &a.Commit)
+		&a.TaskName, &a.TaskID, &a.FromRole, &a.Body, &a.Commit, &terminal)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("approval %s: %w", id, ErrNotFound)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("reading approval: %w", err)
 	}
+	a.Terminal = terminal != 0
 	if note.Valid {
 		a.Note = &note.String
 	}

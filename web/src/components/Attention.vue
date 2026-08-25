@@ -4,6 +4,7 @@ import type { Attention } from '@/lib/api'
 import { ChevronRight } from '@lucide/vue'
 import { api, type ChangedFile } from '@/lib/api'
 import { renderMarkdown } from '@/lib/markdown'
+import DiffView from '@/components/DiffView.vue'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -16,7 +17,9 @@ const emit = defineEmits<{
 }>()
 
 const notesOpen = ref<Record<string, boolean>>({})
-const diffs = ref<Record<string, { open: boolean; files: ChangedFile[]; error?: string }>>({})
+const diffs = ref<
+  Record<string, { open: boolean; files: ChangedFile[]; range?: boolean; base?: string; error?: string }>
+>({})
 
 /** Markdown is shown as the document it is. Everything else is shown as a
  *  diff, because for a change to existing code the change *is* the point —
@@ -47,7 +50,10 @@ async function loadFiles(id: string) {
   diffs.value = { ...diffs.value, [id]: { open: true, files: [] } }
   try {
     const r = await api.approvalDiff(id)
-    diffs.value = { ...diffs.value, [id]: { open: true, files: r.files ?? [] } }
+    diffs.value = {
+      ...diffs.value,
+      [id]: { open: true, files: r.files ?? [], range: r.range, base: r.base },
+    }
   } catch (e) {
     diffs.value = {
       ...diffs.value,
@@ -151,6 +157,15 @@ function empty(a: Attention | null): boolean {
             Loading…
           </p>
 
+          <p
+            v-if="diffs[a.id]?.range && diffs[a.id]?.files.length"
+            class="text-muted-foreground mb-1.5 text-[11px]"
+          >
+            Everything that would land on <code>{{ diffs[a.id]?.base }}</code> —
+            {{ diffs[a.id]!.files.length }}
+            {{ diffs[a.id]!.files.length === 1 ? 'file' : 'files' }}.
+          </p>
+
           <div
             v-for="f in diffs[a.id]?.files ?? []"
             :key="f.path"
@@ -168,10 +183,10 @@ function empty(a: Attention | null): boolean {
               class="md max-h-[26rem] overflow-y-auto px-3 py-2 text-xs leading-relaxed"
               v-html="renderMarkdown(f.content ?? '')"
             />
-            <pre
-              v-else
-              class="bg-muted max-h-80 overflow-auto p-2 font-mono text-[10px] leading-relaxed"
-            >{{ f.diff || '(no diff)' }}</pre>
+            <div v-else class="max-h-96 overflow-y-auto py-1">
+              <DiffView v-if="f.diff" :diff="f.diff" />
+              <p v-else class="text-muted-foreground px-2 text-[11px]">(no diff)</p>
+            </div>
           </div>
         </div>
       </div>
