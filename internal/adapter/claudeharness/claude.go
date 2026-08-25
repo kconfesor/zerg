@@ -14,8 +14,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/kconfesor/zerg/internal/adapter"
 )
@@ -432,4 +435,101 @@ func (*Adapter) EncodeTurn(text string) ([]byte, error) {
 		return nil, fmt.Errorf("claude: encoding turn: %w", err)
 	}
 	return append(b, '\n'), nil
+}
+
+// ── provider limits ───────────────────────────────────────────────────────
+
+// claudeLimit matches what Claude Code prints when the subscription window is
+// spent. Captured from the binary rather than recalled: its own fatal-error
+// classifier carries "usage limit reached", and the surrounding copy is
+// "resets in <duration>" or "until your limit resets at <time>".
+var (
+	// "until your limit resets" is the blocking phrasing, and is matched in
+	// full. A bare "limit resets" is not: the binary also carries
+	// "Lower-priority mode is offered again after your weekly limit resets",
+	// which is informational, and pausing a working agent on it would be a
+	// far worse failure than missing a throttle.
+	claudeLimit = regexp.MustCompile(
+		`(?i)usage limit reached|until your limit resets|rate_limit_error|\brate limit exceeded\b`)
+
+	// "resets at 3pm", "resets at 15:00" — an absolute wall-clock time, which
+	// is what the subscription copy uses.
+	claudeResetsAt = regexp.MustCompile(`(?i)resets? at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?`)
+
+	// "resets in 42 minutes", "try again in ~3 hours".
+	claudeResetsIn = regexp.MustCompile(`(?i)(?:resets?|try again) in\s+~?\s*(\d+)\s*(second|minute|hour|min|hr|sec)s?`)
+)
+
+// ThrottledBy recognises the subscription window being spent.
+func (*Adapter) ThrottledBy(text string) (adapter.Throttle, bool) {
+	if !claudeLimit.MatchString(text) {
+		return adapter.Throttle{}, false
+	}
+	return adapter.Throttle{
+		Until:  claudeResetAt(text, time.Now()),
+		Detail: firstLine(text),
+	}, true
+}
+
+// claudeResetAt reads whichever phrasing is present, and returns the zero time
+// when neither is. A throttle with no known end is still a throttle; guessing
+// an end would produce a role that says it resumes at a time it will not.
+func claudeResetAt(text string, now time.Time) time.Time {
+	if m := claudeResetsIn.FindStringSubmatch(text); m != nil {
+		n, err := strconv.Atoi(m[1])
+		if err != nil {
+			return time.Time{}
+		}
+		switch strings.ToLower(m[2]) {
+		case "second", "sec":
+			return now.Add(time.Duration(n) * time.Second)
+		case "minute", "min":
+			return now.Add(time.Duration(n) * time.Minute)
+		case "hour", "hr":
+			return now.Add(time.Duration(n) * time.Hour)
+		}
+		return time.Time{}
+	}
+
+	m := claudeResetsAt.FindStringSubmatch(text)
+	if m == nil {
+		return time.Time{}
+	}
+	hour, err := strconv.Atoi(m[1])
+	if err != nil || hour > 23 {
+		return time.Time{}
+	}
+	minute := 0
+	if m[2] != "" {
+		if minute, err = strconv.Atoi(m[2]); err != nil || minute > 59 {
+			return time.Time{}
+		}
+	}
+	switch strings.ToLower(m[3]) {
+	case "pm":
+		if hour < 12 {
+			hour += 12
+		}
+	case "am":
+		if hour == 12 {
+			hour = 0
+		}
+	}
+
+	at := time.Date(now.Year(), now.Month(), now.Day(), hour, minute, 0, 0, now.Location())
+	if !at.After(now) {
+		// "resets at 3pm" said at 4pm means tomorrow. A reset time in the past
+		// would otherwise resume the role instantly, straight back into the wall.
+		at = at.AddDate(0, 0, 1)
+	}
+	return at
+}
+
+// firstLine keeps the harness's own sentence without the stack of context
+// that can follow it.
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	return strings.TrimSpace(s)
 }

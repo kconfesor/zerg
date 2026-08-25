@@ -101,6 +101,8 @@ export interface RoleStatus {
   lastError?: string
   restarts: number
   terminal: boolean
+  /** When a spent provider quota is expected to lift. Only while throttled. */
+  throttledUntil?: string
 }
 
 export interface SwarmStatus {

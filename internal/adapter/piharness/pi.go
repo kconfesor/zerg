@@ -6,7 +6,8 @@
 // or derived — were unexercised until something multi-provider and
 // subscription-billed had to fill them.
 //
-// Every shape decoded here was captured from pi 0.74.2 rather than recalled.
+// Every shape decoded here was captured from a running pi rather than recalled:
+// originally 0.74.2, re-checked against 0.84.3.
 package piharness
 
 import (
@@ -17,8 +18,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/kconfesor/zerg/internal/adapter"
 )
@@ -138,19 +142,21 @@ func billingFor(provider string) adapter.Billing {
 
 // ── models ────────────────────────────────────────────────────────────────
 
-// ListModels unions pi's two catalogs, because neither one is complete.
+// ListModels unions pi's two catalogs, because either one can be incomplete.
 //
 // `pi --list-models` prints a fixed-column table; ~/.pi/agent/models-store.json
-// is what its own picker reads. Measured against pi 0.74.2 they disagree in
-// both directions: the table carries gpt-5.1 through gpt-5.3-codex, which the
-// store omits, and the store carries gpt-5.6-sol, -luna and -terra, which the
-// table omits despite their working when passed to --model. Twelve and ten
-// entries, sixteen between them.
+// is what its own picker reads. On pi 0.74.2 they disagreed in both directions:
+// the table carried gpt-5.1 through gpt-5.3-codex, which the store omitted, and
+// the store carried gpt-5.6-sol, -luna and -terra, which the table omitted
+// despite their working when passed to --model. Twelve and ten entries, sixteen
+// between them.
 //
-// So neither is authoritative and picking one loses models a person can see in
-// pi itself. Both are read and merged, keyed by provider/id. The store wins on
-// metadata: it is JSON with an exact context window, where the table rounds to
-// a "272K" column that has to be parsed back.
+// On 0.84.3 they agree, so the merge is currently a no-op. It is kept because
+// the disagreement was real and cost a person models they could select in pi
+// itself, and because a union of two sources is only wrong if a source lies —
+// which neither does. Both are read and merged, keyed by provider/id. The store
+// wins on metadata: it is JSON with an exact context window, where the table
+// rounds to a "272K" column that has to be parsed back.
 //
 // Either source failing degrades to whatever the other returned, and both
 // failing to an empty catalog rather than an error — the role editor accepts
@@ -501,4 +507,72 @@ func seedConfigDir(dir string) error {
 		}
 	}
 	return nil
+}
+
+// ── provider limits ───────────────────────────────────────────────────────
+
+// pi's Codex provider composes "You have hit your ChatGPT usage limit (plus
+// plan). Try again in ~47 min." from the error's plan_type and resets_at, and
+// falls through to the raw codes for everything else. Both are matched: the
+// sentence is what reaches stdout, the codes are what appear when a raw error
+// body is passed through.
+//
+// Read from pi's own openai-codex-responses.js rather than recalled.
+var (
+	piLimit = regexp.MustCompile(
+		`(?i)usage_limit_reached|usage_not_included|rate_limit_exceeded|hit your .* usage limit|\b429\b`)
+
+	// "Try again in ~47 min."
+	piRetryIn = regexp.MustCompile(`(?i)try again in\s+~?\s*(\d+)\s*(second|minute|hour|min|hr|sec)s?`)
+
+	// resets_at is a unix second, and survives when a raw error body is what
+	// reached the stream.
+	piResetsAt = regexp.MustCompile(`"resets_at"\s*:\s*(\d{9,11})`)
+)
+
+// ThrottledBy recognises the provider refusing work on quota.
+func (*Adapter) ThrottledBy(text string) (adapter.Throttle, bool) {
+	if !piLimit.MatchString(text) {
+		return adapter.Throttle{}, false
+	}
+	return adapter.Throttle{
+		Until:  piResetAt(text, time.Now()),
+		Detail: firstLine(text),
+	}, true
+}
+
+func piResetAt(text string, now time.Time) time.Time {
+	// The absolute stamp is preferred: a relative "~47 min" was already
+	// rounded by pi from this same value.
+	if m := piResetsAt.FindStringSubmatch(text); m != nil {
+		if sec, err := strconv.ParseInt(m[1], 10, 64); err == nil {
+			if at := time.Unix(sec, 0); at.After(now) {
+				return at
+			}
+		}
+	}
+	m := piRetryIn.FindStringSubmatch(text)
+	if m == nil {
+		return time.Time{}
+	}
+	n, err := strconv.Atoi(m[1])
+	if err != nil {
+		return time.Time{}
+	}
+	switch strings.ToLower(m[2]) {
+	case "second", "sec":
+		return now.Add(time.Duration(n) * time.Second)
+	case "minute", "min":
+		return now.Add(time.Duration(n) * time.Minute)
+	case "hour", "hr":
+		return now.Add(time.Duration(n) * time.Hour)
+	}
+	return time.Time{}
+}
+
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	return strings.TrimSpace(s)
 }

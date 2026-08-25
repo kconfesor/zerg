@@ -34,6 +34,8 @@ So:
 - **agents emit structured events**, so the cockpit renders tool calls, tokens and cost instead of
   scraping a terminal
 - **leases, not fire-and-forget** — unacked work returns to the queue; a stall is a state, not silence
+- **a spent quota is a pause, not a crash** — a role that hits its subscription limit waits for the
+  window and resumes itself, saying when ([§16](ARCHITECTURE.md#16-provider-limits))
 - **one SQLite database**, one writer, real transactions
 - **nothing reports success it did not observe** — see [§6.1](ARCHITECTURE.md#61-what-the-first-real-run-broke),
   which is the record of a task reaching Done over a branch that had never moved

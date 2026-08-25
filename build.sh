@@ -1,15 +1,21 @@
 #!/usr/bin/env bash
 # Builds the cockpit and compiles it into the zerg binary.
-#
-# Node 24.19.0 (see .nvmrc): Vite 8 and the shadcn-vue CLI require
-# ^22.18.0 || >=24.12.0, and this machine's shell resolves to 22.12.0.
 set -euo pipefail
 cd "$(dirname "$0")"
 
-if [ -s "$HOME/.nvm/nvm.sh" ]; then
-  # shellcheck disable=SC1091
-  . "$HOME/.nvm/nvm.sh"
-  nvm use "$(cat .nvmrc)" >/dev/null
+# Vite 8 and the shadcn-vue CLI require ^22.18.0 || >=24.12.0. Rather than
+# activate a version manager, check what is on PATH and say what is wrong —
+# a build that silently runs on the wrong Node fails much further downstream.
+need=$(cat .nvmrc)
+have=$(node -v 2>/dev/null | sed 's/^v//') || true
+if [ -z "$have" ]; then
+  echo "node is not on PATH; this project needs $need" >&2
+  exit 1
+fi
+major=${have%%.*}
+if [ "$major" -lt 24 ]; then
+  echo "node $have is too old; this project needs $need (found $(command -v node))" >&2
+  exit 1
 fi
 
 echo "==> cockpit"

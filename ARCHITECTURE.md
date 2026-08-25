@@ -989,16 +989,70 @@ and §6.1 are almost entirely coordination bugs caught without spending a token.
 8. **WebSocket transport** (§7.5), replacing the SSE stream it started as.
 9. **Approval gates, integration modes and the gate diff** (§9.1, §9.2) — the run that produced
    §6.1 is what motivated showing `base...sha` at the gate that performs the merge.
-10. **Tailnet and TLS** (§16), because a board you cannot read from a phone gets read less.
+10. **Tailnet and TLS** (§17), because a board you cannot read from a phone gets read less.
+11. **Provider-limit handling** (§16) — a spent quota window pauses a role
+    instead of failing it.
 
 Still open: pty attach and takeover (§10.1, needs `github.com/creack/pty`), artifacts (§13), and
-authentication (§16). Nothing resumes a swarm after a daemon restart — agents stop and stay
+authentication (§17). Nothing resumes a swarm after a daemon restart — agents stop and stay
 stopped until Start is pressed, which is deliberate while spawning an LLM process costs money, but
 it is a decision rather than a finished answer.
 
 ---
 
-## 16. Network exposure
+## 16. Provider limits
+
+A subscription window that is spent looks exactly like a fatal error and is not
+one. Nothing is wrong with the agent, the code or the task, and the correct
+response is to wait — so treating it as a crash costs an operator the twenty
+minutes it takes to discover that the thing to do was nothing.
+
+### 16.1 What the harnesses actually expose
+
+Checked at the source, because the answer determines what is buildable:
+
+| | remaining quota | limit reached |
+|---|---|---|
+| `claude` | **no** — no `usage` subcommand, nothing in `--output-format json`, and `stats-cache.json` is historical consumption | yes: `usage limit reached`, `until your limit resets at <time>` |
+| `pi` | **no** — no usage command, nothing in the model store or auth file | yes: its Codex provider composes *"You have hit your ChatGPT usage limit (plus plan). Try again in ~47 min."* from the error's `plan_type` and `resets_at` |
+
+So a remaining-percentage gauge is not buildable from what the harnesses give
+us. Both learn about the limit **reactively**, in the error, and that one signal
+is what zerg uses. Building the gauge would mean calling an undocumented
+endpoint with the operator's OAuth token, which is fragile and not zerg's
+business — §2 already says provider setup is out of scope.
+
+### 16.2 Throttling is a state, not a failure
+
+`StateThrottled` is distinct from `StateFailed` because it needs nobody to do
+anything: it ends by itself. The supervisor holds the role until the window
+rolls over — a minute past the stated time, since resuming exactly on it races
+the provider's clock and losing that race spends another attempt to learn
+nothing — then respawns and resets the backoff. The worktree and configuration
+are untouched, so this is a pause rather than a teardown.
+
+When the harness says the window is spent but not when it lifts — common — the
+role rechecks every five minutes rather than guessing an end. A role that
+announces it resumes at a time it will not is worse than one that says it does
+not know.
+
+Detection is `adapter.Throttler`, an **optional** interface reached by type
+assertion. A harness that cannot tell a quota limit from any other failure
+should not be forced to pretend, and the assertion keeps every existing
+implementation and test double compiling.
+
+The matching is deliberately narrow. claude's binary carries *"Lower-priority
+mode is offered again after your weekly limit resets"*, which is informational —
+matching a bare `limit resets` would pause a working agent, which is a far worse
+failure than missing a throttle. The blocking phrase is matched in full, and a
+test asserts the informational one does not trigger.
+
+The cockpit shows amber, not red, with the one fact the state raises: *provider
+limit · resumes in 47m*. Red would send someone looking for a problem to fix.
+
+---
+
+## 17. Network exposure
 
 The daemon binds `127.0.0.1:7717` by default. `--addr`, or **Settings → Network**, binds one other
 interface — over Tailscale, that is the tailnet address.

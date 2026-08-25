@@ -117,7 +117,12 @@ type Status struct {
 	State     cerebrate.State `json:"state"`
 	LastError string          `json:"lastError,omitempty"`
 	Restarts  int             `json:"restarts"`
-	Terminal  bool            `json:"terminal"`
+
+	// ThrottledUntil is when a spent provider quota is expected to lift. Set
+	// only while the state is throttled, and absent when the harness said the
+	// window was spent but not for how long.
+	ThrottledUntil *time.Time `json:"throttledUntil,omitempty"`
+	Terminal       bool       `json:"terminal"`
 }
 
 // Running reports whether a project's swarm is up.
@@ -152,6 +157,9 @@ func (o *Overmind) Status(ctx context.Context, projectID string) ([]Status, erro
 		}
 		if c, ok := s.cerebrates[role.Name]; ok {
 			st.State, st.LastError, st.Restarts = c.State(), c.LastError(), c.Restarts()
+			if until := c.ThrottledUntil(); !until.IsZero() {
+				st.ThrottledUntil = &until
+			}
 		}
 		out = append(out, st)
 	}

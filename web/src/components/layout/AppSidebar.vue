@@ -42,7 +42,20 @@ function tone(state: string): string {
   if (state === 'working') return 'text-[var(--primary)]'
   if (state === 'ready') return 'text-[var(--status-good)]'
   if (state === 'blocked' || state === 'failed') return 'text-destructive'
+  // Waiting on a quota window is not a fault. Amber, not red: nobody has to
+  // do anything, and red would send someone looking for a problem to fix.
+  if (state === 'throttled') return 'text-[var(--status-warning)]'
   return 'text-muted-foreground'
+}
+
+/** "in 47m", "in 2h 10m" — how long until the role resumes by itself. */
+function resumesIn(iso?: string): string {
+  if (!iso) return ''
+  const ms = new Date(iso).getTime() - Date.now()
+  if (!Number.isFinite(ms) || ms <= 0) return 'any moment'
+  const mins = Math.round(ms / 60000)
+  if (mins < 60) return `in ${mins}m`
+  return `in ${Math.floor(mins / 60)}h ${mins % 60}m`
 }
 function live(r: RoleStatus): boolean {
   return r.state === 'working'
@@ -129,8 +142,18 @@ function live(r: RoleStatus): boolean {
             <span class="truncate text-xs font-medium">{{ r.role }}</span>
             <span :class="['tabular ml-auto text-[10px]', tone(r.state)]">{{ r.state }}</span>
           </div>
+          <!-- A throttled role says when it comes back, because that is the
+               only question it raises. It is not an error and is not styled
+               as one. -->
+          <p
+            v-if="r.state === 'throttled'"
+            class="mt-1 pl-3.5 text-[10px] break-words text-[var(--status-warning)]"
+          >
+            provider limit · resumes {{ resumesIn(r.throttledUntil) || 'when the window rolls over' }}
+            <span v-if="r.lastError" class="text-muted-foreground block">{{ r.lastError }}</span>
+          </p>
           <!-- A failed role says why, here, where it is already being looked at. -->
-          <p v-if="r.lastError" class="text-destructive mt-1 pl-3.5 text-[10px] break-words">
+          <p v-else-if="r.lastError" class="text-destructive mt-1 pl-3.5 text-[10px] break-words">
             {{ r.lastError }}
           </p>
         </li>

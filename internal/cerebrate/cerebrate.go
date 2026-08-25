@@ -37,7 +37,10 @@ const (
 	StateWorking  State = "working"  // mid-turn
 	StateBlocked  State = "blocked"  // preflight refused; needs a human
 	StateFailed   State = "failed"   // fatal; will not restart
-	StateStopped  State = "stopped"  // shut down deliberately
+	// StateThrottled is a provider quota window that is spent. Distinct from
+	// failed because it needs no one to do anything: it ends by itself.
+	StateThrottled State = "throttled"
+	StateStopped   State = "stopped" // shut down deliberately
 )
 
 const (
@@ -101,6 +104,8 @@ type Cerebrate struct {
 	state    State
 	lastErr  string
 	restarts int
+	// throttledUntil is when a spent provider quota is expected to lift.
+	throttledUntil time.Time
 
 	stdin io.WriteCloser
 	ready chan struct{} // closed when the agent first reports ready
@@ -142,6 +147,14 @@ func (c *Cerebrate) LastError() string {
 }
 
 // Restarts counts respawns since the last stable run.
+// ThrottledUntil is when a spent quota window is expected to lift. Zero when
+// the role is not throttled, or when the harness did not say.
+func (c *Cerebrate) ThrottledUntil() time.Time {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.throttledUntil
+}
+
 func (c *Cerebrate) Restarts() int {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -157,6 +170,9 @@ func (c *Cerebrate) setBusy(b bool) {
 func (c *Cerebrate) setState(s State, reason string) {
 	c.mu.Lock()
 	c.state = s
+	if s != StateThrottled {
+		c.throttledUntil = time.Time{}
+	}
 	if reason != "" {
 		c.lastErr = reason
 	}
@@ -183,6 +199,18 @@ func (c *Cerebrate) Run(ctx context.Context) error {
 			c.setState(StateStopped, "")
 			return nil
 		case fatal:
+			// A spent quota window looks like a fatal error and is not one:
+			// nothing is wrong with the agent, the code, or the task, and the
+			// correct response is to wait. Failing here would cost an operator
+			// the time it takes to discover the thing to do was nothing.
+			if t, ok := c.throttle(errString(err)); ok {
+				if !c.waitOutThrottle(ctx, t) {
+					c.setState(StateStopped, "")
+					return nil
+				}
+				backoff = c.cfg.backoffBase
+				continue
+			}
 			// Restarting into the same wall is how twenty minutes gets spent on
 			// an agent that cannot work. A fatal error means stop and say so.
 			c.setState(StateFailed, errString(err))
@@ -496,4 +524,60 @@ func errString(err error) string {
 		return ""
 	}
 	return err.Error()
+}
+
+// throttleRecheck is how long to wait when the harness said the quota was
+// spent but not when it lifts. Long enough not to hammer the provider,
+// short enough that a window that rolled over is noticed.
+const throttleRecheck = 5 * time.Minute
+
+// throttle asks the adapter whether this failure is a provider quota limit.
+// Adapters that cannot tell simply do not implement Throttler.
+func (c *Cerebrate) throttle(text string) (adapter.Throttle, bool) {
+	t, ok := c.cfg.Adapter.(adapter.Throttler)
+	if !ok {
+		return adapter.Throttle{}, false
+	}
+	return t.ThrottledBy(text)
+}
+
+// waitOutThrottle holds the role until the quota window rolls over. It reports
+// false if the swarm was shut down while waiting.
+//
+// The role stays configured and its worktree untouched, so nothing has to be
+// rebuilt when it resumes — this is a pause, not a teardown.
+func (c *Cerebrate) waitOutThrottle(ctx context.Context, t adapter.Throttle) bool {
+	wait := throttleRecheck
+	if !t.Until.IsZero() {
+		// A minute past the stated time: resuming exactly on it races the
+		// provider's own clock, and losing that race spends another attempt
+		// to learn nothing.
+		if d := time.Until(t.Until) + time.Minute; d > 0 {
+			wait = d
+		}
+	}
+
+	c.mu.Lock()
+	c.throttledUntil = c.cfg.clock().Add(wait)
+	c.mu.Unlock()
+	c.setState(StateThrottled, t.Detail)
+
+	detail := t.Detail
+	if detail == "" {
+		detail = "the provider refused work on quota"
+	}
+	c.cfg.Log.Warn("provider quota spent, waiting",
+		"role", c.cfg.Role.Name, "resumes_in", wait.Round(time.Second), "detail", detail)
+	c.publish(adapter.Event{
+		Kind: adapter.EventError,
+		Text: fmt.Sprintf("%s is waiting on a provider limit, resuming in %s — %s",
+			c.cfg.Role.Name, wait.Round(time.Minute), detail),
+	})
+
+	select {
+	case <-ctx.Done():
+		return false
+	case <-time.After(wait):
+		return true
+	}
 }

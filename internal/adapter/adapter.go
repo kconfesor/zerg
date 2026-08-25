@@ -268,3 +268,35 @@ type Event struct {
 	// 400 on every turn, indistinguishable from working.
 	Fatal bool
 }
+
+// ── provider limits ───────────────────────────────────────────────────────
+
+// Throttle is a provider refusing work until a quota window rolls over.
+//
+// It is deliberately not an error: nothing is wrong with the agent, the code
+// or the task, and the correct response is to wait rather than to investigate.
+// Treating it as a crash costs the operator the twenty minutes it takes to
+// discover that the thing to do was nothing.
+type Throttle struct {
+	// Until is when the quota is expected to lift. Zero when the harness said
+	// it was throttled but not for how long — common, and not a reason to
+	// discard the rest.
+	Until time.Time
+
+	// Detail is the harness's own sentence, kept verbatim. It names the plan
+	// and the window in the provider's vocabulary, which is what a person
+	// needs to decide whether to wait or switch models.
+	Detail string
+}
+
+// Throttler is implemented by adapters that can recognise their harness
+// refusing work on quota.
+//
+// Optional rather than part of Adapter: a harness that cannot tell a quota
+// limit from any other failure should not be forced to pretend, and the type
+// assertion keeps every existing implementation and test double compiling.
+type Throttler interface {
+	// ThrottledBy reports whether this output is a provider quota limit, and
+	// when it lifts.
+	ThrottledBy(text string) (Throttle, bool)
+}
