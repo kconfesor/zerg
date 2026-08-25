@@ -341,3 +341,21 @@ func TestUsageCarriesTheModelThatActuallyRan(t *testing.T) {
 		t.Errorf("usage model = %q, want the model that ran, claude-sonnet-5", usage.Model)
 	}
 }
+
+// turn_end says a turn ended. It used to also carry the turn's final message,
+// which had already been emitted as its own event — so every answer was stored
+// twice, in the tier with the shortest retention and the largest volume.
+func TestTurnEndDoesNotRepeatTheFinalMessage(t *testing.T) {
+	a := New()
+	line := `{"type":"result","subtype":"success","total_cost_usd":0.1,
+		"result":"the whole answer, again","usage":{"output_tokens":9}}`
+	events, err := a.Parse([]byte(line))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	for _, e := range events {
+		if e.Kind == adapter.EventTurnEnd && e.Text != "" {
+			t.Errorf("turn_end carries %q; the message event already did", e.Text)
+		}
+	}
+}

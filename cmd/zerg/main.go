@@ -25,6 +25,7 @@ import (
 	"github.com/konfessor/zerg/internal/adapter/piharness"
 	"github.com/konfessor/zerg/internal/agent"
 	"github.com/konfessor/zerg/internal/api"
+	"github.com/konfessor/zerg/internal/chat"
 	"github.com/konfessor/zerg/internal/event"
 	"github.com/konfessor/zerg/internal/nydus"
 	"github.com/konfessor/zerg/internal/overmind"
@@ -194,6 +195,11 @@ func runUp(args []string) error {
 		log.Info("reclaimed work from the previous run", "leases", n)
 	}
 
+	// Chat runs outside the pipeline: its own process, its own worktree, no
+	// capability token, so a question cannot disturb work in flight.
+	chatMgr := chat.NewManager(db, registry, bus, log, stateDir)
+	defer chatMgr.StopAll()
+
 	agents := agent.NewServer(db, nyd, log)
 	socket := filepath.Join(stateDir, "agent.sock")
 	if err := agents.Listen(socket); err != nil {
@@ -216,7 +222,7 @@ func runUp(args []string) error {
 	srv := &http.Server{
 		Handler: api.New(api.Deps{
 			DB: db, Log: log, Registry: registry,
-			Overmind: over, Nydus: nyd, Bus: bus, Applied: cfg.Addr,
+			Overmind: over, Nydus: nyd, Bus: bus, Applied: cfg.Addr, Chat: chatMgr,
 		}).Routes(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}

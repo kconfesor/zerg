@@ -2,7 +2,7 @@
 import { computed } from 'vue'
 import type { RoleStatus, SwarmStatus } from '@/lib/api'
 
-export type View = 'board' | 'activity' | 'team' | 'attention' | 'readiness' | 'settings'
+export type View = 'board' | 'activity' | 'chat' | 'team' | 'attention' | 'readiness' | 'settings'
 
 const props = defineProps<{
   view: View
@@ -18,6 +18,7 @@ const emit = defineEmits<{ navigate: [view: View]; close: [] }>()
 const nav = computed(() => [
   { key: 'board' as const, label: 'Board', count: props.taskCount },
   { key: 'activity' as const, label: 'Activity', count: 0 },
+  { key: 'chat' as const, label: 'Chat', count: 0 },
   { key: 'team' as const, label: 'Team', count: 0 },
   { key: 'attention' as const, label: 'Attention', count: props.attentionCount },
   { key: 'readiness' as const, label: 'Readiness', count: 0 },

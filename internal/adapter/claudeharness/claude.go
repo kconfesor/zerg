@@ -361,7 +361,11 @@ func (a *Adapter) Parse(line []byte) ([]adapter.Event, error) {
 			})
 			return out, nil
 		}
-		out = append(out, adapter.Event{Kind: adapter.EventTurnEnd, Text: w.Result})
+		// No text. result.Result is the turn's final assistant message, which
+		// has already arrived as its own message event — carrying it again
+		// stored every answer twice, in the tier that costs the most to keep.
+		// turn_end means the turn ended; that is all anyone reads it for.
+		out = append(out, adapter.Event{Kind: adapter.EventTurnEnd})
 		return out, nil
 
 	default:

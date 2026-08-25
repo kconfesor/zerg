@@ -16,6 +16,7 @@ import {
 import Attention from '@/components/Attention.vue'
 import Activity from '@/components/Activity.vue'
 import Board from '@/components/Board.vue'
+import Chat from '@/components/Chat.vue'
 import Settings from '@/components/Settings.vue'
 import ReadinessPanel from '@/components/Readiness.vue'
 import TeamEditor from '@/components/TeamEditor.vue'
@@ -99,7 +100,7 @@ const working = computed(() => tasks.value.filter((t) => t.state === 'working').
 const boardSubtitle = computed(() => {
   const n = tasks.value.length
   if (!n) return 'No cards yet. Open one to give the agents something to do.'
-  return `${n} ${n === 1 ? 'card' : 'cards'} · ${working.value} being worked`
+  return `${n} ${n === 1 ? 'task' : 'tasks'} · ${working.value} being worked`
 })
 
 function schedulePoll(delay: number) {
@@ -386,10 +387,19 @@ watch(current, () => (banner.value = null))
           <template v-if="view === 'board'">
             <PageHeader title="Board" :subtitle="boardSubtitle">
               <template #actions>
-                <Button @click="composing = true">New card</Button>
+                <Button @click="composing = true">New task</Button>
               </template>
             </PageHeader>
             <div class="pt-4"><Board :team="team" :tasks="tasks" /></div>
+          </template>
+
+          <!-- Chat -->
+          <template v-else-if="view === 'chat'">
+            <PageHeader
+              title="Chat"
+              subtitle="Ask about the project. This agent reads it and answers; it takes no work."
+            />
+            <div class="pt-4"><Chat :project-id="current?.id ?? null" /></div>
           </template>
 
           <!-- Settings -->
@@ -505,10 +515,10 @@ watch(current, () => (banner.value = null))
     <Dialog v-model:open="composing">
       <DialogContent class="sm:max-w-lg">
         <DialogHeader>
-          <DialogTitle>New card</DialogTitle>
+          <DialogTitle>New task</DialogTitle>
           <DialogDescription>
-            Queued for {{ team.find((r) => r.enabled)?.name ?? 'the first role' }}, the first role
-            in the pipeline.
+            Goes to {{ team.find((r) => r.enabled)?.name ?? 'the first role' }} first, then down
+            the pipeline. The last role merges it to {{ current?.baseBranch ?? 'the base branch' }}.
           </DialogDescription>
         </DialogHeader>
 
@@ -517,18 +527,26 @@ watch(current, () => (banner.value = null))
             <Label>Name</Label>
             <Input v-model="taskName" placeholder="Expression parser" autofocus />
             <span class="text-muted-foreground text-[11px]">
-              Short and stable — it follows the card through every role.
+              Short and distinct — every role refers to the task by this name.
             </span>
           </div>
           <div class="flex flex-col gap-1.5">
             <Label>What to do</Label>
-            <Textarea v-model="taskBody" rows="5" placeholder="Describe the work." />
+            <Textarea
+              v-model="taskBody"
+              rows="6"
+              placeholder="Support + - * / with precedence and parentheses. Error on divide by zero. Keep the existing tests passing."
+            />
+            <span class="text-muted-foreground text-[11px]">
+              This is the whole brief — the agent has the repository and nothing else. Concrete
+              cases and what must not break are worth more than length.
+            </span>
           </div>
         </div>
 
         <DialogFooter>
           <Button variant="outline" @click="composing = false">Cancel</Button>
-          <Button :disabled="!taskName.trim()" @click="createTask">Open card</Button>
+          <Button :disabled="!taskName.trim()" @click="createTask">Queue it</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

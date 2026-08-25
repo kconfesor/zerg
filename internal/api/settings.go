@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/konfessor/zerg/internal/hatchery"
 	"github.com/konfessor/zerg/internal/store"
@@ -120,4 +121,33 @@ func Sweep(ctx context.Context, db *store.DB, projectID string, cfg store.Config
 		}
 	}
 	return freed, pruned, nil
+}
+
+type chatRequest struct {
+	Message string `json:"message"`
+}
+
+// chat asks the project's chat agent a question.
+//
+// Returns as soon as the agent has the message, not when it has answered: the
+// reply arrives as events on the stream the cockpit is already watching, so a
+// long answer renders as it is written rather than after a silent wait.
+func (s *Server) askChat(w http.ResponseWriter, r *http.Request) {
+	if s.chatMgr == nil {
+		writeError(w, http.StatusServiceUnavailable, "chat is not available")
+		return
+	}
+	var req chatRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	if strings.TrimSpace(req.Message) == "" {
+		badRequest(w, "a question needs some text")
+		return
+	}
+	if err := s.chatMgr.Ask(r.Context(), r.PathValue("id"), strings.TrimSpace(req.Message)); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "asked"})
 }

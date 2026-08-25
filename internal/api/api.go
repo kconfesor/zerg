@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/konfessor/zerg/internal/adapter"
+	"github.com/konfessor/zerg/internal/chat"
 	"github.com/konfessor/zerg/internal/event"
 	"github.com/konfessor/zerg/internal/nydus"
 	"github.com/konfessor/zerg/internal/overmind"
@@ -35,6 +36,8 @@ type Server struct {
 	// applied is the address this process actually bound, so the UI can tell a
 	// saved setting from a running one.
 	applied string
+
+	chatMgr *chat.Manager
 }
 
 // Deps are what the API needs to serve the cockpit.
@@ -52,6 +55,9 @@ type Deps struct {
 
 	// Applied is the address the daemon bound at startup.
 	Applied string
+
+	// Chat answers questions about a project without touching the pipeline.
+	Chat *chat.Manager
 }
 
 func New(d Deps) *Server {
@@ -61,7 +67,7 @@ func New(d Deps) *Server {
 	}
 	return &Server{
 		db: d.DB, log: d.Log, registry: d.Registry,
-		preflt: pf, over: d.Overmind, nyd: d.Nydus, bus: d.Bus, applied: d.Applied,
+		preflt: pf, over: d.Overmind, nyd: d.Nydus, bus: d.Bus, applied: d.Applied, chatMgr: d.Chat,
 	}
 }
 
@@ -114,6 +120,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/settings", s.getSettings)
 	mux.HandleFunc("PUT /api/settings", s.setSettings)
 	mux.HandleFunc("POST /api/projects/{id}/sweep", s.sweep)
+	mux.HandleFunc("POST /api/projects/{id}/chat", s.askChat)
 	mux.HandleFunc("GET /api/settings/shared-instructions", s.getSharedInstructions)
 	mux.HandleFunc("PUT /api/settings/shared-instructions", s.setSharedInstructions)
 

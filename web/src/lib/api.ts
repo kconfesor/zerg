@@ -193,6 +193,12 @@ export const api = {
   answer: (id: string, answer: string) =>
     call<void>(`/clarifications/${id}/answer`, { method: 'POST', body: JSON.stringify({ answer }) }),
 
+  chat: (id: string, message: string) =>
+    call<{ status: string }>(`/projects/${id}/chat`, {
+      method: 'POST',
+      body: JSON.stringify({ message }),
+    }),
+
   settings: () => call<SettingsResponse>('/settings'),
   setSettings: (cfg: DaemonConfig) =>
     call<SettingsResponse>('/settings', { method: 'PUT', body: JSON.stringify(cfg) }),
