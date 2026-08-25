@@ -480,7 +480,7 @@ watch(current, () => (banner.value = null))
                   : 'Everything waiting on a human appears here'
               "
             />
-            <div class="max-w-3xl pt-4">
+            <div class="pt-4">
               <Attention
                 :attention="attention"
                 @approve="act.approve"
@@ -500,7 +500,7 @@ watch(current, () => (banner.value = null))
                 <Button size="sm" variant="outline" @click="checkReadiness">Re-check</Button>
               </template>
             </PageHeader>
-            <div class="max-w-4xl pt-4">
+            <div class="pt-4">
               <ReadinessPanel :readiness="readiness" />
               <p v-if="!readiness" class="text-muted-foreground py-10 text-center text-xs">
                 Not checked yet. Press Re-check to probe every enabled role.

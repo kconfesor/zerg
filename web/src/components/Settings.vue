@@ -14,6 +14,8 @@ import { Label } from '@/components/ui/label'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Textarea } from '@/components/ui/textarea'
 import { Badge } from '@/components/ui/badge'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import {
   Select,
   SelectContent,
@@ -29,6 +31,7 @@ const form = ref<DaemonConfig | null>(null)
 const saving = ref(false)
 const note = ref<{ tone: 'ok' | 'bad'; text: string } | null>(null)
 const sweeping = ref(false)
+const tab = ref('network')
 
 /** The protocol document every role is given, on top of its own prompt. It had
  *  an endpoint and no UI, so until now it could only be edited with curl. */
@@ -127,7 +130,7 @@ const loopback = computed(() => {
 </script>
 
 <template>
-  <div v-if="form" class="flex max-w-2xl flex-col gap-6">
+  <div v-if="form" class="flex w-full flex-col gap-4">
     <p
       v-if="note"
       :class="[
@@ -140,12 +143,31 @@ const loopback = computed(() => {
       {{ note.text }}
     </p>
 
-    <!-- ── Network ────────────────────────────────────────────────────── -->
-    <section class="flex flex-col gap-3">
-      <div class="flex items-center gap-2">
-        <h2 class="text-sm font-semibold">Network</h2>
-        <Badge variant="outline">applies on restart</Badge>
-      </div>
+    <!-- default-value, not v-model. v-model makes this controlled, and if the
+         update never reaches the ref the tabs are pinned to their initial value
+         with no visible error — which is exactly what happened. Uncontrolled
+         plus a listener keeps reka-ui in charge of the switching and mirrors it
+         out for the save button. -->
+    <Tabs default-value="network" @update:model-value="(v) => (tab = String(v))">
+      <TabsList>
+        <TabsTrigger value="network">Network</TabsTrigger>
+        <TabsTrigger value="disk">Disk</TabsTrigger>
+        <TabsTrigger value="instructions">Instructions</TabsTrigger>
+      </TabsList>
+
+      <!-- ── Network ──────────────────────────────────────────────────── -->
+      <TabsContent value="network" class="pt-4">
+        <Card>
+          <CardHeader>
+            <CardTitle class="flex items-center gap-2 text-sm">
+              How the cockpit is served
+              <Badge variant="outline">applies on restart</Badge>
+            </CardTitle>
+            <CardDescription class="text-[11px]">
+              Where it listens, and whether the connection is encrypted.
+            </CardDescription>
+          </CardHeader>
+          <CardContent class="flex flex-col gap-4">
 
       <div class="flex flex-col gap-1.5">
         <Label for="addr">Listen on</Label>
@@ -227,14 +249,24 @@ const loopback = computed(() => {
         This machine on the tailnet: <code>{{ ts.dnsName }}</code>
         <span v-if="ts.ips?.length"> · {{ ts.ips[0] }}</span>
       </div>
-    </section>
+          </CardContent>
+        </Card>
+      </TabsContent>
 
-    <!-- ── Disk ───────────────────────────────────────────────────────── -->
-    <section class="flex flex-col gap-3">
-      <div class="flex items-center gap-2">
-        <h2 class="text-sm font-semibold">Disk</h2>
-        <Badge variant="outline">applies immediately</Badge>
-      </div>
+
+      <!-- ── Disk ─────────────────────────────────────────────────────── -->
+      <TabsContent value="disk" class="pt-4">
+        <Card>
+          <CardHeader>
+            <CardTitle class="flex items-center gap-2 text-sm">
+              Reclaiming disk
+              <Badge variant="outline">applies immediately</Badge>
+            </CardTitle>
+            <CardDescription class="text-[11px]">
+              Each role gets its own worktree, and build output dominates them.
+            </CardDescription>
+          </CardHeader>
+          <CardContent class="flex flex-col gap-4">
       <p class="text-muted-foreground text-[11px] leading-snug">
         Each role gets its own worktree, and build output dominates them: a Rust calculator is 256 KB
         of source against 45 MB of <code>target/</code>, per role. Sweeping removes only files the
@@ -285,14 +317,24 @@ const loopback = computed(() => {
           {{ sweeping ? 'Sweeping…' : 'Sweep this project now' }}
         </Button>
       </div>
-    </section>
+          </CardContent>
+        </Card>
+      </TabsContent>
 
-    <!-- ── Shared instructions ────────────────────────────────────────── -->
-    <section class="flex flex-col gap-3">
-      <div class="flex items-center gap-2">
-        <h2 class="text-sm font-semibold">Shared instructions</h2>
-        <Badge variant="outline">applies on next spawn</Badge>
-      </div>
+
+      <!-- ── Shared instructions ──────────────────────────────────────── -->
+      <TabsContent value="instructions" class="pt-4">
+        <Card>
+          <CardHeader>
+            <CardTitle class="flex items-center gap-2 text-sm">
+              Shared instructions
+              <Badge variant="outline">applies on next spawn</Badge>
+            </CardTitle>
+            <CardDescription class="text-[11px]">
+              Given to every role on top of its own prompt.
+            </CardDescription>
+          </CardHeader>
+          <CardContent class="flex flex-col gap-3">
       <p class="text-muted-foreground text-[11px] leading-snug">
         Given to every role on top of its own prompt. Role prompts cover the job; this covers the
         protocol — claiming work, handing it on, asking a question — so the two cannot drift apart
@@ -304,9 +346,16 @@ const loopback = computed(() => {
           {{ savingInstructions ? 'Saving…' : 'Save instructions' }}
         </Button>
       </div>
-    </section>
+          </CardContent>
+        </Card>
+      </TabsContent>
+    </Tabs>
 
-    <div class="flex items-center gap-3">
+
+    <!-- Only for the tabs it saves. Instructions are stored separately and have
+         their own button; a second one that quietly ignored what you just typed
+         would be worse than no button at all. -->
+    <div v-if="tab !== 'instructions'" class="flex items-center gap-3">
       <Button :disabled="saving" @click="save">{{ saving ? 'Saving…' : 'Save settings' }}</Button>
       <span v-if="data?.restartNeeded" class="text-[11px] text-[var(--status-warning)]">
         Serving {{ data.applied }} until restart.
