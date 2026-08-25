@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -38,7 +39,7 @@ func newFixture(t *testing.T) *streamFixture {
 	if err := store.Seed(ctx, db, "claude"); err != nil {
 		t.Fatalf("Seed: %v", err)
 	}
-	project, err := db.CreateProject(ctx, filepath.Join(t.TempDir(), "repo"), "", "")
+	project, err := db.CreateProject(ctx, mustDir(t, "repo"), "", "")
 	if err != nil {
 		t.Fatalf("CreateProject: %v", err)
 	}
@@ -294,4 +295,15 @@ func TestStreamHonoursTheRoleFilterWhileLive(t *testing.T) {
 	if got := readActivity(t, ctx, conn); got != wanted {
 		t.Errorf("got %s, want %s; another role's event crossed the filter", got, wanted)
 	}
+}
+
+// mustDir makes a directory for a project to point at. Paths are validated on
+// creation now, so a test cannot name one that does not exist.
+func mustDir(t *testing.T, name string) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("creating %s: %v", dir, err)
+	}
+	return dir
 }

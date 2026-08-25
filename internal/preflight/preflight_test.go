@@ -2,6 +2,7 @@ package preflight
 
 import (
 	"context"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
@@ -58,7 +59,7 @@ func setup(t *testing.T, checks ...adapter.Check) (*Runner, *store.Project, *sto
 	if err := store.Seed(ctx, db, "fakeharness"); err != nil {
 		t.Fatalf("Seed: %v", err)
 	}
-	p, err := db.CreateProject(ctx, filepath.Join(t.TempDir(), "repo"), "", "")
+	p, err := db.CreateProject(ctx, mustDir(t, "repo"), "", "")
 	if err != nil {
 		t.Fatalf("CreateProject: %v", err)
 	}
@@ -269,4 +270,15 @@ func TestDisabledRolesAreNotChecked(t *testing.T) {
 	if len(report.Roles) != 1 {
 		t.Fatalf("checked %d roles, want only the enabled one", len(report.Roles))
 	}
+}
+
+// mustDir makes a directory for a project to point at. Paths are validated on
+// creation now, so a test cannot name one that does not exist.
+func mustDir(t *testing.T, name string) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("creating %s: %v", dir, err)
+	}
+	return dir
 }

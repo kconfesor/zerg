@@ -31,12 +31,12 @@ const emit = defineEmits<{ navigate: [view: View]; close: [] }>()
 // waiting on a person.
 const nav = computed(() => [
   { key: 'board' as const, label: 'Board', icon: Columns3, count: props.taskCount },
+  { key: 'projects' as const, label: 'Projects', icon: FolderGit2, count: props.projectCount },
   { key: 'activity' as const, label: 'Activity', icon: ActivityIcon, count: 0 },
   { key: 'chat' as const, label: 'Chat', icon: MessageSquare, count: 0 },
   { key: 'team' as const, label: 'Team', icon: Users, count: 0 },
   { key: 'attention' as const, label: 'Attention', icon: Bell, count: props.attentionCount },
   { key: 'readiness' as const, label: 'Readiness', icon: ShieldCheck, count: 0 },
-  { key: 'projects' as const, label: 'Projects', icon: FolderGit2, count: props.projectCount },
   { key: 'settings' as const, label: 'Settings', icon: SettingsIcon, count: 0 },
 ])
 

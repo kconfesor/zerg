@@ -3,9 +3,22 @@ package store
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+// repoDir makes a directory for a project to point at. Paths are validated on
+// creation now, so a test cannot name one that does not exist.
+func repoDir(t *testing.T, name string) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("creating %s: %v", dir, err)
+	}
+	return dir
+}
 
 // seeded returns a db with the built-in library and one project.
 func seeded(t *testing.T) (*DB, *Project) {
@@ -15,7 +28,7 @@ func seeded(t *testing.T) (*DB, *Project) {
 	if err := Seed(ctx, db, "claude"); err != nil {
 		t.Fatalf("Seed: %v", err)
 	}
-	p, err := db.CreateProject(ctx, filepath.Join(t.TempDir(), "repo"), "", "")
+	p, err := db.CreateProject(ctx, repoDir(t, "repo"), "", "")
 	if err != nil {
 		t.Fatalf("CreateProject: %v", err)
 	}
@@ -35,7 +48,7 @@ func TestCreateProjectDefaults(t *testing.T) {
 	ctx := context.Background()
 	db := newTestDB(t)
 
-	dir := filepath.Join(t.TempDir(), "calc-rs")
+	dir := repoDir(t, "calc-rs")
 	p, err := db.CreateProject(ctx, dir, "", "")
 	if err != nil {
 		t.Fatalf("CreateProject: %v", err)
@@ -316,11 +329,11 @@ func TestListProjectsOrdersByRecency(t *testing.T) {
 	ctx := context.Background()
 	db := newTestDB(t)
 
-	older, err := db.CreateProject(ctx, filepath.Join(t.TempDir(), "older"), "", "")
+	older, err := db.CreateProject(ctx, repoDir(t, "older"), "", "")
 	if err != nil {
 		t.Fatalf("CreateProject: %v", err)
 	}
-	if _, err := db.CreateProject(ctx, filepath.Join(t.TempDir(), "newer"), "", ""); err != nil {
+	if _, err := db.CreateProject(ctx, repoDir(t, "newer"), "", ""); err != nil {
 		t.Fatalf("CreateProject: %v", err)
 	}
 	if err := db.TouchProject(ctx, older.ID); err != nil {
@@ -333,5 +346,64 @@ func TestListProjectsOrdersByRecency(t *testing.T) {
 	}
 	if len(list) != 2 || list[0].Name != "older" {
 		t.Errorf("opening a project did not float it to the top: %+v", list)
+	}
+}
+
+// A path is checked before it becomes a project. Every string used to be
+// accepted, so "/totally/made/up/nonsense" and "/etc/hosts" both became
+// projects — and the mistake surfaced later as a worktree that could not be
+// created, looking like a git fault rather than a typo.
+func TestCreateProjectRejectsPathsThatAreNotDirectories(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+
+	dir := t.TempDir()
+	file := filepath.Join(dir, "notadir")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct{ name, path, want string }{
+		{"missing", filepath.Join(dir, "nope"), "there is nothing at"},
+		{"a file", file, "is a file"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := db.CreateProject(ctx, tc.path, "", "")
+			if err == nil {
+				t.Fatalf("%s was accepted as a project", tc.path)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error does not say %q: %v", tc.want, err)
+			}
+		})
+	}
+
+	// A real directory is fine, git repository or not — the hatchery
+	// initialises one that is not.
+	if _, err := db.CreateProject(ctx, dir, "", ""); err != nil {
+		t.Errorf("a plain directory was refused: %v", err)
+	}
+}
+
+// What CreateProject returns has to be what the database holds. Columns with
+// defaults are set by SQLite, and a hand-built return value reported an empty
+// integration mode while the stored row said "merge".
+func TestCreateProjectReturnsWhatWasStored(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+
+	created, err := db.CreateProject(ctx, t.TempDir(), "", "")
+	if err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+	stored, err := db.GetProject(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("GetProject: %v", err)
+	}
+	if created.Integration != stored.Integration {
+		t.Errorf("returned integration %q, stored %q", created.Integration, stored.Integration)
+	}
+	if created.Integration != IntegrateMerge {
+		t.Errorf("a new project defaults to %q, want %q", created.Integration, IntegrateMerge)
 	}
 }

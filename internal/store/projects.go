@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -25,20 +26,35 @@ func (db *DB) CreateProject(ctx context.Context, path, name, baseBranch string) 
 		baseBranch = "main"
 	}
 
-	p := &Project{
-		ID:         NewID(),
-		Path:       abs,
-		Name:       name,
-		BaseBranch: baseBranch,
-		CreatedAt:  time.Now().UTC(),
+	// A path is checked before it is stored. Without this any string was
+	// accepted — "/totally/made/up/nonsense" and "/etc/hosts" both became
+	// projects — and the mistake surfaced much later as a worktree that could
+	// not be created, by which point it looked like a git problem rather than a
+	// typo in a dialog.
+	info, err := os.Stat(abs)
+	switch {
+	case os.IsNotExist(err):
+		return nil, invalid("there is nothing at %s", abs)
+	case err != nil:
+		return nil, invalid("cannot read %s: %v", abs, err)
+	case !info.IsDir():
+		return nil, invalid("%s is a file; a project is a directory", abs)
 	}
-	_, err = db.sql.ExecContext(ctx,
+
+	id := NewID()
+	created := time.Now().UTC()
+	if _, err := db.sql.ExecContext(ctx,
 		`INSERT INTO projects (id, path, name, base_branch, created_at) VALUES (?,?,?,?,?)`,
-		p.ID, p.Path, p.Name, p.BaseBranch, p.CreatedAt.Format(time.RFC3339Nano))
-	if err != nil {
+		id, abs, name, baseBranch, created.Format(time.RFC3339Nano)); err != nil {
 		return nil, fmt.Errorf("creating project %s: %w", abs, err)
 	}
-	return p, nil
+
+	// Read it back rather than returning the struct that was written. Columns
+	// with defaults — integration is one — are set by the database, and a
+	// hand-built return value reported an empty string for it while the row
+	// said "merge". Returning what was stored is the only way the two cannot
+	// disagree.
+	return db.GetProject(ctx, id)
 }
 
 // ListProjects returns projects most-recently-opened first, so the picker
