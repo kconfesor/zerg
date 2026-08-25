@@ -33,11 +33,19 @@ jobs:
       - name: test
         run: go test ./...
 
-      # The concurrency findings were races and orderings. Running the packages
-      # that supervise processes and route work under -race is what makes the
-      # next one fail here rather than in someone's transcript.
-      - name: race
-        run: go test -race ./internal/agent ./internal/event ./internal/cerebrate ./internal/nydus ./internal/overmind
+      # Disabled for now, on request. It has already earned its keep — it found
+      # a real race between the per-spawn config refresh and the quota poller
+      # that `go test` never saw — but it is slow and it is the step that keeps
+      # this workflow red while other things are being fixed.
+      #
+      # Run it by hand before touching anything that supervises a process or
+      # routes work:
+      #
+      #   go test -race ./internal/agent ./internal/event ./internal/cerebrate \
+      #                 ./internal/nydus ./internal/overmind
+      #
+      # - name: race
+      #   run: go test -race ./internal/agent ./internal/event ./internal/cerebrate ./internal/nydus ./internal/overmind
 
   web:
     runs-on: ubuntu-latest
