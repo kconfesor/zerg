@@ -356,7 +356,17 @@ func (c *Cerebrate) Run(ctx context.Context) error {
 		c.cfg.Log.Warn("agent exited, restarting",
 			"role", c.cfg.Role.Name, "after", ranFor, "attempt", attempts,
 			"backoff", backoff, "err", errString(err))
-		c.setState(StateStarting, errString(err))
+
+		// A blocked role keeps saying blocked while it retries.
+		//
+		// Overwriting it with "starting" was wrong twice over: a role waiting
+		// for a person to fix its PATH is not starting, and the true state was
+		// then visible only in the few milliseconds between the check failing
+		// and this line — which the cockpit polls far too slowly to catch, so
+		// a blocked role read as one perpetually about to start.
+		if c.State() != StateBlocked {
+			c.setState(StateStarting, errString(err))
+		}
 
 		select {
 		case <-ctx.Done():

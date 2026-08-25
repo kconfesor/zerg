@@ -439,3 +439,23 @@ func TestPruneTakesMergedZergBranchesOnly(t *testing.T) {
 		}
 	}
 }
+
+// Tests here make their own commits, and a machine with no configured identity
+// — a fresh container, a CI runner — makes git refuse them with "Please tell me
+// who you are". The product sets an identity for the one commit it authors
+// itself (see EnsureRepo); this is the same problem on the test's side of the
+// line, so it is fixed for the whole binary rather than at each call.
+//
+// Environment rather than config: it touches no repository and no file, and it
+// cannot leak into the operator's own commits.
+func TestMain(m *testing.M) {
+	for k, v := range map[string]string{
+		"GIT_AUTHOR_NAME":     "zerg tests",
+		"GIT_AUTHOR_EMAIL":    "tests@localhost",
+		"GIT_COMMITTER_NAME":  "zerg tests",
+		"GIT_COMMITTER_EMAIL": "tests@localhost",
+	} {
+		os.Setenv(k, v)
+	}
+	os.Exit(m.Run())
+}
