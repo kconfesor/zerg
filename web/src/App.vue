@@ -14,6 +14,7 @@ import {
   type Task,
 } from '@/lib/api'
 import Attention from '@/components/Attention.vue'
+import Activity from '@/components/Activity.vue'
 import Board from '@/components/Board.vue'
 import ReadinessPanel from '@/components/Readiness.vue'
 import TeamEditor from '@/components/TeamEditor.vue'
@@ -311,6 +312,20 @@ watch(current, () => (banner.value = null))
               </template>
             </PageHeader>
             <div class="pt-4"><Board :team="team" :tasks="tasks" /></div>
+          </template>
+
+          <!-- Activity -->
+          <template v-else-if="view === 'activity'">
+            <PageHeader
+              title="Activity"
+              subtitle="Every tool call, message and turn, as the agents emit them."
+            />
+            <div class="pt-4">
+              <Activity
+                :project-id="current?.id ?? ''"
+                :roles="team.filter((r) => r.enabled).map((r) => r.name)"
+              />
+            </div>
           </template>
 
           <!-- Team -->

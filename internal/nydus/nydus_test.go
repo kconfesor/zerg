@@ -839,3 +839,51 @@ func TestCompleteRefusesWithoutACommit(t *testing.T) {
 		t.Error("completed a task with no commit to integrate")
 	}
 }
+
+// A lease outlives the process that held it. Agents are children of the daemon,
+// so a restart leaves open leases with no holder — and because the route is
+// `claimed` rather than `queued`, nothing nudges anyone and the work sits until
+// the deadline. Observed: a card reading "working" with twenty minutes left on
+// a lease, beside two live agents that had been handed nothing.
+func TestReclaimRequeuesLeasesThatOutlivedTheirHolder(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t, WithLease(time.Hour)) // nowhere near expiry
+	task := f.task(t, "Calculator")
+
+	// From coder, not planner: the planner's handoffs sit behind an approval
+	// gate, so they are held rather than queued and there is nothing to claim.
+	if _, err := f.n.Send(ctx, f.project.ID, "coder", SendRequest{
+		To: "reviewer", TaskID: task.ID, Commit: "aaaaaaaaaa", Body: "implemented",
+	}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	lease, err := f.n.Claim(ctx, f.project.ID, "reviewer")
+	if err != nil || lease == nil {
+		t.Fatalf("claim: %v %v", lease, err)
+	}
+
+	// The holder dies with the daemon. Expiry alone does nothing here.
+	if n, err := f.n.ExpireLeases(ctx); err != nil || n != 0 {
+		t.Fatalf("expiry took %d leases before the deadline (err %v); it must not", n, err)
+	}
+
+	n, err := f.n.ReclaimOrphanedLeases(ctx)
+	if err != nil {
+		t.Fatalf("ReclaimOrphanedLeases: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("reclaimed %d leases, want the 1 that was open", n)
+	}
+
+	// The proof is that the work is claimable again, not that a counter moved.
+	again, err := f.n.Claim(ctx, f.project.ID, "reviewer")
+	if err != nil {
+		t.Fatalf("re-claim: %v", err)
+	}
+	if again == nil {
+		t.Fatal("the work did not return to the queue; it is stranded until the deadline")
+	}
+	if again.ID == lease.ID {
+		t.Error("the same dead lease was handed back rather than a new one")
+	}
+}

@@ -651,11 +651,42 @@ func (n *Nydus) Ack(ctx context.Context, leaseID string) error {
 	return tx.Commit()
 }
 
+// ReclaimOrphanedLeases returns every open lease's work to the queue, and is
+// called once when the daemon starts.
+//
+// Agents are child processes of the daemon, so no lease that predates this
+// process can still have a holder. Waiting for the deadline instead means work
+// in flight at a restart sits untouched for up to the full lease period: the
+// route stays `claimed` rather than `queued`, so nothing nudges anyone, and the
+// board shows a card being worked by an agent that no longer exists.
+//
+// Observed after a routine restart — a card reading "working" with a lease
+// twenty minutes from expiry and two live agents that had been handed nothing.
+func (n *Nydus) ReclaimOrphanedLeases(ctx context.Context) (int, error) {
+	return n.expire(ctx, time.Time{})
+}
+
 // ExpireLeases returns unacknowledged work to the queue and reports how many
 // leases lapsed. Without this a crashed agent takes its work with it, and the
 // pipeline stalls with nothing to notice that it has.
 func (n *Nydus) ExpireLeases(ctx context.Context) (int, error) {
+	return n.expire(ctx, n.now())
+}
+
+// expire requeues open leases. A zero deadline means every one of them,
+// regardless of when it lapses; otherwise only those already past it.
+//
+// One body for both callers on purpose: requeueing is the delicate part, and
+// two copies of it would be two chances to get the route state wrong.
+func (n *Nydus) expire(ctx context.Context, deadline time.Time) (int, error) {
 	now := n.now()
+
+	where := `acked_at IS NULL AND expired_at IS NULL`
+	args := []any{}
+	if !deadline.IsZero() {
+		where += ` AND expires_at < ?`
+		args = append(args, deadline.Format(time.RFC3339Nano))
+	}
 
 	tx, err := n.db.SQL().BeginTx(ctx, nil)
 	if err != nil {
@@ -664,8 +695,7 @@ func (n *Nydus) ExpireLeases(ctx context.Context) (int, error) {
 	defer tx.Rollback()
 
 	rows, err := tx.QueryContext(ctx,
-		`SELECT id FROM leases WHERE acked_at IS NULL AND expired_at IS NULL AND expires_at < ?`,
-		now.Format(time.RFC3339Nano))
+		`SELECT id FROM leases WHERE `+where, args...)
 	if err != nil {
 		return 0, fmt.Errorf("finding lapsed leases: %w", err)
 	}

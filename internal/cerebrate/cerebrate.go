@@ -32,7 +32,7 @@ type State string
 
 const (
 	StateIdle     State = "idle"     // not started
-	StateStarting State = "starting" // spawned, no ready event yet
+	StateStarting State = "starting" // spawning; the process is not up yet
 	StateReady    State = "ready"    // accepting turns
 	StateWorking  State = "working"  // mid-turn
 	StateBlocked  State = "blocked"  // preflight refused; needs a human
@@ -277,6 +277,17 @@ func (c *Cerebrate) runOnce(ctx context.Context) (fatal bool, ranFor time.Durati
 	c.ready = make(chan struct{})
 	c.busy = false
 	c.mu.Unlock()
+
+	// The process is up and its input is open, which is the whole of what
+	// "ready" means here: it can be handed a turn.
+	//
+	// This deliberately does not wait for the harness to announce itself.
+	// claude emits its init event only in response to the first turn, so an
+	// agent with nothing queued would never announce anything and would sit at
+	// "starting" indefinitely — which is exactly how a stuck lease came to look
+	// like a failed spawn. The init event still arrives, and still latches the
+	// model and billing mode; it is just not what gates delivery.
+	c.setState(StateReady, "")
 
 	// Read on a goroutine so Wait is always reached. Wait is what enforces
 	// WaitDelay, and WaitDelay is what closes the pipes when a descendant is

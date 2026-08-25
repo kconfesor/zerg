@@ -32,6 +32,17 @@ import (
 	"github.com/konfessor/zerg/internal/store"
 )
 
+// How long an agent transcript stays replayable, and how often the sweep runs.
+//
+// Events are the expensive tier — roughly 40 MB a day at five active roles —
+// and exist to replay recent work. A task's cost, duration and outcome live in
+// usage_turns and tasks, and are kept indefinitely, so ageing a transcript out
+// loses the narrative and none of the metrics.
+const (
+	eventRetention = 14 * 24 * time.Hour
+	retentionSweep = 6 * time.Hour
+)
+
 func main() {
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintf(os.Stderr, "zerg: %v\n", err)
@@ -140,10 +151,23 @@ func runUp(args []string) error {
 	// failure it was built to prevent.
 	event.LogEvents(ctx, bus, log)
 
-	// And something has to keep what the turns cost. Usage is reported once,
-	// as it happens, and cannot be recovered later — an unrecorded turn is
+	// And something has to keep it. Both events and usage are reported once, as
+	// they happen, and cannot be recovered later — an unrecorded turn is
 	// unrecorded permanently.
-	event.RecordUsage(ctx, bus, db, log)
+	event.Record(ctx, bus, db, log)
+
+	// Events are the expensive tier and exist to replay recent work, so they
+	// age out. Costs and outcomes live elsewhere and do not.
+	api.PruneEvents(ctx, db, log, eventRetention, retentionSweep)
+
+	// Agents are children of this process, so any lease still open belongs to a
+	// process that no longer exists. Requeue it now rather than letting the
+	// work sit untouched until its deadline.
+	if n, err := nyd.ReclaimOrphanedLeases(ctx); err != nil {
+		log.Error("could not reclaim leases from the previous run", "err", err)
+	} else if n > 0 {
+		log.Info("reclaimed work from the previous run", "leases", n)
+	}
 
 	agents := agent.NewServer(db, nyd, log)
 	socket := filepath.Join(stateDir, "agent.sock")
@@ -164,7 +188,7 @@ func runUp(args []string) error {
 	srv := &http.Server{
 		Handler: api.New(api.Deps{
 			DB: db, Log: log, Registry: registry,
-			Overmind: over, Nydus: nyd,
+			Overmind: over, Nydus: nyd, Bus: bus,
 		}).Routes(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}

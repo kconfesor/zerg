@@ -193,10 +193,97 @@ export const api = {
   answer: (id: string, answer: string) =>
     call<void>(`/clarifications/${id}/answer`, { method: 'POST', body: JSON.stringify({ answer }) }),
 
+  usage: (id: string, by: 'role' | 'provider' | 'model' = 'role') =>
+    call<UsageTotal[]>(`/projects/${id}/usage?by=${by}`),
+
   sharedInstructions: () => call<{ text: string }>('/settings/shared-instructions'),
   setSharedInstructions: (text: string) =>
     call<{ text: string }>('/settings/shared-instructions', {
       method: 'PUT',
       body: JSON.stringify({ text }),
     }),
+}
+
+// ── activity ────────────────────────────────────────────────────────────────
+
+/** One thing an agent did. */
+export interface ActivityEvent {
+  id: string
+  projectId: string
+  taskId?: string
+  role: string
+  kind:
+    | 'ready'
+    | 'thinking'
+    | 'message'
+    | 'tool_call'
+    | 'tool_done'
+    | 'usage'
+    | 'turn_end'
+    | 'error'
+  at: string
+  text?: string
+  tool?: string
+  data?: Record<string, unknown>
+  fatal?: boolean
+}
+
+export interface UsageTotal {
+  key: string
+  turns: number
+  inputTokens: number
+  cacheWriteTokens: number
+  cacheReadTokens: number
+  outputTokens: number
+  costUsd: number
+  subscriptionTurns: number
+}
+
+export interface ActivityStream {
+  close(): void
+}
+
+/**
+ * Subscribe to a project's activity: history first, then live.
+ *
+ * EventSource rather than a WebSocket because this only ever flows one way. It
+ * also reconnects on its own and resends the last id it saw, and because event
+ * ids are monotonic ULIDs the server treats that header as a replay cursor —
+ * so a dropped connection resumes exactly, with no logic here.
+ */
+export function streamActivity(
+  projectId: string,
+  handlers: {
+    onEvent: (e: ActivityEvent) => void
+    onCaughtUp?: (replayed: number) => void
+    onError?: () => void
+  },
+  opts: { role?: string; limit?: number } = {},
+): ActivityStream {
+  const params = new URLSearchParams()
+  if (opts.role) params.set('role', opts.role)
+  if (opts.limit) params.set('limit', String(opts.limit))
+  const qs = params.toString()
+
+  const src = new EventSource(`/api/projects/${projectId}/events${qs ? `?${qs}` : ''}`)
+
+  src.addEventListener('activity', (ev) => {
+    try {
+      handlers.onEvent(JSON.parse((ev as MessageEvent).data))
+    } catch {
+      // One malformed frame is not a reason to tear down the stream.
+    }
+  })
+  src.addEventListener('caught-up', (ev) => {
+    try {
+      handlers.onCaughtUp?.(JSON.parse((ev as MessageEvent).data).replayed ?? 0)
+    } catch {
+      handlers.onCaughtUp?.(0)
+    }
+  })
+  // EventSource retries by itself, so this reports the gap rather than
+  // reconnecting. Doing both would double the connections.
+  src.onerror = () => handlers.onError?.()
+
+  return { close: () => src.close() }
 }

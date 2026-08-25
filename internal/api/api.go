@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/konfessor/zerg/internal/adapter"
+	"github.com/konfessor/zerg/internal/event"
 	"github.com/konfessor/zerg/internal/nydus"
 	"github.com/konfessor/zerg/internal/overmind"
 	"github.com/konfessor/zerg/internal/preflight"
@@ -29,6 +30,7 @@ type Server struct {
 	preflt   *preflight.Runner
 	over     *overmind.Overmind
 	nyd      *nydus.Nydus
+	bus      *event.Bus
 }
 
 // Deps are what the API needs to serve the cockpit.
@@ -39,6 +41,10 @@ type Deps struct {
 	Preflight *preflight.Runner
 	Overmind  *overmind.Overmind
 	Nydus     *nydus.Nydus
+
+	// Bus is what the activity stream tails. Without it /events replies 503
+	// rather than serving an empty stream that looks like a quiet project.
+	Bus *event.Bus
 }
 
 func New(d Deps) *Server {
@@ -48,7 +54,7 @@ func New(d Deps) *Server {
 	}
 	return &Server{
 		db: d.DB, log: d.Log, registry: d.Registry,
-		preflt: pf, over: d.Overmind, nyd: d.Nydus,
+		preflt: pf, over: d.Overmind, nyd: d.Nydus, bus: d.Bus,
 	}
 }
 
@@ -92,6 +98,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/projects/{id}/tasks", s.newTask)
 	mux.HandleFunc("GET /api/projects/{id}/attention", s.attention)
 	mux.HandleFunc("GET /api/projects/{id}/usage", s.usage)
+	mux.HandleFunc("GET /api/projects/{id}/events", s.events)
 	mux.HandleFunc("GET /api/tasks/{id}/usage", s.taskUsage)
 	mux.HandleFunc("POST /api/approvals/{id}/approve", s.approve)
 	mux.HandleFunc("POST /api/approvals/{id}/reject", s.reject)
