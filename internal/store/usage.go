@@ -26,9 +26,22 @@ type UsageTurn struct {
 	OutputTokens     int `json:"outputTokens"`
 
 	CostUSD    float64 `json:"costUsd"`
-	CostSource string  `json:"costSource"` // harness | computed
-	Billing    string  `json:"billing"`    // metered | subscription
+	CostSource string  `json:"costSource"`
+	Billing    string  `json:"billing"` // metered | subscription
 }
+
+// Where a cost figure came from.
+//
+// CostComputed is defined but never written: deriving cost requires a price
+// table, and §9's model_prices does not exist yet. It is here so the value has
+// one spelling when it does, not because anything produces it — a cost labelled
+// as computed when nothing computed it is worse than no label, because a stored
+// 0.0 then reads as "this turn was free".
+const (
+	CostFromHarness = "harness"
+	CostUnknown     = "unknown"
+	CostComputed    = "computed"
+)
 
 // RecordUsage stores one turn.
 //
@@ -43,7 +56,9 @@ func (db *DB) RecordUsage(ctx context.Context, u UsageTurn) error {
 		u.At = time.Now().UTC()
 	}
 	if u.CostSource == "" {
-		u.CostSource = "harness"
+		// Unknown, not harness. A missing label must not assert that the
+		// harness stated a figure it never sent.
+		u.CostSource = CostUnknown
 	}
 	_, err := db.sql.ExecContext(ctx,
 		`INSERT INTO usage_turns
@@ -76,6 +91,12 @@ type UsageTotal struct {
 	// total across both billing modes would describe neither: a subscription
 	// run looks free, and a metered run looks like it used no tokens.
 	SubscriptionTurns int `json:"subscriptionTurns"`
+
+	// UnpricedTurns are turns whose harness reported no cost. Their tokens are
+	// real and counted; their contribution to CostUSD is zero because nothing
+	// knows what they cost. Without this the total reads as complete when it is
+	// merely the part that happened to be priced.
+	UnpricedTurns int `json:"unpricedTurns"`
 }
 
 // usageGroupable is the set of columns callers may group by, as an allowlist.
@@ -114,7 +135,8 @@ func (db *DB) UsageByGroup(ctx context.Context, projectID, groupBy string, since
 		        COALESCE(SUM(input_tokens),0), COALESCE(SUM(cache_write_tokens),0),
 		        COALESCE(SUM(cache_read_tokens),0), COALESCE(SUM(output_tokens),0),
 		        COALESCE(SUM(cost_usd),0),
-		        COALESCE(SUM(CASE WHEN billing = 'subscription' THEN 1 ELSE 0 END),0)
+		        COALESCE(SUM(CASE WHEN billing = 'subscription' THEN 1 ELSE 0 END),0),
+		        COALESCE(SUM(CASE WHEN cost_source = 'harness' THEN 0 ELSE 1 END),0)
 		 FROM usage_turns WHERE `+where+`
 		 GROUP BY k ORDER BY SUM(cost_usd) DESC, k ASC`, args...)
 	if err != nil {
@@ -126,7 +148,8 @@ func (db *DB) UsageByGroup(ctx context.Context, projectID, groupBy string, since
 	for rows.Next() {
 		var t UsageTotal
 		if err := rows.Scan(&t.Key, &t.Turns, &t.InputTokens, &t.CacheWriteTokens,
-			&t.CacheReadTokens, &t.OutputTokens, &t.CostUSD, &t.SubscriptionTurns); err != nil {
+			&t.CacheReadTokens, &t.OutputTokens, &t.CostUSD,
+			&t.SubscriptionTurns, &t.UnpricedTurns); err != nil {
 			return nil, err
 		}
 		out = append(out, t)
@@ -142,13 +165,15 @@ func (db *DB) UsageForTask(ctx context.Context, taskID string) (UsageTotal, erro
 		        COALESCE(SUM(input_tokens),0), COALESCE(SUM(cache_write_tokens),0),
 		        COALESCE(SUM(cache_read_tokens),0), COALESCE(SUM(output_tokens),0),
 		        COALESCE(SUM(cost_usd),0),
-		        COALESCE(SUM(CASE WHEN billing = 'subscription' THEN 1 ELSE 0 END),0)
+		        COALESCE(SUM(CASE WHEN billing = 'subscription' THEN 1 ELSE 0 END),0),
+		        COALESCE(SUM(CASE WHEN cost_source = 'harness' THEN 0 ELSE 1 END),0)
 		 FROM usage_turns WHERE task_id = ?`, taskID)
 
 	var t UsageTotal
 	t.Key = taskID
 	err := row.Scan(&t.Turns, &t.InputTokens, &t.CacheWriteTokens,
-		&t.CacheReadTokens, &t.OutputTokens, &t.CostUSD, &t.SubscriptionTurns)
+		&t.CacheReadTokens, &t.OutputTokens, &t.CostUSD,
+		&t.SubscriptionTurns, &t.UnpricedTurns)
 	if err != nil {
 		return t, fmt.Errorf("totalling task usage: %w", err)
 	}

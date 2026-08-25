@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { Project, SwarmStatus } from '@/lib/api'
 import { Button } from '@/components/ui/button'
+import UsageSummary from '@/components/layout/UsageSummary.vue'
 import {
   Select,
   SelectContent,
@@ -13,6 +14,9 @@ const props = defineProps<{
   projects: Project[]
   current: Project | null
   status: SwarmStatus
+  // Bumped when work completes, so the figure is not stale the moment it
+  // matters most — right after a run that cost something.
+  usageKey?: number
 }>()
 const emit = defineEmits<{
   openProject: [project: Project]
@@ -52,6 +56,10 @@ function liveCount(s: SwarmStatus): number {
     </span>
 
     <div class="ml-auto flex items-center gap-3">
+      <!-- Spend sits beside the agents that incur it, so it is noticed rather
+           than gone looking for. -->
+      <UsageSummary :project-id="current?.id ?? null" :refresh-key="usageKey" />
+
       <!-- State in words, with colour as reinforcement rather than the message. -->
       <span
         v-if="status.running"

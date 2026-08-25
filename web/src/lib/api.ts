@@ -236,7 +236,11 @@ export interface UsageTotal {
   cacheReadTokens: number
   outputTokens: number
   costUsd: number
+  /** Turns on a plan: real tokens, no marginal dollar cost. */
   subscriptionTurns: number
+  /** Turns whose harness reported no cost. Their tokens count; their price
+   *  does not, so costUsd is the priced part rather than the whole. */
+  unpricedTurns: number
 }
 
 export interface ActivityStream {

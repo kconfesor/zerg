@@ -301,3 +301,43 @@ func TestAnAPIKeyMeansMeteredBilling(t *testing.T) {
 		t.Errorf("usage billing = %q, want metered", evs[0].Billing)
 	}
 }
+
+// The result event carries a turn's usage but does not name the model that
+// produced it, so the model is latched from the stream. Without this every
+// usage row stored an empty model and grouping spend by model — one of the
+// three questions the dashboard answers — returned one nameless bucket.
+func TestUsageCarriesTheModelThatActuallyRan(t *testing.T) {
+	a := New()
+
+	// The alias that was requested is not necessarily what serves the turn, so
+	// the assistant message is the authority.
+	init := `{"type":"system","subtype":"init","model":"sonnet","apiKeySource":"none"}`
+	if _, err := a.Parse([]byte(init)); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	assistant := `{"type":"assistant","message":{"model":"claude-sonnet-5",
+		"content":[{"type":"text","text":"working"}]}}`
+	if _, err := a.Parse([]byte(assistant)); err != nil {
+		t.Fatalf("assistant: %v", err)
+	}
+
+	result := `{"type":"result","subtype":"success","total_cost_usd":0.5,
+		"usage":{"input_tokens":10,"output_tokens":20}}`
+	events, err := a.Parse([]byte(result))
+	if err != nil {
+		t.Fatalf("result: %v", err)
+	}
+
+	var usage *adapter.Event
+	for i := range events {
+		if events[i].Kind == adapter.EventUsage {
+			usage = &events[i]
+		}
+	}
+	if usage == nil {
+		t.Fatal("the result event produced no usage")
+	}
+	if usage.Model != "claude-sonnet-5" {
+		t.Errorf("usage model = %q, want the model that ran, claude-sonnet-5", usage.Model)
+	}
+}

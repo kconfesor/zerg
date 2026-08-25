@@ -38,6 +38,11 @@ const projects = ref<Project[]>([])
 const current = ref<Project | null>(null)
 const view = ref<View>('board')
 
+/** Board ticks between usage refreshes. At a 2s board poll this is ~10s. */
+const USAGE_EVERY = 5
+const usageKey = ref(0)
+let usageTicks = 0
+
 const library = ref<RoleTemplate[]>([])
 const team = ref<ResolvedRole[]>([])
 const tasks = ref<Task[]>([])
@@ -102,6 +107,11 @@ async function refresh() {
     tasks.value = tk
     attention.value = at
     status.value = st
+
+    // Usage moves only when an agent finishes a turn, and it is a summary
+    // rather than a live counter, so it is refreshed on a slower cadence than
+    // the board — a totals query every board tick would be mostly wasted.
+    if (++usageTicks % USAGE_EVERY === 0) usageKey.value++
   } catch (err) {
     fail(err)
   }
@@ -259,6 +269,7 @@ watch(current, () => (banner.value = null))
         :projects="projects"
         :current="current"
         :status="status"
+        :usage-key="usageKey"
         @open-project="open"
         @add-project="addingProject = true"
         @start="start"

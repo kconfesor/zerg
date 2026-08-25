@@ -130,3 +130,42 @@ func TestUsageForTaskSpansEveryLap(t *testing.T) {
 		t.Errorf("task total = %+v; want 3 turns, $6, 230 output", got)
 	}
 }
+
+// A cost nobody reported must not be labelled as one somebody calculated.
+// Nothing computes cost — model_prices does not exist — so a stored 0.0 that
+// claimed to be "computed" would read as a turn that genuinely cost nothing.
+func TestUnreportedCostIsUnknownNotComputed(t *testing.T) {
+	ctx := context.Background()
+	db, p := usageDB(t)
+
+	if err := db.RecordUsage(ctx, UsageTurn{
+		ProjectID: p.ID, Role: "coder", OutputTokens: 900, // no CostSource given
+	}); err != nil {
+		t.Fatalf("RecordUsage: %v", err)
+	}
+	if err := db.RecordUsage(ctx, UsageTurn{
+		ProjectID: p.ID, Role: "reviewer", CostUSD: 2, CostSource: CostFromHarness,
+	}); err != nil {
+		t.Fatalf("RecordUsage: %v", err)
+	}
+
+	got, err := db.UsageByGroup(ctx, p.ID, "role", time.Time{})
+	if err != nil {
+		t.Fatalf("UsageByGroup: %v", err)
+	}
+	byRole := map[string]UsageTotal{}
+	for _, g := range got {
+		byRole[g.Key] = g
+	}
+
+	if byRole["coder"].UnpricedTurns != 1 {
+		t.Error("a turn with no reported cost was counted as priced; the total then reads as complete")
+	}
+	if byRole["reviewer"].UnpricedTurns != 0 {
+		t.Error("a harness-reported cost was counted as unpriced")
+	}
+	// The tokens are real even when the price is not, and must still be counted.
+	if byRole["coder"].OutputTokens != 900 {
+		t.Errorf("unpriced turn lost its tokens: %+v", byRole["coder"])
+	}
+}

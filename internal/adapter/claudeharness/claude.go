@@ -30,13 +30,35 @@ type Adapter struct {
 	// it is written and read on the same stream but not necessarily the same
 	// goroutine.
 	billing atomic.Pointer[string]
+
+	// model is latched the same way, because the result event that carries a
+	// turn's usage does not name the model that produced it. Without this every
+	// usage row stored an empty model, and grouping spend by model — one of the
+	// three questions the dashboard exists to answer — returned a single
+	// nameless bucket.
+	//
+	// The value comes from the assistant messages of the turn rather than from
+	// the requested alias: "sonnet" is what was asked for, "claude-sonnet-5" is
+	// what actually ran, and an alias that silently resolves elsewhere is
+	// precisely what this should make visible.
+	model atomic.Pointer[string]
 }
 
 func New() *Adapter {
 	a := &Adapter{}
 	unknown := string(adapter.BillingUnknown)
 	a.billing.Store(&unknown)
+	empty := ""
+	a.model.Store(&empty)
 	return a
+}
+
+// latchModel records the model actually serving this session. Called wherever
+// the harness names one, since the result event does not.
+func (a *Adapter) latchModel(model string) {
+	if model != "" {
+		a.model.Store(&model)
+	}
 }
 
 // billingFor reads the CLI's own account of how it authenticated. An OAuth
@@ -271,6 +293,7 @@ func (a *Adapter) Parse(line []byte) ([]adapter.Event, error) {
 			// authenticated, so billing mode is latched here for the session.
 			b := string(billingFor(w.APIKeySource))
 			a.billing.Store(&b)
+			a.latchModel(w.Model)
 			return []adapter.Event{{
 				Kind: adapter.EventReady, Model: w.Model,
 				Provider: providerName, Billing: billingFor(w.APIKeySource),
@@ -279,6 +302,8 @@ func (a *Adapter) Parse(line []byte) ([]adapter.Event, error) {
 		return nil, nil // hook_started, hook_response, and friends
 
 	case "assistant":
+		// The resolved model, which is not always the alias that was requested.
+		a.latchModel(w.Message.Model)
 		var out []adapter.Event
 		for _, c := range w.Message.Content {
 			switch c.Type {
@@ -315,6 +340,7 @@ func (a *Adapter) Parse(line []byte) ([]adapter.Event, error) {
 	case "result":
 		out := []adapter.Event{{
 			Kind:             adapter.EventUsage,
+			Model:            deref(a.model.Load()),
 			TokensIn:         w.Usage.InputTokens,
 			CacheReadTokens:  w.Usage.CacheReadInputTokens,
 			CacheWriteTokens: w.Usage.CacheCreationInputTokens,

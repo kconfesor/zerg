@@ -121,9 +121,14 @@ func Payload(ev Event) json.RawMessage {
 }
 
 func recordUsage(ctx context.Context, db *store.DB, log *slog.Logger, ev Event, taskID *string) {
-	source := "computed"
+	// "computed" is reserved for a cost derived from a price table, and no such
+	// table exists yet (§9's model_prices is unbuilt), so it is never written.
+	// Labelling an unreported cost as computed would claim a calculation that
+	// did not happen, and would make a stored 0.0 indistinguishable from a turn
+	// that genuinely cost nothing.
+	source := store.CostUnknown
 	if ev.CostReported {
-		source = "harness"
+		source = store.CostFromHarness
 	}
 	if err := db.RecordUsage(ctx, store.UsageTurn{
 		ProjectID: ev.ProjectID, TaskID: taskID, Role: ev.Role, At: ev.At,
