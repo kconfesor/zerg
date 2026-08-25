@@ -25,6 +25,12 @@ type fixture struct {
 // merges records terminal integration without needing a repository.
 type recordingIntegrator struct{ commits, into []string }
 
+// Resolve is identity here: these tests pass shas already, and the point of
+// the real one is the tree it resolves against, which a fake has none of.
+func (r *recordingIntegrator) Resolve(_ context.Context, _, ref string) (string, error) {
+	return ref, nil
+}
+
 func (r *recordingIntegrator) MergeInto(_ context.Context, _, commit string) error {
 	r.into = append(r.into, commit)
 	return nil

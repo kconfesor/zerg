@@ -109,3 +109,20 @@ func (Git) MergeInto(ctx context.Context, worktreePath, commit string) error {
 	}
 	return nil
 }
+
+// Resolve expands a commit-ish to the sha it names in the tree at path.
+//
+// ^{commit} makes the failure explicit rather than clever: a tag or a tree
+// that is not a commit errors here instead of producing an object id that
+// every later step treats as a commit and fails on obscurely.
+func (Git) Resolve(ctx context.Context, worktreePath, ref string) (string, error) {
+	out, err := runGit(ctx, worktreePath, "rev-parse", "--verify", ref+"^{commit}")
+	if err != nil {
+		return "", err
+	}
+	sha := strings.TrimSpace(out)
+	if sha == "" {
+		return "", fmt.Errorf("%q resolved to nothing in %s", ref, worktreePath)
+	}
+	return sha, nil
+}

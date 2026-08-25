@@ -22,6 +22,12 @@ type fakeIntegrator struct {
 	err    error
 }
 
+// Resolve is identity here: these tests pass shas already, and the point of
+// the real one is the tree it resolves against, which a fake has none of.
+func (f *fakeIntegrator) Resolve(_ context.Context, _, ref string) (string, error) {
+	return ref, nil
+}
+
 func (f *fakeIntegrator) MergeInto(_ context.Context, _, commit string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -695,5 +701,141 @@ func TestClaimMergesHandoffIntoWorktree(t *testing.T) {
 	got, err := os.ReadFile(filepath.Join(reviewerTree, "calc.rs"))
 	if err != nil || string(got) != "fn eval() {}" {
 		t.Errorf("reviewer's tree: calc.rs = %q, err = %v; the work did not arrive", got, err)
+	}
+}
+
+// setupRealRepo builds a project on a real repository with real worktrees and a
+// real integrator, which is the only configuration where ref resolution and
+// merging can be checked against git rather than against a double.
+func setupRealRepo(t *testing.T, roles ...string) (*Nydus, *store.Project, *hatchery.Hatchery) {
+	t.Helper()
+	ctx := context.Background()
+	repo := newRepo(t)
+	hat := hatchery.New(repo)
+	for _, role := range roles {
+		if _, err := hat.EnsureWorktree(ctx, role, "main"); err != nil {
+			t.Fatalf("worktree for %s: %v", role, err)
+		}
+	}
+
+	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if err := store.Seed(ctx, db, "claude"); err != nil {
+		t.Fatalf("Seed: %v", err)
+	}
+	project, err := db.CreateProject(ctx, repo, "", "")
+	if err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+	team := make([]store.ProjectRole, 0, len(roles))
+	for _, role := range roles {
+		tpl, err := db.GetTemplateByName(ctx, role)
+		if err != nil {
+			t.Fatalf("GetTemplateByName(%q): %v", role, err)
+		}
+		team = append(team, store.ProjectRole{TemplateID: tpl.ID, Enabled: true})
+	}
+	if err := db.SetTeam(ctx, project.ID, team); err != nil {
+		t.Fatalf("SetTeam: %v", err)
+	}
+	return New(db, WithIntegrator(Git{})), project, hat
+}
+
+// Agents write `--commit HEAD`, and HEAD means the tip of whichever tree
+// resolves it. Stored unresolved, the coder's "my new commit" becomes "main's
+// tip" the moment the orchestrator reads it at the project root — where
+// `merge --ff-only HEAD` is a no-op that reports success.
+//
+// That shipped once: a task went to Done with the base branch still on its
+// initial commit. The ref must be pinned in the sender's tree.
+func TestSendResolvesHeadInTheSendersWorktree(t *testing.T) {
+	ctx := context.Background()
+	n, project, hat := setupRealRepo(t, "coder", "reviewer")
+	task, err := n.NewTask(ctx, project.ID, "Calculator", "do the thing")
+	if err != nil {
+		t.Fatalf("NewTask: %v", err)
+	}
+
+	coderTree := hat.Path("coder")
+	write(t, coderTree, "calc.rs", "fn eval() {}")
+	want := commitAll(t, coderTree, "implement eval")
+
+	msg, err := n.Send(ctx, project.ID, "coder", SendRequest{
+		To: "reviewer", TaskID: task.ID, Commit: "HEAD", Body: "implemented",
+	})
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+
+	if msg.CommitSHA == nil {
+		t.Fatal("the handoff carries no commit")
+	}
+	if *msg.CommitSHA == "HEAD" {
+		t.Fatal("stored the literal ref; it means a different commit in every tree")
+	}
+	if *msg.CommitSHA != want {
+		t.Errorf("stored %s, want the coder's tip %s", *msg.CommitSHA, want)
+	}
+
+	// And the distinction that matters: it is not the project root's HEAD.
+	mainHead, err := Git{}.Resolve(ctx, project.Path, "HEAD")
+	if err != nil {
+		t.Fatalf("resolving main: %v", err)
+	}
+	if *msg.CommitSHA == mainHead {
+		t.Error("resolved against the project root, not the sender's worktree")
+	}
+}
+
+// Completion is the hand-off that moves the project's own branch. The first
+// run reported a task done while main stayed on its initial commit, so this
+// asserts the branch, not the card.
+func TestCompleteIntegratesIntoTheBaseBranch(t *testing.T) {
+	ctx := context.Background()
+	n, project, hat := setupRealRepo(t, "coder")
+	task, err := n.NewTask(ctx, project.ID, "Calculator", "do the thing")
+	if err != nil {
+		t.Fatalf("NewTask: %v", err)
+	}
+
+	coderTree := hat.Path("coder")
+	write(t, coderTree, "calc.rs", "fn eval() {}")
+	want := commitAll(t, coderTree, "implement eval")
+
+	// One enabled role is terminal, so it finishes the task itself.
+	if _, err := n.Send(ctx, project.ID, "coder", SendRequest{
+		TaskID: task.ID, Commit: "HEAD", Body: "done",
+	}); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+
+	got, err := Git{}.Resolve(ctx, project.Path, "main")
+	if err != nil {
+		t.Fatalf("resolving main: %v", err)
+	}
+	if got != want {
+		t.Errorf("main is at %s, want %s; the task finished over a branch that never moved", got[:8], want[:8])
+	}
+	if _, err := os.Stat(filepath.Join(project.Path, "calc.rs")); err != nil {
+		t.Errorf("the work is not on the base branch: %v", err)
+	}
+}
+
+// Nothing to integrate is not a completion. The guard used to sit around the
+// merge alone, so an empty commit meant "merge nothing, mark it done".
+func TestCompleteRefusesWithoutACommit(t *testing.T) {
+	ctx := context.Background()
+	n, project, _ := setupRealRepo(t, "coder")
+	task, err := n.NewTask(ctx, project.ID, "Calculator", "do the thing")
+	if err != nil {
+		t.Fatalf("NewTask: %v", err)
+	}
+	if _, err := n.Send(ctx, project.ID, "coder", SendRequest{
+		TaskID: task.ID, Body: "done", Kind: store.KindNote,
+	}); err == nil {
+		t.Error("completed a task with no commit to integrate")
 	}
 }

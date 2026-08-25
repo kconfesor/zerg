@@ -31,6 +31,10 @@ type Integrator interface {
 	// MergeInto brings commit into the working tree at path. Called when work
 	// is claimed, so a role opens its tree and finds the work already there.
 	MergeInto(ctx context.Context, worktreePath, commit string) error
+
+	// Resolve turns a commit-ish into the absolute sha it names in the tree at
+	// path. Every commit that enters the system goes through this.
+	Resolve(ctx context.Context, worktreePath, ref string) (string, error)
 }
 
 // Nydus is the transport. It is safe for concurrent use: every operation that
@@ -137,6 +141,28 @@ func (n *Nydus) Send(ctx context.Context, projectID, fromRole string, req SendRe
 	}
 	if kind == store.KindHandoff && req.Commit == "" {
 		return nil, invalid("a handoff must carry a commit; it points at committed state rather than a diff")
+	}
+
+	// Pin the commit to an absolute sha, in the sender's own tree, before it
+	// goes anywhere.
+	//
+	// Agents write `--commit HEAD`, which is the natural thing to write and
+	// which we ask them for. But HEAD means "the tip of whichever tree is
+	// reading it", so the string that means "my new commit" in the coder's
+	// worktree means "main's tip" once the orchestrator applies it at the
+	// project root — and `merge --ff-only HEAD` there is a no-op that reports
+	// success. That is not hypothetical: the first completed task merged
+	// nothing, marked itself done, and left the base branch on its initial
+	// commit while the board showed green.
+	//
+	// A ref is only meaningful in the tree that resolves it, so it is resolved
+	// once, here, at the boundary it is about to cross.
+	if req.Commit != "" {
+		sha, err := n.resolveCommit(ctx, projectID, fromRole, req.Commit)
+		if err != nil {
+			return nil, err
+		}
+		req.Commit = sha
 	}
 
 	// An empty recipient means completion, and completion is the terminal
@@ -281,6 +307,13 @@ func (n *Nydus) complete(ctx context.Context, projectID string, sender store.Res
 	if req.TaskID == "" {
 		return nil, invalid("completing a task requires its id")
 	}
+	// Completion is the one hand-off that changes the project's own branch, so
+	// it is the last place to accept a missing commit. The guard used to be
+	// `req.Commit != ""` around the merge alone, which turned "no commit" into
+	// "integrate nothing, report done".
+	if req.Commit == "" {
+		return nil, invalid("finishing a task requires the commit to integrate")
+	}
 	task, err := n.db.GetTask(ctx, req.TaskID)
 	if err != nil {
 		return nil, err
@@ -289,7 +322,7 @@ func (n *Nydus) complete(ctx context.Context, projectID string, sender store.Res
 	// Merge before recording completion. If integration fails the card stays
 	// where it is and the error reaches the operator, rather than the board
 	// claiming success over a branch that never moved.
-	if n.integrator != nil && req.Commit != "" {
+	if n.integrator != nil {
 		project, err := n.db.GetProject(ctx, projectID)
 		if err != nil {
 			return nil, err
@@ -501,6 +534,28 @@ func (n *Nydus) Claim(ctx context.Context, projectID, role string) (*store.Lease
 // happened. What must never happen is claiming the merge succeeded when it
 // did not; that was the original bug, and it cost a reviewer two rounds of
 // discovering its worktree did not contain the code it was reviewing.
+// resolveCommit expands a commit-ish to a full sha using the sending role's
+// worktree. With no integrator or no worktree — tests, mostly — the value is
+// passed through, since there is nothing to resolve it against.
+func (n *Nydus) resolveCommit(ctx context.Context, projectID, role, ref string) (string, error) {
+	if n.integrator == nil {
+		return ref, nil
+	}
+	project, err := n.db.GetProject(ctx, projectID)
+	if err != nil {
+		return "", err
+	}
+	worktree := hatchery.New(project.Path).Path(role)
+	if _, err := os.Stat(worktree); err != nil {
+		return ref, nil
+	}
+	sha, err := n.integrator.Resolve(ctx, worktree, ref)
+	if err != nil {
+		return "", invalid("%q does not name a commit in %s's worktree: %v", ref, role, err)
+	}
+	return sha, nil
+}
+
 func (n *Nydus) deliverCommits(ctx context.Context, projectID string, lease *store.Lease) {
 	lease.Merged = make(map[string]bool, len(lease.Items))
 
