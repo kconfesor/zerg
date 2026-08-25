@@ -462,3 +462,60 @@ func TestStopOnAProjectThatIsNotRunning(t *testing.T) {
 		t.Error("stopping a stopped project was accepted")
 	}
 }
+
+// Start checks whether a project is running, then unlocks and spends seconds in
+// preflight, worktree preparation and spawning before registering the swarm.
+// Without a reservation both callers pass the check and both bring a swarm up,
+// leaving two sets of agents drawing from one queue.
+func TestConcurrentStartsBringUpOneSwarm(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t, &scriptedHarness{script: idleAgent})
+
+	const callers = 4
+	errs := make(chan error, callers)
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for range callers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			errs <- h.over.Start(ctx, h.project.ID)
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+
+	// Exactly one wins, and — the part that matters — the losers are refused
+	// for being late rather than failing incidentally. Without a reservation
+	// all four proceed and three die colliding on git init against the same
+	// repository, which also leaves one winner and would pass a bare count.
+	won := 0
+	for err := range errs {
+		if err == nil {
+			won++
+			continue
+		}
+		if !strings.Contains(err.Error(), "already") {
+			t.Errorf("a losing Start failed by collision rather than refusal: %v", err)
+		}
+	}
+	if won != 1 {
+		t.Errorf("%d of %d Starts succeeded, want exactly 1", won, callers)
+	}
+
+	// And exactly one set of agents is up.
+	waitFor(t, func() bool {
+		st, err := h.over.Status(ctx, h.project.ID)
+		return err == nil && len(st) == 2 &&
+			st[0].State == cerebrate.StateReady && st[1].State == cerebrate.StateReady
+	}, 40*time.Second, "the surviving swarm never became ready")
+
+	if err := h.over.Stop(ctx, h.project.ID, "test"); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if h.over.Running(h.project.ID) {
+		t.Error("still running after Stop — a second swarm was left behind")
+	}
+}

@@ -79,6 +79,9 @@ type Overmind struct {
 
 	mu      sync.Mutex
 	running map[string]*swarm
+	// starting reserves a project between the check and its registration, so
+	// two concurrent Starts cannot both get past the check.
+	starting map[string]bool
 }
 
 // swarm is one project's live state.
@@ -265,12 +268,54 @@ func (o *Overmind) Quotas(projectID string) Quotas {
 // up, dashboard green, board drawn — while half the roles sit at a prompt they
 // cannot pass and nothing anywhere says so.
 func (o *Overmind) Start(ctx context.Context, projectID string) error {
+	// Reserve the project before doing anything slow. Preflight, worktrees and
+	// spawning all happen outside the lock — they shell out, and holding a
+	// mutex across a subprocess is its own bug — so without a reservation two
+	// concurrent Starts both pass the check and both bring a swarm up, leaving
+	// two sets of agents on one queue.
 	o.mu.Lock()
 	if _, ok := o.running[projectID]; ok {
 		o.mu.Unlock()
 		return fmt.Errorf("this project is already running")
 	}
+	if o.starting == nil {
+		o.starting = map[string]bool{}
+	}
+	if o.starting[projectID] {
+		o.mu.Unlock()
+		return fmt.Errorf("this project is already starting")
+	}
+	o.starting[projectID] = true
 	o.mu.Unlock()
+
+	// Everything acquired before the swarm is published has to be given back on
+	// any failure, or a half-started project leaks agent tokens, an open
+	// session and running processes that nothing can stop.
+	started := false
+	var (
+		cancel  context.CancelFunc
+		session *store.Session
+		tokens  []string
+	)
+	defer func() {
+		o.mu.Lock()
+		delete(o.starting, projectID)
+		o.mu.Unlock()
+		if started {
+			return
+		}
+		if cancel != nil {
+			cancel()
+		}
+		for _, t := range tokens {
+			o.agents.Revoke(t)
+		}
+		if session != nil {
+			if err := o.db.EndSession(context.WithoutCancel(ctx), session.ID, "start failed"); err != nil {
+				o.log.Warn("closing a session after a failed start", "project", projectID, "err", err)
+			}
+		}
+	}()
 
 	project, err := o.db.GetProject(ctx, projectID)
 	if err != nil {
@@ -313,14 +358,15 @@ func (o *Overmind) Start(ctx context.Context, projectID string) error {
 		return err
 	}
 
-	session, err := o.db.StartSession(ctx, projectID)
+	session, err = o.db.StartSession(ctx, projectID)
 	if err != nil {
 		return err
 	}
 
-	runCtx, cancel := context.WithCancel(context.Background())
+	runCtx, runCancel := context.WithCancel(context.Background())
+	cancel = runCancel
 	s := &swarm{
-		session: session, cancel: cancel, done: make(chan struct{}),
+		session: session, cancel: runCancel, done: make(chan struct{}),
 		cerebrates: map[string]*cerebrate.Cerebrate{},
 	}
 
@@ -330,17 +376,16 @@ func (o *Overmind) Start(ctx context.Context, projectID string) error {
 		}
 		a, err := o.registry.Get(role.Harness)
 		if err != nil {
-			cancel()
 			return err
 		}
 		worktree, err := hatch.EnsureWorktree(ctx, role.Name, project.BaseBranch)
 		if err != nil {
-			cancel()
 			return err
 		}
 
 		token := o.agents.Mint(projectID, role.Name)
 		s.tokens = append(s.tokens, token)
+		tokens = s.tokens
 
 		// A private config directory per role, but only where the harness can
 		// actually run with one. claude keeps credentials in the OS keychain
@@ -374,6 +419,7 @@ func (o *Overmind) Start(ctx context.Context, projectID string) error {
 	o.mu.Lock()
 	o.running[projectID] = s
 	o.mu.Unlock()
+	started = true
 
 	go o.keepMoving(runCtx, projectID, s)
 

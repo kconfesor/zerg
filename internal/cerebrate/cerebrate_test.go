@@ -265,7 +265,10 @@ func TestBlockedPreflightPreventsSpawnAndRecovers(t *testing.T) {
 	defer cancel()
 	go c.Run(ctx)
 
-	waitFor(t, func() bool { return c.State() == StateBlocked }, 15*time.Second,
+	// Generous on purpose: waitFor polls and returns the moment the condition
+	// holds, so a wide bound costs nothing when things work and only matters
+	// on a machine already running several race-instrumented packages.
+	waitFor(t, func() bool { return c.State() == StateBlocked }, 40*time.Second,
 		"a blocked preflight did not block the role")
 	if a.Spawns() != 0 {
 		t.Errorf("spawned %d times despite a blocked preflight, want 0", a.Spawns())
