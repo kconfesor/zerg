@@ -356,9 +356,24 @@ messages    (id, project_id, from_role, type, priority, task_id, commit_sha, bod
 routes      (message_id, to_role, state, enqueued_at, delivered_at)   -- idempotent per recipient
 leases      (id, project_id, role, message_id, expires_at, acked_at)
 events      (id, project_id, ts, role, kind, payload)                 -- append-only
-runs        (id, project_id, role, pid, started_at, exited_at, exit_code,
-             tokens_in, tokens_out, cost_usd)
+runs        (id, project_id, role, pid, started_at, exited_at, exit_code)
 approvals   (id, project_id, message_id, state, decided_at)
+
+-- one row per model turn, not per run: this is what the cost dashboard reads
+usage_turns (id, project_id, task_id, role, run_id, ts,
+             harness, provider, model,
+             input_tokens,        -- uncached input only
+             cache_write_tokens,  -- billed ~1.25x (5m TTL) or 2x (1h)
+             cache_read_tokens,   -- billed ~0.1x
+             output_tokens,
+             cost_usd,
+             cost_source,         -- 'harness' | 'computed'
+             billing)             -- 'metered' | 'subscription'
+
+-- prices carry effective dates; introductory rates expire
+model_prices (provider, model, effective_from, effective_to,
+              input_per_mtok, output_per_mtok,
+              cache_write_mult, cache_read_mult)
 ```
 
 `events` being append-only gives the cockpit free time travel: the UI is a projection, so a reload
@@ -390,6 +405,12 @@ plain `//go:embed dist` silently skips Vite's `.vite/` manifest directory.
   human, first.
 - **Board** — one lane per enabled role plus Done. Cards move on ack.
 - **Roles** — per-role health, current lease, live/idle, tokens, cost.
+- **Spend** — the cost dashboard (§11.4). A summary strip carries session tokens, dollars and cache
+  rate; every figure on it is a filter. Click a provider chip to scope the page to Anthropic or
+  OpenAI; click a role to scope to that stage. Breakdowns by **provider**, by **role/stage**, and by
+  **task**, each showing the three-way input split rather than one input number, with subscription
+  rows labelled as estimates. Drill-down runs summary → provider → role → task → turn, ending at the
+  individual turn that the activity view already shows.
 - **Chat** — talk to the first role in the pipeline.
 
 Transport: one WebSocket carrying typed events; REST for commands.
@@ -479,6 +500,39 @@ tasks.
 Corollary for the role editor: changing a role's **model** invalidates every cache tier, since
 caches are model-scoped. That is unavoidable and correct — the change requires a restart anyway —
 but the UI should not present model switching as free.
+
+### 11.4 Accounting rules
+
+§11.1–11.3 are why cost moves. These are the rules for reporting it honestly.
+
+**Record turns, not runs.** A run is a process; a turn is a billable unit. Only per-turn rows let you
+attribute spend to a task, watch a cache rate change after a prompt edit, or find the role burning
+the budget.
+
+**Never report a bare "input tokens" number.** Prompt caching splits input three ways at wildly
+different prices — uncached at 1×, cache writes at 1.25× or 2×, cache reads at ~0.1×. A dashboard
+that sums them into one figure misstates cost by up to an order of magnitude and hides the single
+biggest lever a user has. Store the three separately and show the split.
+
+**Cache hit rate is a headline metric, not a detail.** It is the one number that reveals a silent
+regression: a prompt edit that introduced a volatile byte drops the rate to zero and multiplies cost
+with no error anywhere. A role whose rate falls below its own trailing average gets flagged.
+
+**Prices carry effective dates.** A hardcoded table goes wrong on a schedule — Claude Sonnet 5 runs
+at introductory $2/$10 per MTok through 2026-08-31 and $3/$15 after, so a table written this week is
+wrong next week. Price rows are ranged and the lookup is by turn timestamp, so historical costs stay
+correct after a price change rather than being retroactively rewritten.
+
+**Distinguish metered from subscription.** This is the trap most likely to produce a wrong number
+that looks right. An agent running under a Claude or ChatGPT subscription is not billed per token —
+`pi` already reports this, printing `$0.067 (sub)` rather than a charge. Showing a subscription-run
+role a confident "$47.32 spent" is simply false. Subscription turns are labelled and their dollar
+figures presented as *estimated at API rates*, useful for comparing roles against each other and
+useless as an invoice. Tokens are always real; dollars sometimes are not.
+
+**Prefer the harness's own number.** When a harness reports cost, store it with
+`cost_source = 'harness'`. Compute from the price table only when it does not, and mark it
+`'computed'` so a disagreement is visible rather than averaged away.
 
 ## 12. Stack
 
