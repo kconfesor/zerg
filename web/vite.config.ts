@@ -8,10 +8,6 @@ export default defineConfig({
   resolve: {
     alias: {
       '@': fileURLToPath(new URL('./src', import.meta.url)),
-      // See src/lib/hugeicons.ts: shadcn-vue's generated components import
-      // icon components from a package that only exports the renderer. The
-      // alias fixes their imports without editing files the CLI owns.
-      '@hugeicons/vue': fileURLToPath(new URL('./src/lib/hugeicons.ts', import.meta.url)),
     },
   },
   server: {

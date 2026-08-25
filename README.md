@@ -64,7 +64,8 @@ Pinned versions and their gotchas: [ARCHITECTURE.md §14](ARCHITECTURE.md#14-sta
 ## Prerequisites
 
 - **Go 1.26.7+** — not currently installed on this machine (`brew install go`)
-- **Node 24.19.0** — pinned in `.nvmrc`; `create-vue` requires `^22.18.0 || >=24.12.0`
+- **Node 24.19.0** — pinned in `.nvmrc`; Vite 8 and the shadcn-vue CLI require `^22.18.0 || >=24.12.0`
+- **pnpm** — the cockpit's package manager (`pnpm-lock.yaml` is the lockfile)
 - At least one agent harness logged in: `claude` and/or `pi`
 
 No tmux, no babashka, no zsh. Agents are child processes of the daemon, not tmux sessions — see

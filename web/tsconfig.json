@@ -15,8 +15,7 @@
     "noEmit": true,
     "types": ["vite/client"],
     "paths": {
-      "@/*": ["./src/*"],
-      "@hugeicons/vue": ["./src/lib/hugeicons.ts"]
+      "@/*": ["./src/*"]
     }
   },
   "include": ["src/**/*.ts", "src/**/*.vue", "vite.config.ts"]
