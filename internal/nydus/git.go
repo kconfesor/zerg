@@ -91,3 +91,21 @@ func short(commit string) string {
 	}
 	return commit
 }
+
+// MergeInto brings commit into the worktree at path.
+//
+// Not --ff-only, unlike base-branch integration: a role's branch has its own
+// commits, so a hand-off is usually a real merge. A conflict is left in the
+// tree on purpose — the agent is told the merge did not complete and resolves
+// it in the place it happened, which is the only place it can be resolved.
+func (Git) MergeInto(ctx context.Context, worktreePath, commit string) error {
+	// Already an ancestor means nothing to do. Checking is cheaper than
+	// merging, and it keeps a resumed lease from producing an empty commit.
+	if _, err := runGit(ctx, worktreePath, "merge-base", "--is-ancestor", commit, "HEAD"); err == nil {
+		return nil
+	}
+	if _, err := runGit(ctx, worktreePath, "merge", "--no-edit", commit); err != nil {
+		return fmt.Errorf("merging %s into %s: %w", commit, worktreePath, err)
+	}
+	return nil
+}

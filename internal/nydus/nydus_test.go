@@ -3,11 +3,13 @@ package nydus
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/konfessor/zerg/internal/hatchery"
 	"github.com/konfessor/zerg/internal/store"
 )
 
@@ -16,7 +18,15 @@ import (
 type fakeIntegrator struct {
 	mu     sync.Mutex
 	merges []string
+	into   []string
 	err    error
+}
+
+func (f *fakeIntegrator) MergeInto(_ context.Context, _, commit string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.into = append(f.into, commit)
+	return nil
 }
 
 func (f *fakeIntegrator) Merge(_ context.Context, _, _, commit string) error {
@@ -607,4 +617,83 @@ func roleFromTeam(t *testing.T, f *fixture, name string) store.ResolvedRole {
 	}
 	t.Fatalf("role %q is not on the team", name)
 	return store.ResolvedRole{}
+}
+
+// A hand-off has to arrive in the recipient's tree. The first version of this
+// system told agents it had merged for them while nothing merged anything, and
+// the unit test agreed, because both read the same field. A live reviewer found
+// its worktree missing the code twice before concluding it was being lied to.
+//
+// So this one uses a real repository and a real integrator, and asks git.
+func TestClaimMergesHandoffIntoWorktree(t *testing.T) {
+	ctx := context.Background()
+	repo := newRepo(t)
+
+	hat := hatchery.New(repo)
+	for _, role := range []string{"coder", "reviewer"} {
+		if _, err := hat.EnsureWorktree(ctx, role, "main"); err != nil {
+			t.Fatalf("worktree for %s: %v", role, err)
+		}
+	}
+
+	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if err := store.Seed(ctx, db, "claude"); err != nil {
+		t.Fatalf("Seed: %v", err)
+	}
+	project, err := db.CreateProject(ctx, repo, "", "")
+	if err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+	tpl := func(name string) string {
+		x, err := db.GetTemplateByName(ctx, name)
+		if err != nil {
+			t.Fatalf("GetTemplateByName(%q): %v", name, err)
+		}
+		return x.ID
+	}
+	if err := db.SetTeam(ctx, project.ID, []store.ProjectRole{
+		{TemplateID: tpl("coder"), Enabled: true},
+		{TemplateID: tpl("reviewer"), Enabled: true},
+	}); err != nil {
+		t.Fatalf("SetTeam: %v", err)
+	}
+
+	n := New(db, WithIntegrator(Git{}))
+	task, err := n.NewTask(ctx, project.ID, "Calculator", "do the thing")
+	if err != nil {
+		t.Fatalf("NewTask: %v", err)
+	}
+
+	// The coder commits in its own worktree, exactly as a real one does.
+	coderTree := hat.Path("coder")
+	write(t, coderTree, "calc.rs", "fn eval() {}")
+	sha := commitAll(t, coderTree, "implement eval")
+
+	if _, err := n.Send(ctx, project.ID, "coder", SendRequest{
+		To: "reviewer", TaskID: task.ID, Commit: sha, Body: "implemented",
+	}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+
+	lease, err := n.Claim(ctx, project.ID, "reviewer")
+	if err != nil || lease == nil {
+		t.Fatalf("claim: lease=%v err=%v", lease, err)
+	}
+	if !lease.Merged[lease.Items[0].ID] {
+		t.Error("claim reported the hand-off as unmerged")
+	}
+
+	// The check that matters: ask git, not the struct that just told us.
+	reviewerTree := hat.Path("reviewer")
+	if _, err := runGit(ctx, reviewerTree, "merge-base", "--is-ancestor", sha, "HEAD"); err != nil {
+		t.Errorf("commit %s is not in the reviewer's worktree: %v", sha[:8], err)
+	}
+	got, err := os.ReadFile(filepath.Join(reviewerTree, "calc.rs"))
+	if err != nil || string(got) != "fn eval() {}" {
+		t.Errorf("reviewer's tree: calc.rs = %q, err = %v; the work did not arrive", got, err)
+	}
 }

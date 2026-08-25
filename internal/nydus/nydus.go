@@ -12,18 +12,25 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"time"
 
+	"github.com/konfessor/zerg/internal/hatchery"
 	"github.com/konfessor/zerg/internal/store"
 )
 
 // DefaultLease is how long a role may hold work before it returns to the queue.
 const DefaultLease = 20 * time.Minute
 
-// Integrator merges the terminal role's commit into the project's base branch.
+// Integrator moves commits between trees: a hand-off commit into the recipient's
+// worktree, and the terminal role's commit into the project's base branch.
 // The orchestrator owns integration, not whichever agent happened to be last.
 type Integrator interface {
 	Merge(ctx context.Context, projectPath, baseBranch, commit string) error
+
+	// MergeInto brings commit into the working tree at path. Called when work
+	// is claimed, so a role opens its tree and finds the work already there.
+	MergeInto(ctx context.Context, worktreePath, commit string) error
 }
 
 // Nydus is the transport. It is safe for concurrent use: every operation that
@@ -367,6 +374,7 @@ func (n *Nydus) Claim(ctx context.Context, projectID, role string) (*store.Lease
 		if err := tx.Commit(); err != nil {
 			return nil, err
 		}
+		n.deliverCommits(ctx, projectID, open)
 		return open, nil
 	}
 
@@ -476,7 +484,47 @@ func (n *Nydus) Claim(ctx context.Context, projectID, role string) (*store.Lease
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("committing claim: %w", err)
 	}
+	n.deliverCommits(ctx, projectID, lease)
 	return lease, nil
+}
+
+// deliverCommits merges each claimed commit into the role's worktree, so a
+// role opens its tree and finds the work it was handed already in it.
+//
+// This runs after the transaction commits, never inside it: a git subprocess
+// holding the single write lock would block every other writer for as long as
+// the merge took.
+//
+// Failure is not an error here. A merge can conflict, and a conflict is a
+// normal outcome of parallel work, not a reason to refuse to hand over the
+// task — the agent is told merged=false and resolves it in the tree where it
+// happened. What must never happen is claiming the merge succeeded when it
+// did not; that was the original bug, and it cost a reviewer two rounds of
+// discovering its worktree did not contain the code it was reviewing.
+func (n *Nydus) deliverCommits(ctx context.Context, projectID string, lease *store.Lease) {
+	lease.Merged = make(map[string]bool, len(lease.Items))
+
+	var worktree string
+	for _, m := range lease.Items {
+		if m.CommitSHA == nil || *m.CommitSHA == "" {
+			continue
+		}
+		if worktree == "" {
+			project, err := n.db.GetProject(ctx, projectID)
+			if err != nil {
+				return
+			}
+			worktree = hatchery.New(project.Path).Path(lease.Role)
+			if _, err := os.Stat(worktree); err != nil {
+				return // no worktree for this role; nothing to merge into
+			}
+		}
+		if err := n.integrator.MergeInto(ctx, worktree, *m.CommitSHA); err != nil {
+			// Left false. The envelope carries the truth either way.
+			continue
+		}
+		lease.Merged[m.ID] = true
+	}
 }
 
 // errRaced means another claimer took the work between selection and update.

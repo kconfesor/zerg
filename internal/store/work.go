@@ -88,6 +88,13 @@ type Lease struct {
 	GrantedAt time.Time `json:"grantedAt"`
 	ExpiresAt time.Time `json:"expiresAt"`
 	Items     []Message `json:"items"`
+
+	// Merged records, per message id, whether the orchestrator actually got
+	// that message's commit into the claiming role's worktree. It is derived
+	// from the merge attempt, never from the presence of a commit — a boolean
+	// named after an action has to be set by that action's result. Transient:
+	// it describes this hand-off, not a stored fact.
+	Merged map[string]bool `json:"-"`
 }
 
 type Approval struct {

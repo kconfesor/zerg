@@ -172,10 +172,14 @@ type Item struct {
 	Commit    *string `json:"commit,omitempty"`
 	Body      string  `json:"body"`
 
-	// Merged states that the orchestrator already merged this commit into the
-	// agent's worktree. The predecessor merged in its helper and *also* told
-	// the agent to merge again in the payload; it worked only because the
-	// second merge happened to be a no-op.
+	// Merged says the orchestrator got this commit into the agent's worktree.
+	// It comes from the merge attempt, never from the presence of a commit.
+	// The first version derived it — `m.CommitSHA != nil` — while nothing
+	// merged anything, so every hand-off asserted a merge that had not
+	// happened and the instructions told the recipient not to repeat it. A
+	// reviewer found its tree empty twice before working out it was being
+	// lied to. False here means the merge conflicted or could not run, and
+	// the agent completes it itself.
 	Merged bool `json:"merged"`
 }
 
@@ -254,7 +258,7 @@ func (s *Server) describe(ctx context.Context, id Identity, lease *store.Lease) 
 		item := Item{
 			MessageID: m.ID, From: m.FromRole, Kind: m.Kind,
 			TaskID: m.TaskID, Commit: m.CommitSHA, Body: m.Body,
-			Merged: m.CommitSHA != nil,
+			Merged: lease.Merged[m.ID],
 		}
 		if m.TaskID != nil {
 			if task, err := s.db.GetTask(ctx, *m.TaskID); err == nil {

@@ -23,7 +23,12 @@ type fixture struct {
 }
 
 // merges records terminal integration without needing a repository.
-type recordingIntegrator struct{ commits []string }
+type recordingIntegrator struct{ commits, into []string }
+
+func (r *recordingIntegrator) MergeInto(_ context.Context, _, commit string) error {
+	r.into = append(r.into, commit)
+	return nil
+}
 
 func (r *recordingIntegrator) Merge(_ context.Context, _, _, commit string) error {
 	r.commits = append(r.commits, commit)
@@ -120,11 +125,16 @@ func TestAgentClaimsWorksAndHandsOn(t *testing.T) {
 	if got.Items[0].From != "coder" {
 		t.Errorf("work came from %q, want coder", got.Items[0].From)
 	}
-	// The orchestrator merges before handing work over, so the agent must not
-	// merge again — the predecessor told it to, and got away with it only
-	// because the second merge was a no-op.
-	if !got.Items[0].Merged {
-		t.Error("a handoff carrying a commit must say it was already merged")
+	// This fixture has no worktree, so no merge can have happened, and the
+	// envelope has to say so. The assertion here used to be the opposite —
+	// "a handoff carrying a commit must say it was already merged" — which
+	// passed because the field was derived from the same commit the test had
+	// just attached. It restated the implementation instead of checking an
+	// outcome, so it stayed green through a release where nothing merged
+	// anything at all. TestClaimMergesHandoffIntoWorktree owns the real
+	// property, against a repository where a merge can actually occur.
+	if got.Items[0].Merged {
+		t.Error("merged must report the merge, not the presence of a commit")
 	}
 }
 

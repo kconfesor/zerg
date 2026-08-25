@@ -31,8 +31,13 @@ Use those. Never guess a recipient: the team is configured per project and the
 pipeline is not the same everywhere. If it prints nothing, there is no work; do
 not poll in a loop.
 
-When a handoff carries a commit, it has already been merged into your worktree
-before you were handed it. Do not merge it again.
+When a handoff carries a commit, each item says whether it reached your tree:
+
+    "merged": true   the commit is already in your worktree; do not merge again
+    "merged": false  merge it yourself — it conflicted, or could not be applied
+
+` + "`false`" + ` is not an error, and it is not rare. Merge it, resolve anything that
+conflicts, and carry on.
 
 # When you finish
 

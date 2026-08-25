@@ -147,3 +147,20 @@ func TestGitRejectsAnUnknownCommit(t *testing.T) {
 		t.Fatal("a commit that is not in the repository was accepted")
 	}
 }
+
+// commitAll commits whatever is in a worktree and returns the sha, which is
+// what a role does before handing work on.
+func commitAll(t *testing.T, dir, message string) string {
+	t.Helper()
+	run := func(args ...string) string {
+		t.Helper()
+		out, err := runGit(context.Background(), dir, args...)
+		if err != nil {
+			t.Fatalf("git %s: %v", strings.Join(args, " "), err)
+		}
+		return out
+	}
+	run("add", ".")
+	run("commit", "-q", "-m", message)
+	return strings.TrimSpace(run("rev-parse", "HEAD"))
+}
