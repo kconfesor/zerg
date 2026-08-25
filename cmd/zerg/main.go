@@ -19,6 +19,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/konfessor/zerg/internal/adapter"
+	"github.com/konfessor/zerg/internal/adapter/claudeharness"
 	"github.com/konfessor/zerg/internal/api"
 	"github.com/konfessor/zerg/internal/store"
 )
@@ -98,8 +100,11 @@ func runUp(args []string) error {
 		return fmt.Errorf("seeding the role library: %w", err)
 	}
 
+	registry := adapter.NewRegistry()
+	registry.Register(claudeharness.New())
+
 	srv := &http.Server{
-		Handler:           api.New(db, log).Routes(),
+		Handler:           api.New(db, log, registry).Routes(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
@@ -131,8 +136,8 @@ func runUp(args []string) error {
 	}
 }
 
-// defaultHarness picks what the seeded library points at. Once the adapter
-// registry exists (milestone 3) this asks the registry which harnesses are
-// actually installed; until then the seed names claude and preflight is what
-// reports the truth.
-func defaultHarness() string { return "claude" }
+// defaultHarness is what a freshly seeded library points its roles at.
+// Whether that harness is actually usable is preflight's question, not this
+// one: the answer belongs in a readiness panel with a remedy attached, not in
+// a silent decision here.
+func defaultHarness() string { return claudeharness.New().Name() }

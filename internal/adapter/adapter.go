@@ -38,10 +38,12 @@ type Adapter interface {
 	// under Spec.ConfigDir.
 	Command(ctx context.Context, spec Spec) (*exec.Cmd, error)
 
-	// Parse converts one line of the harness's structured output into a typed
-	// Event. Returning (nil, nil) means "no event, not an error" — harnesses
-	// emit banners and warnings that carry no semantics.
-	Parse(line []byte) (*Event, error)
+	// Parse converts one line of the harness's structured output into typed
+	// events. One line can carry several — a single assistant message may hold
+	// prose and two tool calls — so this returns a slice. An empty result means
+	// "nothing meaningful", which is common: harnesses emit banners, hook
+	// chatter and rate-limit notices that carry no semantics.
+	Parse(line []byte) ([]Event, error)
 
 	Capabilities() Caps
 }
@@ -106,16 +108,24 @@ type Caps struct {
 	ResumeSession    bool // can resume after a crash without losing context
 }
 
+// Ctx is context.Context, aliased so a Check reads on one line.
+type Ctx = context.Context
+
 // Check is one preflight probe. Every incident worth a postmortem in the
 // predecessor system — a stale CLI rejecting its model, a corrupted config, an
 // unanswered trust dialog, a broken plugin tree — was a Check that did not exist.
 type Check struct {
 	Name string
-	Run  func(ctx context.Context, spec Spec) Result
+	Run  func(ctx Ctx, spec Spec) Result
 }
 
 type Result struct {
 	OK bool
+
+	// Detail carries what the check found when it passed — a resolved path, a
+	// version string. The readiness panel shows it so a green row is evidence
+	// rather than an assertion.
+	Detail string
 
 	// Warn reports a concern that must not block the spawn — an unlisted model
 	// id, for instance, since a harness catalog can lag a model that works.
@@ -156,9 +166,18 @@ type Event struct {
 	Tool string
 	Args map[string]any
 
-	TokensIn  int
-	TokensOut int
-	CostUSD   float64
+	// Usage keeps input split three ways because the prices differ by roughly
+	// 50x and summing them into one "input tokens" figure misstates cost by an
+	// order of magnitude (ARCHITECTURE.md §11.4).
+	TokensIn         int // uncached input
+	CacheReadTokens  int // ~0.1x
+	CacheWriteTokens int // 1.25x at 5m TTL, 2x at 1h
+	TokensOut        int
+	CostUSD          float64
+
+	// Model is what the harness reports it actually used, which is not always
+	// what was asked for — a fallback or an alias resolves here.
+	Model string
 
 	// Fatal marks an error the agent cannot recover from, so the cerebrate
 	// stops instead of leaving a process that looks alive and answers nothing.

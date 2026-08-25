@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/konfessor/zerg/internal/adapter"
+	"github.com/konfessor/zerg/internal/adapter/claudeharness"
 	"github.com/konfessor/zerg/internal/store"
 )
 
@@ -28,7 +30,9 @@ func newTestServer(t *testing.T) (http.Handler, *store.DB) {
 		t.Fatalf("Seed: %v", err)
 	}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return New(db, log).Routes(), db
+	reg := adapter.NewRegistry()
+	reg.Register(claudeharness.New())
+	return New(db, log, reg).Routes(), db
 }
 
 func do(t *testing.T, h http.Handler, method, path string, body any) *httptest.ResponseRecorder {

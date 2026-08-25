@@ -13,17 +13,26 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/konfessor/zerg/internal/adapter"
+	"github.com/konfessor/zerg/internal/preflight"
 	"github.com/konfessor/zerg/internal/store"
 )
 
 // Server holds the dependencies every handler needs.
 type Server struct {
-	db  *store.DB
-	log *slog.Logger
+	db       *store.DB
+	log      *slog.Logger
+	registry *adapter.Registry
+	preflt   *preflight.Runner
 }
 
-func New(db *store.DB, log *slog.Logger) *Server {
-	return &Server{db: db, log: log}
+func New(db *store.DB, log *slog.Logger, reg *adapter.Registry) *Server {
+	return &Server{
+		db:       db,
+		log:      log,
+		registry: reg,
+		preflt:   preflight.NewRunner(db, reg),
+	}
 }
 
 // Routes builds the mux. Go 1.22+ patterns carry the method and the wildcard,
@@ -48,6 +57,13 @@ func (s *Server) Routes() http.Handler {
 	// The team: which library roles this project uses, in what order.
 	mux.HandleFunc("GET /api/projects/{id}/team", s.getTeam)
 	mux.HandleFunc("PUT /api/projects/{id}/team", s.setTeam)
+
+	// What this build can drive, and what a role may be pointed at.
+	mux.HandleFunc("GET /api/harnesses", s.listHarnesses)
+	mux.HandleFunc("GET /api/harnesses/{name}/models", s.listModels)
+
+	// The readiness gate: a team that cannot work must not reach a board.
+	mux.HandleFunc("GET /api/projects/{id}/readiness", s.readiness)
 
 	mux.HandleFunc("GET /api/settings/shared-instructions", s.getSharedInstructions)
 	mux.HandleFunc("PUT /api/settings/shared-instructions", s.setSharedInstructions)
@@ -216,6 +232,41 @@ func (s *Server) setTeam(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, orEmpty(team))
+}
+
+// ── harnesses ─────────────────────────────────────────────────────────────
+
+func (s *Server) listHarnesses(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, orEmpty(s.registry.Names()))
+}
+
+// listModels asks the harness what it can actually run, so the role editor
+// offers a picker instead of a text box. The field still accepts free text —
+// a catalog can lag a working model — but a hand-typed id that 400s on every
+// turn is the failure this exists to prevent.
+func (s *Server) listModels(w http.ResponseWriter, r *http.Request) {
+	a, err := s.registry.Get(r.PathValue("name"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	models, err := a.ListModels(r.Context())
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, orEmpty(models))
+}
+
+// readiness runs every check across every enabled role. The cockpit disables
+// Start while Ready is false.
+func (s *Server) readiness(w http.ResponseWriter, r *http.Request) {
+	report, err := s.preflt.Check(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, report)
 }
 
 // ── settings ──────────────────────────────────────────────────────────────

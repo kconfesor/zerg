@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -283,7 +284,7 @@ func TestSettingsRoundTrip(t *testing.T) {
 
 func TestNewIDIsSortableAndUnique(t *testing.T) {
 	seen := map[string]bool{}
-	var ids []string
+	ids := make([]string, 0, 2000)
 	for i := 0; i < 2000; i++ {
 		id := NewID()
 		if len(id) != 26 {
@@ -296,20 +297,56 @@ func TestNewIDIsSortableAndUnique(t *testing.T) {
 		ids = append(ids, id)
 	}
 
-	// Ids generated later must sort later, so insertion order needs no
-	// secondary index.
-	early := newIDAt(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
-	late := newIDAt(time.Date(2026, 8, 25, 0, 0, 0, 0, time.UTC))
-	if !(early < late) {
-		t.Errorf("ids do not sort by time: %q >= %q", early, late)
+	// Ids must sort by creation order even inside a single millisecond, which
+	// is where a burst of events lands. Without monotonicity two events 0.2ms
+	// apart would replay out of order.
+	if !sort.StringsAreSorted(ids) {
+		for i := 1; i < len(ids); i++ {
+			if ids[i-1] >= ids[i] {
+				t.Fatalf("ids went backwards at %d: %q then %q", i, ids[i-1], ids[i])
+			}
+		}
 	}
 
-	if !sort.StringsAreSorted(ids) {
-		// Same millisecond ties break on randomness, so only assert the
-		// coarse property: the first id precedes the last.
-		if ids[0] >= ids[len(ids)-1] {
-			t.Error("ids from a run do not increase overall")
+	early := newIDAt(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	late := newIDAt(time.Date(2026, 8, 25, 0, 0, 0, 0, time.UTC))
+	if early >= late {
+		t.Errorf("ids do not sort by time: %q >= %q", early, late)
+	}
+}
+
+// A clock that steps backwards must not produce an id that sorts before one
+// already handed out, or an event stream silently reorders itself.
+func TestNewIDSurvivesAClockGoingBackwards(t *testing.T) {
+	forward := newIDAt(time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC))
+	backward := newIDAt(time.Date(2026, 8, 25, 11, 0, 0, 0, time.UTC))
+	if backward <= forward {
+		t.Errorf("a backwards clock produced %q, which does not follow %q", backward, forward)
+	}
+}
+
+func TestNewIDIsUniqueUnderConcurrency(t *testing.T) {
+	const workers, each = 16, 500
+	out := make(chan string, workers*each)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < each; j++ {
+				out <- NewID()
+			}
+		}()
+	}
+	wg.Wait()
+	close(out)
+
+	seen := map[string]bool{}
+	for id := range out {
+		if seen[id] {
+			t.Fatalf("concurrent generation produced a duplicate: %q", id)
 		}
+		seen[id] = true
 	}
 }
 
