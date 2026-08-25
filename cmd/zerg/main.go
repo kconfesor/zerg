@@ -30,6 +30,7 @@ import (
 	"github.com/konfessor/zerg/internal/overmind"
 	"github.com/konfessor/zerg/internal/preflight"
 	"github.com/konfessor/zerg/internal/store"
+	"github.com/konfessor/zerg/internal/tailnet"
 )
 
 // How long an agent transcript stays replayable, and how often the sweep runs.
@@ -98,7 +99,7 @@ Everything is configured in the cockpit; there are no config files.
 
 func runUp(args []string) error {
 	fs := flag.NewFlagSet("up", flag.ContinueOnError)
-	addr := fs.String("addr", "127.0.0.1:0", "address to serve the cockpit on; port 0 picks a free one")
+	addr := fs.String("addr", "", "override the stored bind address for this run only")
 	dbPath := fs.String("db", "", "database path (default ~/.zerg/zerg.db)")
 	verbose := fs.Bool("verbose", false, "log every request")
 	if err := fs.Parse(args); err != nil {
@@ -144,7 +145,13 @@ func runUp(args []string) error {
 	// git artifacts.
 	stateDir := filepath.Join(filepath.Dir(*dbPath), "state")
 
-	nyd := nydus.New(db, nydus.WithIntegrator(nydus.Git{}))
+	nyd := nydus.New(db, nydus.WithIntegrator(nydus.Git{}),
+		// Reclaiming disk when a card lands is the policy that keeps a long
+		// run bounded: build output is per role, and nothing needs it once the
+		// work is merged.
+		nydus.WithOnTaskDone(func(ctx context.Context, projectID, _ string) {
+			sweepOnDone(ctx, db, projectID, log)
+		}))
 	bus := event.NewBus()
 
 	// Something has to watch the agents, or the orchestrator reproduces the
@@ -156,9 +163,20 @@ func runUp(args []string) error {
 	// unrecorded permanently.
 	event.Record(ctx, bus, db, log)
 
+	// Settings live in the database like everything else, so the cockpit can
+	// change them. The flag stays as an override for one run, which is what you
+	// want when a stored address turns out not to bind.
+	cfg, err := db.GetConfig(ctx)
+	if err != nil {
+		return err
+	}
+	if *addr != "" {
+		cfg.Addr = *addr
+	}
+
 	// Events are the expensive tier and exist to replay recent work, so they
 	// age out. Costs and outcomes live elsewhere and do not.
-	api.PruneEvents(ctx, db, log, eventRetention, retentionSweep)
+	api.PruneEvents(ctx, db, log, cfg.Retention(), retentionSweep)
 
 	// Agents are children of this process, so any lease still open belongs to a
 	// process that no longer exists. Requeue it now rather than letting the
@@ -185,28 +203,56 @@ func runUp(args []string) error {
 	// daemon exits would orphan work nobody is supervising.
 	defer over.StopAll(context.Background(), "the daemon shut down")
 
+	// Whatever the last run left behind, before anything new is written.
+	sweepOnStart(ctx, db, cfg, log)
+
 	srv := &http.Server{
 		Handler: api.New(api.Deps{
 			DB: db, Log: log, Registry: registry,
-			Overmind: over, Nydus: nyd, Bus: bus,
+			Overmind: over, Nydus: nyd, Bus: bus, Applied: cfg.Addr,
 		}).Routes(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	// Listen before announcing, so the printed URL is always a port that is
-	// actually accepting connections.
-	ln, err := net.Listen("tcp", *addr)
+	tlsCert, tlsKey, err := resolveTLS(ctx, cfg, filepath.Join(stateDir, "certs"))
 	if err != nil {
-		return fmt.Errorf("listening on %s: %w", *addr, err)
+		return err
 	}
 
-	log.Info("overmind up", "url", "http://"+ln.Addr().String(), "db", *dbPath, "socket", socket)
-	fmt.Printf("Cockpit: http://%s\n", ln.Addr().String())
-	warnIfReachable(*addr)
+	// Listen before announcing, so the printed URL is always a port that is
+	// actually accepting connections.
+	ln, err := net.Listen("tcp", cfg.Addr)
+	if err != nil {
+		return fmt.Errorf("listening on %s: %w", cfg.Addr, err)
+	}
+
+	scheme := "http"
+	if tlsCert != "" {
+		scheme = "https"
+	}
+	// The MagicDNS name, not the IP: a certificate is issued for the name, so
+	// the address that avoids a warning is the one worth printing.
+	shown := ln.Addr().String()
+	if cfg.TLSMode == store.TLSTailscale {
+		if st := tailnet.Probe(ctx); st.Available && st.DNSName != "" {
+			_, port, _ := net.SplitHostPort(cfg.Addr)
+			shown = net.JoinHostPort(st.DNSName, port)
+		}
+	}
+
+	log.Info("overmind up", "url", scheme+"://"+shown, "db", *dbPath, "socket", socket)
+	fmt.Printf("Cockpit: %s://%s\n", scheme, shown)
+	warnIfReachable(cfg.Addr, tlsCert != "")
 
 	errCh := make(chan error, 1)
 	go func() {
-		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		var err error
+		if tlsCert != "" {
+			err = srv.ServeTLS(ln, tlsCert, tlsKey)
+		} else {
+			err = srv.Serve(ln)
+		}
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}
 	}()
@@ -222,6 +268,81 @@ func runUp(args []string) error {
 	}
 }
 
+// resolveTLS turns the configured mode into a certificate and key, or empty
+// strings for plain HTTP.
+//
+// A tailscale certificate is requested on every start: the command is
+// idempotent, reusing a valid certificate and renewing one near expiry, so
+// there is nothing to cache and nothing to go stale.
+func resolveTLS(ctx context.Context, cfg store.Config, certDir string) (certFile, keyFile string, err error) {
+	switch cfg.TLSMode {
+	case store.TLSOff:
+		return "", "", nil
+
+	case store.TLSFiles:
+		return cfg.CertFile, cfg.KeyFile, nil
+
+	case store.TLSTailscale:
+		host := cfg.TailnetHost
+		if host == "" {
+			st := tailnet.Probe(ctx)
+			if !st.Available {
+				return "", "", fmt.Errorf("TLS is set to tailscale but %s", st.Reason)
+			}
+			host = st.DNSName
+		}
+		return tailnet.EnsureCert(ctx, host, certDir)
+	}
+	return "", "", fmt.Errorf("unknown TLS mode %q", cfg.TLSMode)
+}
+
+// sweepOnStart reclaims whatever the previous run left in the worktrees.
+//
+// Best effort and never fatal: failing to free disk is not a reason to refuse
+// to start, and the operator would rather have the daemon than the bytes.
+func sweepOnStart(ctx context.Context, db *store.DB, cfg store.Config, log *slog.Logger) {
+	if cfg.CleanPolicy != store.CleanOnStart {
+		return
+	}
+	projects, err := db.ListProjects(ctx)
+	if err != nil {
+		log.Error("startup sweep: could not list projects", "err", err)
+		return
+	}
+	for _, p := range projects {
+		freed, pruned, err := api.Sweep(ctx, db, p.ID, cfg)
+		if err != nil {
+			log.Error("startup sweep", "project", p.Name, "err", err)
+			continue
+		}
+		if freed > 0 || len(pruned) > 0 {
+			log.Info("startup sweep", "project", p.Name,
+				"freed_mb", freed/(1024*1024), "branches_pruned", len(pruned))
+		}
+	}
+}
+
+// sweepOnDone reclaims a project's disk when a card finishes, if that is the
+// configured policy.
+//
+// Best effort by design: the task is complete either way, and failing to free
+// bytes must never look like failing to finish work.
+func sweepOnDone(ctx context.Context, db *store.DB, projectID string, log *slog.Logger) {
+	cfg, err := db.GetConfig(ctx)
+	if err != nil || cfg.CleanPolicy != store.CleanOnDone {
+		return
+	}
+	freed, pruned, err := api.Sweep(ctx, db, projectID, cfg)
+	if err != nil {
+		log.Error("sweep after task", "project", projectID, "err", err)
+		return
+	}
+	if freed > 0 || len(pruned) > 0 {
+		log.Info("swept after task", "project", projectID,
+			"freed_mb", freed/(1024*1024), "branches_pruned", len(pruned))
+	}
+}
+
 // warnIfReachable says so, once, when the cockpit is listening somewhere other
 // than loopback.
 //
@@ -234,7 +355,7 @@ func runUp(args []string) error {
 // Binding to a private-network interface such as Tailscale is a reasonable
 // thing to want — a phone on the tailnet is still your own device. Binding
 // 0.0.0.0 also exposes it to whatever else shares the local network.
-func warnIfReachable(addr string) {
+func warnIfReachable(addr string, encrypted bool) {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
 		return
@@ -243,16 +364,20 @@ func warnIfReachable(addr string) {
 	case "", "127.0.0.1", "::1", "localhost":
 		return
 	}
+	plain := ""
+	if !encrypted {
+		plain = " and no TLS"
+	}
 	if host == "0.0.0.0" || host == "::" {
 		fmt.Fprintln(os.Stderr,
-			"warning: listening on every interface, and the cockpit has no authentication.\n"+
+			"warning: listening on every interface, with no authentication"+plain+".\n"+
 				"         Anything that can reach this port can start agents and read every\n"+
 				"         transcript. Prefer binding one interface, e.g. --addr <tailscale-ip>:7717")
 		return
 	}
 	fmt.Fprintf(os.Stderr,
-		"note: reachable at %s beyond this machine. The cockpit has no authentication,\n"+
-			"      so treat anything that can route to it as trusted.\n", addr)
+		"note: reachable at %s beyond this machine, with no authentication%s.\n"+
+			"      Treat anything that can route to it as trusted.\n", addr, plain)
 }
 
 // defaultHarness is what a freshly seeded library points its roles at.

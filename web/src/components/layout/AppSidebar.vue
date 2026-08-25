@@ -2,7 +2,7 @@
 import { computed } from 'vue'
 import type { RoleStatus, SwarmStatus } from '@/lib/api'
 
-export type View = 'board' | 'activity' | 'team' | 'attention' | 'readiness'
+export type View = 'board' | 'activity' | 'team' | 'attention' | 'readiness' | 'settings'
 
 const props = defineProps<{
   view: View
@@ -21,6 +21,7 @@ const nav = computed(() => [
   { key: 'team' as const, label: 'Team', count: 0 },
   { key: 'attention' as const, label: 'Attention', count: props.attentionCount },
   { key: 'readiness' as const, label: 'Readiness', count: 0 },
+  { key: 'settings' as const, label: 'Settings', count: 0 },
 ])
 
 /** Role state drives a colour and a word. Never colour alone. */

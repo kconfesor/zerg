@@ -42,6 +42,7 @@ type Integrator interface {
 type Nydus struct {
 	db         *store.DB
 	integrator Integrator
+	onTaskDone func(ctx context.Context, projectID, taskID string)
 	leaseFor   time.Duration
 	now        func() time.Time
 }
@@ -56,6 +57,17 @@ func WithClock(f func() time.Time) Option { return func(n *Nydus) { n.now = f } 
 
 // WithIntegrator supplies the merge strategy for terminal completion.
 func WithIntegrator(i Integrator) Option { return func(n *Nydus) { n.integrator = i } }
+
+// WithOnTaskDone registers what to run once a task lands in Done.
+//
+// A callback rather than nydus doing the work itself: reclaiming disk needs
+// worktrees and settings, and a router that reached for those would depend on
+// half the system to move a message. It runs after the transaction commits and
+// its failure never affects the completion, because a task is finished whether
+// or not the tidying afterwards worked.
+func WithOnTaskDone(fn func(ctx context.Context, projectID, taskID string)) Option {
+	return func(n *Nydus) { n.onTaskDone = fn }
+}
 
 func New(db *store.DB, opts ...Option) *Nydus {
 	n := &Nydus{
@@ -363,6 +375,9 @@ func (n *Nydus) complete(ctx context.Context, projectID string, sender store.Res
 
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("committing completion: %w", err)
+	}
+	if n.onTaskDone != nil {
+		n.onTaskDone(ctx, projectID, task.ID)
 	}
 	return msg, nil
 }

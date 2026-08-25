@@ -220,3 +220,71 @@ func git(ctx context.Context, dir string, args ...string) (string, error) {
 	}
 	return strings.TrimSpace(stdout.String()), nil
 }
+
+// SweepIgnored removes files the project itself declared disposable from a
+// role's worktree, and reports how many bytes went.
+//
+// `git clean -Xdf` and never -x: capital X removes only ignored files, so it
+// deletes build output and nothing a project has not already said is
+// regenerable. Lowercase -x would also take untracked files, which is where an
+// agent's half-finished work lives.
+//
+// The numbers are the argument. A Rust calculator's worktree is 256 KB of
+// source and 45 MB of target/ — per role, so it multiplies by team size, and
+// none of it is worth keeping once a task is done.
+func (h *Hatchery) SweepIgnored(ctx context.Context, role string) (int64, error) {
+	path := h.Path(role)
+	if !isWorktree(ctx, path) {
+		return 0, nil
+	}
+	before := dirSize(path)
+	if _, err := git(ctx, path, "clean", "-Xdf"); err != nil {
+		return 0, fmt.Errorf("sweeping %s: %w", path, err)
+	}
+	freed := before - dirSize(path)
+	if freed < 0 {
+		freed = 0
+	}
+	return freed, nil
+}
+
+// PruneMergedBranches deletes zerg-<role> branches already contained in the
+// base branch, and returns the names.
+//
+// Only merged ones: -d rather than -D, so git refuses anything carrying work
+// that has not reached the base branch. A branch whose worktree is still
+// checked out is skipped by git for the same reason.
+func (h *Hatchery) PruneMergedBranches(ctx context.Context, baseBranch string) ([]string, error) {
+	out, err := git(ctx, h.repoPath, "branch", "--merged", baseBranch, "--format=%(refname:short)")
+	if err != nil {
+		return nil, fmt.Errorf("listing merged branches: %w", err)
+	}
+
+	var pruned []string
+	for _, name := range strings.Split(out, "\n") {
+		name = strings.TrimSpace(name)
+		// Ours only. Deleting a branch the operator made would be well past
+		// anything this was asked to do.
+		if name == "" || !strings.HasPrefix(name, BranchPrefix) || name == baseBranch {
+			continue
+		}
+		if _, err := git(ctx, h.repoPath, "branch", "-d", name); err != nil {
+			continue // checked out, or not actually merged; either way leave it
+		}
+		pruned = append(pruned, name)
+	}
+	return pruned, nil
+}
+
+// dirSize is best effort: a tree that cannot be walked reports what it read, so
+// a permissions problem understates the saving rather than failing the sweep.
+func dirSize(path string) int64 {
+	var total int64
+	_ = filepath.Walk(path, func(_ string, info os.FileInfo, err error) error {
+		if err == nil && info != nil && !info.IsDir() {
+			total += info.Size()
+		}
+		return nil
+	})
+	return total
+}

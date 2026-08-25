@@ -31,6 +31,10 @@ type Server struct {
 	over     *overmind.Overmind
 	nyd      *nydus.Nydus
 	bus      *event.Bus
+
+	// applied is the address this process actually bound, so the UI can tell a
+	// saved setting from a running one.
+	applied string
 }
 
 // Deps are what the API needs to serve the cockpit.
@@ -45,6 +49,9 @@ type Deps struct {
 	// Bus is what the activity stream tails. Without it /events replies 503
 	// rather than serving an empty stream that looks like a quiet project.
 	Bus *event.Bus
+
+	// Applied is the address the daemon bound at startup.
+	Applied string
 }
 
 func New(d Deps) *Server {
@@ -54,7 +61,7 @@ func New(d Deps) *Server {
 	}
 	return &Server{
 		db: d.DB, log: d.Log, registry: d.Registry,
-		preflt: pf, over: d.Overmind, nyd: d.Nydus, bus: d.Bus,
+		preflt: pf, over: d.Overmind, nyd: d.Nydus, bus: d.Bus, applied: d.Applied,
 	}
 }
 
@@ -104,6 +111,9 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/approvals/{id}/reject", s.reject)
 	mux.HandleFunc("POST /api/clarifications/{id}/answer", s.answer)
 
+	mux.HandleFunc("GET /api/settings", s.getSettings)
+	mux.HandleFunc("PUT /api/settings", s.setSettings)
+	mux.HandleFunc("POST /api/projects/{id}/sweep", s.sweep)
 	mux.HandleFunc("GET /api/settings/shared-instructions", s.getSharedInstructions)
 	mux.HandleFunc("PUT /api/settings/shared-instructions", s.setSharedInstructions)
 

@@ -16,6 +16,7 @@ import {
 import Attention from '@/components/Attention.vue'
 import Activity from '@/components/Activity.vue'
 import Board from '@/components/Board.vue'
+import Settings from '@/components/Settings.vue'
 import ReadinessPanel from '@/components/Readiness.vue'
 import TeamEditor from '@/components/TeamEditor.vue'
 import AppSidebar, { type View } from '@/components/layout/AppSidebar.vue'
@@ -389,6 +390,15 @@ watch(current, () => (banner.value = null))
               </template>
             </PageHeader>
             <div class="pt-4"><Board :team="team" :tasks="tasks" /></div>
+          </template>
+
+          <!-- Settings -->
+          <template v-else-if="view === 'settings'">
+            <PageHeader
+              title="Settings"
+              subtitle="How the daemon serves the cockpit, and what it keeps on disk."
+            />
+            <div class="pt-4"><Settings :project-id="current?.id ?? null" /></div>
           </template>
 
           <!-- Activity -->

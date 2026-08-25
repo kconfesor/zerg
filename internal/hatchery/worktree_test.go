@@ -337,3 +337,105 @@ func TestLegacyIgnoreIsClearedOnlyWhenItIsOurs(t *testing.T) {
 		t.Error("the stray file we wrote was left in place")
 	}
 }
+
+// The sweep must take build output and leave everything else. A role's
+// worktree is mostly regenerable bytes — 256 KB of source against 45 MB of
+// target/ in a real Rust project — but an agent's uncommitted work lives in
+// untracked files, and those are not ours to delete.
+func TestSweepTakesIgnoredFilesAndNothingElse(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	ctx := context.Background()
+	h, _ := newProject(t)
+	tree, err := h.EnsureWorktree(ctx, "coder", "main")
+	if err != nil {
+		t.Fatalf("EnsureWorktree: %v", err)
+	}
+
+	// The project declares its build directory disposable, and commits that.
+	if err := os.WriteFile(filepath.Join(tree, ".gitignore"), []byte("target/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "-A"}, {"commit", "-q", "-m", "ignore target"}} {
+		if _, err := git(ctx, tree, args...); err != nil {
+			t.Fatalf("git %v: %v", args, err)
+		}
+	}
+
+	if err := os.MkdirAll(filepath.Join(tree, "target", "debug"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tree, "target", "debug", "big"), make([]byte, 64*1024), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Untracked but not ignored: an agent's work in progress.
+	if err := os.WriteFile(filepath.Join(tree, "draft.rs"), []byte("fn wip() {}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	freed, err := h.SweepIgnored(ctx, "coder")
+	if err != nil {
+		t.Fatalf("SweepIgnored: %v", err)
+	}
+	if freed < 64*1024 {
+		t.Errorf("freed %d bytes, want at least the 64 KB of build output", freed)
+	}
+	if _, err := os.Stat(filepath.Join(tree, "target")); !os.IsNotExist(err) {
+		t.Error("ignored build output survived the sweep")
+	}
+	if _, err := os.Stat(filepath.Join(tree, "draft.rs")); err != nil {
+		t.Error("the sweep deleted untracked work; only ignored files are ours to remove")
+	}
+	if _, err := os.Stat(filepath.Join(tree, ".gitignore")); err != nil {
+		t.Error("the sweep deleted a tracked file")
+	}
+}
+
+// Only branches whose work is already on the base branch, and only ours.
+func TestPruneTakesMergedZergBranchesOnly(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	ctx := context.Background()
+	h, dir := newProject(t)
+
+	// A merged role branch, made without a worktree so nothing holds it.
+	if _, err := git(ctx, dir, "branch", BranchPrefix+"merged", "main"); err != nil {
+		t.Fatal(err)
+	}
+	// A role branch carrying work that never reached main.
+	if _, err := git(ctx, dir, "checkout", "-q", "-b", BranchPrefix+"ahead"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "extra.txt"), []byte("unmerged"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "-A"}, {"commit", "-q", "-m", "ahead"}} {
+		if _, err := git(ctx, dir, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := git(ctx, dir, "checkout", "-q", "main"); err != nil {
+		t.Fatal(err)
+	}
+	// And one of the operator's own, merged, which is not ours to touch.
+	if _, err := git(ctx, dir, "branch", "my-feature", "main"); err != nil {
+		t.Fatal(err)
+	}
+
+	pruned, err := h.PruneMergedBranches(ctx, "main")
+	if err != nil {
+		t.Fatalf("PruneMergedBranches: %v", err)
+	}
+	if len(pruned) != 1 || pruned[0] != BranchPrefix+"merged" {
+		t.Fatalf("pruned %v, want only %s", pruned, BranchPrefix+"merged")
+	}
+
+	out, _ := git(ctx, dir, "branch", "--format=%(refname:short)")
+	for _, must := range []string{"my-feature", BranchPrefix + "ahead"} {
+		if !strings.Contains(out, must) {
+			t.Errorf("%s was deleted; it is either unmerged or not zerg's", must)
+		}
+	}
+}

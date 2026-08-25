@@ -193,6 +193,14 @@ export const api = {
   answer: (id: string, answer: string) =>
     call<void>(`/clarifications/${id}/answer`, { method: 'POST', body: JSON.stringify({ answer }) }),
 
+  settings: () => call<SettingsResponse>('/settings'),
+  setSettings: (cfg: DaemonConfig) =>
+    call<SettingsResponse>('/settings', { method: 'PUT', body: JSON.stringify(cfg) }),
+  sweep: (id: string) =>
+    call<{ bytesFreed: number; branchesPruned: string[] | null }>(`/projects/${id}/sweep`, {
+      method: 'POST',
+    }),
+
   usage: (id: string, by: 'role' | 'provider' | 'model' = 'role') =>
     call<UsageTotal[]>(`/projects/${id}/usage?by=${by}`),
 
@@ -351,4 +359,38 @@ export function streamActivity(
       socket = null
     },
   }
+}
+
+// ── settings ────────────────────────────────────────────────────────────────
+
+/** The daemon's own configuration, as the settings form edits it. */
+export interface DaemonConfig {
+  addr: string
+  tlsMode: 'off' | 'tailscale' | 'files'
+  certFile?: string
+  keyFile?: string
+  tailnetHost?: string
+  eventRetentionDays: number
+  cleanPolicy: 'never' | 'on_done' | 'on_start'
+  cleanIgnored: boolean
+  pruneMergedBranches: boolean
+}
+
+/** What the local tailscaled reports. Absent Tailscale is a normal state, not
+ *  an error, so `available` is false with a reason rather than a failed call. */
+export interface TailnetStatus {
+  available: boolean
+  reason?: string
+  dnsName?: string
+  ips?: string[]
+  httpsEnabled: boolean
+}
+
+export interface SettingsResponse {
+  config: DaemonConfig
+  tailnet: TailnetStatus
+  /** The address actually being served, which differs from config.addr when
+   *  settings have been saved but the daemon has not restarted. */
+  applied: string
+  restartNeeded: boolean
 }
