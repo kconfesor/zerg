@@ -92,6 +92,15 @@ func (*Adapter) Command(ctx context.Context, spec adapter.Spec) (*exec.Cmd, erro
 		"--input-format", "stream-json",
 		"--output-format", "stream-json",
 		"--verbose", // required for stream-json to emit anything but the result
+
+		// Load no MCP servers. This role runs with the operator's own config
+		// directory — claude reads OAuth from the keychain and refuses to start
+		// if that directory is relocated — so without this every agent inherits
+		// whatever servers the operator has configured for their own use. On the
+		// first real run that meant a code-review agent could reach a staging
+		// database, and paid startup latency and tool budget for servers it had
+		// no reason to hold.
+		"--strict-mcp-config",
 	}
 	if spec.SystemFile != "" {
 		args = append(args, "--append-system-prompt-file", spec.SystemFile)
