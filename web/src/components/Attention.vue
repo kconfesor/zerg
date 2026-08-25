@@ -2,7 +2,7 @@
 import { ref } from 'vue'
 import type { Attention } from '@/lib/api'
 import { ChevronRight } from '@lucide/vue'
-import { api } from '@/lib/api'
+import { api, type ChangedFile } from '@/lib/api'
 import { renderMarkdown } from '@/lib/markdown'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -15,7 +15,15 @@ const emit = defineEmits<{
   answer: [id: string, answer: string]
 }>()
 
-const diffs = ref<Record<string, { open: boolean; text: string; truncated: boolean }>>({})
+const diffs = ref<Record<string, { open: boolean; files: ChangedFile[]; error?: string }>>({})
+
+/** Markdown is shown as the document it is. Everything else is shown as a
+ *  diff, because for a change to existing code the change *is* the point —
+ *  while for a file the commit created, the diff is the document with a plus in
+ *  front of every line. */
+function isDoc(f: ChangedFile): boolean {
+  return /\.(md|markdown|txt)$/i.test(f.path) && !!f.content
+}
 
 async function toggleDiff(id: string) {
   const cur = diffs.value[id]
@@ -23,18 +31,15 @@ async function toggleDiff(id: string) {
     diffs.value = { ...diffs.value, [id]: { ...cur, open: false } }
     return
   }
-  diffs.value = { ...diffs.value, [id]: { open: true, text: cur?.text ?? '', truncated: false } }
-  if (cur?.text) return
+  diffs.value = { ...diffs.value, [id]: { open: true, files: cur?.files ?? [] } }
+  if (cur?.files?.length) return
   try {
     const r = await api.approvalDiff(id)
-    diffs.value = {
-      ...diffs.value,
-      [id]: { open: true, text: r.diff || '(this commit changed nothing)', truncated: r.truncated },
-    }
+    diffs.value = { ...diffs.value, [id]: { open: true, files: r.files ?? [] } }
   } catch (e) {
     diffs.value = {
       ...diffs.value,
-      [id]: { open: true, text: `Could not read the diff: ${e}`, truncated: false },
+      [id]: { open: true, files: [], error: e instanceof Error ? e.message : String(e) },
     }
   }
 }
@@ -91,16 +96,41 @@ function empty(a: Attention | null): boolean {
             :class="['transition-transform', diffs[a.id]?.open ? 'rotate-90' : '']"
             aria-hidden="true"
           />
-          {{ diffs[a.id]?.open ? 'Hide' : 'View' }} changes
+          {{ diffs[a.id]?.open ? 'Hide' : 'Read' }} what was written
           <code class="ml-1 opacity-70">{{ a.commit.slice(0, 8) }}</code>
         </button>
-        <pre
-          v-if="diffs[a.id]?.open"
-          class="bg-muted mt-1.5 max-h-80 overflow-auto p-2 font-mono text-[10px] leading-relaxed"
-        >{{ diffs[a.id]?.text || 'Loading…' }}</pre>
-        <p v-if="diffs[a.id]?.truncated" class="text-muted-foreground mt-1 text-[10px]">
-          Truncated — read the rest in the worktree.
-        </p>
+
+        <div v-if="diffs[a.id]?.open" class="mt-2">
+          <p v-if="diffs[a.id]?.error" class="text-destructive text-[11px]">
+            {{ diffs[a.id]?.error }}
+          </p>
+          <p v-else-if="!diffs[a.id]?.files.length" class="text-muted-foreground text-[11px]">
+            Loading…
+          </p>
+
+          <div
+            v-for="f in diffs[a.id]?.files ?? []"
+            :key="f.path"
+            class="mb-3 border last:mb-0"
+          >
+            <div class="hairline-b flex items-center gap-2 px-2 py-1">
+              <Badge variant="outline">{{ f.status }}</Badge>
+              <code class="min-w-0 truncate text-[11px]">{{ f.path }}</code>
+            </div>
+
+            <!-- A document, rendered. This is the thing being approved; showing
+                 it as a diff makes the reader reconstruct it line by line. -->
+            <div
+              v-if="isDoc(f)"
+              class="md max-h-[26rem] overflow-y-auto px-3 py-2 text-xs leading-relaxed"
+              v-html="renderMarkdown(f.content ?? '')"
+            />
+            <pre
+              v-else
+              class="bg-muted max-h-80 overflow-auto p-2 font-mono text-[10px] leading-relaxed"
+            >{{ f.diff || '(no diff)' }}</pre>
+          </div>
+        </div>
       </div>
 
       <div class="flex flex-wrap gap-2">

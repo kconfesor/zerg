@@ -248,7 +248,15 @@ func (s *Server) approvalDiff(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	const maxDiff = 256 * 1024
-	diff, truncated := hatchery.New(project.Path).Diff(r.Context(), approval.Commit, maxDiff)
-	writeJSON(w, http.StatusOK, map[string]any{"diff": diff, "truncated": truncated})
+	// Per file, with content as well as diff. A spec is a file the commit
+	// created, and its diff is the document with a plus in front of every line
+	// — which is not how anyone reads a document they are being asked to
+	// approve.
+	const maxFile = 256 * 1024
+	files, err := hatchery.New(project.Path).ChangedFiles(r.Context(), approval.Commit, maxFile)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"files": files})
 }

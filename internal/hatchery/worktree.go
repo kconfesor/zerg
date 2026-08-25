@@ -317,3 +317,56 @@ func (h *Hatchery) Diff(ctx context.Context, sha string, maxBytes int) (string, 
 	}
 	return out, false
 }
+
+// ChangedFile is one file a commit touched.
+type ChangedFile struct {
+	Path string `json:"path"`
+	// Status is git's letter: A added, M modified, D deleted.
+	Status string `json:"status"`
+	// Content is the file as of this commit. Empty for a deletion, and for
+	// anything too large or not text — the diff is the fallback for those.
+	Content string `json:"content,omitempty"`
+	// Diff is the unified diff for this file, which is what you want for a
+	// change to existing code and not what you want for a new document.
+	Diff string `json:"diff,omitempty"`
+}
+
+// ChangedFiles returns what a commit touched, with the content of each file as
+// of that commit.
+//
+// Content as well as diff, because the two answer different questions. A diff
+// is right for a change to existing code. For a file the commit created — a
+// spec, a design note — the diff is the document with a plus in front of every
+// line, and the thing you actually want to read is the document.
+func (h *Hatchery) ChangedFiles(ctx context.Context, sha string, maxBytes int) ([]ChangedFile, error) {
+	out, err := git(ctx, h.repoPath, "show", "--format=", "--name-status", sha)
+	if err != nil {
+		return nil, fmt.Errorf("listing what %s changed: %w", sha, err)
+	}
+
+	var files []ChangedFile
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		parts := strings.Fields(line)
+		if len(parts) < 2 {
+			continue
+		}
+		f := ChangedFile{Status: parts[0][:1], Path: parts[len(parts)-1]}
+
+		if f.Status != "D" {
+			if body, err := git(ctx, h.repoPath, "show", sha+":"+f.Path); err == nil {
+				if maxBytes <= 0 || len(body) <= maxBytes {
+					f.Content = body
+				}
+			}
+		}
+		// The diff comes too: content alone cannot show what changed in a file
+		// that already existed.
+		if d, err := git(ctx, h.repoPath, "show", "--format=", "--patch", sha, "--", f.Path); err == nil {
+			if maxBytes <= 0 || len(d) <= maxBytes {
+				f.Diff = d
+			}
+		}
+		files = append(files, f)
+	}
+	return files, nil
+}

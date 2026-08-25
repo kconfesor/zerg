@@ -217,8 +217,7 @@ export const api = {
     }),
 
   taskDetail: (id: string) => call<TaskDetail>(`/tasks/${id}`),
-  approvalDiff: (id: string) =>
-    call<{ diff: string; truncated: boolean }>(`/approvals/${id}/diff`),
+  approvalDiff: (id: string) => call<{ files: ChangedFile[] }>(`/approvals/${id}/diff`),
   setIntegration: (id: string, integration: Integration) =>
     call<Project>(`/projects/${id}/integration`, {
       method: 'PUT',
@@ -448,4 +447,13 @@ export interface TaskDetail {
   task: Task
   history: TaskStep[]
   usage: UsageTotal
+}
+
+/** One file a commit touched, with both its content and its diff. */
+export interface ChangedFile {
+  path: string
+  /** git's letter: A added, M modified, D deleted. */
+  status: 'A' | 'M' | 'D' | string
+  content?: string
+  diff?: string
 }
