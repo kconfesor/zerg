@@ -18,8 +18,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/konfessor/zerg/internal/adapter"
-	"github.com/konfessor/zerg/internal/store"
+	"github.com/kconfesor/zerg/internal/adapter"
+	"github.com/kconfesor/zerg/internal/store"
 )
 
 // Status is the outcome of one check or one role.

@@ -9,7 +9,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/konfessor/zerg/internal/adapter"
+	"github.com/kconfesor/zerg/internal/adapter"
 )
 
 // Checks probe what only this adapter knows. Two of them exist because pi

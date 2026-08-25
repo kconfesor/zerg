@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/konfessor/zerg/internal/hatchery"
-	"github.com/konfessor/zerg/internal/store"
+	"github.com/kconfesor/zerg/internal/hatchery"
+	"github.com/kconfesor/zerg/internal/store"
 )
 
 // fakeIntegrator records merges so a test can assert integration happened

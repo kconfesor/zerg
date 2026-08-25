@@ -1,4 +1,4 @@
-module github.com/konfessor/zerg
+module github.com/kconfesor/zerg
 
 go 1.27.0
 

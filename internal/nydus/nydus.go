@@ -16,8 +16,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/konfessor/zerg/internal/hatchery"
-	"github.com/konfessor/zerg/internal/store"
+	"github.com/kconfesor/zerg/internal/hatchery"
+	"github.com/kconfesor/zerg/internal/store"
 )
 
 // DefaultLease is how long a role may hold work before it returns to the queue.

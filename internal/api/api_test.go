@@ -13,9 +13,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/konfessor/zerg/internal/adapter"
-	"github.com/konfessor/zerg/internal/adapter/claudeharness"
-	"github.com/konfessor/zerg/internal/store"
+	"github.com/kconfesor/zerg/internal/adapter"
+	"github.com/kconfesor/zerg/internal/adapter/claudeharness"
+	"github.com/kconfesor/zerg/internal/store"
 )
 
 func newTestServer(t *testing.T) (http.Handler, *store.DB) {

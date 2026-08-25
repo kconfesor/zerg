@@ -17,14 +17,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/konfessor/zerg/internal/adapter"
-	"github.com/konfessor/zerg/internal/agent"
-	"github.com/konfessor/zerg/internal/cerebrate"
-	"github.com/konfessor/zerg/internal/event"
-	"github.com/konfessor/zerg/internal/hatchery"
-	"github.com/konfessor/zerg/internal/nydus"
-	"github.com/konfessor/zerg/internal/preflight"
-	"github.com/konfessor/zerg/internal/store"
+	"github.com/kconfesor/zerg/internal/adapter"
+	"github.com/kconfesor/zerg/internal/agent"
+	"github.com/kconfesor/zerg/internal/cerebrate"
+	"github.com/kconfesor/zerg/internal/event"
+	"github.com/kconfesor/zerg/internal/hatchery"
+	"github.com/kconfesor/zerg/internal/nydus"
+	"github.com/kconfesor/zerg/internal/preflight"
+	"github.com/kconfesor/zerg/internal/store"
 )
 
 const (

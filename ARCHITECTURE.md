@@ -137,6 +137,36 @@ runs.
 Consequence: edit a prompt in the UI, restart the role, and the change is live. This is the direct
 fix for the snapshot staleness that silently produced a Clojure calculator when the config said Rust.
 
+### 4.4.1 What zerg injects, and what it leaves alone
+
+An orchestrator that edits the repository it is orchestrating is a bad neighbour. The boundary:
+
+**Appended, never replaced.** Both adapters use their harness's *append* flag
+(`--append-system-prompt-file`, `--append-system-prompt`). The harness's own system prompt, the
+project's `CLAUDE.md` or `AGENTS.md`, and the operator's global instructions all still load and
+still apply. zerg adds the protocol and the role; it does not take over the agent.
+
+**Nothing is written into the repository.** The composed prompt goes to
+`$TMPDIR/zerg/<project>/<role>/state/<role>.system.md`, outside the tree. The only thing zerg puts
+inside a repository is `.worktrees/`, and its ignore rule goes in `.git/info/exclude` rather than
+`.gitignore` — that file belongs to the project, and writing to it made zerg's first task on a real
+repository fail on a collision with the project's own.
+
+**A ground rule forbids editing instruction files.** `CLAUDE.md`, `AGENTS.md` and their kin
+configure every future agent, so a docs role tidying them would quietly change behaviour far beyond
+its task. The shared instructions say to leave them alone unless the task is explicitly about them,
+and to follow the conventions already in the repository over any preference of the agent's own.
+
+**Role prompts name no paths the project has not chosen.** The planner writes a specification, and
+looks for where the project already keeps design documents before falling back to `docs/specs/`.
+An earlier version hardcoded that path, which meant pointing zerg at any existing repository
+created a directory in someone else's tree on the first run.
+
+**Budget.** Shared instructions are ~760 tokens; role prompts are 85–225. Under 1k per agent, and
+byte-frozen per §11.2 so it is a cache hit after the first turn. Nothing instructs an agent to
+narrate its status — structured events carry that natively (§11.1), and a dashboard that greps for
+sentences makes agents spend output tokens on telemetry.
+
 ### 4.5 The built-in library
 
 Eight templates ship, covering every team shape worth presetting — as rows in a picker, rather than
@@ -417,6 +447,14 @@ delete before it exists. A smaller reason found on the way: HTTP/1.1 allows abou
 per origin, and an SSE stream holds one open per tab for its lifetime — the daemon serves plain TCP,
 so there is no HTTP/2 multiplexing to make that free. WebSockets are not subject to that limit.
 
+---
+
+## 8. Preflight
+
+Four hangs in one day of running an earlier build presented identically — an agent that looks alive
+and does nothing — and every one was detectable before spawning. Preflight is that check, promoted
+from something you do when puzzled to something that runs first.
+
 Runs before every spawn. Each check yields `ok` or `blocked(reason, remedy)`. A blocked role renders
 in **Attention** with both — never as an idle pane that happens to be doing nothing.
 
@@ -473,15 +511,18 @@ Adapters declare which env var relocates their config.
 
 ## 9. Data model
 
-SQLite, WAL, single writer inside the overmind.
+SQLite, WAL, single writer inside the overmind. Fourteen tables; migrations are numbered files
+applied in one transaction, and `user_version` records how far a database has got.
 
 ```sql
 -- global library, edited exclusively through the UI
 role_templates (id, name, harness, model, args, receive,
-                batch_max_items, batch_max_age, prompt, gate,
+                batch_max_items, batch_max_age_sec, prompt, gate,
                 builtin, created_at, updated_at)
-settings       (key, value)       -- shared instructions, preferences
-projects       (id, path, name, base_branch, last_opened_at)
+settings       (key, value)       -- shared instructions, daemon config, harness flags
+
+projects       (id, path, name, base_branch, created_at, last_opened_at,
+                integration)      -- 'merge' | 'pr' | 'branch'; see §9.2
 
 -- which templates this project uses, in what order, with what overrides
 project_roles  (project_id, template_id, position, enabled,
@@ -490,18 +531,24 @@ project_roles  (project_id, template_id, position, enabled,
 -- per-project runtime
 sessions    (id, project_id, started_at, ended_at, end_reason)
 
-tasks       (id, project_id, session_id, name, lane, state,
+tasks       (id, project_id, session_id, name, body, lane, state,
              created_at, first_claimed_at, completed_at,
-             active_ms)          -- summed lease time; wall time is completed−created
-messages    (id, project_id, from_role, type, priority, task_id, commit_sha, body, created_at)
-routes      (message_id, to_role, state, enqueued_at, delivered_at)   -- idempotent per recipient
-leases      (id, project_id, role, message_id, expires_at, acked_at)
-events      (id, project_id, ts, role, kind, payload)                 -- append-only
-runs        (id, project_id, role, pid, started_at, exited_at, exit_code)
-approvals   (id, project_id, message_id, state, decided_at)
+             active_ms,           -- summed lease time; wall time is completed−created
+             rework_count,        -- laps backward through the pipeline
+             hidden)              -- put away by a person; §9.3
+
+messages    (id, project_id, task_id, from_role, kind, priority,
+             commit_sha, body, terminal, created_at)
+routes      (message_id, to_role, state, enqueued_at, delivered_at)  -- idempotent per recipient
+leases      (id, project_id, role, granted_at, expires_at, acked_at, expired_at)
+lease_items (lease_id, message_id, to_role)   -- a batch lease covers many messages
+events      (id, project_id, task_id, role, kind, ts, text, tool, data, fatal)  -- append-only
+approvals   (id, project_id, message_id, state, note, created_at, decided_at)
+clarifications (id, project_id, task_id, role, question, answer, state,
+                created_at, answered_at)
 
 -- one row per model turn, not per run: this is what the cost dashboard reads
-usage_turns (id, project_id, task_id, role, run_id, ts,
+usage_turns (id, project_id, task_id, role, ts,
              harness, provider, model,
              input_tokens,        -- uncached input only
              cache_write_tokens,  -- billed ~1.25x (5m TTL) or 2x (1h)
@@ -510,22 +557,56 @@ usage_turns (id, project_id, task_id, role, run_id, ts,
              cost_usd,
              cost_source,         -- 'harness' | 'computed'
              billing)             -- 'metered' | 'subscription'
-
--- prices carry effective dates; introductory rates expire
-model_prices (provider, model, effective_from, effective_to,
-              input_per_mtok, output_per_mtok,
-              cache_write_mult, cache_read_mult)
-
--- pre-aggregated history; small, permanent, powers every long-range chart
-daily_rollup (project_id, day, role, provider, model,
-              input_tokens, cache_read_tokens, cache_write_tokens, output_tokens,
-              cost_usd, turns, active_ms, tasks_completed)
 ```
 
 `events` being append-only gives the cockpit free time travel: the UI is a projection, so a reload
-replays rather than re-scrapes.
+replays rather than re-scrapes. Ids are monotonic ULIDs, which makes one value serve as primary key,
+sort order and stream resume cursor at once — a client reconnects with `after=<last id seen>`.
 
----
+### 9.1 The two gates
+
+A role's `gate` column decides whether its output stops for a person. Both kinds of stop use the
+same `approvals` table and the same cockpit queue, but they hold different things:
+
+- **A routed handoff** — the sender is not terminal. The route is written `held` rather than
+  `queued`, so the recipient never sees it. Approving flips it to `queued`.
+- **A terminal completion** — the sender is the last enabled role, and approving is what lands the
+  work. Integration runs *before* the decision is recorded, so a merge that fails leaves the
+  approval open rather than marking a task done over a branch that never moved. §6.1 is the record
+  of getting that backwards.
+
+The distinction reaches the cockpit as `terminal` on the approval, because the two deserve
+different views. A handoff shows what the sender just committed. A terminal completion shows
+`git diff base...sha` — everything that would land, across every role and every lap — since
+approving the last commit on the strength of its own diff is approving a merge by its closing
+paragraph.
+
+### 9.2 Where finished work goes
+
+`projects.integration` is per project and deliberately not per role:
+
+| mode | what the terminal approval does |
+|---|---|
+| `merge` | fast-forwards the base branch. Right for a repository you own outright. |
+| `pr` | pushes the branch and opens a PR via `gh`, using the handoff note as the description. |
+| `branch` | nothing. The work sits on its branch; landing it is a later decision. |
+
+Per role would attach the policy to whichever role happened to be last, and disabling that role
+would silently move it to another one — the same failure as taking terminality from config-file
+line order, which §6 records.
+
+### 9.3 Hidden cards
+
+`tasks.hidden` is a card a person has put away. Done accumulates, and most of an old board is work
+nobody needs to see again. An age cutoff was the alternative and hides the wrong things: a
+month-old card you still refer to goes, this morning's dead end stays.
+
+It is a column rather than a browser preference because the same board is read from a laptop and a
+phone over the tailnet, and a card put away on one should be away on the other. Whether hidden
+cards are *shown* is per browser, and lives in `localStorage`.
+
+Hiding changes nothing else — not the lane, not the state. A hidden card is finished work that is
+still finished, and unhiding returns it unchanged.
 
 ## 10. Cockpit
 
@@ -890,18 +971,52 @@ editor. If it reads tiring at length, that editor is the place to make an except
 
 ---
 
-## 15. Build order
+## 15. Build order — as built
 
-1. **store + role library + project team API** — templates as rows with the eight built-ins seeded; a new project selects coder and reviewer.
-2. **nydus + board** against an in-memory harness stub — prove leases, claims, acks, terminal merge
-   with zero LLM calls.
-3. **adapter interface + claude adapter + preflight**, including the readiness gate — a team that
-   cannot work must not reach a running board.
+The order below is what was actually followed, and milestones 1–2 being LLM-free is the reason §6
+and §6.1 are almost entirely coordination bugs caught without spending a token.
+
+1. **store + role library + project team API** — templates as rows with the eight built-ins seeded.
+2. **nydus + board** against an in-memory harness stub — leases, claims, acks and terminal merge
+   proven with zero LLM calls.
+3. **adapter interface + claude adapter + preflight** — a team that cannot work never reaches a
+   running board.
 4. **cerebrate** supervision, lease expiry, crash/backoff.
 5. **Cockpit v1** — projects, team, role editor, attention, board.
-6. **pi adapter** — the second adapter is what proves the interface is real.
-7. pty attach + xterm.js; cost accounting; event replay.
+6. **pi adapter** — the second adapter is what turned the interface from a description of claude
+   into a contract; three fields the design required were unexercised until then.
+7. **Cost accounting and event replay** — usage per turn, not per run.
+8. **WebSocket transport** (§7.5), replacing the SSE stream it started as.
+9. **Approval gates, integration modes and the gate diff** (§9.1, §9.2) — the run that produced
+   §6.1 is what motivated showing `base...sha` at the gate that performs the merge.
+10. **Tailnet and TLS** (§16), because a board you cannot read from a phone gets read less.
 
-Milestones 1–2 are deliberately LLM-free. The coordination layer is where the interesting failure
-modes live — §6 and §6.1 are both almost entirely coordination bugs — and it is testable without
-spending a token.
+Still open: pty attach and takeover (§10.1, needs `github.com/creack/pty`), artifacts (§13), and
+authentication (§16). Nothing resumes a swarm after a daemon restart — agents stop and stay
+stopped until Start is pressed, which is deliberate while spawning an LLM process costs money, but
+it is a decision rather than a finished answer.
+
+---
+
+## 16. Network exposure
+
+The daemon binds `127.0.0.1:7717` by default. `--addr`, or **Settings → Network**, binds one other
+interface — over Tailscale, that is the tailnet address.
+
+**TLS has three modes.** `off`; `tailscale`, which asks the local `tailscaled` for a Let's Encrypt
+certificate for this machine's MagicDNS name; and `files`, for a certificate you supply. The
+Tailscale path needs **HTTPS Certificates** enabled for the tailnet in the admin console, and the
+settings view says so when it is not.
+
+Tailscale is reached through its **CLI**, not `tsnet`. Measured: `tsnet` pulls 547 modules and
+about 30 MB into a project whose entire dependency set is otherwise two modules and 18 MB. The
+daemon shells out to a `tailscaled` that is already running for other reasons.
+
+**Loopback keeps working alongside it.** A second listener serves plain HTTP on `127.0.0.1` on the
+same port — one daemon, two doors. Local work does not need the MagicDNS name, and a network
+setting that breaks the main listener cannot lock you out of the view that would fix it.
+
+**There is no authentication.** Anything that can route to the port can start agents, read every
+transcript, and see which repositories are being worked on. On a tailnet that is your own devices,
+which is the point; `--addr 0.0.0.0` hands it to whatever else shares the local network. The daemon
+states which of the two you have chosen at startup, and does not pretend the difference is small.

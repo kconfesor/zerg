@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/konfessor/zerg/internal/adapter"
-	"github.com/konfessor/zerg/internal/store"
+	"github.com/kconfesor/zerg/internal/adapter"
+	"github.com/kconfesor/zerg/internal/store"
 )
 
 // fake is an adapter whose checks a test dictates, so readiness logic can be

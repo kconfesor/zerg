@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/konfessor/zerg/internal/adapter"
+	"github.com/kconfesor/zerg/internal/adapter"
 )
 
 // Runs the check against whatever this machine actually has, and prints it.

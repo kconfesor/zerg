@@ -10,7 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/konfessor/zerg/internal/adapter"
+	"github.com/kconfesor/zerg/internal/adapter"
 )
 
 // Event is an adapter event stamped with where it came from.

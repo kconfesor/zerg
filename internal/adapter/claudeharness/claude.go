@@ -17,7 +17,7 @@ import (
 	"strings"
 	"sync/atomic"
 
-	"github.com/konfessor/zerg/internal/adapter"
+	"github.com/kconfesor/zerg/internal/adapter"
 )
 
 const (

@@ -9,8 +9,8 @@ import (
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
 
-	"github.com/konfessor/zerg/internal/event"
-	"github.com/konfessor/zerg/internal/store"
+	"github.com/kconfesor/zerg/internal/event"
+	"github.com/kconfesor/zerg/internal/store"
 )
 
 // Ping cadence. An agent can think for a minute without emitting anything, so

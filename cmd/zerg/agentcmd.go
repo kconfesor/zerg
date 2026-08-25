@@ -9,7 +9,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/konfessor/zerg/internal/agent"
+	"github.com/kconfesor/zerg/internal/agent"
 )
 
 // The agent-facing side of the binary. An agent gets these four verbs and

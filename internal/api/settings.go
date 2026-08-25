@@ -7,9 +7,9 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/konfessor/zerg/internal/hatchery"
-	"github.com/konfessor/zerg/internal/store"
-	"github.com/konfessor/zerg/internal/tailnet"
+	"github.com/kconfesor/zerg/internal/hatchery"
+	"github.com/kconfesor/zerg/internal/store"
+	"github.com/kconfesor/zerg/internal/tailnet"
 )
 
 // settingsResponse is the settings form plus the facts it needs to be filled

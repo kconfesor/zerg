@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/konfessor/zerg/internal/adapter"
+	"github.com/kconfesor/zerg/internal/adapter"
 )
 
 // These fixtures are verbatim lines captured from claude 2.1.243 running

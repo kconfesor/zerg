@@ -19,11 +19,11 @@ import (
 
 	"log/slog"
 
-	"github.com/konfessor/zerg/internal/adapter"
-	"github.com/konfessor/zerg/internal/cerebrate"
-	"github.com/konfessor/zerg/internal/event"
-	"github.com/konfessor/zerg/internal/hatchery"
-	"github.com/konfessor/zerg/internal/store"
+	"github.com/kconfesor/zerg/internal/adapter"
+	"github.com/kconfesor/zerg/internal/cerebrate"
+	"github.com/kconfesor/zerg/internal/event"
+	"github.com/kconfesor/zerg/internal/hatchery"
+	"github.com/kconfesor/zerg/internal/store"
 )
 
 // Role is the name chat events carry, and the worktree they run in.

@@ -37,9 +37,25 @@ So:
 - **one SQLite database**, one writer, real transactions
 - **nothing reports success it did not observe** — see [§6.1](ARCHITECTURE.md#61-what-the-first-real-run-broke),
   which is the record of a task reaching Done over a branch that had never moved
+- **it is a guest in your repository** — prompts are appended, never substituted, so your
+  `CLAUDE.md` and `AGENTS.md` still apply; nothing is written into the tree but `.worktrees/`, and
+  that ignore rule goes in `.git/info/exclude` rather than your `.gitignore`
+  ([§4.4.1](ARCHITECTURE.md#441-what-zerg-injects-and-what-it-leaves-alone))
 
 Provider setup is out of scope: log into `pi` and `claude` yourself. zerg detects credential state
 and tells you what to fix — it never runs a login flow or touches an auth file.
+
+## Approving, and where work lands
+
+A role can be gated. A gated handoff is held before the next role sees it; a gated **last** role is
+the approval that performs the merge, and it shows `git diff base...sha` — everything the task would
+land, across every role and every lap, not just the final commit.
+
+Per project you choose what that approval does: fast-forward the base branch, open a pull request
+with `gh`, or leave the work on its branch. It is a project setting rather than a role setting
+because only the last role integrates, and which role that is changes when you change the team.
+
+Finished cards can be put away one at a time; the switch to show them again is off by default.
 
 ## Defaults
 
@@ -58,11 +74,13 @@ internal/
   agent/           unix socket serving the four agent verbs
   nydus/           message transport: work plane + control plane
   board/           cards and lanes
+  chat/            ask the repository a question, outside the pipeline
   store/           sqlite (~/.zerg/zerg.db), migrations, role library
   event/           typed event bus, logging and usage recording
   preflight/       readiness checks run before anything spawns
   api/             http, serves the embedded cockpit
   hatchery/        workspace and worktree management
+  tailnet/         tailscale status and certificates, via its CLI
 web/               Vue 3 + Vite + shadcn-vue cockpit
 ```
 

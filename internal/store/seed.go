@@ -77,6 +77,11 @@ questions into your output hoping someone reads them.
   tree conflicts sometimes; that is expected, not an error.
 - Do not describe what you are doing for the orchestrator's benefit. It sees
   your tool calls directly.
+- Leave CLAUDE.md, AGENTS.md and any other file that configures a coding tool
+  alone unless the task is explicitly about them. They are the operator's
+  instructions to you; editing them changes how every future agent behaves.
+- Follow the conventions already in the repository over any preference of your
+  own. You are one contributor to someone else's codebase, not its owner.
 `
 
 type seedRole struct {
@@ -98,7 +103,10 @@ var builtinRoles = []seedRole{
 		prompt: `You turn a request into a specification precise enough to implement without
 guessing.
 
-Write the spec to ` + "`docs/specs/<task-name>.md`" + ` and commit it. Cover:
+Write the spec where this project already keeps design documents, and commit
+it. Look before you choose: if there is a docs/, design/ or rfc/ directory with
+prose in it, follow that convention and its file naming. Only if the project
+keeps no such documents, use ` + "`docs/specs/<task-name>.md`" + `. Cover:
 
 - what the change must do, in terms a test could check
 - the cases that matter, including the ones that should fail

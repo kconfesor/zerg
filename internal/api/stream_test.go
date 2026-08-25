@@ -14,10 +14,10 @@ import (
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
 
-	"github.com/konfessor/zerg/internal/adapter"
-	"github.com/konfessor/zerg/internal/adapter/claudeharness"
-	"github.com/konfessor/zerg/internal/event"
-	"github.com/konfessor/zerg/internal/store"
+	"github.com/kconfesor/zerg/internal/adapter"
+	"github.com/kconfesor/zerg/internal/adapter/claudeharness"
+	"github.com/kconfesor/zerg/internal/event"
+	"github.com/kconfesor/zerg/internal/store"
 )
 
 // streamFixture is a server with a bus attached and one project to stream.

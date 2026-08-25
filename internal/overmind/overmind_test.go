@@ -14,13 +14,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/konfessor/zerg/internal/adapter"
-	"github.com/konfessor/zerg/internal/agent"
-	"github.com/konfessor/zerg/internal/cerebrate"
-	"github.com/konfessor/zerg/internal/event"
-	"github.com/konfessor/zerg/internal/nydus"
-	"github.com/konfessor/zerg/internal/preflight"
-	"github.com/konfessor/zerg/internal/store"
+	"github.com/kconfesor/zerg/internal/adapter"
+	"github.com/kconfesor/zerg/internal/agent"
+	"github.com/kconfesor/zerg/internal/cerebrate"
+	"github.com/kconfesor/zerg/internal/event"
+	"github.com/kconfesor/zerg/internal/nydus"
+	"github.com/kconfesor/zerg/internal/preflight"
+	"github.com/kconfesor/zerg/internal/store"
 )
 
 // scriptedHarness stands in for claude or pi. Its "agent" is a shell script
@@ -124,7 +124,7 @@ func TestMain(m *testing.M) {
 	defer os.RemoveAll(dir)
 
 	zergBin = filepath.Join(dir, "zerg")
-	build := exec.Command("go", "build", "-o", zergBin, "github.com/konfessor/zerg/cmd/zerg")
+	build := exec.Command("go", "build", "-o", zergBin, "github.com/kconfesor/zerg/cmd/zerg")
 	if out, err := build.CombinedOutput(); err != nil {
 		fmt.Fprintf(os.Stderr, "building the zerg CLI: %v\n%s", err, out)
 		os.Exit(1)

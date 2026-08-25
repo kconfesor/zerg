@@ -20,7 +20,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/konfessor/zerg/internal/adapter"
+	"github.com/kconfesor/zerg/internal/adapter"
 )
 
 const binary = "pi"

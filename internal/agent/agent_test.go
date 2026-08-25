@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/konfessor/zerg/internal/nydus"
-	"github.com/konfessor/zerg/internal/store"
+	"github.com/kconfesor/zerg/internal/nydus"
+	"github.com/kconfesor/zerg/internal/store"
 )
 
 type fixture struct {

@@ -14,13 +14,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/konfessor/zerg/internal/adapter"
-	"github.com/konfessor/zerg/internal/chat"
-	"github.com/konfessor/zerg/internal/event"
-	"github.com/konfessor/zerg/internal/nydus"
-	"github.com/konfessor/zerg/internal/overmind"
-	"github.com/konfessor/zerg/internal/preflight"
-	"github.com/konfessor/zerg/internal/store"
+	"github.com/kconfesor/zerg/internal/adapter"
+	"github.com/kconfesor/zerg/internal/chat"
+	"github.com/kconfesor/zerg/internal/event"
+	"github.com/kconfesor/zerg/internal/nydus"
+	"github.com/kconfesor/zerg/internal/overmind"
+	"github.com/kconfesor/zerg/internal/preflight"
+	"github.com/kconfesor/zerg/internal/store"
 )
 
 // Server holds the dependencies every handler needs.

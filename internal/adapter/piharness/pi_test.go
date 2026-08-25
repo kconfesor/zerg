@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/konfessor/zerg/internal/adapter"
+	"github.com/kconfesor/zerg/internal/adapter"
 )
 
 // Fixtures captured verbatim from pi 0.74.2 running `--mode json`. Note how
