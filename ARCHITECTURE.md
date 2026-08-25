@@ -351,7 +351,11 @@ projects    (id, path, name, base_branch, last_opened_at)
 role_overrides (project_id, role_id, model, enabled)
 
 -- per-project runtime
-tasks       (id, project_id, name, lane, state, created_at, updated_at)
+sessions    (id, project_id, started_at, ended_at, end_reason)
+
+tasks       (id, project_id, session_id, name, lane, state,
+             created_at, first_claimed_at, completed_at,
+             active_ms)          -- summed lease time; wall time is completed−created
 messages    (id, project_id, from_role, type, priority, task_id, commit_sha, body, created_at)
 routes      (message_id, to_role, state, enqueued_at, delivered_at)   -- idempotent per recipient
 leases      (id, project_id, role, message_id, expires_at, acked_at)
@@ -374,6 +378,11 @@ usage_turns (id, project_id, task_id, role, run_id, ts,
 model_prices (provider, model, effective_from, effective_to,
               input_per_mtok, output_per_mtok,
               cache_write_mult, cache_read_mult)
+
+-- pre-aggregated history; small, permanent, powers every long-range chart
+daily_rollup (project_id, day, role, provider, model,
+              input_tokens, cache_read_tokens, cache_write_tokens, output_tokens,
+              cost_usd, turns, active_ms, tasks_completed)
 ```
 
 `events` being append-only gives the cockpit free time travel: the UI is a projection, so a reload
@@ -411,6 +420,9 @@ plain `//go:embed dist` silently skips Vite's `.vite/` manifest directory.
   **task**, each showing the three-way input split rather than one input number, with subscription
   rows labelled as estimates. Drill-down runs summary → provider → role → task → turn, ending at the
   individual turn that the activity view already shows.
+- **History** — the long view (§12), scoped per project: spend over time stacked by role, cost per
+  task ranked, wall time against active time, cache rate as a line, and a session log. Reads
+  `daily_rollup`, so a twelve-month range is as fast as a one-day range.
 - **Chat** — talk to the first role in the pipeline.
 
 Transport: one WebSocket carrying typed events; REST for commands.
@@ -534,7 +546,64 @@ useless as an invoice. Tokens are always real; dollars sometimes are not.
 `cost_source = 'harness'`. Compute from the price table only when it does not, and mark it
 `'computed'` so a disagreement is visible rather than averaged away.
 
-## 12. Stack
+## 12. History and metrics
+
+The database makes history nearly free — but only if the three kinds of record are kept on different
+terms. Treating them alike is how a local SQLite file becomes a 14 GB liability.
+
+### 12.1 Three tiers, three retentions
+
+| Tier | Row size | A busy day | Kept |
+|---|---|---|---|
+| `events` | ~2 KB (tool payloads, diffs, command output) | ~40 MB | rolling window, default 30 days |
+| `usage_turns` | ~200 B | ~200 KB | indefinitely |
+| `daily_rollup` | ~120 B | ~40 rows | forever |
+
+The arithmetic decides it. Five roles at ~200 turns a day is ~1,000 turns; at 20 events per turn
+that is roughly 40 MB of events daily — about **14 GB a year** — against ~73 MB of usage rows for the
+same period. Events are the expensive tier and the least valuable in the long run: they exist to
+replay and debug *recent* work.
+
+The honest consequence, stated plainly in the UI: recent work replays in full; older work keeps its
+metrics, its costs and its outcome, but not its complete transcript. The window is configurable, and
+a task can be pinned to exempt it.
+
+Rollups are computed on session end and on a daily timer, so a twelve-month chart reads a few
+thousand tiny rows instead of scanning millions of turns.
+
+### 12.2 Wall time is not work time
+
+Two durations per task, and the gap between them is the interesting number:
+
+- **Wall time** — `completed_at − created_at`. How long the task took in human terms.
+- **Active time** — summed lease durations. How long agents actually worked on it.
+
+A task showing 6 hours wall and 12 minutes active was not slow; it was **blocked** — waiting on an
+approval gate, a clarification, or a queue behind another card. swarm-forge could not distinguish
+these at all, so a stalled pipeline and a hard task looked identical. Charting them together turns
+"where does our time go" from a guess into a reading.
+
+### 12.3 What the history view answers
+
+Every panel below is a query against `daily_rollup` joined to `tasks`, scoped by project:
+
+- **Spend over time** — daily cost, stacked by role, with sessions marked on the axis. Answers
+  "what did this project cost last month" directly.
+- **Cost per task** — ranked. The long tail is usually fine; the top three are where the money went.
+- **Wall vs active per task** — paired bars. Long wall with short active means the pipeline stalls,
+  not the agents.
+- **Cache rate over time** — a line, per role. This is the regression detector: the architect case in
+  §11.4 shows up here as a cliff on the day its prompt changed, weeks before anyone would notice it
+  in a bill.
+- **Sessions** — a table: when, how long, roles active, tasks completed, cost.
+
+### 12.4 Cross-project comparison
+
+Because roles are global (§4.1) and rollups carry `project_id`, the same queries aggregate across
+projects: cost per project, which project a role earns its keep in, whether a prompt change helped
+everywhere or only in one repo. That falls out of the schema rather than needing a second one.
+
+## 13. Stack
 
 Versions verified against npm dist-tags and `proxy.golang.org` on 2026-08-24.
 
@@ -570,7 +639,7 @@ Versions verified against npm dist-tags and `proxy.golang.org` on 2026-08-24.
 
 ---
 
-## 13. Build order
+## 14. Build order
 
 1. **store + config + role CRUD API** — roles as rows, seeded with coder and qa.
 2. **nydus + board** against an in-memory harness stub — prove leases, claims, acks, terminal merge

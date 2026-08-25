@@ -59,7 +59,7 @@ web/               Vue 3 + Vite + shadcn-vue cockpit
 Go 1.26.7 · stdlib `net/http` · coder/websocket · creack/pty · modernc.org/sqlite (cgo-free)
 Vue 3.5 · Vite 8 · shadcn-vue 2.8 (reka-ui) · Tailwind 4 · @xterm/xterm 6 · TypeScript 6 (pinned)
 
-Pinned versions and their gotchas: [ARCHITECTURE.md §12](ARCHITECTURE.md#12-stack).
+Pinned versions and their gotchas: [ARCHITECTURE.md §13](ARCHITECTURE.md#13-stack).
 
 ## Prerequisites
 
