@@ -22,7 +22,9 @@ import TaskDetail from '@/components/TaskDetail.vue'
 import Settings from '@/components/Settings.vue'
 import ReadinessPanel from '@/components/Readiness.vue'
 import TeamEditor from '@/components/TeamEditor.vue'
-import AppSidebar, { type View } from '@/components/layout/AppSidebar.vue'
+import AppSidebar from '@/components/layout/AppSidebar.vue'
+import { useRoute, useRouter } from 'vue-router'
+import { type View } from '@/router'
 import ProjectBar from '@/components/layout/ProjectBar.vue'
 import PageHeader from '@/components/layout/PageHeader.vue'
 import { Button } from '@/components/ui/button'
@@ -39,7 +41,16 @@ import {
 
 const projects = ref<Project[]>([])
 const current = ref<Project | null>(null)
-const view = ref<View>('board')
+/**
+ * The current view is the route, not a ref. Anything that needs to change it
+ * navigates, so the address bar, the back button and a reload all agree.
+ */
+const route = useRoute()
+const router = useRouter()
+const view = computed<View>(() => (route.name as View) ?? 'board')
+function go(v: View) {
+  router.push({ name: v })
+}
 
 /** The nav drawer, which only exists below md. */
 const navOpen = ref(false)
@@ -192,7 +203,11 @@ async function refresh() {
 
 async function open(project: Project) {
   current.value = project
-  view.value = 'board'
+  // Deliberately no navigation. Opening a project on startup used to force the
+  // board, which silently discarded whatever route was asked for — so a link to
+  // /settings, or a reload while on /chat, always landed on the board. Every
+  // view is scoped to the current project anyway, so switching project while
+  // reading one of them should keep you there.
   readiness.value = null
   await refresh()
 }
@@ -214,7 +229,7 @@ async function checkReadiness() {
   if (!current.value) return
   try {
     readiness.value = await api.readiness(current.value.id)
-    view.value = 'readiness'
+    go('readiness')
   } catch (err) {
     fail(err)
   }
@@ -233,7 +248,7 @@ async function start() {
       const body = err.body as { readiness?: Readiness } | undefined
       if (body?.readiness) {
         readiness.value = body.readiness
-        view.value = 'readiness'
+        go('readiness')
       }
     }
     fail(err)
@@ -349,7 +364,7 @@ watch(current, () => (banner.value = null))
       :task-count="tasks.length"
       :open="navOpen"
       @close="navOpen = false"
-      @navigate="(v) => (view = v)"
+      @navigate="go"
     />
 
     <div class="flex min-w-0 flex-1 flex-col overflow-hidden">
@@ -382,7 +397,7 @@ watch(current, () => (banner.value = null))
       <button
         v-if="attentionCount && view !== 'attention'"
         class="hairline-b flex shrink-0 items-center gap-2 bg-[var(--status-warning)]/10 px-[var(--gutter)] py-2 text-left text-xs text-[var(--status-warning)] transition-colors hover:bg-[var(--status-warning)]/15"
-        @click="view = 'attention'"
+        @click="go('attention')"
       >
         <span class="pulse-dot size-1.5 rounded-full bg-current" />
         <span class="tabular font-semibold">{{ attentionCount }}</span>

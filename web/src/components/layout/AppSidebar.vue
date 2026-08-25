@@ -11,7 +11,7 @@ import {
 } from '@lucide/vue'
 import type { RoleStatus, SwarmStatus } from '@/lib/api'
 
-export type View = 'board' | 'activity' | 'chat' | 'team' | 'attention' | 'readiness' | 'settings'
+import type { View } from '@/router'
 
 const props = defineProps<{
   view: View
