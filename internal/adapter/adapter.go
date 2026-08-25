@@ -142,6 +142,22 @@ type Result struct {
 	Remedy string
 }
 
+// Billing says whether a turn is charged per token or covered by a plan.
+//
+// This distinction is the difference between a cost figure and a lie. An agent
+// running under a ChatGPT or Claude subscription is not billed for what it
+// used, so reporting a confident dollar total for it would be false — pi says
+// as much itself, printing "$0.067 (sub)" rather than a charge. Subscription
+// turns are still costed at API rates, because comparing roles against each
+// other is useful; they are simply labelled as estimates.
+type Billing string
+
+const (
+	BillingUnknown      Billing = ""
+	BillingMetered      Billing = "metered"
+	BillingSubscription Billing = "subscription"
+)
+
 // EventKind is the vocabulary the cockpit renders. Adapters map their harness's
 // native output onto it; the UI knows nothing about any specific harness.
 type EventKind string
@@ -178,6 +194,19 @@ type Event struct {
 	// Model is what the harness reports it actually used, which is not always
 	// what was asked for — a fallback or an alias resolves here.
 	Model string
+
+	// Provider is who served the turn. A single harness can front several:
+	// pi reports openai-codex, anthropic, google and more, and spend is only
+	// attributable per provider if the adapter says which one ran.
+	Provider string
+
+	// Billing is how this turn is charged. See Billing.
+	Billing Billing
+
+	// CostReported distinguishes a cost the harness stated from one zerg would
+	// have to derive from a price table. Storing which is which keeps a
+	// disagreement visible instead of averaging it away.
+	CostReported bool
 
 	// Fatal marks an error the agent cannot recover from, so the cerebrate
 	// stops instead of leaving a process that looks alive and answers nothing.

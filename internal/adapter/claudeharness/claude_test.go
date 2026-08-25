@@ -16,6 +16,7 @@ import (
 const (
 	lineHookStarted = `{"type":"system","subtype":"hook_started","hook_id":"ef7d","hook_name":"SessionStart:startup","session_id":"5ee7"}`
 	lineInit        = `{"type":"system","subtype":"init","cwd":"/tmp/x","session_id":"5ee7","model":"claude-sonnet-5","permissionMode":"bypassPermissions","apiKeySource":"none"}`
+	lineInitKeyed   = `{"type":"system","subtype":"init","session_id":"5ee7","model":"claude-opus-5","apiKeySource":"ANTHROPIC_API_KEY"}`
 	lineAssistant   = `{"type":"assistant","message":{"model":"claude-sonnet-5","id":"msg_01","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":2,"cache_creation_input_tokens":14540,"cache_read_input_tokens":24326,"output_tokens":4}},"session_id":"5ee7"}`
 	lineRateLimit   = `{"type":"rate_limit_event","rate_limit_info":{"status":"allowed"},"session_id":"5ee7"}`
 	lineResult      = `{"is_error":false,"duration_api_ms":1743,"num_turns":1,"stop_reason":"end_turn","session_id":"5ee7","total_cost_usd":0.0630692,"usage":{"input_tokens":2,"cache_creation_input_tokens":14540,"cache_read_input_tokens":24326,"output_tokens":4},"subtype":"success","api_error_status":null,"result":"ok","type":"result"}`
@@ -23,7 +24,14 @@ const (
 
 func parse(t *testing.T, line string) []adapter.Event {
 	t.Helper()
-	evs, err := New().Parse([]byte(line))
+	return parseWith(t, New(), line)
+}
+
+// parseWith keeps one adapter across several lines, which matters because
+// billing mode is latched from the init event and read when usage arrives.
+func parseWith(t *testing.T, a *Adapter, line string) []adapter.Event {
+	t.Helper()
+	evs, err := a.Parse([]byte(line))
 	if err != nil {
 		t.Fatalf("Parse(%.40s...): %v", line, err)
 	}
@@ -257,5 +265,39 @@ func TestListModelsIncludesTheDocumentedAliases(t *testing.T) {
 		if !have[want] {
 			t.Errorf("alias %q is missing from the model list", want)
 		}
+	}
+}
+
+// Billing comes from how the CLI authenticated, which it states once, in the
+// init event. An OAuth login is a Claude plan: tokens are not charged per use,
+// so a confident dollar total for that role would be a fiction.
+func TestBillingIsLatchedFromTheInitEvent(t *testing.T) {
+	a := New()
+	if evs := parseWith(t, a, lineInit); evs[0].Billing != adapter.BillingSubscription {
+		t.Fatalf("ready billing = %q, want subscription for an OAuth login", evs[0].Billing)
+	}
+
+	evs := parseWith(t, a, lineResult)
+	if evs[0].Kind != adapter.EventUsage {
+		t.Fatalf("first event is %s, want usage", evs[0].Kind)
+	}
+	if evs[0].Billing != adapter.BillingSubscription {
+		t.Errorf("usage billing = %q; it must carry what init established", evs[0].Billing)
+	}
+	if evs[0].Provider != "anthropic" {
+		t.Errorf("provider = %q, want anthropic", evs[0].Provider)
+	}
+	if !evs[0].CostReported {
+		t.Error("claude states total_cost_usd; that must be recorded rather than derived")
+	}
+}
+
+func TestAnAPIKeyMeansMeteredBilling(t *testing.T) {
+	a := New()
+	if evs := parseWith(t, a, lineInitKeyed); evs[0].Billing != adapter.BillingMetered {
+		t.Fatalf("billing = %q, want metered when an API key is in use", evs[0].Billing)
+	}
+	if evs := parseWith(t, a, lineResult); evs[0].Billing != adapter.BillingMetered {
+		t.Errorf("usage billing = %q, want metered", evs[0].Billing)
 	}
 }

@@ -21,6 +21,7 @@ import (
 
 	"github.com/konfessor/zerg/internal/adapter"
 	"github.com/konfessor/zerg/internal/adapter/claudeharness"
+	"github.com/konfessor/zerg/internal/adapter/piharness"
 	"github.com/konfessor/zerg/internal/api"
 	"github.com/konfessor/zerg/internal/store"
 )
@@ -102,6 +103,7 @@ func runUp(args []string) error {
 
 	registry := adapter.NewRegistry()
 	registry.Register(claudeharness.New())
+	registry.Register(piharness.New())
 
 	srv := &http.Server{
 		Handler:           api.New(db, log, registry).Routes(),

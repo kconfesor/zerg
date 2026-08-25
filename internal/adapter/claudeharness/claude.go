@@ -15,15 +15,43 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 
 	"github.com/konfessor/zerg/internal/adapter"
 )
 
-const binary = "claude"
+const (
+	binary       = "claude"
+	providerName = "anthropic"
+)
 
-type Adapter struct{}
+type Adapter struct {
+	// billing is latched from the init event and read when usage arrives, so
+	// it is written and read on the same stream but not necessarily the same
+	// goroutine.
+	billing atomic.Pointer[string]
+}
 
-func New() *Adapter { return &Adapter{} }
+func New() *Adapter {
+	a := &Adapter{}
+	unknown := string(adapter.BillingUnknown)
+	a.billing.Store(&unknown)
+	return a
+}
+
+// billingFor reads the CLI's own account of how it authenticated. An OAuth
+// login ("none" — no API key involved) is a Claude plan, where usage is not
+// charged per token, so its dollar figures are estimates rather than bills.
+func billingFor(apiKeySource string) adapter.Billing {
+	switch apiKeySource {
+	case "":
+		return adapter.BillingUnknown
+	case "none":
+		return adapter.BillingSubscription
+	default:
+		return adapter.BillingMetered
+	}
+}
 
 func (*Adapter) Name() string { return "claude" }
 
@@ -185,6 +213,11 @@ type wire struct {
 		Usage usage `json:"usage"`
 	} `json:"message"`
 
+	// apiKeySource is how the CLI authenticated. "none" means an OAuth login,
+	// i.e. a Claude plan, where tokens are not billed per use — so a confident
+	// dollar figure would be a fiction. Anything else is a metered API key.
+	APIKeySource string `json:"apiKeySource"`
+
 	Usage        usage   `json:"usage"`
 	TotalCostUSD float64 `json:"total_cost_usd"`
 	IsError      bool    `json:"is_error"`
@@ -209,7 +242,7 @@ func (u usage) empty() bool {
 // Most lines are noise — hook chatter, rate-limit notices, banners — and return
 // nothing. That is not an error condition, and treating it as one is how a
 // harness upgrade turns into a wall of spurious failures.
-func (*Adapter) Parse(line []byte) ([]adapter.Event, error) {
+func (a *Adapter) Parse(line []byte) ([]adapter.Event, error) {
 	line = bytes.TrimSpace(line)
 	if len(line) == 0 || line[0] != '{' {
 		return nil, nil
@@ -223,7 +256,14 @@ func (*Adapter) Parse(line []byte) ([]adapter.Event, error) {
 	switch w.Type {
 	case "system":
 		if w.Subtype == "init" {
-			return []adapter.Event{{Kind: adapter.EventReady, Model: w.Model}}, nil
+			// The init event is the only place the CLI states how it
+			// authenticated, so billing mode is latched here for the session.
+			b := string(billingFor(w.APIKeySource))
+			a.billing.Store(&b)
+			return []adapter.Event{{
+				Kind: adapter.EventReady, Model: w.Model,
+				Provider: providerName, Billing: billingFor(w.APIKeySource),
+			}}, nil
 		}
 		return nil, nil // hook_started, hook_response, and friends
 
@@ -234,12 +274,14 @@ func (*Adapter) Parse(line []byte) ([]adapter.Event, error) {
 			case "text":
 				if strings.TrimSpace(c.Text) != "" {
 					out = append(out, adapter.Event{
-						Kind: adapter.EventMessage, Text: c.Text, Model: w.Message.Model,
+						Kind: adapter.EventMessage, Text: c.Text,
+						Model: w.Message.Model, Provider: providerName,
 					})
 				}
 			case "tool_use":
 				out = append(out, adapter.Event{
-					Kind: adapter.EventToolCall, Tool: c.Name, Args: c.Input, Model: w.Message.Model,
+					Kind: adapter.EventToolCall, Tool: c.Name, Args: c.Input,
+					Model: w.Message.Model, Provider: providerName,
 				})
 			case "thinking":
 				out = append(out, adapter.Event{Kind: adapter.EventThinking, Model: w.Message.Model})
@@ -267,6 +309,9 @@ func (*Adapter) Parse(line []byte) ([]adapter.Event, error) {
 			CacheWriteTokens: w.Usage.CacheCreationInputTokens,
 			TokensOut:        w.Usage.OutputTokens,
 			CostUSD:          w.TotalCostUSD,
+			CostReported:     true,
+			Provider:         providerName,
+			Billing:          adapter.Billing(deref(a.billing.Load())),
 		}}
 		if w.IsError || w.APIError != nil {
 			// A turn that errored must surface as an error, not as a quiet end.
@@ -321,4 +366,12 @@ func boolLabel(isErr bool) string {
 		return "error"
 	}
 	return "ok"
+}
+
+// deref reads a latched string pointer, tolerating an unset value.
+func deref(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
 }
