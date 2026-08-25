@@ -31,6 +31,10 @@ type fakeIntegrator struct {
 	// nanoseconds.
 	enter chan struct{}
 	hold  chan struct{}
+	// once, so the fields are written before the goroutines start and never
+	// mutated afterwards — a fake that nils its own channel to fire once is a
+	// data race with the test reading it.
+	once sync.Once
 }
 
 // Resolve is identity here: these tests pass shas already, and the point of
@@ -56,8 +60,7 @@ func (f *fakeIntegrator) MergeInto(_ context.Context, _, commit string) error {
 
 func (f *fakeIntegrator) Merge(_ context.Context, _, _, commit string) error {
 	if f.enter != nil {
-		close(f.enter)
-		f.enter = nil
+		f.once.Do(func() { close(f.enter) })
 		<-f.hold
 	}
 	f.mu.Lock()
