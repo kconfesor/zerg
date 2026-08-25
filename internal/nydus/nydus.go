@@ -197,6 +197,17 @@ func (n *Nydus) Send(ctx context.Context, projectID, fromRole string, req SendRe
 		if !sender.Terminal {
 			return nil, invalid("role %q must name a recipient; only the terminal role finishes a task", fromRole)
 		}
+		// KNOWN GAP: a terminal role's approval gate is not honoured here. The
+		// gate is applied further down, to routed hand-offs, and completion
+		// returns before reaching it — so a reviewer set to require approval
+		// merges to the base branch without asking, which is the setting doing
+		// the opposite of what it says.
+		//
+		// Fixing it is not a one-line change: decide() releases held *routes*,
+		// and a completion has none, so a held completion would need
+		// integration to run on approval instead — outside the transaction,
+		// where complete() already does it. Left deliberately rather than
+		// half-built.
 		return n.complete(ctx, projectID, sender, req)
 	}
 

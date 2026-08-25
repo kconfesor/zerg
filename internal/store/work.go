@@ -105,6 +105,13 @@ type Approval struct {
 	CreatedAt time.Time `json:"createdAt"`
 	TaskName  string    `json:"taskName,omitempty"`
 	FromRole  string    `json:"fromRole,omitempty"`
+
+	// Body is what the sending role wrote when it handed the work on, and
+	// Commit is what it points at. Without them the approval card names a task
+	// and a role and asks you to decide — which is asking someone to approve
+	// something they cannot read.
+	Body   string `json:"body,omitempty"`
+	Commit string `json:"commit,omitempty"`
 }
 
 type Session struct {
@@ -308,7 +315,7 @@ const messageCols = `id, project_id, task_id, from_role, kind, priority,
 func (db *DB) ListPendingApprovals(ctx context.Context, projectID string) ([]Approval, error) {
 	rows, err := db.sql.QueryContext(ctx,
 		`SELECT a.id, a.project_id, a.message_id, a.state, a.note, a.created_at,
-		        COALESCE(t.name, ''), m.from_role
+		        COALESCE(t.name, ''), m.from_role, m.body, COALESCE(m.commit_sha, '')
 		 FROM approvals a
 		 JOIN messages m ON m.id = a.message_id
 		 LEFT JOIN tasks t ON t.id = m.task_id
@@ -327,7 +334,7 @@ func (db *DB) ListPendingApprovals(ctx context.Context, projectID string) ([]App
 			created string
 		)
 		if err := rows.Scan(&a.ID, &a.ProjectID, &a.MessageID, &a.State, &note,
-			&created, &a.TaskName, &a.FromRole); err != nil {
+			&created, &a.TaskName, &a.FromRole, &a.Body, &a.Commit); err != nil {
 			return nil, err
 		}
 		if note.Valid {
