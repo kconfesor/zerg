@@ -28,6 +28,8 @@ import { useRoute, useRouter } from 'vue-router'
 import { viewOf, viewPath, type View } from '@/router'
 import ProjectBar from '@/components/layout/ProjectBar.vue'
 import PageHeader from '@/components/layout/PageHeader.vue'
+import { Switch } from '@/components/ui/switch'
+import UsageSummary from '@/components/layout/UsageSummary.vue'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -65,6 +67,16 @@ const openTask = ref<Task | null>(null)
  *  it. It arrives while you are reading something else, and going to another
  *  screen and back loses your place twice. */
 const attentionOpen = ref(false)
+
+/**
+ * Whether the Done well is shown, remembered across reloads.
+ *
+ * A view preference, so localStorage rather than the database: it belongs to
+ * this browser, not to the project, and someone else looking at the same board
+ * should not have their lanes rearranged by it.
+ */
+const showDone = ref(localStorage.getItem('zerg.showDone') !== 'false')
+watch(showDone, (v) => localStorage.setItem('zerg.showDone', String(v)))
 
 /** Which cards are the ones waiting, so the board can mark them rather than
  *  leaving you to work out which of five is holding the pipeline. */
@@ -299,8 +311,9 @@ async function start() {
   if (!current.value) return
   banner.value = null
   try {
+    // No banner. The bar already flips to "n/n agents live", which is the
+    // same news said in the place you look for it and without a dismissal.
     status.value = await api.start(current.value.id)
-    banner.value = { tone: 'ok', text: 'Swarm started.' }
   } catch (err) {
     // A refused start carries the readiness report, so show which role failed
     // which check rather than only that something was wrong.
@@ -485,13 +498,29 @@ watch(current, () => (banner.value = null))
           <!-- Board -->
           <template v-if="view === 'board'">
             <PageHeader title="Board" :subtitle="boardSubtitle">
+              <template #meta>
+                <span class="text-muted-foreground truncate font-mono text-[11px]" :title="current.path">
+                  {{ current.path }}
+                </span>
+                <span class="text-muted-foreground text-[11px]">·</span>
+                <span class="text-muted-foreground text-[11px]">{{ current.baseBranch }}</span>
+                <UsageSummary :project-id="current.id" :refresh-key="usageKey" />
+              </template>
               <template #actions>
+                <!-- A switch, not a button: the state is visible when you are
+                     not using it, so a board with no Done column explains
+                     itself rather than looking like lost work. -->
+                <div class="flex items-center gap-2">
+                  <Switch id="show-done" v-model="showDone" />
+                  <Label for="show-done" class="cursor-pointer text-xs font-normal">Done</Label>
+                </div>
                 <Button @click="composing = true">New task</Button>
               </template>
             </PageHeader>
             <div class="pt-4"><Board
                 :team="team"
                 :tasks="tasks"
+                :show-done="showDone"
                 :needs-attention="attentionTaskIds"
                 @open="(t) => (openTask = t)"
                 @review="() => (attentionOpen = true)"

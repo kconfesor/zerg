@@ -238,3 +238,46 @@ func TestUnlistedModelWarnsRatherThanBlocks(t *testing.T) {
 		t.Errorf("an unlisted model blocked the role: %+v", res)
 	}
 }
+
+// The union is the point: before it, whichever source was chosen lost models
+// the person could select in pi itself. This asserts both directions of the
+// disagreement, so dropping either source fails it.
+func TestModelStoreAndTableAreMerged(t *testing.T) {
+	table := parseModelTable([]byte(
+		"provider      model      context\n" +
+			"openai-codex  gpt-5.1    272K\n" +
+			"openai-codex  gpt-5.4    272K\n"))
+
+	store := []adapter.Model{
+		{ID: "openai-codex/gpt-5.4", Label: "gpt-5.4", Provider: "openai-codex", Context: 272000},
+		{ID: "openai-codex/gpt-5.6-sol", Label: "gpt-5.6-sol", Provider: "openai-codex", Context: 272000},
+	}
+
+	got := map[string]adapter.Model{}
+	for _, m := range mergeCatalogs(table, store) {
+		got[m.ID] = m
+	}
+
+	// gpt-5.1 exists only in the table, gpt-5.6-sol only in the store.
+	for _, want := range []string{"openai-codex/gpt-5.1", "openai-codex/gpt-5.6-sol"} {
+		if _, ok := got[want]; !ok {
+			t.Errorf("%s missing: one source was dropped", want)
+		}
+	}
+	if len(got) != 3 {
+		t.Errorf("got %d models, want 3 (the overlap counted once)", len(got))
+	}
+	// The store's exact window beats the table's rounded column.
+	if got["openai-codex/gpt-5.4"].Context != 272000 {
+		t.Errorf("overlap kept the wrong record: %+v", got["openai-codex/gpt-5.4"])
+	}
+}
+
+// The store is pi's file, not zerg's. A missing or malformed one costs the
+// models it would have added and nothing else.
+func TestModelStoreDegradesQuietly(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // no store at all
+	if got := modelsFromStore(); got != nil {
+		t.Errorf("missing store returned %v, want nil", got)
+	}
+}

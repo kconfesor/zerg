@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/konfessor/zerg/internal/adapter"
@@ -137,23 +138,137 @@ func billingFor(provider string) adapter.Billing {
 
 // ── models ────────────────────────────────────────────────────────────────
 
-// ListModels shells out to `pi --list-models`, which prints a fixed-column
-// table and ignores --mode json.
+// ListModels unions pi's two catalogs, because neither one is complete.
 //
-// Parsing a table is unpleasant, but the alternative is a hand-maintained list
-// of every model across every provider pi fronts, which would be wrong within a
-// week. A parse failure degrades to an empty catalog rather than an error: the
-// role editor accepts free text anyway, and gpt-5.6-sol is itself absent from
-// this table while working perfectly.
+// `pi --list-models` prints a fixed-column table; ~/.pi/agent/models-store.json
+// is what its own picker reads. Measured against pi 0.74.2 they disagree in
+// both directions: the table carries gpt-5.1 through gpt-5.3-codex, which the
+// store omits, and the store carries gpt-5.6-sol, -luna and -terra, which the
+// table omits despite their working when passed to --model. Twelve and ten
+// entries, sixteen between them.
+//
+// So neither is authoritative and picking one loses models a person can see in
+// pi itself. Both are read and merged, keyed by provider/id. The store wins on
+// metadata: it is JSON with an exact context window, where the table rounds to
+// a "272K" column that has to be parsed back.
+//
+// Either source failing degrades to whatever the other returned, and both
+// failing to an empty catalog rather than an error — the role editor accepts
+// free text, so an unlisted model is typed rather than unreachable.
 func (*Adapter) ListModels(ctx context.Context) ([]adapter.Model, error) {
+	var table []adapter.Model
 	// CombinedOutput, not Output: pi prints the table on stderr. Reading only
 	// stdout silently yields an empty catalog, which then degrades to "no
 	// catalog" and looks like a working check.
-	out, err := exec.CommandContext(ctx, binary, "--no-extensions", "--list-models").CombinedOutput()
-	if err != nil {
-		return nil, nil
+	//
+	// No --no-extensions here. Extensions can register providers, and the flag
+	// would hide models the person can otherwise select.
+	if out, err := exec.CommandContext(ctx, binary, "--list-models").CombinedOutput(); err == nil {
+		table = parseModelTable(out)
 	}
-	return parseModelTable(out), nil
+	return mergeCatalogs(table, modelsFromStore()), nil
+}
+
+// mergeCatalogs unions the two sources, keyed by provider/id.
+//
+// Separate from ListModels so it can be tested without a pi on the machine —
+// the merge is the part with a rule in it, and shelling out is not.
+func mergeCatalogs(table, store []adapter.Model) []adapter.Model {
+	merged := map[string]adapter.Model{}
+	var order []string
+
+	add := func(m adapter.Model, authoritative bool) {
+		prev, seen := merged[m.ID]
+		if !seen {
+			order = append(order, m.ID)
+			merged[m.ID] = m
+			return
+		}
+		// Keep the better-populated record rather than the later one: a store
+		// entry missing a context window should not blank one the table had.
+		if authoritative {
+			if m.Label == "" {
+				m.Label = prev.Label
+			}
+			if m.Context == 0 {
+				m.Context = prev.Context
+			}
+			merged[m.ID] = m
+		}
+	}
+
+	for _, m := range table {
+		add(m, false)
+	}
+	for _, m := range store {
+		add(m, true)
+	}
+
+	models := make([]adapter.Model, 0, len(order))
+	for _, id := range order {
+		models = append(models, merged[id])
+	}
+	return models
+}
+
+// storeModel is the subset of ~/.pi/agent/models-store.json that is needed.
+// Decoding only these fields means pi adding a key does not break the read.
+type storeModel struct {
+	ID            string `json:"id"`
+	Provider      string `json:"provider"`
+	ContextWindow int    `json:"contextWindow"`
+}
+
+// modelsFromStore reads the catalog pi's own model picker uses.
+//
+// Silent on every failure. The file is pi's, not zerg's: it is absent before
+// pi is first authenticated and its shape is not a published contract, so a
+// change here should cost the models it would have added and nothing else.
+func modelsFromStore() []adapter.Model {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+	raw, err := os.ReadFile(filepath.Join(home, ".pi", "agent", "models-store.json"))
+	if err != nil {
+		return nil
+	}
+
+	// Keyed by provider, each holding its own model list.
+	var store map[string]struct {
+		Models []storeModel `json:"models"`
+	}
+	if err := json.Unmarshal(raw, &store); err != nil {
+		return nil
+	}
+
+	// Map iteration is random and this list is shown to a person, so the
+	// providers are sorted. Within a provider pi's own order is kept.
+	providers := make([]string, 0, len(store))
+	for p := range store {
+		providers = append(providers, p)
+	}
+	sort.Strings(providers)
+
+	var models []adapter.Model
+	for _, p := range providers {
+		for _, m := range store[p].Models {
+			if m.ID == "" {
+				continue
+			}
+			provider := m.Provider
+			if provider == "" {
+				provider = p
+			}
+			models = append(models, adapter.Model{
+				ID:       provider + "/" + m.ID,
+				Label:    m.ID,
+				Provider: provider,
+				Context:  m.ContextWindow,
+			})
+		}
+	}
+	return models
 }
 
 func parseModelTable(out []byte) []adapter.Model {

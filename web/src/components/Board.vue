@@ -35,13 +35,18 @@ const props = defineProps<{
   tasks: Task[]
   /** Ids of tasks with something waiting on a person. */
   needsAttention?: string[]
+  /** Whether the Done well is shown. Finished work is the bulk of an old
+   *  board and none of the work in front of you. */
+  showDone?: boolean
 }>()
 const emit = defineEmits<{ open: [task: Task]; review: [task: Task] }>()
 
 /** Lanes are the enabled roles in pipeline order, then the Done well. */
 const lanes = computed(() => {
   const roles = props.team.filter((r) => r.enabled).map((r) => r.name)
-  return [...roles, 'done']
+  // The whole lane goes, not its cards: an empty "done" column reading 0 next
+  // to five finished tasks says something false.
+  return props.showDone === false ? roles : [...roles, 'done']
 })
 
 const byLane = computed(() => {
