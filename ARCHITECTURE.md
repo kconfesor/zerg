@@ -264,7 +264,35 @@ in **Attention** with both — never as an idle pane that happens to be doing no
 | `model_available` | model id absent from the harness catalog → warn, don't block | adapter |
 | `plugins_loadable` | *pi's broken extension tree* — smoke run with the real flags | adapter |
 
-### 8.1 Isolated harness config
+### 8.1 Two moments, one check suite
+
+The same checks run at two points, because the two failures they prevent are different.
+
+**Project setup — the readiness gate.** Adding a project, or pressing Start, runs the full suite
+across **every enabled role** first, in parallel, and renders a readiness panel: one row per role,
+each check green, amber or red, with the remedy inline for anything failing. Start is disabled while
+any role is red.
+
+This is the moment that matters. Half our lost day came from a swarm that launched *successfully* —
+six sessions up, dashboard green, board drawn — while four roles sat at a trust dialog and two more
+were dead on a config parse error. Nothing was wrong with the launch; everything was wrong with the
+agents. A team that cannot work should never reach a running board.
+
+Red is blocking. Amber (an unlisted model, a harness whose version could not be determined) shows a
+warning and allows Start with an explicit acknowledgement, since a catalog can lag a model that
+works. The panel is re-runnable on demand — you fix a login in another terminal, hit **Re-check**,
+and watch the row go green without restarting anything.
+
+**Spawn — the guard.** The same suite runs again before each individual spawn, because state drifts
+between setup and launch and between one task and the next: a token expires, a `brew upgrade`
+replaces a binary, another tool rewrites a shared config. A role that fails here does not spawn; it
+appears in Attention as blocked with its remedy, and the work it would have claimed stays queued
+rather than vanishing into a lease held by a process that cannot run.
+
+Checks are cheap (a version probe, a config parse, a credential read) and cached briefly per role,
+so the spawn guard costs milliseconds.
+
+### 8.2 Isolated harness config
 
 swarm-forge launched two codex agents 1.5s apart into fresh directories; both did a non-atomic
 read-modify-write of the **global** `~/.codex/config.toml` to register trust. The writes raced,
@@ -315,6 +343,9 @@ plain `//go:embed dist` silently skips Vite's `.vite/` manifest directory.
 **Configure**
 
 - **Projects** — list, add by directory picker, set base branch, open. Two clicks to a running swarm.
+- **Readiness** — the preflight panel (§8.1). One row per enabled role, every check with its status
+  and an inline remedy, a **Re-check** button, and a **Start** that stays disabled until the team can
+  actually work.
 - **Team** — the role list. Drag to reorder; the last enabled role wears a `terminal` badge. Add,
   duplicate, disable, delete.
 - **Role editor** — every field in §4.2. Harness select, model combobox populated from the live
@@ -459,7 +490,8 @@ Versions verified against npm dist-tags and `proxy.golang.org` on 2026-08-24.
 1. **store + config + role CRUD API** — roles as rows, seeded with coder and qa.
 2. **nydus + board** against an in-memory harness stub — prove leases, claims, acks, terminal merge
    with zero LLM calls.
-3. **adapter interface + claude adapter + preflight.**
+3. **adapter interface + claude adapter + preflight**, including the readiness gate — a team that
+   cannot work must not reach a running board.
 4. **cerebrate** supervision, lease expiry, crash/backoff.
 5. **Cockpit v1** — projects, team, role editor, attention, board.
 6. **pi adapter** — the second adapter is what proves the interface is real.
