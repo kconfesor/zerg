@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, watch } from 'vue'
 import type { Attention } from '@/lib/api'
 import { ChevronRight } from '@lucide/vue'
 import { api, type ChangedFile } from '@/lib/api'
@@ -25,14 +25,25 @@ function isDoc(f: ChangedFile): boolean {
   return /\.(md|markdown|txt)$/i.test(f.path) && !!f.content
 }
 
-async function toggleDiff(id: string) {
-  const cur = diffs.value[id]
-  if (cur?.open) {
-    diffs.value = { ...diffs.value, [id]: { ...cur, open: false } }
-    return
-  }
-  diffs.value = { ...diffs.value, [id]: { open: true, files: cur?.files ?? [] } }
-  if (cur?.files?.length) return
+/**
+ * Load what an approval is about as soon as it is shown.
+ *
+ * It was behind a toggle, which put the thing being decided one click further
+ * away than the buttons that decide it. The document is the point of the card;
+ * the card should open with it.
+ */
+watch(
+  () => props.attention?.approvals?.map((a) => a.id).join(',') ?? '',
+  () => {
+    for (const a of props.attention?.approvals ?? []) {
+      if (a.commit && !diffs.value[a.id]) void loadFiles(a.id)
+    }
+  },
+  { immediate: true },
+)
+
+async function loadFiles(id: string) {
+  diffs.value = { ...diffs.value, [id]: { open: true, files: [] } }
   try {
     const r = await api.approvalDiff(id)
     diffs.value = { ...diffs.value, [id]: { open: true, files: r.files ?? [] } }
@@ -42,6 +53,19 @@ async function toggleDiff(id: string) {
       [id]: { open: true, files: [], error: e instanceof Error ? e.message : String(e) },
     }
   }
+}
+
+async function toggleDiff(id: string) {
+  const cur = diffs.value[id]
+  if (cur?.open) {
+    diffs.value = { ...diffs.value, [id]: { ...cur, open: false } }
+    return
+  }
+  if (cur?.files?.length) {
+    diffs.value = { ...diffs.value, [id]: { ...cur, open: true } }
+    return
+  }
+  await loadFiles(id)
 }
 
 const notes = ref<Record<string, string>>({})
@@ -87,8 +111,9 @@ function empty(a: Attention | null): boolean {
            than anything else here. -->
       <div v-if="a.commit" class="mb-2.5">
         <button
+          v-if="diffs[a.id]?.files.length"
           type="button"
-          class="text-muted-foreground hover:text-foreground flex items-center gap-1 text-[11px]"
+          class="text-muted-foreground hover:text-foreground mb-1.5 flex items-center gap-1 text-[11px]"
           @click="toggleDiff(a.id)"
         >
           <ChevronRight
@@ -96,8 +121,9 @@ function empty(a: Attention | null): boolean {
             :class="['transition-transform', diffs[a.id]?.open ? 'rotate-90' : '']"
             aria-hidden="true"
           />
-          {{ diffs[a.id]?.open ? 'Hide' : 'Read' }} what was written
-          <code class="ml-1 opacity-70">{{ a.commit.slice(0, 8) }}</code>
+          {{ diffs[a.id]?.open ? 'Hide' : 'Show' }}
+          {{ diffs[a.id]!.files.length === 1 ? diffs[a.id]!.files[0].path : `${diffs[a.id]!.files.length} files` }}
+          <code class="ml-1 opacity-70">{{ a.commit!.slice(0, 8) }}</code>
         </button>
 
         <div v-if="diffs[a.id]?.open" class="mt-2">

@@ -13,7 +13,6 @@ import {
   type SwarmStatus,
   type Task,
 } from '@/lib/api'
-import { Bell } from '@lucide/vue'
 import Attention from '@/components/Attention.vue'
 import Activity from '@/components/Activity.vue'
 import Board from '@/components/Board.vue'
@@ -426,17 +425,6 @@ watch(current, () => (banner.value = null))
         {{ banner.text }}
       </p>
 
-      <!-- Still here as well as the bell: a count in a corner is easy to walk
-           past, and this is the one thing that stops the pipeline. -->
-      <button
-        v-if="attentionCount"
-        class="hairline-b flex w-full items-center gap-2 bg-[var(--status-warning)]/10 px-[var(--gutter)] py-2 text-left text-xs text-[var(--status-warning)]"
-        @click="attentionOpen = true"
-      >
-        <Bell :size="14" aria-hidden="true" />
-        {{ attentionCount }} waiting on a decision
-        <span class="ml-auto opacity-70">Review →</span>
-      </button>
 
       <!-- No project yet: one job on screen, nothing else. -->
       <!-- Loading. Deliberately quiet: this resolves in well under a second on
