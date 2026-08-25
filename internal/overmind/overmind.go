@@ -206,6 +206,13 @@ func (o *Overmind) Start(ctx context.Context, projectID string) error {
 		return err
 	}
 
+	// Harness defaults, read at spawn like the prompts are, so changing them in
+	// settings takes effect on the next start rather than the next release.
+	cfg, err := o.db.GetConfig(ctx)
+	if err != nil {
+		return err
+	}
+
 	session, err := o.db.StartSession(ctx, projectID)
 	if err != nil {
 		return err
@@ -253,6 +260,7 @@ func (o *Overmind) Start(ctx context.Context, projectID string) error {
 			Socket:       o.agents.Path(),
 			Token:        token,
 			BinDir:       binDir,
+			HarnessFlags: cfg.FlagsFor(role.Harness),
 			SystemPrompt: composePrompt(shared, role.Prompt),
 			Bus:          o.bus,
 			Log:          o.log,

@@ -87,10 +87,61 @@ type Config struct {
 	CleanPolicy  string `json:"cleanPolicy"`
 	CleanIgnored bool   `json:"cleanIgnored"`
 
+	// Harness holds per-harness CLI flags, applied to every role that uses that
+	// harness. A role's own args still win, because they are the more specific
+	// statement.
+	//
+	// Flags rather than a typed option per setting: the set differs per harness
+	// and changes when a CLI does, and a schema here would need a migration
+	// every time one of them adds a switch. The UI offers the ones worth
+	// recommending as checkboxes and takes the rest as text.
+	Harness map[string]HarnessOptions `json:"harness,omitempty"`
+
 	// PruneMergedBranches removes zerg-<role> branches whose work is already on
 	// the base branch. They are cheap, but they accumulate forever and make
 	// `git branch` in the operator's own repository useless.
 	PruneMergedBranches bool `json:"pruneMergedBranches"`
+}
+
+// HarnessOptions is what every role on a harness gets.
+type HarnessOptions struct {
+	Flags []string `json:"flags"`
+}
+
+// DefaultHarnessFlags are the recommended settings, and each one is here for a
+// reason that cost something to learn.
+//
+//   - claude --permission-mode bypassPermissions: an agent runs unattended in a
+//     worktree the operator chose, so a permission prompt has nobody to answer
+//     it and the turn hangs looking alive.
+//   - claude --strict-mcp-config: without it every agent inherits the
+//     operator's own MCP servers. On the first real run that gave a code
+//     reviewer a live handle to a staging database.
+//   - pi --no-extensions: a broken extension tree is one of the four hangs that
+//     preflight exists for, and an orchestrated role needs none of them.
+//   - pi --no-context-files: stops AGENTS.md and CLAUDE.md discovery, so the
+//     role runs on the prompt zerg composed rather than that plus whatever is
+//     lying in the repository. claude has no equivalent switch.
+func DefaultHarnessFlags() map[string]HarnessOptions {
+	return map[string]HarnessOptions{
+		"claude": {Flags: []string{"--permission-mode", "bypassPermissions", "--strict-mcp-config"}},
+		"pi":     {Flags: []string{"--no-extensions", "--no-context-files"}},
+	}
+}
+
+// FlagsFor returns the configured flags for a harness, falling back to the
+// recommended set when nothing has been stored for it.
+//
+// A stored entry with no flags is a deliberate empty, not a missing value: the
+// operator turned everything off, and defaulting over that would put the flags
+// back on the next start.
+func (cfg Config) FlagsFor(harness string) []string {
+	if cfg.Harness != nil {
+		if opts, ok := cfg.Harness[harness]; ok {
+			return opts.Flags
+		}
+	}
+	return DefaultHarnessFlags()[harness].Flags
 }
 
 // DefaultConfig is what a daemon runs with before anyone opens settings.
@@ -105,6 +156,7 @@ func DefaultConfig() Config {
 		TLSMode:             TLSOff,
 		EventRetentionDays:  14,
 		LocalAccess:         true,
+		Harness:             DefaultHarnessFlags(),
 		CleanPolicy:         CleanNever,
 		CleanIgnored:        true,
 		PruneMergedBranches: false,

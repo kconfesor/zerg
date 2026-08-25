@@ -77,6 +77,9 @@ type Config struct {
 	// BinDir holds the zerg executable the agent is told to run.
 	BinDir string
 
+	// HarnessFlags apply to every role on this harness, from settings.
+	HarnessFlags []string
+
 	// SystemPrompt is composed fresh by the caller from shared instructions
 	// plus the role prompt, so an edit is live on restart and no stale copy
 	// can survive in a worktree.
@@ -222,10 +225,14 @@ func (c *Cerebrate) Run(ctx context.Context) error {
 // whether the failure was fatal and how long the process lasted.
 func (c *Cerebrate) runOnce(ctx context.Context) (fatal bool, ranFor time.Duration, err error) {
 	spec := adapter.Spec{
-		Role:      c.cfg.Role.Name,
-		Worktree:  c.cfg.Worktree,
-		Model:     c.cfg.Role.Model,
-		ExtraArgs: c.cfg.Role.Args,
+		Role:     c.cfg.Role.Name,
+		Worktree: c.cfg.Worktree,
+		Model:    c.cfg.Role.Model,
+		// Harness flags first, the role's own args after. Later wins in every
+		// CLI here, so the more specific statement is the one that takes
+		// effect: a role that sets --permission-mode overrides the default for
+		// its harness without having to know what that default was.
+		ExtraArgs: append(append([]string{}, c.cfg.HarnessFlags...), c.cfg.Role.Args...),
 		ConfigDir: c.cfg.ConfigDir,
 		Socket:    c.cfg.Socket,
 		Token:     c.cfg.Token,

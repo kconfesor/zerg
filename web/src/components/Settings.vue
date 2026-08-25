@@ -33,6 +33,89 @@ const note = ref<{ tone: 'ok' | 'bad'; text: string } | null>(null)
 const sweeping = ref(false)
 const tab = ref('network')
 
+/**
+ * The harness flags worth offering as a switch, with what each one is for.
+ *
+ * Every flag here was verified against the CLI's own --help rather than
+ * recalled, and each recommendation traces to something that went wrong
+ * without it. Anything else a harness accepts goes in the free-text field —
+ * the set changes when a CLI does, and a fixed schema here would be stale by
+ * the next release.
+ */
+const HARNESS_OPTIONS: Record<string, { flag: string[]; label: string; why: string }[]> = {
+  claude: [
+    {
+      flag: ['--permission-mode', 'bypassPermissions'],
+      label: 'Skip permission prompts',
+      why: 'An agent runs unattended in a worktree you chose. A permission prompt has nobody to answer it, so the turn hangs while the agent looks alive.',
+    },
+    {
+      flag: ['--strict-mcp-config'],
+      label: 'Load no MCP servers',
+      why: 'Otherwise every agent inherits the MCP servers configured for your own use. On the first real run that gave a code reviewer a live handle to a staging database.',
+    },
+  ],
+  pi: [
+    {
+      flag: ['--no-extensions'],
+      label: 'Disable extensions',
+      why: 'A broken extension tree is one of the hangs preflight exists to catch, and an orchestrated role needs none of them.',
+    },
+    {
+      flag: ['--no-context-files'],
+      label: 'Ignore AGENTS.md and CLAUDE.md',
+      why: 'The role runs on the prompt zerg composed, rather than that plus whatever happens to be lying in the repository.',
+    },
+    {
+      flag: ['--no-skills'],
+      label: 'Disable skills',
+      why: 'Same reasoning as extensions: fewer things between the role prompt and the work.',
+    },
+  ],
+}
+
+const harnessNames = Object.keys(HARNESS_OPTIONS)
+
+function flagsOf(h: string): string[] {
+  return form.value?.harness?.[h]?.flags ?? []
+}
+function setFlags(h: string, flags: string[]) {
+  if (!form.value) return
+  form.value.harness = { ...(form.value.harness ?? {}), [h]: { flags } }
+}
+
+/** A flag is on when its whole sequence appears in order — "--permission-mode
+ *  bypassPermissions" is two arguments and only means anything together. */
+function hasFlag(h: string, seq: string[]): boolean {
+  const f = flagsOf(h)
+  return f.some((_, i) => seq.every((part, j) => f[i + j] === part))
+}
+function toggleFlag(h: string, seq: string[], on: boolean) {
+  let f = [...flagsOf(h)]
+  const at = f.findIndex((_, i) => seq.every((part, j) => f[i + j] === part))
+  if (on && at === -1) f = [...f, ...seq]
+  if (!on && at !== -1) f.splice(at, seq.length)
+  setFlags(h, f)
+}
+
+/** Whatever is set beyond the offered switches, as text. */
+function extraFor(h: string): string {
+  const known = HARNESS_OPTIONS[h].flatMap((o) => o.flag)
+  return flagsOf(h)
+    .filter((f, i, arr) => {
+      const prev = arr[i - 1]
+      return !known.includes(f) && !known.includes(prev ?? '')
+    })
+    .join(' ')
+}
+function setExtra(h: string, text: string) {
+  const kept = flagsOf(h).filter((f, i, arr) => {
+    const known = HARNESS_OPTIONS[h].flatMap((o) => o.flag)
+    return known.includes(f) || known.includes(arr[i - 1] ?? '')
+  })
+  setFlags(h, [...kept, ...text.split(/\s+/).filter(Boolean)])
+}
+
 /** The protocol document every role is given, on top of its own prompt. It had
  *  an endpoint and no UI, so until now it could only be edited with curl. */
 const instructions = ref('')
@@ -152,6 +235,7 @@ const loopback = computed(() => {
       <TabsList>
         <TabsTrigger value="network">Network</TabsTrigger>
         <TabsTrigger value="disk">Disk</TabsTrigger>
+        <TabsTrigger value="harness">Harness</TabsTrigger>
         <TabsTrigger value="instructions">Instructions</TabsTrigger>
       </TabsList>
 
@@ -321,6 +405,63 @@ const loopback = computed(() => {
         </Card>
       </TabsContent>
 
+
+      <!-- ── Harness ──────────────────────────────────────────────────── -->
+      <TabsContent value="harness" class="flex flex-col gap-4 pt-4">
+        <Card v-for="h in harnessNames" :key="h">
+          <CardHeader>
+            <CardTitle class="flex items-center gap-2 text-sm">
+              {{ h }}
+              <Badge variant="outline">applies on next spawn</Badge>
+            </CardTitle>
+            <CardDescription class="text-[11px]">
+              Applied to every role using this harness. A role's own args are added after these, so
+              a role can override any of them.
+            </CardDescription>
+          </CardHeader>
+          <CardContent class="flex flex-col gap-3">
+            <label
+              v-for="opt in HARNESS_OPTIONS[h]"
+              :key="opt.label"
+              class="flex items-start gap-2 text-xs"
+            >
+              <Checkbox
+                class="mt-0.5"
+                :model-value="hasFlag(h, opt.flag)"
+                @update:model-value="(v) => toggleFlag(h, opt.flag, !!v)"
+              />
+              <span>
+                {{ opt.label }}
+                <code class="text-muted-foreground ml-1">{{ opt.flag.join(' ') }}</code>
+                <span class="text-muted-foreground block text-[11px] leading-snug">
+                  {{ opt.why }}
+                </span>
+              </span>
+            </label>
+
+            <div class="flex flex-col gap-1.5">
+              <Label :for="`extra-${h}`">Other flags</Label>
+              <Input
+                :id="`extra-${h}`"
+                :model-value="extraFor(h)"
+                class="font-mono text-xs"
+                @update:model-value="(v) => setExtra(h, String(v))"
+              />
+              <span class="text-muted-foreground text-[11px]">
+                Passed through as written. Run <code>{{ h }} --help</code> for what this version
+                accepts.
+              </span>
+            </div>
+          </CardContent>
+        </Card>
+
+        <p class="text-muted-foreground text-[11px] leading-snug">
+          These are global — every project, every role on that harness. What they cannot reach is
+          the harness's own global config: claude reads OAuth from the keychain and will not start
+          with a relocated config directory, so its plugins and hooks apply to agents whatever is
+          set here. <code>--strict-mcp-config</code> is the one part of that zerg can shut off.
+        </p>
+      </TabsContent>
 
       <!-- ── Shared instructions ──────────────────────────────────────── -->
       <TabsContent value="instructions" class="pt-4">

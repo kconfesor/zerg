@@ -114,25 +114,24 @@ func (*Adapter) Command(ctx context.Context, spec adapter.Spec) (*exec.Cmd, erro
 		"--input-format", "stream-json",
 		"--output-format", "stream-json",
 		"--verbose", // required for stream-json to emit anything but the result
-
-		// Load no MCP servers. This role runs with the operator's own config
-		// directory — claude reads OAuth from the keychain and refuses to start
-		// if that directory is relocated — so without this every agent inherits
-		// whatever servers the operator has configured for their own use. On the
-		// first real run that meant a code-review agent could reach a staging
-		// database, and paid startup latency and tool budget for servers it had
-		// no reason to hold.
-		"--strict-mcp-config",
 	}
+
+	// --strict-mcp-config and --permission-mode are no longer forced here.
+	// They are the recommended defaults in settings, where they can be read and
+	// changed, rather than facts of the adapter that only a rebuild can alter.
+	// What each is for is documented beside those defaults.
 	if spec.SystemFile != "" {
 		args = append(args, "--append-system-prompt-file", spec.SystemFile)
 	}
 	if spec.Model != "" {
 		args = append(args, "--model", spec.Model)
 	}
-	// The agent runs unattended in a worktree the operator chose, so permission
-	// prompts have nobody to answer them.
-	if !hasFlag(spec.ExtraArgs, "--permission-mode") {
+	// A last-resort floor, not a policy. An agent running unattended with no
+	// permission setting at all will stop at the first prompt and look alive
+	// while doing nothing, which is the failure this whole project is about —
+	// so if settings have removed both switches, put one back.
+	if !hasFlag(spec.ExtraArgs, "--permission-mode") &&
+		!hasFlag(spec.ExtraArgs, "--dangerously-skip-permissions") {
 		args = append(args, "--permission-mode", "bypassPermissions")
 	}
 	args = append(args, spec.ExtraArgs...)

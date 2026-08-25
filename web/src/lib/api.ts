@@ -377,6 +377,7 @@ export interface DaemonConfig {
   keyFile?: string
   tailnetHost?: string
   localAccess: boolean
+  harness?: Record<string, { flags: string[] }>
   eventRetentionDays: number
   cleanPolicy: 'never' | 'on_done' | 'on_start'
   cleanIgnored: boolean
