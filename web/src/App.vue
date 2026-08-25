@@ -12,6 +12,7 @@ import {
   type RoleTemplate,
   type SwarmStatus,
   type Task,
+  type Workspace,
 } from '@/lib/api'
 import Attention from '@/components/Attention.vue'
 import Activity from '@/components/Activity.vue'
@@ -28,6 +29,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { viewOf, viewPath, type View } from '@/router'
 import ProjectBar from '@/components/layout/ProjectBar.vue'
 import PageHeader from '@/components/layout/PageHeader.vue'
+import BoardHeader from '@/components/BoardHeader.vue'
 import { Switch } from '@/components/ui/switch'
 import UsageSummary from '@/components/layout/UsageSummary.vue'
 import { Button } from '@/components/ui/button'
@@ -79,6 +81,18 @@ const attentionOpen = ref(false)
 const showHidden = ref(localStorage.getItem('zerg.showHidden') === 'true')
 watch(showHidden, (v) => localStorage.setItem('zerg.showHidden', String(v)))
 
+/**
+ * What the worktrees occupy. Fetched on its own slow cadence: walking several
+ * checkouts is real filesystem work, and the answer moves in megabytes over
+ * minutes rather than with every board tick.
+ */
+const workspace = ref<Workspace | null>(null)
+
+async function loadWorkspace() {
+  if (!current.value) return
+  workspace.value = await api.workspace(current.value.id).catch(() => null)
+}
+
 const hiddenCount = computed(() => tasks.value.filter((t) => t.hidden).length)
 
 /** Put a finished card away, or bring it back. */
@@ -86,9 +100,15 @@ const hiddenCount = computed(() => tasks.value.filter((t) => t.hidden).length)
 const activityTask = ref<Task | null>(null)
 const confirmDeleteTask = ref<Task | null>(null)
 
+/**
+ * One task's activity, in a dialog.
+ *
+ * Navigating to the Activity view took you off the board to answer a question
+ * about one card on it — and then you had to find your way back and find the
+ * card again. A dialog keeps the board underneath, which is where you were.
+ */
 function showTaskActivity(task: Task) {
   activityTask.value = task
-  router.push(viewPath(current.value?.id, 'activity'))
 }
 
 /** Park a card. Nothing picks it up again; its history stays. */
@@ -220,13 +240,7 @@ watch(
   },
 )
 
-const working = computed(() => tasks.value.filter((t) => t.state === 'working').length)
 
-const boardSubtitle = computed(() => {
-  const n = tasks.value.length
-  if (!n) return 'No cards yet. Open one to give the agents something to do.'
-  return `${n} ${n === 1 ? 'task' : 'tasks'} · ${working.value} being worked`
-})
 
 function schedulePoll(delay: number) {
   window.clearTimeout(timer)
@@ -308,7 +322,10 @@ async function refresh() {
     // Usage moves only when an agent finishes a turn, and it is a summary
     // rather than a live counter, so it is refreshed on a slower cadence than
     // the board — a totals query every board tick would be mostly wasted.
-    if (++usageTicks % USAGE_EVERY === 0) usageKey.value++
+    if (++usageTicks % USAGE_EVERY === 0) {
+      usageKey.value++
+      loadWorkspace()
+    }
   } catch {
     pollerLostContact()
     pollDelay = Math.min(pollDelay * 2, POLL_MAX)
@@ -337,6 +354,7 @@ async function open(project: Project) {
   // reading one of them should keep you there.
   readiness.value = null
   await refresh()
+  loadWorkspace()
 }
 
 /** Reload the list after one is added or removed, and pick a sensible current
@@ -588,30 +606,20 @@ watch(current, () => (banner.value = null))
         <div class="w-full p-[var(--gutter)]">
           <!-- Board -->
           <template v-if="view === 'board'">
-            <PageHeader title="Board" :subtitle="boardSubtitle">
-              <template #meta>
-                <span class="text-muted-foreground truncate font-mono text-[11px]" :title="current.path">
-                  {{ current.path }}
-                </span>
-                <span class="text-muted-foreground text-[11px]">·</span>
-                <span class="text-muted-foreground text-[11px]">{{ current.baseBranch }}</span>
-                <UsageSummary :project-id="current.id" :refresh-key="usageKey" />
-              </template>
+            <BoardHeader :project="current" :tasks="tasks" :workspace="workspace">
               <template #actions>
-                <!-- A switch, not a button: the state is visible when you are
-                     not using it, so a board with no Done column explains
-                     itself rather than looking like lost work. -->
-                <!-- Only offered when there is something to reveal. A switch
-                     for an empty set is a control that does nothing. -->
                 <div v-if="hiddenCount" class="flex items-center gap-2">
                   <Switch id="show-hidden" v-model="showHidden" />
                   <Label for="show-hidden" class="cursor-pointer text-xs font-normal">
-                    Show hidden ({{ hiddenCount }})
+                    Show hidden
                   </Label>
                 </div>
                 <Button @click="composing = true">New task</Button>
               </template>
-            </PageHeader>
+              <template #usage>
+                <UsageSummary :project-id="current.id" :refresh-key="usageKey" />
+              </template>
+            </BoardHeader>
             <div class="pt-4"><Board
                 :team="team"
                 :tasks="tasks"
@@ -674,24 +682,13 @@ watch(current, () => (banner.value = null))
           <template v-else-if="view === 'activity'">
             <PageHeader
               title="Activity"
-              :subtitle="
-                activityTask
-                  ? `Everything recorded for “${activityTask.name}”.`
-                  : 'Every tool call, message and turn, as the agents emit them.'
-              "
-            >
-              <template v-if="activityTask" #actions>
-                <Button variant="outline" size="sm" @click="activityTask = null">
-                  Show every task
-                </Button>
-              </template>
-            </PageHeader>
+              subtitle="Every tool call, message and turn, as the agents emit them."
+            />
             <div class="pt-4">
               <Activity
                 :project-id="current?.id ?? ''"
                 :roles="team.filter((r) => r.enabled).map((r) => r.name)"
-                :task="activityTask?.id"
-              />
+                />
             </div>
           </template>
 
@@ -780,6 +777,26 @@ watch(current, () => (banner.value = null))
           <Button variant="outline" @click="confirmDeleteTask = null">Cancel</Button>
           <Button variant="destructive" @click="removeTask(confirmDeleteTask!)">Delete</Button>
         </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
+    <!-- One card's transcript, over the board rather than instead of it. -->
+    <Dialog :open="!!activityTask" @update:open="(v) => !v && (activityTask = null)">
+      <DialogContent class="flex max-h-[85vh] min-w-0 flex-col sm:max-w-4xl">
+        <DialogHeader>
+          <DialogTitle class="truncate">{{ activityTask?.name }}</DialogTitle>
+          <DialogDescription>
+            Every tool call, message and turn recorded against this card.
+          </DialogDescription>
+        </DialogHeader>
+        <div v-if="activityTask" class="min-h-0 flex-1">
+          <Activity
+            :project-id="current?.id ?? ''"
+            :roles="team.filter((r) => r.enabled).map((r) => r.name)"
+            :task="activityTask.id"
+            embedded
+          />
+        </div>
       </DialogContent>
     </Dialog>
 

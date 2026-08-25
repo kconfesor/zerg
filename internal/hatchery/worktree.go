@@ -400,3 +400,39 @@ func (h *Hatchery) changed(ctx context.Context, sha, base string, maxBytes int) 
 	}
 	return files, nil
 }
+
+// Workspace is what the worktrees cost, for a header that would otherwise be
+// asking you to guess.
+type Workspace struct {
+	// Worktrees is how many exist on disk, which is not the same as how many
+	// roles are enabled: a role removed from the team leaves its checkout.
+	Worktrees []WorktreeInfo `json:"worktrees"`
+	Bytes     int64          `json:"bytes"`
+}
+
+type WorktreeInfo struct {
+	Role  string `json:"role"`
+	Bytes int64  `json:"bytes"`
+}
+
+// Measure reports the worktrees on disk and what they occupy.
+//
+// Best effort throughout, like dirSize: this is a figure in a header, and a
+// permissions problem in one checkout should understate a number rather than
+// fail the page it appears on.
+func (h *Hatchery) Measure() Workspace {
+	var out Workspace
+	entries, err := os.ReadDir(filepath.Join(h.repoPath, WorktreesDir))
+	if err != nil {
+		return out
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		n := dirSize(filepath.Join(h.repoPath, WorktreesDir, e.Name()))
+		out.Worktrees = append(out.Worktrees, WorktreeInfo{Role: e.Name(), Bytes: n})
+		out.Bytes += n
+	}
+	return out
+}

@@ -131,6 +131,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/settings", s.getSettings)
 	mux.HandleFunc("PUT /api/settings", s.setSettings)
 	mux.HandleFunc("POST /api/projects/{id}/sweep", s.sweep)
+	mux.HandleFunc("GET /api/projects/{id}/workspace", s.workspace)
 	mux.HandleFunc("PUT /api/projects/{id}/integration", s.setIntegration)
 	mux.HandleFunc("POST /api/projects/{id}/chat", s.askChat)
 	mux.HandleFunc("DELETE /api/projects/{id}/chat", s.resetChat)

@@ -112,6 +112,11 @@ export interface RoleStatus {
   throttledUntil?: string
 }
 
+export interface Workspace {
+  worktrees: { role: string; bytes: number }[]
+  bytes: number
+}
+
 export interface QuotaReport {
   /** Whose account these windows belong to: "openai-codex", "anthropic". */
   provider: string
@@ -250,6 +255,7 @@ export const api = {
     }),
 
   taskDetail: (id: string) => call<TaskDetail>(`/tasks/${id}`),
+  workspace: (projectId: string) => call<Workspace>(`/projects/${projectId}/workspace`),
   resetChat: (projectId: string) =>
     call<void>(`/projects/${projectId}/chat`, { method: 'DELETE' }),
   setChatAgent: (projectId: string, harness: string, model: string) =>

@@ -399,3 +399,17 @@ func (s *Server) setChatAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, project)
 }
+
+// workspace reports what this project's worktrees occupy.
+//
+// Separate from the board poll: walking several checkouts is real filesystem
+// work and the answer moves in megabytes over minutes, so it is fetched on its
+// own slower cadence rather than every two seconds.
+func (s *Server) workspace(w http.ResponseWriter, r *http.Request) {
+	project, err := s.db.GetProject(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, hatchery.New(project.Path).Measure())
+}

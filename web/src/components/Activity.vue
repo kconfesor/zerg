@@ -24,6 +24,9 @@ const props = defineProps<{
   /** Show only this task's events. The stream has always supported it; there
    *  was no way to ask for it from the board. */
   task?: string
+  /** Inside a dialog: no role filter of its own — it is already filtered to one
+   *  card — and it sizes to the space rather than to the viewport. */
+  embedded?: boolean
 }>()
 
 const events = ref<ActivityEvent[]>([])
@@ -157,8 +160,10 @@ const roleCounts = computed(() => {
 <template>
   <div class="flex flex-col gap-3">
     <!-- Filters in one row above the stream, so the reading area starts at a
-         predictable place regardless of how many roles a project has. -->
-    <div class="flex flex-wrap items-center gap-1.5">
+         predictable place regardless of how many roles a project has. Hidden
+         when embedded: filtered to one card already, the roles that touched it
+         are few and naming them is what the transcript does anyway. -->
+    <div v-if="!embedded" class="flex flex-wrap items-center gap-1.5">
       <Button
         :variant="roleFilter === '' ? 'default' : 'outline'"
         size="sm"
@@ -203,7 +208,10 @@ const roleCounts = computed(() => {
 
     <div
       ref="viewport"
-      class="bg-card h-[70vh] overflow-y-auto border font-mono text-[11px] leading-relaxed md:h-[62vh] md:text-xs"
+      :class="[
+        'bg-card overflow-y-auto border font-mono text-[11px] leading-relaxed md:text-xs',
+        embedded ? 'h-[55vh]' : 'h-[70vh] md:h-[62vh]',
+      ]"
       @scroll="onScroll"
     >
       <!-- A feed that failed must not read as a project with nothing in it.
