@@ -32,6 +32,13 @@ const (
 	// idle agents that have work waiting.
 	tick = 2 * time.Second
 
+	// quotaEvery is how often a harness that has to be asked for its
+	// subscription quota is asked. Slow on purpose: the figure moves in
+	// percent over hours, the call leaves the machine, and a gauge is not
+	// worth a request every two seconds. Harnesses that report quota on their
+	// own stream are not polled at all.
+	quotaEvery = 2 * time.Minute
+
 	// nudge is what an idle agent is told when work is queued for it.
 	//
 	// The alternative is a fixed string of keystrokes fired into whichever
@@ -122,7 +129,11 @@ type Status struct {
 	// only while the state is throttled, and absent when the harness said the
 	// window was spent but not for how long.
 	ThrottledUntil *time.Time `json:"throttledUntil,omitempty"`
-	Terminal       bool       `json:"terminal"`
+
+	// Quota is what this role's subscription has left. Absent for a metered
+	// API key, which has no window to report.
+	Quota    *QuotaReport `json:"quota,omitempty"`
+	Terminal bool         `json:"terminal"`
 }
 
 // Running reports whether a project's swarm is up.
@@ -160,10 +171,85 @@ func (o *Overmind) Status(ctx context.Context, projectID string) ([]Status, erro
 			if until := c.ThrottledUntil(); !until.IsZero() {
 				st.ThrottledUntil = &until
 			}
+
 		}
 		out = append(out, st)
 	}
 	return out, nil
+}
+
+// QuotaReport is a subscription's headroom, shaped for the cockpit: windows
+// already labelled and ordered, so the view does no arithmetic.
+// Quotas is the account-level view: one report per harness, not per role.
+//
+// A subscription belongs to the account, and every role on that harness draws
+// from the same windows. Reporting it per role showed a gauge under whichever
+// role had most recently taken a turn and nothing under the others, which reads
+// as one role having headroom the rest lack.
+type Quotas map[string]*QuotaReport
+
+// QuotaReport struct
+type QuotaReport struct {
+	Plan    string        `json:"plan,omitempty"`
+	Windows []QuotaWindow `json:"windows"`
+	// SeenAt is when this was last learned. A gauge with no age is a gauge you
+	// cannot tell is stale.
+	SeenAt time.Time `json:"seenAt"`
+}
+
+type QuotaWindow struct {
+	Label    string     `json:"label"` // "5h", "7d"
+	Used     float64    `json:"used"`  // 0..1
+	ResetsAt *time.Time `json:"resetsAt,omitempty"`
+}
+
+func quotaReport(q *adapter.Quota, seen time.Time) *QuotaReport {
+	if q == nil || len(q.Windows) == 0 {
+		return nil
+	}
+	out := &QuotaReport{Plan: q.Plan, SeenAt: seen}
+	for _, w := range q.Windows {
+		win := QuotaWindow{Label: w.Label(), Used: w.Used}
+		if !w.ResetsAt.IsZero() {
+			at := w.ResetsAt
+			win.ResetsAt = &at
+		}
+		out.Windows = append(out.Windows, win)
+	}
+	return out
+}
+
+// Quotas reports subscription headroom per harness for a running project.
+//
+// The freshest reading wins: every role on one harness draws from the same
+// windows, so the newest report is the truest, and a role that has not taken a
+// turn yet simply contributes nothing.
+func (o *Overmind) Quotas(projectID string) Quotas {
+	o.mu.Lock()
+	s, ok := o.running[projectID]
+	o.mu.Unlock()
+	if !ok {
+		return nil
+	}
+
+	seen := map[string]time.Time{}
+	out := Quotas{}
+	for _, c := range s.cerebrates {
+		q, at := c.Quota()
+		if q == nil {
+			continue
+		}
+		h := c.Harness()
+		if prev, ok := seen[h]; ok && !at.After(prev) {
+			continue
+		}
+		seen[h] = at
+		out[h] = quotaReport(q, at)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // Start brings a project's swarm up.
@@ -340,11 +426,18 @@ func (o *Overmind) keepMoving(ctx context.Context, projectID string, s *swarm) {
 	defer close(s.done)
 	ticker := time.NewTicker(tick)
 	defer ticker.Stop()
+	quota := time.NewTicker(quotaEvery)
+	defer quota.Stop()
+	// Once at start, so the gauge is populated before the first slow tick
+	// rather than blank for two minutes.
+	go o.refreshQuotas(ctx, s)
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-quota.C:
+			go o.refreshQuotas(ctx, s)
 		case <-ticker.C:
 			// Lapsed leases first: requeued work should be visible to the
 			// nudge that follows in the same tick.
@@ -354,6 +447,36 @@ func (o *Overmind) keepMoving(ctx context.Context, projectID string, s *swarm) {
 				o.log.Info("returned unacknowledged work to the queue", "leases", n)
 			}
 			o.nudgeIdle(ctx, projectID, s)
+		}
+	}
+}
+
+// refreshQuotas asks each harness that has to be asked. Off the tick
+// goroutine: this call leaves the machine, and a slow endpoint must not delay
+// lease expiry.
+func (o *Overmind) refreshQuotas(ctx context.Context, s *swarm) {
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+
+	// One ask per harness, not per role: the windows belong to the account,
+	// so three claude roles asking separately is three subprocesses for one
+	// answer. The result is copied to the rest so every role reports it.
+	//
+	// Ranged without a lock, as nudgeIdle does: the map is fully populated
+	// before the swarm is published and never written again.
+	done := map[string]*cerebrate.Cerebrate{}
+	for _, c := range s.cerebrates {
+		if _, seen := done[c.Harness()]; seen {
+			continue
+		}
+		done[c.Harness()] = c
+		c.RefreshQuota(ctx)
+	}
+	for _, c := range s.cerebrates {
+		if lead, ok := done[c.Harness()]; ok && lead != c {
+			if q, at := lead.Quota(); q != nil {
+				c.AdoptQuota(q, at)
+			}
 		}
 	}
 }

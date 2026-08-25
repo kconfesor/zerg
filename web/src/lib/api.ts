@@ -105,9 +105,26 @@ export interface RoleStatus {
   throttledUntil?: string
 }
 
+export interface QuotaReport {
+  plan?: string
+  windows: QuotaWindow[]
+  /** When this was last learned, so a stale gauge can say so. */
+  seenAt: string
+}
+
+export interface QuotaWindow {
+  /** "5h", "7d" — the window's length, which is what both providers agree on. */
+  label: string
+  /** 0..1 */
+  used: number
+  resetsAt?: string
+}
+
 export interface SwarmStatus {
   running: boolean
   roles: RoleStatus[]
+  /** Subscription headroom per harness. One account serves every role on it. */
+  quotas?: Record<string, QuotaReport>
 }
 
 export interface Approval {

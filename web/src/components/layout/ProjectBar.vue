@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import type { Project, SwarmStatus } from '@/lib/api'
 import { computed } from 'vue'
-import { Bell, Hourglass, Play, Square } from '@lucide/vue'
+import { Bell, Gauge, Hourglass, Play, Square } from '@lucide/vue'
+import QuotaBars from '@/components/QuotaBars.vue'
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Button } from '@/components/ui/button'
 import {
   Select,
@@ -37,6 +39,31 @@ function liveCount(s: SwarmStatus): number {
  * third crashed or is waiting out a limit, and those call for opposite
  * responses: one is yours to fix, the other is yours to ignore.
  */
+/** One entry per harness, ordered so the display is stable across polls. */
+const quotas = computed(() =>
+  Object.entries(props.status.quotas ?? {})
+    .map(([harness, report]) => ({ harness, report }))
+    .sort((a, b) => a.harness.localeCompare(b.harness)),
+)
+
+/** The single window nearest its limit, across every harness. */
+const tightest = computed(() => {
+  const all = quotas.value.flatMap((q) => q.report.windows)
+  if (!all.length) return null
+  return all.reduce((a, b) => (b.used > a.used ? b : a))
+})
+
+const tightestLabel = computed(() =>
+  tightest.value ? `${Math.round(tightest.value.used * 100)}%` : '',
+)
+
+const tightestTone = computed(() => {
+  const u = tightest.value?.used ?? 0
+  if (u >= 0.9) return 'text-destructive font-semibold'
+  if (u >= 0.75) return 'text-[var(--status-warning)]'
+  return 'text-muted-foreground'
+})
+
 const throttled = computed(() => props.status.roles.filter((r) => r.state === 'throttled'))
 
 /** The soonest any of them comes back — the only number worth a top bar. */
@@ -114,6 +141,34 @@ const resumesIn = computed(() => {
         {{ liveCount(status) }}/{{ status.roles.length }}<span class="hidden sm:inline"> agents live</span>
       </span>
       <span v-else class="text-muted-foreground hidden text-[11px] sm:inline">no agents running</span>
+
+      <!-- What the plan has left, per harness. An account-level fact, so it
+           sits with the swarm rather than under one role: every role on a
+           harness draws from the same windows. -->
+      <Popover v-if="quotas.length">
+        <PopoverTrigger as-child>
+          <button
+            type="button"
+            class="hover:bg-muted focus-visible:outline-ring flex items-center gap-1.5 px-1.5 py-1 text-[11px] transition-colors focus-visible:outline-2"
+            :title="`plan usage — ${quotas.map((q) => q.harness).join(', ')}`"
+          >
+            <Gauge :size="13" class="text-muted-foreground" aria-hidden="true" />
+            <span class="tabular" :class="tightestTone">{{ tightestLabel }}</span>
+          </button>
+        </PopoverTrigger>
+        <PopoverContent align="end" class="w-72">
+          <p class="mb-2 text-xs font-semibold">Plan usage</p>
+          <div v-for="q in quotas" :key="q.harness" class="mb-3 last:mb-0">
+            <p class="text-muted-foreground mb-1 text-[11px]">
+              {{ q.harness }}<span v-if="q.report.plan"> · {{ q.report.plan }}</span>
+            </p>
+            <QuotaBars :quota="q.report" />
+          </div>
+          <p class="text-muted-foreground/70 mt-2 text-[10px]">
+            Read from the plan itself, refreshed every two minutes. claude also reports it on every turn.
+          </p>
+        </PopoverContent>
+      </Popover>
 
       <!-- A quota limit is not a fault and is not styled as one, but it does
            explain a number that would otherwise look like a crash. -->

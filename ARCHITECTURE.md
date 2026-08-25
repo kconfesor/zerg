@@ -1002,25 +1002,47 @@ it is a decision rather than a finished answer.
 
 ## 16. Provider limits
 
-A subscription window that is spent looks exactly like a fatal error and is not
+A subscription window has two questions: how much is left, and what happens
+when it runs out. §16.1 is the first; §16.2 onward is the second.
+
+A spent window looks exactly like a fatal error and is not
 one. Nothing is wrong with the agent, the code or the task, and the correct
 response is to wait — so treating it as a crash costs an operator the twenty
 minutes it takes to discover that the thing to do was nothing.
 
-### 16.1 What the harnesses actually expose
+### 16.1 Where the numbers come from
 
-Checked at the source, because the answer determines what is buildable:
+Two different mechanisms, because the harnesses differ:
 
-| | remaining quota | limit reached |
+| | how the gauge is obtained | cost |
 |---|---|---|
-| `claude` | **no** — no `usage` subcommand, nothing in `--output-format json`, and `stats-cache.json` is historical consumption | yes: `usage limit reached`, `until your limit resets at <time>` |
-| `pi` | **no** — no usage command, nothing in the model store or auth file | yes: its Codex provider composes *"You have hit your ChatGPT usage limit (plus plan). Try again in ~47 min."* from the error's `plan_type` and `resets_at` |
+| `claude` | a `rate_limit_event` on **every turn** of `--output-format stream-json`, which zerg already reads | free — nothing to poll |
+| `pi` | `GET https://chatgpt.com/backend-api/wham/usage`, with the OAuth token pi stores, polled every two minutes | one request per two minutes |
 
-So a remaining-percentage gauge is not buildable from what the harnesses give
-us. Both learn about the limit **reactively**, in the error, and that one signal
-is what zerg uses. Building the gauge would mean calling an undocumented
-endpoint with the operator's OAuth token, which is fragile and not zerg's
-business — §2 already says provider setup is out of scope.
+claude's event carries `unifiedWindows` keyed `five_hour` and `seven_day`, each
+with a `utilization` (0..1) and a `resetsAt`. It exists only in the streaming
+format: `--output-format json` collapses to the final result and drops it, which
+is why a first pass through the CLI concluded, wrongly, that nothing was
+available. `claude -p "/usage"` also works non-interactively and costs nothing —
+zero turns, zero tokens — but it is a second path to the same numbers, so it is
+not used.
+
+pi has no such signal: its own `/usage` reports session tokens, not plan
+headroom. The endpoint above is what the ChatGPT app's own meter uses, and the
+request shape was read from the `pi-chatgpt-limit` extension
+(github.com/patlux/pi-chatgpt-limit), which does the same thing inside pi. It is
+undocumented, so every failure is soft — a gauge that cannot be read must never
+stop a role from running, and the last good reading is kept with its timestamp
+rather than blanked.
+
+**Windows are identified by length, not name.** claude names them; the ChatGPT
+endpoint returns a `primary_window` and a `secondary_window` with only a
+`limit_window_seconds` each — and on a live account the *primary* was the 7-day
+one. Position and name are both unreliable; a duration means the same thing to
+both.
+
+Only the tightest window is coloured. It is the one that will actually stop
+work, and two coloured bars would say the same thing twice.
 
 ### 16.2 Throttling is a state, not a failure
 

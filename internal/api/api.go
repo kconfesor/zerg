@@ -391,10 +391,15 @@ func (s *Server) statusBody(w http.ResponseWriter, r *http.Request, projectID st
 		s.fail(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	body := map[string]any{
 		"running": s.over.Running(projectID),
 		"roles":   orEmpty(roles),
-	})
+	}
+	// Per harness, not per role: one subscription serves every role on it.
+	if q := s.over.Quotas(projectID); len(q) > 0 {
+		body["quotas"] = q
+	}
+	writeJSON(w, http.StatusOK, body)
 }
 
 // ── board ─────────────────────────────────────────────────────────────────

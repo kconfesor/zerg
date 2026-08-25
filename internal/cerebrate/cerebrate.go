@@ -110,6 +110,11 @@ type Cerebrate struct {
 	// fatal or not. The process exit status rarely says why.
 	lastStreamErr string
 
+	// quota is the subscription's remaining headroom, as last reported.
+	// Whether it arrived on the stream or was fetched does not matter here.
+	quota     *adapter.Quota
+	quotaSeen time.Time
+
 	stdin io.WriteCloser
 	ready chan struct{} // closed when the agent first reports ready
 
@@ -150,6 +155,86 @@ func (c *Cerebrate) LastError() string {
 }
 
 // Restarts counts respawns since the last stable run.
+// Harness names the CLI this role runs on. Quota is reported per harness,
+// because that is what an account belongs to.
+func (c *Cerebrate) Harness() string { return c.cfg.Role.Harness }
+
+// Quota is the subscription headroom last reported for this role, and when it
+// was learned. Nil until something reports it, which for an API-key provider
+// is never.
+func (c *Cerebrate) Quota() (*adapter.Quota, time.Time) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.quota, c.quotaSeen
+}
+
+// mergeQuota takes the new percentages but keeps reset times the fetched
+// source did not carry.
+//
+// claude has two sources for one fact: the stream event states exact reset
+// stamps, and `/usage` states only percentages. A poll must not blank a stamp
+// the stream already gave — the fresher number is not the more complete record.
+func (c *Cerebrate) mergeQuota(q *adapter.Quota) {
+	c.mu.Lock()
+	prev := c.quota
+	c.mu.Unlock()
+
+	if prev != nil {
+		known := map[time.Duration]time.Time{}
+		for _, w := range prev.Windows {
+			if !w.ResetsAt.IsZero() {
+				known[w.Window] = w.ResetsAt
+			}
+		}
+		for i, w := range q.Windows {
+			if w.ResetsAt.IsZero() {
+				if at, ok := known[w.Window]; ok {
+					q.Windows[i].ResetsAt = at
+				}
+			}
+		}
+		if q.Plan == "" {
+			q.Plan = prev.Plan
+		}
+	}
+	c.setQuota(q)
+}
+
+func (c *Cerebrate) setQuota(q *adapter.Quota) {
+	c.mu.Lock()
+	c.quota, c.quotaSeen = q, c.cfg.clock()
+	c.mu.Unlock()
+}
+
+// AdoptQuota copies a reading taken for another role on the same harness.
+// Only fills a gap: a role that has heard from its own stream has the better
+// record, since that one carries exact reset stamps.
+func (c *Cerebrate) AdoptQuota(q *adapter.Quota, at time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.quota == nil || at.After(c.quotaSeen) {
+		c.quota, c.quotaSeen = q, at
+	}
+}
+
+// RefreshQuota asks a harness that has to be asked. Harnesses that report
+// quota on their own stream do not implement QuotaReporter and are skipped,
+// so this is not a second path to the same number.
+func (c *Cerebrate) RefreshQuota(ctx context.Context) {
+	r, ok := c.cfg.Adapter.(adapter.QuotaReporter)
+	if !ok {
+		return
+	}
+	q, ok, err := r.Quota(ctx)
+	if err != nil || !ok {
+		// A gauge that cannot be read is not a failure of the role. The last
+		// good reading is kept rather than blanked, with its timestamp, so the
+		// cockpit can say how stale it is instead of showing nothing.
+		return
+	}
+	c.mergeQuota(&q)
+}
+
 // ThrottledUntil is when a spent quota window is expected to lift. Zero when
 // the role is not throttled, or when the harness did not say.
 func (c *Cerebrate) ThrottledUntil() time.Time {
@@ -379,6 +464,9 @@ func (c *Cerebrate) readStream(stdout io.Reader) error {
 		for _, ev := range events {
 			c.observe(ev)
 			c.publish(ev)
+			if ev.Kind == adapter.EventQuota && ev.Quota != nil {
+				c.setQuota(ev.Quota)
+			}
 			if ev.Kind == adapter.EventError {
 				// Kept whether or not it is fatal: claude reports a spent
 				// quota window as an ordinary error, and the supervisor has

@@ -15,6 +15,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -575,4 +577,124 @@ func firstLine(s string) string {
 		s = s[:i]
 	}
 	return strings.TrimSpace(s)
+}
+
+// ── subscription quota ────────────────────────────────────────────────────
+
+// chatgptUsageURL is the endpoint the ChatGPT app itself uses for the usage
+// meter. Undocumented, and reached with the OAuth token pi already holds.
+//
+// Nothing in pi's own output carries these numbers — its /usage command
+// reports session tokens, not the plan's remaining headroom — so unlike claude,
+// which emits them unprompted every turn, they have to be asked for.
+//
+// The shape and the headers were read from the pi-chatgpt-limit extension
+// (github.com/patlux/pi-chatgpt-limit), which does the same thing inside pi,
+// and verified against a live account before being relied on here.
+const chatgptUsageURL = "https://chatgpt.com/backend-api/wham/usage"
+
+// quotaHTTP is separate so a hung endpoint cannot hold a status refresh open.
+var quotaHTTP = &http.Client{Timeout: 15 * time.Second}
+
+// Quota reports what the ChatGPT plan has left.
+//
+// Every failure is soft: this is a gauge, and a missing gauge must never stop
+// a role from running. An account without a plan — an API key rather than a
+// subscription — returns false, which is not an error.
+func (*Adapter) Quota(ctx context.Context) (adapter.Quota, bool, error) {
+	tok, account, ok := codexToken()
+	if !ok {
+		return adapter.Quota{}, false, nil
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, chatgptUsageURL, nil)
+	if err != nil {
+		return adapter.Quota{}, false, err
+	}
+	req.Header.Set("Authorization", "Bearer "+tok)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "zerg")
+	if account != "" {
+		req.Header.Set("chatgpt-account-id", account)
+	}
+
+	resp, err := quotaHTTP.Do(req)
+	if err != nil {
+		return adapter.Quota{}, false, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return adapter.Quota{}, false, fmt.Errorf("chatgpt usage: %s", resp.Status)
+	}
+
+	var body struct {
+		PlanType  string `json:"plan_type"`
+		RateLimit struct {
+			Primary   usageWindow `json:"primary_window"`
+			Secondary usageWindow `json:"secondary_window"`
+		} `json:"rate_limit"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&body); err != nil {
+		return adapter.Quota{}, false, fmt.Errorf("chatgpt usage: %w", err)
+	}
+
+	q := adapter.Quota{Plan: body.PlanType}
+	// Which of the two is the five-hour and which the week is not fixed: on a
+	// live account the primary window was the 7-day one. The length is the
+	// only reliable identity, so neither position nor name is trusted.
+	for _, w := range []usageWindow{body.RateLimit.Primary, body.RateLimit.Secondary} {
+		if w.LimitWindowSeconds == nil || w.UsedPercent == nil {
+			continue
+		}
+		out := adapter.QuotaWindow{
+			Window: time.Duration(*w.LimitWindowSeconds) * time.Second,
+			Used:   *w.UsedPercent / 100, // reported 0..100, carried 0..1
+		}
+		if w.ResetAt != nil && *w.ResetAt > 0 {
+			out.ResetsAt = time.Unix(*w.ResetAt, 0)
+		}
+		q.Windows = append(q.Windows, out)
+	}
+	if len(q.Windows) == 0 {
+		return adapter.Quota{}, false, nil
+	}
+	sort.Slice(q.Windows, func(i, j int) bool { return q.Windows[i].Window < q.Windows[j].Window })
+	return q, true, nil
+}
+
+// usageWindow uses pointers so an absent field is distinguishable from a
+// reported zero — "0% used" and "not reported" are different facts, and
+// showing an empty bar for the second is a lie.
+type usageWindow struct {
+	UsedPercent        *float64 `json:"used_percent"`
+	LimitWindowSeconds *int64   `json:"limit_window_seconds"`
+	ResetAt            *int64   `json:"reset_at"`
+}
+
+// codexToken reads pi's stored OAuth credentials for the ChatGPT provider.
+//
+// Read-only, and never logged or returned anywhere it could be rendered: this
+// is the operator's account token, held only long enough to sign one request.
+func codexToken() (token, account string, ok bool) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", "", false
+	}
+	raw, err := os.ReadFile(filepath.Join(home, ".pi", "agent", "auth.json"))
+	if err != nil {
+		return "", "", false
+	}
+	var auth map[string]struct {
+		Type      string `json:"type"`
+		Access    string `json:"access"`
+		AccountID string `json:"accountId"`
+	}
+	if err := json.Unmarshal(raw, &auth); err != nil {
+		return "", "", false
+	}
+	c, present := auth["openai-codex"]
+	if !present || c.Type != "oauth" || c.Access == "" {
+		return "", "", false
+	}
+	return c.Access, c.AccountID, true
 }

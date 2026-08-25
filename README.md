@@ -34,6 +34,8 @@ So:
 - **agents emit structured events**, so the cockpit renders tool calls, tokens and cost instead of
   scraping a terminal
 - **leases, not fire-and-forget** — unacked work returns to the queue; a stall is a state, not silence
+- **your plan's headroom is on screen** — claude reports it on every turn, pi is asked for it; a
+  bar per window, coloured only where it is nearly spent
 - **a spent quota is a pause, not a crash** — a role that hits its subscription limit waits for the
   window and resumes itself, saying when ([§16](ARCHITECTURE.md#16-provider-limits))
 - **one SQLite database**, one writer, real transactions

@@ -8,6 +8,7 @@ package adapter
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"strings"
@@ -225,6 +226,7 @@ const (
 	EventUsage    EventKind = "usage"     // tokens and cost for a turn
 	EventTurnEnd  EventKind = "turn_end"  // finished a turn, likely idle now
 	EventError    EventKind = "error"     // harness-level failure, carries Fatal
+	EventQuota    EventKind = "quota"     // subscription usage, carries Quota
 )
 
 type Event struct {
@@ -262,6 +264,10 @@ type Event struct {
 	// disagreement visible instead of averaging it away.
 	CostReported bool
 
+	// Quota is the subscription's remaining headroom, when the harness
+	// reported it. See Quota.
+	Quota *Quota
+
 	// Fatal marks an error the agent cannot recover from, so the cerebrate
 	// stops instead of leaving a process that looks alive and answers nothing.
 	// Observed: codex agents sitting at a prompt for 20 minutes returning HTTP
@@ -287,6 +293,66 @@ type Throttle struct {
 	// and the window in the provider's vocabulary, which is what a person
 	// needs to decide whether to wait or switch models.
 	Detail string
+}
+
+// QuotaWindow is one rolling limit and how much of it is spent.
+//
+// Windows are identified by their length rather than a name, because that is
+// what the providers agree on: claude reports "five_hour" and "seven_day" as
+// keys, the ChatGPT endpoint reports a primary and a secondary window with a
+// limit_window_seconds each, and only the duration means the same thing in
+// both.
+type QuotaWindow struct {
+	Window   time.Duration // 5h, 7d
+	Used     float64       // 0..1
+	ResetsAt time.Time     // zero when the provider did not say
+}
+
+// Label names a window by its length, for a person reading a bar.
+func (w QuotaWindow) Label() string {
+	switch {
+	case w.Window >= 24*time.Hour:
+		return fmt.Sprintf("%dd", int(w.Window.Hours()/24))
+	case w.Window >= time.Hour:
+		return fmt.Sprintf("%dh", int(w.Window.Hours()))
+	default:
+		return w.Window.String()
+	}
+}
+
+// Quota is what a subscription has left, as the provider states it.
+//
+// Separate from the throttle in Throttle: this is the gauge before the wall,
+// and it is what stops a run being planned into a window that cannot hold it.
+type Quota struct {
+	Plan    string // "prolite", "max", … when the provider names it
+	Windows []QuotaWindow
+}
+
+// Tightest returns the window closest to being spent, which is the one that
+// will actually stop work. Ok is false when there are no windows.
+func (q Quota) Tightest() (QuotaWindow, bool) {
+	var out QuotaWindow
+	found := false
+	for _, w := range q.Windows {
+		if !found || w.Used > out.Used {
+			out, found = w, true
+		}
+	}
+	return out, found
+}
+
+// QuotaReporter is implemented by adapters that have to ask for the figure
+// rather than being told it.
+//
+// claude does not implement this: it emits the numbers unprompted on every
+// turn, so asking would be a second way to learn the same thing. pi does,
+// because nothing in its output carries them.
+type QuotaReporter interface {
+	// Quota reports the subscription's remaining headroom. The bool is false
+	// when this role is not on a plan that has one — an API-key provider has
+	// no window to report and is not an error.
+	Quota(ctx context.Context) (Quota, bool, error)
 }
 
 // Throttler is implemented by adapters that can recognise their harness

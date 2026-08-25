@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -253,6 +254,17 @@ type wire struct {
 	// dollar figure would be a fiction. Anything else is a metered API key.
 	APIKeySource string `json:"apiKeySource"`
 
+	// RateLimitInfo arrives on its own event every turn, and is the only
+	// proactive quota signal either harness gives. Captured from
+	// --output-format stream-json; the collapsed json format drops it.
+	RateLimitInfo *struct {
+		Status         string `json:"status"`
+		UnifiedWindows map[string]struct {
+			Utilization float64 `json:"utilization"`
+			ResetsAt    int64   `json:"resetsAt"`
+		} `json:"unifiedWindows"`
+	} `json:"rate_limit_info"`
+
 	Usage        usage   `json:"usage"`
 	TotalCostUSD float64 `json:"total_cost_usd"`
 	IsError      bool    `json:"is_error"`
@@ -289,6 +301,15 @@ func (a *Adapter) Parse(line []byte) ([]adapter.Event, error) {
 	}
 
 	switch w.Type {
+	case "rate_limit_event":
+		// The subscription gauge, unprompted, once per turn. Free: it rides
+		// the stream that is already being read, so there is nothing to poll
+		// and no second way to learn the same thing.
+		if q := quotaFrom(w); q != nil {
+			return []adapter.Event{{Kind: adapter.EventQuota, Quota: q}}, nil
+		}
+		return nil, nil
+
 	case "system":
 		if w.Subtype == "init" {
 			// The init event is the only place the CLI states how it
@@ -532,4 +553,99 @@ func firstLine(s string) string {
 		s = s[:i]
 	}
 	return strings.TrimSpace(s)
+}
+
+// quotaFrom reads claude's rate_limit_event.
+//
+// The window keys are named ("five_hour", "seven_day") but the duration is
+// what is kept: the ChatGPT endpoint pi talks to reports the same two windows
+// with no names at all, only a length, and a duration is the only identity
+// both providers agree on.
+func quotaFrom(w wire) *adapter.Quota {
+	if w.RateLimitInfo == nil || len(w.RateLimitInfo.UnifiedWindows) == 0 {
+		return nil
+	}
+	q := &adapter.Quota{}
+	for name, win := range w.RateLimitInfo.UnifiedWindows {
+		d := windowLength(name)
+		if d == 0 {
+			continue
+		}
+		out := adapter.QuotaWindow{Window: d, Used: win.Utilization}
+		if win.ResetsAt > 0 {
+			out.ResetsAt = time.Unix(win.ResetsAt, 0)
+		}
+		q.Windows = append(q.Windows, out)
+	}
+	if len(q.Windows) == 0 {
+		return nil
+	}
+	// Map order is random and these are rendered in sequence.
+	sort.Slice(q.Windows, func(i, j int) bool { return q.Windows[i].Window < q.Windows[j].Window })
+	return q
+}
+
+func windowLength(name string) time.Duration {
+	switch name {
+	case "five_hour":
+		return 5 * time.Hour
+	case "seven_day":
+		return 7 * 24 * time.Hour
+	}
+	return 0
+}
+
+// ── subscription quota ────────────────────────────────────────────────────
+
+// usageLine reads one row of `claude -p "/usage"`:
+//
+//	Current session: 39% used · resets Aug 25 at 3:20pm (America/Santo_Domingo)
+//	Current week (all models): 68% used · resets Aug 25 at 10pm
+//	Current week (Fable): 0% used
+//
+// Only the two that describe the whole plan are taken. A per-model row is a
+// slice of the same window, and adding it as a third bar would double-count.
+var usageLine = regexp.MustCompile(`(?i)^current (session|week)(?:\s*\(all models\))?:\s*(\d+(?:\.\d+)?)%\s*used`)
+
+// Quota reads the plan's headroom without running a turn.
+//
+// claude reports the same numbers on every turn as a rate_limit_event, which is
+// the live source and carries exact reset stamps. This exists for the moment
+// before the first turn: after a daemon restart the stream has said nothing
+// yet, and a gauge that is blank until someone happens to run a task is a gauge
+// nobody trusts.
+//
+// `/usage` is not an inference call — measured at zero turns, zero tokens and
+// zero dollars — so asking costs nothing but the round trip. It returns prose
+// rather than JSON, so only the percentages are taken from it; reset times are
+// left to the stream event, which states them as unix stamps rather than
+// "Aug 25 at 3:20pm" in an unstated timezone.
+func (*Adapter) Quota(ctx context.Context) (adapter.Quota, bool, error) {
+	out, err := exec.CommandContext(ctx, binary, "-p", "/usage", "--output-format", "text").Output()
+	if err != nil {
+		return adapter.Quota{}, false, fmt.Errorf("claude /usage: %w", err)
+	}
+
+	var q adapter.Quota
+	for _, line := range strings.Split(string(out), "\n") {
+		m := usageLine.FindStringSubmatch(strings.TrimSpace(line))
+		if m == nil {
+			continue
+		}
+		pct, err := strconv.ParseFloat(m[2], 64)
+		if err != nil {
+			continue
+		}
+		window := 5 * time.Hour
+		if strings.EqualFold(m[1], "week") {
+			window = 7 * 24 * time.Hour
+		}
+		q.Windows = append(q.Windows, adapter.QuotaWindow{Window: window, Used: pct / 100})
+	}
+	if len(q.Windows) == 0 {
+		// An API key rather than a plan: no window to report, and not an error.
+		return adapter.Quota{}, false, nil
+	}
+	sort.Slice(q.Windows, func(i, j int) bool { return q.Windows[i].Window < q.Windows[j].Window })
+	return q, true, nil
 }
