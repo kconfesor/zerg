@@ -140,6 +140,20 @@ const attentionCount = computed(() => {
   return a.approvals.length + a.clarifications.length + a.rework.tasks.length
 })
 
+/**
+ * Close the queue when the last thing in it is decided.
+ *
+ * On the transition to empty, not on being empty: deciding the final approval
+ * should dismiss the dialog, but a dialog opened deliberately over an empty
+ * queue is a place someone chose to be and should stay put.
+ */
+watch(
+  () => attentionCount.value,
+  (now, before) => {
+    if (attentionOpen.value && now === 0 && (before ?? 0) > 0) attentionOpen.value = false
+  },
+)
+
 const working = computed(() => tasks.value.filter((t) => t.state === 'working').length)
 
 const boardSubtitle = computed(() => {
