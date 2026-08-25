@@ -106,6 +106,9 @@ type Cerebrate struct {
 	restarts int
 	// throttledUntil is when a spent provider quota is expected to lift.
 	throttledUntil time.Time
+	// lastStreamErr is the most recent error the agent's own output carried,
+	// fatal or not. The process exit status rarely says why.
+	lastStreamErr string
 
 	stdin io.WriteCloser
 	ready chan struct{} // closed when the agent first reports ready
@@ -198,19 +201,27 @@ func (c *Cerebrate) Run(ctx context.Context) error {
 		case ctx.Err() != nil:
 			c.setState(StateStopped, "")
 			return nil
+		}
+
+		// Before anything else, a spent quota window: it presents as fatal on
+		// one harness and as an ordinary error on the other, so it is checked
+		// on both paths. Checking only the fatal one is how this first shipped,
+		// and it left claude crash-looping through a limit it should wait out.
+		if t, ok := c.throttle(c.streamErr(), errString(err)); ok {
+			if !c.waitOutThrottle(ctx, t) {
+				c.setState(StateStopped, "")
+				return nil
+			}
+			backoff = c.cfg.backoffBase
+			continue
+		}
+
+		switch {
 		case fatal:
 			// A spent quota window looks like a fatal error and is not one:
 			// nothing is wrong with the agent, the code, or the task, and the
 			// correct response is to wait. Failing here would cost an operator
 			// the time it takes to discover the thing to do was nothing.
-			if t, ok := c.throttle(errString(err)); ok {
-				if !c.waitOutThrottle(ctx, t) {
-					c.setState(StateStopped, "")
-					return nil
-				}
-				backoff = c.cfg.backoffBase
-				continue
-			}
 			// Restarting into the same wall is how twenty minutes gets spent on
 			// an agent that cannot work. A fatal error means stop and say so.
 			c.setState(StateFailed, errString(err))
@@ -368,6 +379,14 @@ func (c *Cerebrate) readStream(stdout io.Reader) error {
 		for _, ev := range events {
 			c.observe(ev)
 			c.publish(ev)
+			if ev.Kind == adapter.EventError {
+				// Kept whether or not it is fatal: claude reports a spent
+				// quota window as an ordinary error, and the supervisor has
+				// to be able to recognise it on the non-fatal path too.
+				c.mu.Lock()
+				c.lastStreamErr = ev.Text
+				c.mu.Unlock()
+			}
 			if ev.Kind == adapter.EventError && ev.Fatal && fatal == nil {
 				fatal = errors.New(ev.Text)
 			}
@@ -533,12 +552,29 @@ const throttleRecheck = 5 * time.Minute
 
 // throttle asks the adapter whether this failure is a provider quota limit.
 // Adapters that cannot tell simply do not implement Throttler.
-func (c *Cerebrate) throttle(text string) (adapter.Throttle, bool) {
-	t, ok := c.cfg.Adapter.(adapter.Throttler)
+func (c *Cerebrate) throttle(texts ...string) (adapter.Throttle, bool) {
+	a, ok := c.cfg.Adapter.(adapter.Throttler)
 	if !ok {
 		return adapter.Throttle{}, false
 	}
-	return t.ThrottledBy(text)
+	// The agent's own output first: an exit status says a process died, not
+	// that a provider refused it.
+	for _, text := range texts {
+		if text == "" {
+			continue
+		}
+		if t, ok := a.ThrottledBy(text); ok {
+			return t, true
+		}
+	}
+	return adapter.Throttle{}, false
+}
+
+// streamErr is the last error the agent's output carried.
+func (c *Cerebrate) streamErr() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.lastStreamErr
 }
 
 // waitOutThrottle holds the role until the quota window rolls over. It reports

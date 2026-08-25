@@ -1036,6 +1036,13 @@ role rechecks every five minutes rather than guessing an end. A role that
 announces it resumes at a time it will not is worse than one that says it does
 not know.
 
+The check runs on **every** failed run, not only fatal ones. The two harnesses
+disagree about severity: pi's quota error is fatal, claude's decodes as an
+ordinary error, and a first version that checked only the fatal path left claude
+crash-looping with exponential backoff through a limit it should have waited
+out. The agent's own output is consulted before the process exit status, because
+an exit status says a process died, not that a provider refused it.
+
 Detection is `adapter.Throttler`, an **optional** interface reached by type
 assertion. A harness that cannot tell a quota limit from any other failure
 should not be forced to pretend, and the assertion keeps every existing

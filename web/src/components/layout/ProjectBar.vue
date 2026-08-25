@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { Project, SwarmStatus } from '@/lib/api'
-import { Bell, Play, Square } from '@lucide/vue'
+import { computed } from 'vue'
+import { Bell, Hourglass, Play, Square } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 import {
   Select,
@@ -28,6 +29,26 @@ const emit = defineEmits<{
 function liveCount(s: SwarmStatus): number {
   return s.roles.filter((r) => r.state === 'ready' || r.state === 'working').length
 }
+
+/**
+ * Roles waiting on a provider quota.
+ *
+ * Counted separately because "2/3 agents live" reads the same whether the
+ * third crashed or is waiting out a limit, and those call for opposite
+ * responses: one is yours to fix, the other is yours to ignore.
+ */
+const throttled = computed(() => props.status.roles.filter((r) => r.state === 'throttled'))
+
+/** The soonest any of them comes back — the only number worth a top bar. */
+const resumesIn = computed(() => {
+  const times = throttled.value
+    .map((r) => (r.throttledUntil ? new Date(r.throttledUntil).getTime() : NaN))
+    .filter((t) => Number.isFinite(t))
+  if (!times.length) return ''
+  const mins = Math.round((Math.min(...times) - Date.now()) / 60000)
+  if (mins <= 0) return 'any moment'
+  return mins < 60 ? `${mins}m` : `${Math.floor(mins / 60)}h ${mins % 60}m`
+})
 </script>
 
 <template>
@@ -93,6 +114,19 @@ function liveCount(s: SwarmStatus): number {
         {{ liveCount(status) }}/{{ status.roles.length }}<span class="hidden sm:inline"> agents live</span>
       </span>
       <span v-else class="text-muted-foreground hidden text-[11px] sm:inline">no agents running</span>
+
+      <!-- A quota limit is not a fault and is not styled as one, but it does
+           explain a number that would otherwise look like a crash. -->
+      <span
+        v-if="throttled.length"
+        class="flex items-center gap-1.5 text-[11px] font-medium text-[var(--status-warning)]"
+        :title="throttled.map((r) => `${r.role}: ${r.lastError || 'provider limit'}`).join('\n')"
+      >
+        <Hourglass :size="12" aria-hidden="true" />
+        {{ throttled.length }} waiting on a limit<span v-if="resumesIn" class="hidden sm:inline">
+          · back in {{ resumesIn }}</span
+        >
+      </span>
 
       <!-- An icon, with the words in the tooltip and the aria label. The pair
            reads as one control at a glance, and on a phone it stops the bar
