@@ -225,6 +225,14 @@ func runUp(args []string) error {
 			Overmind: over, Nydus: nyd, Bus: bus, Recorder: recorder, Applied: cfg.Addr, Chat: chatMgr,
 		}).Routes(),
 		ReadHeaderTimeout: 10 * time.Second,
+		// A body that arrives a byte at a time holds a connection open
+		// indefinitely; an idle keep-alive holds one for nothing. Generous
+		// enough for a slow tailnet link and finite, which is the point.
+		ReadTimeout: 60 * time.Second,
+		IdleTimeout: 120 * time.Second,
+		// Deliberately no WriteTimeout: the activity stream is a long-lived
+		// WebSocket and a write deadline on the server would cut it. The
+		// stream sets its own per-write deadline instead.
 	}
 
 	tlsCert, tlsKey, err := resolveTLS(ctx, cfg, filepath.Join(stateDir, "certs"))

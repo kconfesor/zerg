@@ -146,7 +146,7 @@ func (s *Server) Routes() http.Handler {
 		mux.Handle("/", ui)
 	}
 
-	return s.withLogging(mux)
+	return s.guard(s.withLogging(mux))
 }
 
 // ── health ────────────────────────────────────────────────────────────────

@@ -1130,7 +1130,23 @@ daemon shells out to a `tailscaled` that is already running for other reasons.
 same port — one daemon, two doors. Local work does not need the MagicDNS name, and a network
 setting that breaks the main listener cannot lock you out of the view that would fix it.
 
-**There is no authentication.** Anything that can route to the port can start agents, read every
+**Cross-origin writes are refused.** A page you visit can resolve its own
+hostname to `127.0.0.1` and then post to this API from your browser — DNS
+rebinding — and the tailnet cannot help, because the request originates inside
+it. That matters more here than in most apps: agents run with permission
+prompts disabled, in worktrees of repositories you chose, so *create a task* is
+arbitrary code execution on this machine. Mutating requests must carry a
+`Sec-Fetch-Site` of `same-origin`/`none`, or an `Origin` matching the `Host`.
+Reads are untouched, and a client that sends neither header — curl, a script —
+is allowed, because it is not what this defends against. The WebSocket has
+always enforced the same-origin check its library provides.
+
+Bodies are capped at 1 MB, and the server has `ReadTimeout` and `IdleTimeout`
+as well as `ReadHeaderTimeout`. There is deliberately no `WriteTimeout`: the
+activity stream is a long-lived WebSocket and a server write deadline would cut
+it, so the stream sets its own per-write deadline instead.
+
+**There is still no authentication.** Anything that can route to the port can start agents, read every
 transcript, and see which repositories are being worked on. On a tailnet that is your own devices,
 which is the point; `--addr 0.0.0.0` hands it to whatever else shares the local network. The daemon
 states which of the two you have chosen at startup, and does not pretend the difference is small.
