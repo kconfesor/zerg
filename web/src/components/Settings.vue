@@ -15,6 +15,7 @@ import { Checkbox } from '@/components/ui/checkbox'
 import { Textarea } from '@/components/ui/textarea'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import {
   Select,
@@ -32,7 +33,16 @@ const form = ref<DaemonConfig | null>(null)
 const saving = ref(false)
 const note = ref<{ tone: 'ok' | 'bad'; text: string } | null>(null)
 const sweeping = ref(false)
-const tab = ref('project')
+/**
+ * The open tab, mirrored out of the uncontrolled Tabs so the save button can
+ * key off it.
+ *
+ * One constant feeds both the ref and default-value. Written separately they
+ * drifted immediately — the ref said "project" while the component opened on
+ * "network", so the state the button read was never the tab on screen.
+ */
+const FIRST_TAB = 'project'
+const tab = ref(FIRST_TAB)
 
 const INTEGRATIONS: { value: Integration; label: string; why: string }[] = [
   {
@@ -265,7 +275,7 @@ const loopback = computed(() => {
          with no visible error — which is exactly what happened. Uncontrolled
          plus a listener keeps reka-ui in charge of the switching and mirrors it
          out for the save button. -->
-    <Tabs default-value="network" @update:model-value="(v) => (tab = String(v))">
+    <Tabs :default-value="FIRST_TAB" @update:model-value="(v) => (tab = String(v))">
       <TabsList>
         <TabsTrigger value="project">Project</TabsTrigger>
         <TabsTrigger value="network">Network</TabsTrigger>
@@ -289,26 +299,23 @@ const loopback = computed(() => {
           </CardHeader>
           <CardContent class="flex flex-col gap-3">
             <p v-if="!project" class="text-muted-foreground text-xs">Open a project first.</p>
-            <label
-              v-for="opt in INTEGRATIONS"
+            <RadioGroup
               v-else
-              :key="opt.value"
-              class="flex items-start gap-2 text-xs"
+              :model-value="project.integration"
+              :disabled="savingIntegration"
+              class="gap-3"
+              @update:model-value="(v) => setIntegration(v as Integration)"
             >
-              <input
-                type="radio"
-                name="integration"
-                class="accent-primary mt-0.5"
-                :value="opt.value"
-                :checked="project.integration === opt.value"
-                :disabled="savingIntegration"
-                @change="setIntegration(opt.value)"
-              />
-              <span>
-                {{ opt.label }}
-                <span class="text-muted-foreground block text-[11px] leading-snug">{{ opt.why }}</span>
-              </span>
-            </label>
+              <div v-for="opt in INTEGRATIONS" :key="opt.value" class="flex items-start gap-2">
+                <RadioGroupItem :id="`int-${opt.value}`" :value="opt.value" class="mt-0.5" />
+                <Label :for="`int-${opt.value}`" class="cursor-pointer text-xs font-normal">
+                  {{ opt.label }}
+                  <span class="text-muted-foreground block text-[11px] leading-snug">
+                    {{ opt.why }}
+                  </span>
+                </Label>
+              </div>
+            </RadioGroup>
           </CardContent>
         </Card>
       </TabsContent>
