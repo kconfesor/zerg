@@ -149,6 +149,11 @@
     --gutter: 1.25rem;
     --rail: 15rem;
 
+    /* The height of the sidebar's brand block and the project bar above the
+       view. One value because the two sit side by side and their bottom rules
+       have to meet: matched by hand they drifted the moment the logo grew. */
+    --topbar: 3.5rem;
+
     /* Surfaces, darkest to lightest. */
     --surface-sunken: oklch(15.5% 0.017 305);
     --surface-raised: oklch(22.5% 0.030 301.6);

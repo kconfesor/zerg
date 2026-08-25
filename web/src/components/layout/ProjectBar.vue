@@ -36,7 +36,12 @@ function liveCount(s: SwarmStatus): number {
   <!-- Project context and the action that acts on it, together. Starting the
        agents belongs beside the repository they will work in, not filed under
        navigation where "Start" has no visible object. -->
-  <div class="hairline-b bg-[var(--surface-sunken)]/60 flex flex-wrap items-center gap-x-3 gap-y-2 px-[var(--gutter)] py-2.5">
+  <!-- min-h rather than h: this bar wraps to two rows on a narrow screen, and
+       a fixed height would clip the second one. It matches the brand block
+       beside it whenever there is room, and grows when there is not. -->
+  <div
+    class="hairline-b bg-[var(--surface-sunken)]/60 flex min-h-[var(--topbar)] flex-wrap items-center gap-x-3 gap-y-2 px-[var(--gutter)] py-2"
+  >
     <!-- Only below md, where the rail is a drawer rather than always present. -->
     <Button
       size="icon-sm"
