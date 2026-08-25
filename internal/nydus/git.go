@@ -125,3 +125,97 @@ func (Git) Resolve(ctx context.Context, worktreePath, ref string) (string, error
 	}
 	return sha, nil
 }
+
+// TaskBranchPrefix names the branch a task's finished work is published on.
+//
+// One branch per task rather than reusing the role's, because a pull request
+// should be about one task. A role branch accumulates everything that role has
+// ever done, and a reviewer opening the PR would be reading work that landed
+// weeks ago.
+const TaskBranchPrefix = "zerg/"
+
+// Publish pushes a branch at commit and opens a pull request for it.
+//
+// The description is the terminal role's handoff note, which is already an
+// account of what was done and what was checked — written for the next reader,
+// which is exactly who opens a PR.
+//
+// Shelling out to gh rather than talking to the API: gh already holds the
+// credentials, already knows which remote is which, and adding an HTTP client
+// and a token store here would duplicate all of it worse.
+func (Git) Publish(ctx context.Context, repoPath, base, commit, title, body string) (string, error) {
+	if _, err := exec.LookPath("gh"); err != nil {
+		return "", fmt.Errorf(
+			"opening a pull request needs the gh CLI, which is not installed (brew install gh)")
+	}
+	remote, err := runGit(ctx, repoPath, "remote")
+	if err != nil || strings.TrimSpace(remote) == "" {
+		return "", fmt.Errorf(
+			"this repository has no remote, so there is nowhere to open a pull request; " +
+				"add one, or set integration to merge or branch")
+	}
+
+	branch := TaskBranchPrefix + slug(title)
+	// -f so a retried completion updates the branch rather than failing on a
+	// name that already exists.
+	if _, err := runGit(ctx, repoPath, "branch", "-f", branch, commit); err != nil {
+		return "", fmt.Errorf("creating %s: %w", branch, err)
+	}
+	if _, err := runGit(ctx, repoPath, "push", "-u", "--force-with-lease",
+		strings.Fields(remote)[0], branch); err != nil {
+		return "", fmt.Errorf("pushing %s: %w", branch, err)
+	}
+
+	out, err := exec.CommandContext(ctx, "gh", "pr", "create",
+		"--base", base, "--head", branch, "--title", title, "--body", body,
+	).CombinedOutput()
+	if err != nil {
+		msg := strings.TrimSpace(string(out))
+		// A pull request that already exists is a retry, not a failure.
+		if strings.Contains(msg, "already exists") {
+			if url, e := existingPR(ctx, repoPath, branch); e == nil {
+				return url, nil
+			}
+		}
+		return "", fmt.Errorf("gh pr create: %v (%s)", err, msg)
+	}
+	return firstURL(string(out)), nil
+}
+
+func existingPR(ctx context.Context, repoPath, branch string) (string, error) {
+	cmd := exec.CommandContext(ctx, "gh", "pr", "view", branch, "--json", "url", "-q", ".url")
+	cmd.Dir = repoPath
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// firstURL pulls the pull request link out of gh's output, which prints it on
+// its own line among other chatter.
+func firstURL(s string) string {
+	for _, line := range strings.Fields(s) {
+		if strings.HasPrefix(line, "https://") {
+			return line
+		}
+	}
+	return strings.TrimSpace(s)
+}
+
+// slug turns a task name into something git will accept as a branch.
+func slug(name string) string {
+	var b strings.Builder
+	lastDash := true // no leading dash
+	for _, r := range strings.ToLower(name) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+			lastDash = false
+		case !lastDash:
+			b.WriteByte('-')
+			lastDash = true
+		}
+	}
+	return strings.Trim(b.String(), "-")
+}

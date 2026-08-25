@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -16,14 +17,23 @@ import (
 // fakeIntegrator records merges so a test can assert integration happened
 // without needing a repository.
 type fakeIntegrator struct {
-	mu     sync.Mutex
-	merges []string
-	into   []string
-	err    error
+	mu        sync.Mutex
+	merges    []string
+	into      []string
+	published []string
+	err       error
 }
 
 // Resolve is identity here: these tests pass shas already, and the point of
 // the real one is the tree it resolves against, which a fake has none of.
+// Publish records the request and returns a plausible URL, so a test can check
+// that PR mode published without needing a remote or a GitHub account.
+func (f *fakeIntegrator) Publish(_ context.Context, _, base, commit, title, body string) (string, error) {
+	f.published = append(f.published, title+" -> "+base+"@"+commit[:min(8, len(commit))])
+	_ = body
+	return "https://example.test/pr/1", nil
+}
+
 func (f *fakeIntegrator) Resolve(_ context.Context, _, ref string) (string, error) {
 	return ref, nil
 }
@@ -878,5 +888,54 @@ func TestReclaimRequeuesLeasesThatOutlivedTheirHolder(t *testing.T) {
 	}
 	if again.ID == lease.ID {
 		t.Error("the same dead lease was handed back rather than a new one")
+	}
+}
+
+// How finished work lands is the project's decision. Merging to the base is
+// right for a repository you own and wrong wherever the base is protected, so
+// all three outcomes have to be reachable — and only the chosen one may happen.
+func TestIntegrationModeDecidesWhatCompletionDoes(t *testing.T) {
+	ctx := context.Background()
+
+	for _, tc := range []struct {
+		mode       string
+		wantMerges int
+		wantPRs    int
+		wantInBody string
+	}{
+		{store.IntegrateMerge, 1, 0, ""},
+		{store.IntegrateBranch, 0, 0, ""},
+		{store.IntegratePR, 0, 1, "Pull request: https://example.test/pr/1"},
+	} {
+		t.Run(tc.mode, func(t *testing.T) {
+			f := newFixture(t)
+			if _, err := f.db.SetIntegration(ctx, f.project.ID, tc.mode); err != nil {
+				t.Fatalf("SetIntegration: %v", err)
+			}
+			task := f.task(t, "Calculator")
+
+			// reviewer is terminal in this fixture, so it finishes the task.
+			msg, err := f.n.Send(ctx, f.project.ID, "reviewer", SendRequest{
+				TaskID: task.ID, Commit: "aaaaaaaaaa", Body: "approved",
+			})
+			if err != nil {
+				t.Fatalf("complete: %v", err)
+			}
+
+			if got := len(f.git.merges); got != tc.wantMerges {
+				t.Errorf("%s: %d merges to the base branch, want %d", tc.mode, got, tc.wantMerges)
+			}
+			if got := len(f.git.published); got != tc.wantPRs {
+				t.Errorf("%s: %d pull requests, want %d", tc.mode, got, tc.wantPRs)
+			}
+			if tc.wantInBody != "" && !strings.Contains(msg.Body, tc.wantInBody) {
+				t.Errorf("%s: the completion does not record where the work went: %q", tc.mode, msg.Body)
+			}
+			// The task is finished either way. Whether it has landed is a
+			// separate question from whether the work is done.
+			if f.reload(t, task.ID).State != store.TaskDone {
+				t.Errorf("%s: the task did not reach Done", tc.mode)
+			}
+		})
 	}
 }

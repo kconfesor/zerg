@@ -45,7 +45,7 @@ func (db *DB) CreateProject(ctx context.Context, path, name, baseBranch string) 
 // surfaces what you were last working on.
 func (db *DB) ListProjects(ctx context.Context) ([]Project, error) {
 	rows, err := db.sql.QueryContext(ctx,
-		`SELECT id, path, name, base_branch, created_at, last_opened_at
+		`SELECT id, path, name, base_branch, integration, created_at, last_opened_at
 		 FROM projects ORDER BY COALESCE(last_opened_at, created_at) DESC`)
 	if err != nil {
 		return nil, fmt.Errorf("listing projects: %w", err)
@@ -66,7 +66,7 @@ func (db *DB) ListProjects(ctx context.Context) ([]Project, error) {
 // GetProject looks a project up by id.
 func (db *DB) GetProject(ctx context.Context, id string) (*Project, error) {
 	row := db.sql.QueryRowContext(ctx,
-		`SELECT id, path, name, base_branch, created_at, last_opened_at FROM projects WHERE id = ?`, id)
+		`SELECT id, path, name, base_branch, integration, created_at, last_opened_at FROM projects WHERE id = ?`, id)
 	p, err := scanProject(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("project %s: %w", id, ErrNotFound)
@@ -251,7 +251,7 @@ func scanProject(s scanner) (*Project, error) {
 		created    string
 		lastOpened sql.NullString
 	)
-	if err := s.Scan(&p.ID, &p.Path, &p.Name, &p.BaseBranch, &created, &lastOpened); err != nil {
+	if err := s.Scan(&p.ID, &p.Path, &p.Name, &p.BaseBranch, &p.Integration, &created, &lastOpened); err != nil {
 		return nil, err
 	}
 	var err error
@@ -289,4 +289,16 @@ func prefixed(cols, alias string) string {
 		parts[i] = alias + "." + strings.TrimSpace(c)
 	}
 	return strings.Join(parts, ", ")
+}
+
+// SetIntegration changes how a project's finished work reaches its base branch.
+func (db *DB) SetIntegration(ctx context.Context, projectID, mode string) (*Project, error) {
+	if !ValidIntegration(mode) {
+		return nil, invalid("unknown integration mode %q; use merge, branch or pr", mode)
+	}
+	if _, err := db.sql.ExecContext(ctx,
+		`UPDATE projects SET integration = ? WHERE id = ?`, mode, projectID); err != nil {
+		return nil, fmt.Errorf("setting integration mode: %w", err)
+	}
+	return db.GetProject(ctx, projectID)
 }

@@ -1,0 +1,13 @@
+-- zerg schema, version 7: how finished work reaches the base branch.
+--
+-- Merging straight to the base branch is right for a scratch repository and
+-- wrong for most others, where the base is protected and change arrives by
+-- pull request. That is a property of the repository, not of a role: the same
+-- reviewer reviews the same way whether the result merges or opens a PR.
+--
+-- Per project, and deliberately not per role. Only the terminal role
+-- integrates, so a role-level setting would apply to whichever role happened to
+-- be last — and disabling that role would silently move the policy to another
+-- one. That is the same failure as taking terminality from config-file line
+-- order, which §6 records.
+ALTER TABLE projects ADD COLUMN integration TEXT NOT NULL DEFAULT 'merge';

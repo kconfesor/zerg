@@ -23,10 +23,18 @@ type fixture struct {
 }
 
 // merges records terminal integration without needing a repository.
-type recordingIntegrator struct{ commits, into []string }
+type recordingIntegrator struct{ commits, into, published []string }
 
 // Resolve is identity here: these tests pass shas already, and the point of
 // the real one is the tree it resolves against, which a fake has none of.
+// Publish records the request and returns a plausible URL, so a test can check
+// that PR mode published without needing a remote or a GitHub account.
+func (r *recordingIntegrator) Publish(_ context.Context, _, base, commit, title, body string) (string, error) {
+	r.published = append(r.published, title+" -> "+base+"@"+commit[:min(8, len(commit))])
+	_ = body
+	return "https://example.test/pr/1", nil
+}
+
 func (r *recordingIntegrator) Resolve(_ context.Context, _, ref string) (string, error) {
 	return ref, nil
 }

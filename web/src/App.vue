@@ -438,7 +438,7 @@ watch(current, () => (banner.value = null))
               title="Settings"
               subtitle="How the daemon serves the cockpit, and what it keeps on disk."
             />
-            <div class="pt-4"><Settings :project-id="current?.id ?? null" /></div>
+            <div class="pt-4"><Settings :project="current" @project-changed="(p) => (current = p)" /></div>
           </template>
 
           <!-- Activity -->

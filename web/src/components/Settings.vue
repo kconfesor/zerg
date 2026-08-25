@@ -7,7 +7,7 @@
  * next to the fields beats a paragraph nobody reads.
  */
 import { computed, ref, watch } from 'vue'
-import { api, type DaemonConfig, type SettingsResponse } from '@/lib/api'
+import { api, type DaemonConfig, type Integration, type Project, type SettingsResponse } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -24,14 +24,48 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 
-const props = defineProps<{ projectId: string | null }>()
+const props = defineProps<{ project: Project | null }>()
+const emit = defineEmits<{ projectChanged: [project: Project] }>()
 
 const data = ref<SettingsResponse | null>(null)
 const form = ref<DaemonConfig | null>(null)
 const saving = ref(false)
 const note = ref<{ tone: 'ok' | 'bad'; text: string } | null>(null)
 const sweeping = ref(false)
-const tab = ref('network')
+const tab = ref('project')
+
+const INTEGRATIONS: { value: Integration; label: string; why: string }[] = [
+  {
+    value: 'merge',
+    label: 'Merge into the base branch',
+    why: 'The terminal role fast-forwards the base branch when it approves. Right for a repository you own outright; wrong wherever the base is protected.',
+  },
+  {
+    value: 'pr',
+    label: 'Open a pull request',
+    why: "Pushes the work to its own branch and opens a PR, using the terminal role's handoff note as the description. Needs the gh CLI and a remote.",
+  },
+  {
+    value: 'branch',
+    label: 'Leave it on a branch',
+    why: 'The task finishes and nothing else happens. Landing it is your decision, taken later.',
+  },
+]
+
+const savingIntegration = ref(false)
+async function setIntegration(mode: Integration) {
+  if (!props.project || props.project.integration === mode) return
+  savingIntegration.value = true
+  note.value = null
+  try {
+    emit('projectChanged', await api.setIntegration(props.project.id, mode))
+    note.value = { tone: 'ok', text: 'Saved. It applies to the next task that finishes.' }
+  } catch (e) {
+    note.value = { tone: 'bad', text: e instanceof Error ? e.message : String(e) }
+  } finally {
+    savingIntegration.value = false
+  }
+}
 
 /**
  * The harness flags worth offering as a switch, with what each one is for.
@@ -150,11 +184,11 @@ async function save() {
 }
 
 async function sweepNow() {
-  if (!props.projectId) return
+  if (!props.project) return
   sweeping.value = true
   note.value = null
   try {
-    const r = await api.sweep(props.projectId)
+    const r = await api.sweep(props.project.id)
     const mb = (r.bytesFreed / 1048576).toFixed(1)
     const branches = r.branchesPruned?.length ?? 0
     note.value = {
@@ -233,11 +267,51 @@ const loopback = computed(() => {
          out for the save button. -->
     <Tabs default-value="network" @update:model-value="(v) => (tab = String(v))">
       <TabsList>
+        <TabsTrigger value="project">Project</TabsTrigger>
         <TabsTrigger value="network">Network</TabsTrigger>
         <TabsTrigger value="disk">Disk</TabsTrigger>
         <TabsTrigger value="harness">Harness</TabsTrigger>
         <TabsTrigger value="instructions">Instructions</TabsTrigger>
       </TabsList>
+
+      <!-- ── Project ──────────────────────────────────────────────────── -->
+      <TabsContent value="project" class="pt-4">
+        <Card>
+          <CardHeader>
+            <CardTitle class="flex items-center gap-2 text-sm">
+              Where finished work goes
+              <Badge variant="outline">{{ project?.name ?? 'no project' }}</Badge>
+            </CardTitle>
+            <CardDescription class="text-[11px]">
+              What the last role does when it approves. Per project, not per role: only the terminal
+              role integrates, and which role that is changes when you change the team.
+            </CardDescription>
+          </CardHeader>
+          <CardContent class="flex flex-col gap-3">
+            <p v-if="!project" class="text-muted-foreground text-xs">Open a project first.</p>
+            <label
+              v-for="opt in INTEGRATIONS"
+              v-else
+              :key="opt.value"
+              class="flex items-start gap-2 text-xs"
+            >
+              <input
+                type="radio"
+                name="integration"
+                class="accent-primary mt-0.5"
+                :value="opt.value"
+                :checked="project.integration === opt.value"
+                :disabled="savingIntegration"
+                @change="setIntegration(opt.value)"
+              />
+              <span>
+                {{ opt.label }}
+                <span class="text-muted-foreground block text-[11px] leading-snug">{{ opt.why }}</span>
+              </span>
+            </label>
+          </CardContent>
+        </Card>
+      </TabsContent>
 
       <!-- ── Network ──────────────────────────────────────────────────── -->
       <TabsContent value="network" class="pt-4">
@@ -397,7 +471,7 @@ const loopback = computed(() => {
       </div>
 
       <div>
-        <Button size="sm" variant="outline" :disabled="!projectId || sweeping" @click="sweepNow">
+        <Button size="sm" variant="outline" :disabled="!project || sweeping" @click="sweepNow">
           {{ sweeping ? 'Sweeping…' : 'Sweep this project now' }}
         </Button>
       </div>

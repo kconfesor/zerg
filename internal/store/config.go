@@ -17,6 +17,32 @@ import (
 // worth being able to represent.
 const SettingConfig = "config"
 
+// How finished work reaches the base branch.
+const (
+	// IntegrateMerge fast-forwards the base branch to the terminal commit.
+	// Right for a repository you own outright, wrong wherever the base is
+	// protected.
+	IntegrateMerge = "merge"
+
+	// IntegrateBranch leaves the work on its branch and touches nothing else.
+	// The task is finished; landing it is someone else's decision.
+	IntegrateBranch = "branch"
+
+	// IntegratePR pushes the branch and opens a pull request, with the
+	// terminal role's handoff note as the description — which is already a
+	// summary of what was done and what was checked.
+	IntegratePR = "pr"
+)
+
+// ValidIntegration reports whether a mode is one zerg knows.
+func ValidIntegration(mode string) bool {
+	switch mode {
+	case IntegrateMerge, IntegrateBranch, IntegratePR:
+		return true
+	}
+	return false
+}
+
 // TLSMode is where the certificate comes from.
 const (
 	// TLSOff serves plain HTTP. Correct on loopback, and the default.

@@ -205,3 +205,21 @@ func (s *Server) taskDetail(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, taskDetail{Task: task, History: steps, Usage: usage})
 }
+
+type integrationRequest struct {
+	Integration string `json:"integration"`
+}
+
+// setIntegration changes how a project's finished work reaches its base branch.
+func (s *Server) setIntegration(w http.ResponseWriter, r *http.Request) {
+	var req integrationRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	project, err := s.db.SetIntegration(r.Context(), r.PathValue("id"), req.Integration)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, project)
+}

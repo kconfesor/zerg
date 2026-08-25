@@ -33,6 +33,10 @@ type Integrator interface {
 	// is claimed, so a role opens its tree and finds the work already there.
 	MergeInto(ctx context.Context, worktreePath, commit string) error
 
+	// Publish pushes a branch at commit and opens a pull request, returning its
+	// URL. Used when a project integrates by PR rather than by merging.
+	Publish(ctx context.Context, repoPath, base, commit, title, body string) (string, error)
+
 	// Resolve turns a commit-ish into the absolute sha it names in the tree at
 	// path. Every commit that enters the system goes through this.
 	Resolve(ctx context.Context, worktreePath, ref string) (string, error)
@@ -339,17 +343,46 @@ func (n *Nydus) complete(ctx context.Context, projectID string, sender store.Res
 		return nil, err
 	}
 
-	// Merge before recording completion. If integration fails the card stays
-	// where it is and the error reaches the operator, rather than the board
-	// claiming success over a branch that never moved.
+	// Integrate before recording completion. If it fails the card stays where
+	// it is and the error reaches the operator, rather than the board claiming
+	// success over a branch that never moved.
+	//
+	// How to integrate is the project's decision, not the role's: only the
+	// terminal role gets here, and which role that is changes when the team
+	// does.
+	var published string
 	if n.integrator != nil {
 		project, err := n.db.GetProject(ctx, projectID)
 		if err != nil {
 			return nil, err
 		}
-		if err := n.integrator.Merge(ctx, project.Path, project.BaseBranch, req.Commit); err != nil {
-			return nil, fmt.Errorf("merging %s into %s: %w", req.Commit, project.BaseBranch, err)
+		switch project.Integration {
+		case store.IntegrateBranch:
+			// Nothing to do. The work is committed on the role's branch and
+			// landing it is someone else's decision.
+
+		case store.IntegratePR:
+			// The handoff note becomes the description — it is already an
+			// account of what was done and what was checked, written for
+			// whoever reads next.
+			url, err := n.integrator.Publish(ctx, project.Path, project.BaseBranch,
+				req.Commit, task.Name, req.Body)
+			if err != nil {
+				return nil, fmt.Errorf("opening a pull request for %s: %w", task.Name, err)
+			}
+			published = url
+
+		default:
+			if err := n.integrator.Merge(ctx, project.Path, project.BaseBranch, req.Commit); err != nil {
+				return nil, fmt.Errorf("merging %s into %s: %w", req.Commit, project.BaseBranch, err)
+			}
 		}
+	}
+
+	// The link belongs with the account of the task, so the detail view shows
+	// where the work went rather than only that it finished.
+	if published != "" {
+		req.Body = strings.TrimSpace(req.Body) + "\n\nPull request: " + published
 	}
 
 	now := n.now()

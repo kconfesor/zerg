@@ -35,11 +35,15 @@ export interface ProjectRole {
   argsOverride?: string[] | null
 }
 
+export type Integration = 'merge' | 'branch' | 'pr'
+
 export interface Project {
   id: string
   path: string
   name: string
   baseBranch: string
+  /** How finished work reaches the base branch. */
+  integration: Integration
   createdAt: string
   lastOpenedAt?: string
 }
@@ -200,6 +204,11 @@ export const api = {
     }),
 
   taskDetail: (id: string) => call<TaskDetail>(`/tasks/${id}`),
+  setIntegration: (id: string, integration: Integration) =>
+    call<Project>(`/projects/${id}/integration`, {
+      method: 'PUT',
+      body: JSON.stringify({ integration }),
+    }),
 
   settings: () => call<SettingsResponse>('/settings'),
   setSettings: (cfg: DaemonConfig) =>

@@ -42,10 +42,15 @@ type RoleTemplate struct {
 
 // Project is a git repository zerg orchestrates.
 type Project struct {
-	ID           string     `json:"id"`
-	Path         string     `json:"path"`
-	Name         string     `json:"name"`
-	BaseBranch   string     `json:"baseBranch"`
+	ID         string `json:"id"`
+	Path       string `json:"path"`
+	Name       string `json:"name"`
+	BaseBranch string `json:"baseBranch"`
+
+	// Integration is how finished work reaches the base branch: merge, branch
+	// or pr. See the constants in config.go for what each means and why this
+	// is a property of the project rather than of a role.
+	Integration  string     `json:"integration"`
 	CreatedAt    time.Time  `json:"createdAt"`
 	LastOpenedAt *time.Time `json:"lastOpenedAt,omitempty"`
 }
