@@ -44,6 +44,17 @@ const view = ref<View>('board')
 const navOpen = ref(false)
 
 /**
+ * True until the first load settles.
+ *
+ * Without it the empty state renders while the projects request is still in
+ * flight, so every start said "No project yet" and then replaced it with the
+ * project — telling you something false, briefly, on every single page load.
+ * An empty state is a claim about the world and must not be made before the
+ * answer is back.
+ */
+const loading = ref(true)
+
+/**
  * Board polling, with the same backoff discipline the event stream has.
  *
  * A fixed interval keeps firing into a daemon that is not there: restarting it
@@ -302,8 +313,14 @@ const act = {
 }
 
 onMounted(async () => {
-  await loadGlobals()
-  if (projects.value.length) await open(projects.value[0])
+  try {
+    await loadGlobals()
+    if (projects.value.length) await open(projects.value[0])
+  } finally {
+    // In a finally: a failed load must still stop claiming to be loading, or
+    // the spinner becomes its own kind of lie.
+    loading.value = false
+  }
   schedulePoll(0)
 })
 onUnmounted(() => window.clearTimeout(timer))
@@ -370,7 +387,16 @@ watch(current, () => (banner.value = null))
       </button>
 
       <!-- No project yet: one job on screen, nothing else. -->
-      <main v-if="!current" class="grid flex-1 place-items-center overflow-y-auto p-8">
+      <!-- Loading. Deliberately quiet: this resolves in well under a second on
+           loopback, and a spinner that flashes is worse than a still frame. -->
+      <main v-if="loading" class="grid flex-1 place-items-center p-8">
+        <div class="flex items-center gap-2.5">
+          <span class="loading-pulse size-2 rounded-full bg-[var(--primary)]" />
+          <span class="text-muted-foreground text-xs">Loading…</span>
+        </div>
+      </main>
+
+      <main v-else-if="!current" class="grid flex-1 place-items-center overflow-y-auto p-8">
         <div class="w-full max-w-md text-center">
           <h1 class="text-lg font-semibold tracking-tight">No project yet</h1>
           <p class="text-muted-foreground mt-1.5 mb-4 text-xs leading-relaxed">

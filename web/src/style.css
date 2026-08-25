@@ -206,3 +206,17 @@
 @media (prefers-reduced-motion: reduce) {
   .pulse-dot, .rise { animation: none; }
 }
+
+/* A slow pulse for the first load. Fading rather than spinning: the wait is
+   usually under a second, and a spinner that appears and vanishes reads as a
+   glitch, where a fade that never completes simply goes unnoticed. */
+@keyframes loading-pulse {
+  0%, 100% { opacity: 0.25; }
+  50%      { opacity: 1; }
+}
+.loading-pulse {
+  animation: loading-pulse 1.4s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .loading-pulse { animation: none; opacity: 0.6; }
+}
