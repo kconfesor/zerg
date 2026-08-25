@@ -124,10 +124,13 @@ A fresh install seeds two roles, ready to run:
 | # | name | harness | model | receive | prompt |
 |---|---|---|---|---|---|
 | 1 | `coder` | claude | `sonnet` | task | implement the task, write tests, commit |
-| 2 | `qa` | claude | `sonnet` | batch | verify against the task, run tests, report or hand back |
+| 2 | `reviewer` | claude | `opus` | batch | review the change, run tests, report or hand back |
 
-`qa` is last, therefore terminal. Both are ordinary rows — rename them, replace them, add four more.
-There are no presets and nothing is special-cased.
+The reviewer runs a stronger model than the coder on purpose: catching a wrong change is harder than
+making a plausible one, and it is the last gate before work reaches the base branch.
+
+`reviewer` is last, therefore terminal. Both are ordinary rows — rename them, replace them, add four
+more. There are no presets and nothing is special-cased.
 
 ---
 
@@ -182,7 +185,7 @@ base branch. Integration belongs to the orchestrator, not to whichever agent hap
 │  │  └─────────┬───────────┘              ▲                       ▲             │  │
 │  │            │                          │                       │             │  │
 │  │            ▼            ┌─────────────┴───────────────────────┴──────────┐  │  │
-│  │  ┌─ store ───────────┐  │ cerebrate[coder]   cerebrate[qa]   ...         │  │  │
+│  │  ┌─ store ───────────┐  │ cerebrate[coder]  cerebrate[reviewer] ...         │  │  │
 │  │  │ SQLite WAL        │  │   ├ preflight                                  │  │  │
 │  │  │ ~/.zerg/zerg.db   │  │   ├ adapter (claude | pi | …)                   │  │  │
 │  │  │ single writer     │  │   ├ structured stdio ◀── primary                │  │  │
@@ -716,6 +719,27 @@ Versions verified against npm dist-tags and `proxy.golang.org` on 2026-08-24.
 | TypeScript | **6.0.3 — pinned** | TS 7 is the Go-native rewrite, shipping without a stable programmatic compiler API; `vue-tsc` (Volar) is reported pinned to TS 6 until ~7.1. `vue-tsc`'s peer range says `>=5.0.0`, which is misleading. Verify before unpinning |
 | Pinia | 4.0.3 | |
 | vue-router | 5.2.0 | |
+| JetBrains Mono | — | Google Fonts; the preset's face for headings *and* body |
+| HugeIcons | — | the preset's icon library, in place of Lucide |
+
+### 14.1 UI foundation
+
+The cockpit starts from shadcn-vue preset **`awF4GHI`** — Style *Lyra*, JetBrains Mono for headings
+and body, **radius 0**, HugeIcons, Menu Default/Solid with a Subtle accent. Its structure is kept
+verbatim; only the hue moves, from the preset's Mauve to the zerg palette. Tokens live in
+[`web/theme.css`](web/theme.css) in shadcn-vue's own oklch format, so `npx shadcn-vue@latest add`
+components inherit them with no per-component styling.
+
+Two notes on that file:
+
+- **Chart and tier colors are not decorative and must not be re-picked by eye.** `--chart-1..4`
+  (role identity) and `--tier-1..4` (the cost ramp of §11.4) were validated against the dark surface
+  and pass every gate — worst adjacent CVD ΔE 9.4. All four chart hues sit at L≈62%, which is *why*
+  they pass. Changing one means re-running the validator, not nudging a hex.
+- **Mono for body text is the preset's call, and it has a cost.** It suits dense tool UI — tables,
+  logs, the activity view — and it is why the terminal skin and the cockpit chrome feel continuous.
+  It is less comfortable for long prose, so watch the one screen that has any: the prompt editor. If
+  it reads tiring at length, that editor is the place to make an exception, not the whole app.
 
 > **Node floor:** `create-vue@3.23.0` requires Node `^22.18.0 || >=24.12.0`. This machine's shell
 > resolves to v22.12.0 while nvm's default alias is v24.19.0 — scaffolding must run under 24.19.0.
@@ -726,7 +750,7 @@ Versions verified against npm dist-tags and `proxy.golang.org` on 2026-08-24.
 
 ## 15. Build order
 
-1. **store + config + role CRUD API** — roles as rows, seeded with coder and qa.
+1. **store + config + role CRUD API** — roles as rows, seeded with coder and reviewer.
 2. **nydus + board** against an in-memory harness stub — prove leases, claims, acks, terminal merge
    with zero LLM calls.
 3. **adapter interface + claude adapter + preflight**, including the readiness gate — a team that
