@@ -1,7 +1,11 @@
-# zerg
+<p align="center">
+  <img src="web/public/logo-full.svg" alt="zerg logo" width="540">
+</p>
 
-Multi-agent coding orchestrator. A Go daemon supervises a team of agent harnesses working in
-isolated git worktrees, routes work between them, and serves a Vue 3 cockpit.
+<p align="center">
+  <b>Multi-agent coding orchestrator</b><br>
+  A Go daemon supervises a team of agent harnesses working in isolated git worktrees, routes work between them, and serves a Vue 3 cockpit.
+</p>
 
 **Everything is configured in the UI.** No config files, no prompt files, no presets to copy. Point
 it at a repo, pick your roles, start.
@@ -100,9 +104,21 @@ beside them.
 It binds to loopback by default. To reach it from another device, bind the one
 interface you want — over Tailscale, that is the tailnet address:
 
+Set it in **Settings → Network**, or for one run:
+
 ```sh
 ./zerg up --addr $(tailscale ip -4):7717
 ```
+
+Turn on **TLS → Tailscale certificate** and zerg asks the local tailscaled for a
+real Let's Encrypt certificate for this machine's MagicDNS name, so a phone gets
+no warning. It needs **HTTPS Certificates** enabled for the tailnet, under DNS in
+the admin console; the settings view says so when it is off.
+
+`localhost` keeps working alongside it. A second listener serves plain HTTP on
+loopback on the same port — one daemon, two doors — so local work does not need
+the MagicDNS name, and a network setting that breaks the main listener cannot
+lock you out of the view that sets it.
 
 **The cockpit has no authentication.** Anything that can route to that port can
 start agents, read every transcript, and see which repositories are being worked

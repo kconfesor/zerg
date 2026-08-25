@@ -62,6 +62,20 @@ type Config struct {
 	// means ask tailscaled what this machine is called.
 	TailnetHost string `json:"tailnetHost,omitempty"`
 
+	// LocalAccess also serves plain HTTP on 127.0.0.1, on the same port, when
+	// Addr is some other interface.
+	//
+	// Two listeners rather than one on 0.0.0.0, which would also expose the
+	// local network. Loopback is plain HTTP on purpose: a certificate issued
+	// for a MagicDNS name does not match "localhost", so TLS there would mean
+	// a warning to click through — and loopback is already the same trust
+	// boundary as the shell that started the daemon.
+	//
+	// It is also the way back in. A TLS or address setting that cannot be
+	// satisfied would otherwise lock the operator out of the settings view
+	// that sets it.
+	LocalAccess bool `json:"localAccess"`
+
 	// EventRetentionDays is how long a transcript stays replayable. Costs and
 	// outcomes live in usage_turns and tasks and are never swept, so this
 	// trades narrative for disk and nothing else.
@@ -90,6 +104,7 @@ func DefaultConfig() Config {
 		Addr:                "127.0.0.1:7717",
 		TLSMode:             TLSOff,
 		EventRetentionDays:  14,
+		LocalAccess:         true,
 		CleanPolicy:         CleanNever,
 		CleanIgnored:        true,
 		PruneMergedBranches: false,

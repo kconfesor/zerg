@@ -256,11 +256,38 @@ func runUp(args []string) error {
 		}
 	}
 
+	// A second listener on loopback, plain, when the first is somewhere else.
+	// Local work should not have to type a MagicDNS name, and a settings change
+	// that breaks the main listener must never make settings unreachable.
+	var localLn net.Listener
+	if cfg.LocalAccess && !cfg.LoopbackOnly() {
+		_, port, _ := net.SplitHostPort(cfg.Addr)
+		localAddr := net.JoinHostPort("127.0.0.1", port)
+		localLn, err = net.Listen("tcp", localAddr)
+		if err != nil {
+			// Not fatal. Something else on the port is a reason to lose the
+			// convenience, not the daemon.
+			log.Warn("local access unavailable", "addr", localAddr, "err", err)
+		}
+	}
+
 	log.Info("overmind up", "url", scheme+"://"+shown, "db", *dbPath, "socket", socket)
 	fmt.Printf("Cockpit: %s://%s\n", scheme, shown)
+	if localLn != nil {
+		fmt.Printf("Locally: http://%s\n", localLn.Addr().String())
+	}
 	warnIfReachable(cfg.Addr, tlsCert != "")
 
 	errCh := make(chan error, 1)
+	if localLn != nil {
+		// Same handler, same state — a different door into one daemon, never a
+		// second copy of anything.
+		go func() {
+			if err := srv.Serve(localLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Warn("local listener stopped", "err", err)
+			}
+		}()
+	}
 	go func() {
 		var err error
 		if tlsCert != "" {

@@ -206,6 +206,23 @@ const loopback = computed(() => {
         </div>
       </div>
 
+      <label v-if="!loopback" class="flex items-start gap-2 text-xs">
+        <Checkbox
+          :model-value="form.localAccess"
+          class="mt-0.5"
+          @update:model-value="(v) => (form!.localAccess = !!v)"
+        />
+        <span>
+          Also serve <code>http://localhost</code> on the same port
+          <span class="text-muted-foreground block text-[11px] leading-snug">
+            Plain HTTP, because a certificate issued for a tailnet name does not match
+            <code>localhost</code>. Loopback is already the same trust boundary as the shell that
+            started the daemon — and it is the way back in if a setting here breaks the other
+            listener.
+          </span>
+        </span>
+      </label>
+
       <div v-if="ts?.available" class="text-muted-foreground text-[11px]">
         This machine on the tailnet: <code>{{ ts.dnsName }}</code>
         <span v-if="ts.ips?.length"> · {{ ts.ips[0] }}</span>

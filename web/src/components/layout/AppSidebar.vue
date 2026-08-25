@@ -49,11 +49,8 @@ function live(r: RoleStatus): boolean {
     ]"
   >
     <!-- Identity, and whether anything is running at all. -->
-    <div class="hairline-b flex items-center gap-2 px-3 py-3">
-      <span
-        class="bg-primary text-primary-foreground grid size-5 shrink-0 place-items-center text-[11px] font-bold"
-        >z</span
-      >
+    <div class="hairline-b flex items-center gap-2.5 px-3 py-3">
+      <img src="/logo-icon.svg" alt="zerg logo" class="size-6 shrink-0 rounded-md" />
       <span class="text-sm font-bold tracking-tight">zerg</span>
       <span
         v-if="status.running"

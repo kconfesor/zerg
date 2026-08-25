@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="100%" height="100%">
+  <defs>
+    <linearGradient id="fav-bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1e1b4b" />
+      <stop offset="100%" stop-color="#090d16" />
+    </linearGradient>
+
+    <linearGradient id="fav-z" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#c084fc" />
+      <stop offset="50%" stop-color="#a855f7" />
+      <stop offset="100%" stop-color="#06b6d4" />
+    </linearGradient>
+
+    <linearGradient id="fav-emerald" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#10b981" />
+      <stop offset="100%" stop-color="#34d399" />
+    </linearGradient>
+  </defs>
+
+  <!-- Rounded Squircle Background -->
+  <rect width="128" height="128" rx="28" fill="url(#fav-bg)" />
+  <rect width="124" height="124" x="2" y="2" rx="26" fill="none" stroke="#a855f7" stroke-opacity="0.3" stroke-width="2" />
+
+  <!-- Z Swarm Structure -->
+  <path d="M 32 36 L 96 36" stroke="#38bdf8" stroke-width="12" stroke-linecap="round" />
+  <path d="M 96 36 L 32 92" stroke="url(#fav-z)" stroke-width="15" stroke-linecap="round" stroke-linejoin="round" />
+  <path d="M 32 92 L 96 92" stroke="url(#fav-emerald)" stroke-width="12" stroke-linecap="round" />
+
+  <!-- Node Dots -->
+  <circle cx="32" cy="36" r="8" fill="#38bdf8" />
+  <circle cx="96" cy="36" r="9" fill="#c084fc" />
+  <circle cx="64" cy="64" r="10" fill="#ffffff" stroke="#a855f7" stroke-width="4" />
+  <circle cx="32" cy="92" r="9" fill="#a855f7" />
+  <circle cx="96" cy="92" r="8" fill="#34d399" />
+</svg>

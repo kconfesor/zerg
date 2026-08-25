@@ -376,6 +376,7 @@ export interface DaemonConfig {
   certFile?: string
   keyFile?: string
   tailnetHost?: string
+  localAccess: boolean
   eventRetentionDays: number
   cleanPolicy: 'never' | 'on_done' | 'on_start'
   cleanIgnored: boolean
