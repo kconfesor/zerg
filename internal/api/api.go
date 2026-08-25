@@ -97,6 +97,13 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/settings/shared-instructions", s.getSharedInstructions)
 	mux.HandleFunc("PUT /api/settings/shared-instructions", s.setSharedInstructions)
 
+	// The cockpit itself, on everything the API did not claim.
+	if ui, err := cockpit(); err != nil {
+		s.log.Error("the cockpit could not be served", "err", err)
+	} else {
+		mux.Handle("/", ui)
+	}
+
 	return s.withLogging(mux)
 }
 

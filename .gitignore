@@ -10,3 +10,8 @@ web/node_modules/
 
 # os
 .DS_Store
+
+# internal/api/dist is deliberately NOT ignored. //go:embed requires the
+# directory to exist at compile time, so ignoring it would break `go build`,
+# `go test` and `go vet` on a fresh clone. The built cockpit is committed;
+# ./build.sh regenerates it.

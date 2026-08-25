@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/konfessor/zerg/internal/adapter"
@@ -282,5 +284,72 @@ func TestEmptyCollectionsEncodeAsArrays(t *testing.T) {
 	rec := do(t, h, "GET", "/api/projects", nil)
 	if got := rec.Body.String(); got != "[]\n" {
 		t.Errorf("empty project list encoded as %q, want []", got)
+	}
+}
+
+// ── cockpit ───────────────────────────────────────────────────────────────
+
+func TestCockpitIsServedAtTheRoot(t *testing.T) {
+	h, _ := newTestServer(t)
+	rec := do(t, h, "GET", "/", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "<div id=\"app\">") {
+		t.Errorf("the root did not serve the app shell:\n%.200s", rec.Body.String())
+	}
+}
+
+// A deep link must reload, so unknown paths fall through to the app shell.
+func TestDeepLinksFallBackToTheAppShell(t *testing.T) {
+	h, _ := newTestServer(t)
+	rec := do(t, h, "GET", "/projects/anything", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "<div id=\"app\">") {
+		t.Error("a deep link did not reach the app shell")
+	}
+}
+
+// But an API path must never fall through. Answering a mistyped endpoint with
+// 200 and a page of HTML gives a client something that parses as neither JSON
+// nor an error, so a wrong URL looks like a malformed response.
+func TestUnknownApiPathIs404NotHtml(t *testing.T) {
+	h, _ := newTestServer(t)
+	rec := do(t, h, "GET", "/api/nope", nil)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404: %.120s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "<html") {
+		t.Error("an API path was answered with HTML")
+	}
+	var body map[string]string
+	decodeInto(t, rec, &body)
+	if body["error"] == "" {
+		t.Error("a 404 on an API path must explain itself in JSON")
+	}
+}
+
+// Hashed assets are immutable; the shell must always revalidate, or a deploy
+// serves an old index.html pointing at assets that no longer exist.
+func TestAssetCachingHeaders(t *testing.T) {
+	h, _ := newTestServer(t)
+
+	shell := do(t, h, "GET", "/", nil)
+	if got := shell.Header().Get("Cache-Control"); got != "no-cache" {
+		t.Errorf("index Cache-Control = %q, want no-cache", got)
+	}
+
+	m := regexp.MustCompile(`/assets/[^"]+\.js`).FindString(shell.Body.String())
+	if m == "" {
+		t.Fatal("no hashed asset found in the shell")
+	}
+	asset := do(t, h, "GET", m, nil)
+	if asset.Code != http.StatusOK {
+		t.Fatalf("asset %s returned %d", m, asset.Code)
+	}
+	if !strings.Contains(asset.Header().Get("Cache-Control"), "immutable") {
+		t.Errorf("asset Cache-Control = %q, want immutable", asset.Header().Get("Cache-Control"))
 	}
 }

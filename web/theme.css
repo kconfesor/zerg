@@ -1,145 +1,35 @@
 /* ───────────────────────────────────────────────────────────────────────────
-   zerg theme — shadcn-vue + Tailwind 4
+   zerg data-viz slots.
 
-   Derived from the shadcn-vue preset `awF4GHI`:
-     Style Lyra · Base/Theme/Chart Mauve · JetBrains Mono (heading + body)
-     · HugeIcons · Radius None · Menu Default/Solid · Accent Subtle
+   The base palette lives in src/style.css, inside the token blocks shadcn-vue
+   generated from preset awF4GHI — so components and charts read one set of
+   variables rather than two that can drift apart.
 
-   The preset's structure is kept verbatim — mono everywhere, zero radius,
-   subtle menu accent. Only the hue is moved: Mauve is replaced by the zerg
-   palette, a violet-biased set with organic accents.
+   These slots are what shadcn has no opinion about, and they are not
+   decorative. They were validated with dataviz/scripts/validate_palette.js
+   against the dark surface oklch(20.8% 0.026 301.8):
 
-   Chart and tier colors are NOT decorative. They were validated with
-   dataviz/scripts/validate_palette.js against the dark surface
-   oklch(20.8% 0.026 301.8):
-     - chart-1..4 (role identity, categorical, adjacent pairlist) ALL PASS,
-       worst adjacent CVD ΔE 9.4. All four sit at L≈62%, which is why.
-     - tier-1..4 (cost ramp, ordinal, one hue) ALL PASS, monotone lightness.
+     - chart-1..4 (role identity, categorical) ALL PASS, worst adjacent
+       CVD deltaE 9.4. All four sit at L~62%, which is why they pass.
+     - tier-1..4 (cost ramp, ordinal, one hue, ordered by unit price)
+       ALL PASS, monotone lightness.
+
    Do not re-pick these by eye; re-run the validator.
    ─────────────────────────────────────────────────────────────────────────── */
 
-:root {
-  --radius: 0rem;                                   /* preset: Radius None */
-
-  --font-sans: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
-  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
-
-  /* light — violet-biased neutrals, never a flat grey */
-  --background:            oklch(99.2% 0.003 305);
-  --foreground:            oklch(18.2% 0.019 304.8);
-  --card:                  oklch(100% 0 0);
-  --card-foreground:       oklch(18.2% 0.019 304.8);
-  --popover:               oklch(100% 0 0);
-  --popover-foreground:    oklch(18.2% 0.019 304.8);
-  --primary:               oklch(52.0% 0.205 303.5);
-  --primary-foreground:    oklch(98.5% 0.005 305);
-  --secondary:             oklch(96.5% 0.006 305);
-  --secondary-foreground:  oklch(23.5% 0.035 301.6);
-  --muted:                 oklch(96.5% 0.006 305);
-  --muted-foreground:      oklch(48.0% 0.032 303);
-  --accent:                oklch(96.5% 0.006 305);
-  --accent-foreground:     oklch(23.5% 0.035 301.6);
-  --destructive:           oklch(57.5% 0.186 25.2);
-  --destructive-foreground:oklch(98.5% 0.005 305);
-  --border:                oklch(91.0% 0.010 304);
-  --input:                 oklch(91.0% 0.010 304);
-  --ring:                  oklch(52.0% 0.205 303.5);
-}
-
-/* dark — the primary mode for this tool; the cockpit is a terminal-adjacent
-   surface and every mockup is authored against these values */
-.dark {
-  --background:            oklch(18.2% 0.019 304.8);   /* ground   */
-  --foreground:            oklch(89.9% 0.030 305.1);   /* ink      */
-  --card:                  oklch(20.8% 0.026 301.8);   /* surface  */
-  --card-foreground:       oklch(89.9% 0.030 305.1);
-  --popover:               oklch(23.5% 0.035 301.6);   /* surface2 */
-  --popover-foreground:    oklch(89.9% 0.030 305.1);
-  --primary:               oklch(66.6% 0.203 304.0);   /* carapace */
-  --primary-foreground:    oklch(18.2% 0.019 304.8);
-  --secondary:             oklch(23.5% 0.035 301.6);
-  --secondary-foreground:  oklch(89.9% 0.030 305.1);
-  --muted:                 oklch(23.5% 0.035 301.6);
-  --muted-foreground:      oklch(54.3% 0.057 301.0);
-  --accent:                oklch(23.5% 0.035 301.6);
-  --accent-foreground:     oklch(89.9% 0.030 305.1);
-  --destructive:           oklch(66.2% 0.188 22.0);    /* blood    */
-  --destructive-foreground:oklch(18.2% 0.019 304.8);
-  --border:                oklch(28.4% 0.051 297.9);   /* line     */
-  --input:                 oklch(28.4% 0.051 297.9);
-  --ring:                  oklch(66.6% 0.203 304.0);
-}
-
-/* ── data-viz slots, shared by both modes ─────────────────────────────────
-   chart-*  : role identity. Categorical — colour follows the entity, never
-              its rank. Assigned in fixed order, never cycled; a 5th role
-              folds into "other" rather than generating a hue.
-   tier-*   : cost ramp. Ordinal, one hue, ordered by UNIT PRICE, so a darker
-              segment is literally a more expensive one.
-   status-* : reserved. Never reused as a series colour, and always shipped
-              with an icon and a label so meaning never rests on hue alone. */
 :root, .dark {
   --chart-1: oklch(62.1% 0.128 163.1);   /* aqua    */
   --chart-2: oklch(62.2% 0.173 40.1);    /* orange  */
   --chart-3: oklch(62.2% 0.161 255.1);   /* blue    */
   --chart-4: oklch(62.2% 0.171 0.8);     /* magenta */
-  --chart-5: oklch(66.6% 0.203 304.0);   /* carapace — "other" */
+  --chart-5: oklch(66.6% 0.203 304.0);   /* carapace, for "other" */
 
-  --tier-1:  oklch(44.3% 0.078 295.5);   /* cache read   ~0.1x */
-  --tier-2:  oklch(55.3% 0.136 295.6);   /* input          1x  */
-  --tier-3:  oklch(68.7% 0.131 299.0);   /* cache write  1.25x */
-  --tier-4:  oklch(83.1% 0.102 302.3);   /* output         5x  */
+  --tier-1: oklch(44.3% 0.078 295.5);    /* cache read   ~0.1x */
+  --tier-2: oklch(55.3% 0.136 295.6);    /* input          1x  */
+  --tier-3: oklch(68.7% 0.131 299.0);    /* cache write  1.25x */
+  --tier-4: oklch(83.1% 0.102 302.3);    /* output         5x  */
 
-  --status-good:     oklch(62.1% 0.207 142.6);
-  --status-warning:  oklch(81.1% 0.164 78.5);
+  --status-good: oklch(62.1% 0.207 142.6);
+  --status-warning: oklch(81.1% 0.164 78.5);
   --status-critical: oklch(57.5% 0.186 25.2);
-
-  /* organic accents, from the zerg palette */
-  --creep: oklch(78.4% 0.179 138.9);
-  --spore: oklch(77.1% 0.147 67.0);
-  --chill: oklch(79.9% 0.118 185.5);
-}
-
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --color-card: var(--card);
-  --color-card-foreground: var(--card-foreground);
-  --color-popover: var(--popover);
-  --color-popover-foreground: var(--popover-foreground);
-  --color-primary: var(--primary);
-  --color-primary-foreground: var(--primary-foreground);
-  --color-secondary: var(--secondary);
-  --color-secondary-foreground: var(--secondary-foreground);
-  --color-muted: var(--muted);
-  --color-muted-foreground: var(--muted-foreground);
-  --color-accent: var(--accent);
-  --color-accent-foreground: var(--accent-foreground);
-  --color-destructive: var(--destructive);
-  --color-destructive-foreground: var(--destructive-foreground);
-  --color-border: var(--border);
-  --color-input: var(--input);
-  --color-ring: var(--ring);
-
-  --color-chart-1: var(--chart-1);
-  --color-chart-2: var(--chart-2);
-  --color-chart-3: var(--chart-3);
-  --color-chart-4: var(--chart-4);
-  --color-chart-5: var(--chart-5);
-
-  --color-tier-1: var(--tier-1);
-  --color-tier-2: var(--tier-2);
-  --color-tier-3: var(--tier-3);
-  --color-tier-4: var(--tier-4);
-
-  --color-creep: var(--creep);
-  --color-spore: var(--spore);
-  --color-chill: var(--chill);
-
-  --font-sans: var(--font-sans);
-  --font-mono: var(--font-mono);
-
-  --radius-sm: var(--radius);
-  --radius-md: var(--radius);
-  --radius-lg: var(--radius);
 }
