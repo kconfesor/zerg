@@ -1,0 +1,327 @@
+package store
+
+import (
+	"context"
+	"errors"
+	"path/filepath"
+	"sort"
+	"strings"
+	"testing"
+	"time"
+)
+
+func newTestDB(t *testing.T) *DB {
+	t.Helper()
+	// A file rather than :memory:, because MaxOpenConns(1) plus an in-memory
+	// DSN hides connection-scoping bugs that a real file would expose.
+	db, err := Open(context.Background(), filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	return db
+}
+
+func TestMigrateIsIdempotent(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "test.db")
+
+	db, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("first Open: %v", err)
+	}
+	if _, err := db.CreateTemplate(ctx, sampleTemplate("keeper")); err != nil {
+		t.Fatalf("CreateTemplate: %v", err)
+	}
+	db.Close()
+
+	db2, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("reopening: %v", err)
+	}
+	defer db2.Close()
+
+	if _, err := db2.GetTemplateByName(ctx, "keeper"); err != nil {
+		t.Fatalf("reopening dropped data: %v", err)
+	}
+}
+
+func TestTemplateRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+
+	in := sampleTemplate("coder")
+	in.Args = []string{"--no-extensions", "--flag with space"}
+	in.Prompt = "implement the thing"
+
+	created, err := db.CreateTemplate(ctx, in)
+	if err != nil {
+		t.Fatalf("CreateTemplate: %v", err)
+	}
+	if created.ID == "" {
+		t.Fatal("CreateTemplate returned an empty id")
+	}
+
+	got, err := db.GetTemplate(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("GetTemplate: %v", err)
+	}
+	if got.Name != "coder" || got.Prompt != "implement the thing" {
+		t.Errorf("round trip changed the row: %+v", got)
+	}
+	// A flag containing a space is exactly why args are JSON, not a joined string.
+	if len(got.Args) != 2 || got.Args[1] != "--flag with space" {
+		t.Errorf("args round trip lost quoting: %q", got.Args)
+	}
+}
+
+func TestGetMissingTemplateIsErrNotFound(t *testing.T) {
+	db := newTestDB(t)
+	_, err := db.GetTemplate(context.Background(), "NOSUCHID")
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("want ErrNotFound, got %v", err)
+	}
+}
+
+func TestDuplicateTemplateNameRejected(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+
+	if _, err := db.CreateTemplate(ctx, sampleTemplate("coder")); err != nil {
+		t.Fatalf("first create: %v", err)
+	}
+	if _, err := db.CreateTemplate(ctx, sampleTemplate("coder")); err == nil {
+		t.Fatal("a duplicate role name was accepted; the name is a worktree directory")
+	}
+}
+
+func TestUpdateAndDeleteTemplate(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+
+	created, err := db.CreateTemplate(ctx, sampleTemplate("cleaner"))
+	if err != nil {
+		t.Fatalf("CreateTemplate: %v", err)
+	}
+
+	created.Model = "opus"
+	if err := db.UpdateTemplate(ctx, created); err != nil {
+		t.Fatalf("UpdateTemplate: %v", err)
+	}
+	got, err := db.GetTemplate(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("GetTemplate: %v", err)
+	}
+	if got.Model != "opus" {
+		t.Errorf("model = %q, want opus", got.Model)
+	}
+
+	if err := db.DeleteTemplate(ctx, created.ID); err != nil {
+		t.Fatalf("DeleteTemplate: %v", err)
+	}
+	if _, err := db.GetTemplate(ctx, created.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("after delete, want ErrNotFound, got %v", err)
+	}
+	if err := db.DeleteTemplate(ctx, created.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("deleting twice should report ErrNotFound, got %v", err)
+	}
+}
+
+func TestValidateRejectsBadNames(t *testing.T) {
+	// The name becomes a worktree directory, so these are path safety cases,
+	// not stylistic ones.
+	for _, name := range []string{"", "Coder", "co der", "../escape", "a/b", "-lead", "9lives",
+		strings.Repeat("x", 32)} {
+		tpl := sampleTemplate("placeholder")
+		tpl.Name = name
+		if err := tpl.Validate(); err == nil {
+			t.Errorf("name %q was accepted", name)
+		}
+	}
+	for _, name := range []string{"a", "coder", "code-reviewer", "qa2"} {
+		tpl := sampleTemplate("placeholder")
+		tpl.Name = name
+		if err := tpl.Validate(); err != nil {
+			t.Errorf("name %q was rejected: %v", name, err)
+		}
+	}
+}
+
+func TestValidateRejectsBadEnums(t *testing.T) {
+	tpl := sampleTemplate("coder")
+	tpl.Receive = "whenever"
+	if err := tpl.Validate(); err == nil {
+		t.Error("an unknown receive mode was accepted")
+	}
+
+	tpl = sampleTemplate("coder")
+	tpl.Gate = "sometimes"
+	if err := tpl.Validate(); err == nil {
+		t.Error("an unknown gate was accepted")
+	}
+
+	tpl = sampleTemplate("coder")
+	tpl.Receive = ReceiveBatch
+	tpl.BatchMaxItems = 0
+	if err := tpl.Validate(); err == nil {
+		t.Error("an unbounded batch was accepted; unbounded batches starve priority work")
+	}
+}
+
+func TestSeedIsIdempotentAndPreservesEdits(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+
+	if err := Seed(ctx, db, "claude"); err != nil {
+		t.Fatalf("Seed: %v", err)
+	}
+	first, err := db.ListTemplates(ctx)
+	if err != nil {
+		t.Fatalf("ListTemplates: %v", err)
+	}
+	if len(first) != len(builtinRoles) {
+		t.Fatalf("seeded %d roles, want %d", len(first), len(builtinRoles))
+	}
+
+	// A user edits a built-in.
+	planner, err := db.GetTemplateByName(ctx, "planner")
+	if err != nil {
+		t.Fatalf("planner missing: %v", err)
+	}
+	planner.Prompt = "my own spec instructions"
+	if err := db.UpdateTemplate(ctx, planner); err != nil {
+		t.Fatalf("UpdateTemplate: %v", err)
+	}
+
+	// Restarting must not clobber that edit — the whole point of config living
+	// in the database rather than being copied from a file every launch.
+	if err := Seed(ctx, db, "claude"); err != nil {
+		t.Fatalf("second Seed: %v", err)
+	}
+	again, err := db.ListTemplates(ctx)
+	if err != nil {
+		t.Fatalf("ListTemplates: %v", err)
+	}
+	if len(again) != len(builtinRoles) {
+		t.Errorf("second seed duplicated roles: %d", len(again))
+	}
+	planner, err = db.GetTemplateByName(ctx, "planner")
+	if err != nil {
+		t.Fatalf("planner missing after reseed: %v", err)
+	}
+	if planner.Prompt != "my own spec instructions" {
+		t.Error("re-seeding overwrote a user's edit to a built-in role")
+	}
+}
+
+func TestSeededLibraryShape(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	if err := Seed(ctx, db, "claude"); err != nil {
+		t.Fatalf("Seed: %v", err)
+	}
+
+	tpls, err := db.ListTemplates(ctx)
+	if err != nil {
+		t.Fatalf("ListTemplates: %v", err)
+	}
+
+	byName := map[string]RoleTemplate{}
+	for _, tpl := range tpls {
+		byName[tpl.Name] = tpl
+		if !tpl.Builtin {
+			t.Errorf("%s should be marked builtin", tpl.Name)
+		}
+		if strings.TrimSpace(tpl.Prompt) == "" {
+			t.Errorf("%s shipped with an empty prompt", tpl.Name)
+		}
+		if err := tpl.Validate(); err != nil {
+			t.Errorf("shipped role %s does not validate: %v", tpl.Name, err)
+		}
+	}
+
+	// planner is the reason the approval gate exists as a field.
+	if byName["planner"].Gate != GateApproval {
+		t.Error("planner must gate on approval; it is the write-spec-then-approve flow")
+	}
+	// Reviewing roles run the stronger model on purpose.
+	for _, n := range []string{"reviewer", "architect", "security"} {
+		if byName[n].Model != "opus" {
+			t.Errorf("%s runs %q; reviewing roles are meant to run opus", n, byName[n].Model)
+		}
+	}
+	if byName["coder"].Receive != ReceiveTask {
+		t.Error("coder should take one task at a time")
+	}
+
+	if _, err := db.GetSetting(ctx, SettingSharedInstructions); err != nil {
+		t.Errorf("shared instructions were not seeded: %v", err)
+	}
+}
+
+func TestSettingsRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+
+	if _, err := db.GetSetting(ctx, "absent"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("want ErrNotFound, got %v", err)
+	}
+	if err := db.SetSetting(ctx, "k", "one"); err != nil {
+		t.Fatalf("SetSetting: %v", err)
+	}
+	if err := db.SetSetting(ctx, "k", "two"); err != nil {
+		t.Fatalf("SetSetting overwrite: %v", err)
+	}
+	got, err := db.GetSetting(ctx, "k")
+	if err != nil {
+		t.Fatalf("GetSetting: %v", err)
+	}
+	if got != "two" {
+		t.Errorf("got %q, want two", got)
+	}
+}
+
+func TestNewIDIsSortableAndUnique(t *testing.T) {
+	seen := map[string]bool{}
+	var ids []string
+	for i := 0; i < 2000; i++ {
+		id := NewID()
+		if len(id) != 26 {
+			t.Fatalf("id %q is %d chars, want 26", id, len(id))
+		}
+		if seen[id] {
+			t.Fatalf("duplicate id %q", id)
+		}
+		seen[id] = true
+		ids = append(ids, id)
+	}
+
+	// Ids generated later must sort later, so insertion order needs no
+	// secondary index.
+	early := newIDAt(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	late := newIDAt(time.Date(2026, 8, 25, 0, 0, 0, 0, time.UTC))
+	if !(early < late) {
+		t.Errorf("ids do not sort by time: %q >= %q", early, late)
+	}
+
+	if !sort.StringsAreSorted(ids) {
+		// Same millisecond ties break on randomness, so only assert the
+		// coarse property: the first id precedes the last.
+		if ids[0] >= ids[len(ids)-1] {
+			t.Error("ids from a run do not increase overall")
+		}
+	}
+}
+
+func sampleTemplate(name string) *RoleTemplate {
+	return &RoleTemplate{
+		Name:           name,
+		Harness:        "claude",
+		Model:          "sonnet",
+		Args:           []string{},
+		Receive:        ReceiveTask,
+		BatchMaxItems:  8,
+		BatchMaxAgeSec: 300,
+		Gate:           GateNone,
+	}
+}

@@ -58,9 +58,9 @@ type Model struct {
 // database — there is no config file to read and no snapshot in a worktree to
 // go stale.
 type Spec struct {
-	Role     string
-	Worktree string // agent cwd; a git worktree owned by this role
-	Model    string
+	Role      string
+	Worktree  string // agent cwd; a git worktree owned by this role
+	Model     string
 	ExtraArgs []string
 
 	// SystemFile is composed fresh at every spawn from the shared instructions
@@ -137,14 +137,14 @@ type Result struct {
 type EventKind string
 
 const (
-	EventReady     EventKind = "ready"      // agent booted and is accepting work
-	EventThinking  EventKind = "thinking"   // reasoning, no tool call yet
-	EventToolCall  EventKind = "tool_call"  // invoked a tool
-	EventToolDone  EventKind = "tool_done"  // tool returned
-	EventMessage   EventKind = "message"    // assistant prose
-	EventUsage     EventKind = "usage"      // tokens and cost for a turn
-	EventTurnEnd   EventKind = "turn_end"   // finished a turn, likely idle now
-	EventError     EventKind = "error"      // harness-level failure, carries Fatal
+	EventReady    EventKind = "ready"     // agent booted and is accepting work
+	EventThinking EventKind = "thinking"  // reasoning, no tool call yet
+	EventToolCall EventKind = "tool_call" // invoked a tool
+	EventToolDone EventKind = "tool_done" // tool returned
+	EventMessage  EventKind = "message"   // assistant prose
+	EventUsage    EventKind = "usage"     // tokens and cost for a turn
+	EventTurnEnd  EventKind = "turn_end"  // finished a turn, likely idle now
+	EventError    EventKind = "error"     // harness-level failure, carries Fatal
 )
 
 type Event struct {
