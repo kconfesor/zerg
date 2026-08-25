@@ -52,7 +52,15 @@ const status = ref<SwarmStatus>({ running: false, roles: [] })
 const harnesses = ref<string[]>([])
 const models = ref<Record<string, Model[]>>({})
 
-const banner = ref<{ tone: 'bad' | 'ok'; text: string } | null>(null)
+/**
+ * `transient` marks a message the background poller raised rather than one a
+ * click produced. The two must clear differently: a failed Start has to stay
+ * until it is read, while a connection blip must disappear the moment contact
+ * is back. Without the distinction, restarting the daemon left "Failed to
+ * fetch" on screen permanently — a fully recovered system that reads as broken,
+ * which is the exact failure this project exists to avoid.
+ */
+const banner = ref<{ tone: 'bad' | 'ok'; text: string; transient?: boolean } | null>(null)
 const newPath = ref('')
 const taskName = ref('')
 const taskBody = ref('')
@@ -77,6 +85,20 @@ const boardSubtitle = computed(() => {
 
 function fail(err: unknown) {
   banner.value = { tone: 'bad', text: err instanceof Error ? err.message : String(err) }
+}
+
+/**
+ * The poller lost contact. "Failed to fetch" is the browser's words for it and
+ * says nothing useful, so this says what happened and what is being done —
+ * usually the daemon is restarting, and it will clear itself.
+ */
+function pollerLostContact() {
+  if (banner.value && !banner.value.transient) return // do not bury a real error
+  banner.value = {
+    tone: 'bad',
+    transient: true,
+    text: 'Lost contact with the daemon. Retrying — this clears itself when it is back.',
+  }
 }
 
 async function loadGlobals() {
@@ -108,12 +130,17 @@ async function refresh() {
     attention.value = at
     status.value = st
 
+    // Contact is back, so a message about losing it has to go. Only the
+    // transient one: an error the user's own click produced is still theirs
+    // to read.
+    if (banner.value?.transient) banner.value = null
+
     // Usage moves only when an agent finishes a turn, and it is a summary
     // rather than a live counter, so it is refreshed on a slower cadence than
     // the board — a totals query every board tick would be mostly wasted.
     if (++usageTicks % USAGE_EVERY === 0) usageKey.value++
-  } catch (err) {
-    fail(err)
+  } catch {
+    pollerLostContact()
   }
 }
 
