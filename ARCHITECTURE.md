@@ -328,11 +328,42 @@ plain `//go:embed dist` silently skips Vite's `.vite/` manifest directory.
   human, first.
 - **Board** — one lane per enabled role plus Done. Cards move on ack.
 - **Roles** — per-role health, current lease, live/idle, tokens, cost.
-- **Stream** — typed event feed: tool calls, diffs, errors. Not a terminal scrape.
-- **Terminal** *(on demand)* — attach a real pty to a role for debugging, via xterm.js.
 - **Chat** — talk to the first role in the pipeline.
 
 Transport: one WebSocket carrying typed events; REST for commands.
+
+### 10.1 Watching an agent work
+
+An agent in structured mode is not painting a screen, so there is no TUI to attach to — a pty on
+that process shows JSON lines scrolling past. Three modes cover what a terminal was being used for,
+and the first is better than the thing it replaces.
+
+**Activity view** *(default)*. Rendered from the structured stream: every tool call, every `bash`
+command with its stdout and exit code, every file edit as a diff, reasoning, errors. This is the
+"what is it doing right now" view. Because it is structured rather than scraped, it is searchable,
+filterable by role or tool, linkable per event, and replayable from the `events` table after a
+reload. A terminal scrape offers none of that, and swarm-forge's version of this question was
+grepping a pane for a line containing `I'm`.
+
+**Raw stream**. The JSON lines as received. For debugging an adapter, not for watching work.
+
+**Interactive takeover** *(on demand)*. Sometimes you genuinely want the harness's own TUI — to run
+its slash commands, or to drive it by hand. That is a deliberate mode switch, not a second view of
+the same process: the cerebrate stops the headless process and relaunches that one role in its
+native TUI on a pty, which the cockpit renders with xterm.js. Structured events pause for the
+duration and the role is marked `takeover` on the board, because the orchestrator can no longer see
+what it is doing. Detaching relaunches it headless.
+
+### 10.2 Talking to a running agent
+
+Both target harnesses accept **streaming structured input** alongside streaming output
+(`claude --input-format stream-json`, `pi --mode rpc`). Chat messages, clarification answers and
+follow-ups are therefore delivered as structured messages to a running agent.
+
+No keystrokes are ever injected. swarm-forge's wake-up was `tmux send-keys` of a fixed literal into
+whichever pane happened to be focused, with hardcoded 150ms/50ms sleeps racing the TUI's paste
+debounce — and a tmux exit code of 0 meant "keys accepted", never "the agent read it". Delivery here
+is a write to a pipe with a response event to confirm it landed.
 
 ---
 

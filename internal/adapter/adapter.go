@@ -85,8 +85,22 @@ type Spec struct {
 // Caps declares what a harness can actually do, so the orchestrator can degrade
 // deliberately rather than discovering a gap at runtime.
 type Caps struct {
-	StructuredOutput bool // can emit machine-readable events (required for the primary path)
-	PTYAttach        bool // can also run in a real TUI for debug attach
+	// StructuredOutput is required for the primary path: the harness emits
+	// machine-readable events rather than painting a screen.
+	StructuredOutput bool
+
+	// StructuredInput means the harness accepts streaming structured input
+	// while running headless (claude --input-format stream-json, pi --mode
+	// rpc). With it, chat and clarification answers reach a live agent as
+	// messages. Without it, a role can receive work only between turns.
+	StructuredInput bool
+
+	// InteractiveTUI means the harness has a real terminal UI that a human can
+	// drive, used for takeover (see ARCHITECTURE.md §10.1). Takeover is a mode
+	// switch, not a parallel view: a process is either emitting structured
+	// events or painting a screen, never both.
+	InteractiveTUI bool
+
 	SystemPromptFile bool // accepts a system prompt as a file rather than an argv blob
 	ModelFlag        bool // model selectable per invocation
 	ResumeSession    bool // can resume after a crash without losing context
