@@ -83,7 +83,19 @@ function live(r: RoleStatus): boolean {
   >
     <!-- Identity, and whether anything is running at all. -->
     <div class="hairline-b flex min-h-[var(--topbar)] shrink-0 items-center gap-2.5 px-3">
-      <img src="/logo-icon.svg" alt="" class="size-9 shrink-0" />
+      <!-- The raster, not the SVG. The mark's glow is two feGaussianBlur
+           filters, and a filter is rasterised into an offscreen buffer whose
+           resolution mobile browsers cap — a 512-unit viewBox drawn at 36px
+           came out visibly pixelated on a phone. This PNG has the same glow
+           baked in at 192px, which is five times what 36 CSS pixels need on a
+           3x display, and no filter to resolve at render time. -->
+      <img
+        src="/android-chrome-192x192.png"
+        alt=""
+        width="36"
+        height="36"
+        class="size-9 shrink-0"
+      />
       <span class="text-base font-bold tracking-tight">zerg</span>
       <span
         v-if="status.running"
