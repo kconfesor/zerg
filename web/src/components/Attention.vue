@@ -15,6 +15,7 @@ const emit = defineEmits<{
   answer: [id: string, answer: string]
 }>()
 
+const notesOpen = ref<Record<string, boolean>>({})
 const diffs = ref<Record<string, { open: boolean; files: ChangedFile[]; error?: string }>>({})
 
 /** Markdown is shown as the document it is. Everything else is shown as a
@@ -102,7 +103,23 @@ function empty(a: Attention | null): boolean {
       </div>
       <!-- What the role decided. The note is the substance of the decision and
            was the first thing missing from this card. -->
-      <div v-if="a.body" class="md mb-2.5 text-xs leading-relaxed" v-html="renderMarkdown(a.body)" />
+      <div v-if="a.body" class="mb-2.5">
+        <div
+          class="md text-xs leading-relaxed"
+          :class="notesOpen[a.id] ? '' : 'line-clamp-4'"
+          v-html="renderMarkdown(a.body)"
+        />
+        <!-- The note is a covering line; the document below it is the work.
+             Long notes are clamped rather than given the top of the card. -->
+        <button
+          v-if="(a.body?.length ?? 0) > 280"
+          type="button"
+          class="text-muted-foreground hover:text-foreground mt-0.5 text-[11px]"
+          @click="notesOpen[a.id] = !notesOpen[a.id]"
+        >
+          {{ notesOpen[a.id] ? 'Less' : 'More' }}
+        </button>
+      </div>
 
       <!-- And what it actually wrote. Deciding from a description of a change
            rather than the change is approving blind, and for a planner's spec

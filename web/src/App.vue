@@ -220,6 +220,10 @@ async function refresh() {
 
 async function open(project: Project) {
   current.value = project
+  // Record it, so the next start opens what you were last working on rather
+  // than whichever project happened to be created most recently. The column
+  // and the ordering both existed; nothing was writing it.
+  api.openProject(project.id).catch(() => {})
   // Deliberately no navigation. Opening a project on startup used to force the
   // board, which silently discarded whatever route was asked for — so a link to
   // /settings, or a reload while on /chat, always landed on the board. Every
@@ -461,6 +465,7 @@ watch(current, () => (banner.value = null))
                 :tasks="tasks"
                 :needs-attention="attentionTaskIds"
                 @open="(t) => (openTask = t)"
+                @review="() => (attentionOpen = true)"
               /></div>
           </template>
 

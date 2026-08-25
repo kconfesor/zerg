@@ -36,7 +36,7 @@ const props = defineProps<{
   /** Ids of tasks with something waiting on a person. */
   needsAttention?: string[]
 }>()
-const emit = defineEmits<{ open: [task: Task] }>()
+const emit = defineEmits<{ open: [task: Task]; review: [task: Task] }>()
 
 /** Lanes are the enabled roles in pipeline order, then the Done well. */
 const lanes = computed(() => {
@@ -81,26 +81,36 @@ const byLane = computed(() => {
         </div>
 
         <div class="flex flex-col gap-2 pt-2">
-          <!-- A card is a button: the account of what happened is behind it,
-               and a card that looks inert while holding the only record of a
-               task teaches you not to click it. -->
-          <button
+          <!-- A wrapper, not a button, because a card that is waiting carries
+               its own action and a button cannot nest inside a button. The body
+               is still the whole clickable surface. -->
+          <div
             v-for="task in byLane.get(lane)"
             :key="task.id"
-            type="button"
             :class="[
-              'bg-card hover:border-primary/40 focus-visible:outline-ring w-full border p-2.5 text-left transition-colors focus-visible:outline-2',
+              'bg-card hover:border-primary/40 border transition-colors',
               task.state === 'working' && 'border-primary/50 bg-primary/[0.06]',
+              needsAttention?.includes(task.id) &&
+                'border-[var(--status-warning)]/60 bg-[var(--status-warning)]/[0.06]',
             ]"
+          >
+          <button
+            type="button"
+            class="focus-visible:outline-ring w-full p-2.5 text-left focus-visible:outline-2 focus-visible:-outline-offset-2"
             @click="emit('open', task)"
           >
             <div class="mb-1.5 text-xs leading-snug font-medium break-words">{{ task.name }}</div>
 
             <!-- What is happening right now. "working" for four minutes is
                  indistinguishable from stuck; the tool it just ran is not. -->
+            <!-- Three lines, not one. A tool call fits in one; the line an
+                 agent writes about what it just decided rarely does, and a
+                 single line ending in an ellipsis is the half of a sentence
+                 that carries the least. Clamped rather than unbounded, so one
+                 verbose card cannot push the rest of the lane off screen. -->
             <p
-              v-if="task.state === 'working' && task.doing"
-              class="text-muted-foreground mb-1.5 truncate font-mono text-[10px]"
+              v-if="task.doing"
+              class="text-muted-foreground mb-1.5 line-clamp-3 font-mono text-[10px] leading-snug break-words"
               :title="task.doing"
             >
               {{ task.doing }}
@@ -150,6 +160,21 @@ const byLane = computed(() => {
               </span>
             </div>
           </button>
+
+            <!-- The action the card is waiting for, on the card. Reaching a
+                 decision through a notification means finding the card again
+                 afterwards; the card that is blocked is where the decision
+                 belongs. -->
+            <button
+              v-if="needsAttention?.includes(task.id)"
+              type="button"
+              class="hairline-t hover:bg-[var(--status-warning)]/10 focus-visible:outline-ring flex w-full items-center gap-1.5 px-2.5 py-1.5 text-left text-[11px] font-medium text-[var(--status-warning)] focus-visible:outline-2 focus-visible:-outline-offset-2"
+              @click="emit('review', task)"
+            >
+              <Bell :size="12" aria-hidden="true" />
+              Review and decide
+            </button>
+          </div>
 
           <!-- An empty lane is normal; it should read as quiet, not broken. -->
           <p

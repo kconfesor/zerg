@@ -88,6 +88,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/projects", s.listProjects)
 	mux.HandleFunc("POST /api/projects", s.createProject)
 	mux.HandleFunc("GET /api/projects/{id}", s.getProject)
+	mux.HandleFunc("POST /api/projects/{id}/open", s.openProject)
 	mux.HandleFunc("DELETE /api/projects/{id}", s.deleteProject)
 
 	// The team: which library roles this project uses, in what order.

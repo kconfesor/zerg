@@ -260,3 +260,22 @@ func (s *Server) approvalDiff(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"files": files})
 }
+
+// openProject records that a project was opened, so the picker and the initial
+// selection surface what you were last working on.
+//
+// A POST, not a side effect on GET: reading a project should not change it, and
+// the cockpit reads one on every poll.
+func (s *Server) openProject(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if err := s.db.TouchProject(r.Context(), id); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	project, err := s.db.GetProject(r.Context(), id)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, project)
+}

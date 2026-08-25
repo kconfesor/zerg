@@ -188,6 +188,7 @@ export const api = {
   projects: () => call<Project[]>('/projects'),
   createProject: (path: string, baseBranch: string) =>
     call<Project>('/projects', { method: 'POST', body: JSON.stringify({ path, baseBranch }) }),
+  openProject: (id: string) => call<Project>(`/projects/${id}/open`, { method: 'POST' }),
   deleteProject: (id: string) => call<void>(`/projects/${id}`, { method: 'DELETE' }),
 
   team: (id: string) => call<ResolvedRole[]>(`/projects/${id}/team`),

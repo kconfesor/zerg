@@ -50,9 +50,10 @@ Then commit, and pass the work on to the role the envelope named:
     zerg send --to <next> --commit HEAD --task "<task name>" --body "<what happened>"
 
 ` + "`--body`" + ` is required, and it is read by the next role and by the operator.
-Cover what you did, what you decided and why, anything you deliberately left
-out, and what the next role should check. A commit sha says where to look; it
-does not say what you concluded. Two or three sentences is usually enough.
+Keep it to two or three sentences: what you did, and the one thing the next
+reader most needs to know. Whoever reads it can also see your commit, so do not
+restate what is in the files — if the detail belongs anywhere permanent, it
+belongs in the commit message or the code, not here.
 
 If the envelope said ` + "`\"terminal\": true`" + `, you finish the task instead — omit
 ` + "`--to`" + ` entirely, and the commit is merged into the project's branch:
