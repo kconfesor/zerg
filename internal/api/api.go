@@ -98,7 +98,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/projects/{id}/tasks", s.newTask)
 	mux.HandleFunc("GET /api/projects/{id}/attention", s.attention)
 	mux.HandleFunc("GET /api/projects/{id}/usage", s.usage)
-	mux.HandleFunc("GET /api/projects/{id}/events", s.events)
+	mux.HandleFunc("GET /api/projects/{id}/stream", s.stream)
 	mux.HandleFunc("GET /api/tasks/{id}/usage", s.taskUsage)
 	mux.HandleFunc("POST /api/approvals/{id}/approve", s.approve)
 	mux.HandleFunc("POST /api/approvals/{id}/reject", s.reject)

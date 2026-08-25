@@ -8,7 +8,12 @@
  * after a reload. A pane of captured text can do none of that.
  */
 import { computed, onBeforeUnmount, ref, watch, nextTick } from 'vue'
-import { streamActivity, type ActivityEvent, type ActivityStream } from '@/lib/api'
+import {
+  streamActivity,
+  type ActivityEvent,
+  type ActivityStream,
+  type StreamState,
+} from '@/lib/api'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 
@@ -16,7 +21,7 @@ const props = defineProps<{ projectId: string; roles: string[] }>()
 
 const events = ref<ActivityEvent[]>([])
 const roleFilter = ref<string>('')
-const live = ref(false)
+const state = ref<StreamState>('connecting')
 const follow = ref(true)
 const viewport = ref<HTMLElement | null>(null)
 
@@ -32,7 +37,7 @@ const MAX_LINES = 2000
 function connect() {
   stream?.close()
   events.value = []
-  live.value = false
+  state.value = 'connecting'
   if (!props.projectId) return
 
   stream = streamActivity(
@@ -45,11 +50,8 @@ function connect() {
         }
         if (follow.value) scrollToEnd()
       },
-      onCaughtUp: () => {
-        live.value = true
-        scrollToEnd()
-      },
-      onError: () => (live.value = false),
+      onCaughtUp: () => scrollToEnd(),
+      onState: (s) => (state.value = s),
     },
     { role: roleFilter.value || undefined },
   )
@@ -141,9 +143,12 @@ const roleCounts = computed(() => {
       </Button>
 
       <div class="ml-auto flex items-center gap-2">
-        <!-- Connection state is a word, never a colour alone. -->
-        <Badge :variant="live ? 'default' : 'outline'">
-          {{ live ? 'live' : 'connecting' }}
+        <!-- Connection state is a word, never a colour alone. "reconnecting"
+             is distinct from "connecting" on purpose: the first means the feed
+             dropped and is being resumed from its cursor, which is worth
+             seeing, and the second is just startup. -->
+        <Badge :variant="state === 'live' ? 'default' : 'outline'">
+          {{ state }}
         </Badge>
         <Button v-if="!follow" variant="outline" size="sm" @click="follow = true; scrollToEnd()">
           Follow ↓

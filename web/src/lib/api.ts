@@ -247,47 +247,108 @@ export interface ActivityStream {
   close(): void
 }
 
+/** Where a stream currently is, so the UI can say so rather than guess. */
+export type StreamState = 'connecting' | 'live' | 'reconnecting'
+
 /**
  * Subscribe to a project's activity: history first, then live.
  *
- * EventSource rather than a WebSocket because this only ever flows one way. It
- * also reconnects on its own and resends the last id it saw, and because event
- * ids are monotonic ULIDs the server treats that header as a replay cursor —
- * so a dropped connection resumes exactly, with no logic here.
+ * A WebSocket rather than SSE, so the same connection carries messages back
+ * when terminal takeover lands. The cost is that everything EventSource did
+ * for free is done here instead, and all of it matters:
+ *
+ *  - **Resume.** Every event id is a monotonic ULID, and the last one seen is
+ *    sent as the cursor on every (re)connect. A drop loses nothing, and the
+ *    server sends only what came after.
+ *  - **Backoff.** Reconnecting immediately and forever turns a restarting
+ *    daemon into a request flood. Delay doubles to a ceiling, with jitter so
+ *    several open tabs do not retry in lockstep.
+ *  - **Intent.** A socket closed by close() must stay closed; only an
+ *    unexpected drop reconnects.
  */
 export function streamActivity(
   projectId: string,
   handlers: {
     onEvent: (e: ActivityEvent) => void
     onCaughtUp?: (replayed: number) => void
-    onError?: () => void
+    onState?: (state: StreamState) => void
   },
   opts: { role?: string; limit?: number } = {},
 ): ActivityStream {
-  const params = new URLSearchParams()
-  if (opts.role) params.set('role', opts.role)
-  if (opts.limit) params.set('limit', String(opts.limit))
-  const qs = params.toString()
+  const RETRY_MIN = 500
+  const RETRY_MAX = 15_000
 
-  const src = new EventSource(`/api/projects/${projectId}/events${qs ? `?${qs}` : ''}`)
+  let socket: WebSocket | null = null
+  let retry = RETRY_MIN
+  let timer: number | undefined
+  let closed = false
 
-  src.addEventListener('activity', (ev) => {
-    try {
-      handlers.onEvent(JSON.parse((ev as MessageEvent).data))
-    } catch {
-      // One malformed frame is not a reason to tear down the stream.
+  // The cursor. Kept across reconnects — it is the entire reason a drop is
+  // invisible rather than a hole in the transcript.
+  let after: string | undefined
+
+  const url = () => {
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
+    return `${proto}//${location.host}/api/projects/${projectId}/stream`
+  }
+
+  function connect() {
+    if (closed) return
+    handlers.onState?.(after ? 'reconnecting' : 'connecting')
+
+    const ws = new WebSocket(url())
+    socket = ws
+
+    ws.onopen = () => {
+      // Subscribing is an explicit frame rather than query parameters so that
+      // a resumed connection states its cursor, and so later message types
+      // share one envelope.
+      ws.send(
+        JSON.stringify({ type: 'subscribe', after, role: opts.role, limit: opts.limit }),
+      )
     }
-  })
-  src.addEventListener('caught-up', (ev) => {
-    try {
-      handlers.onCaughtUp?.(JSON.parse((ev as MessageEvent).data).replayed ?? 0)
-    } catch {
-      handlers.onCaughtUp?.(0)
-    }
-  })
-  // EventSource retries by itself, so this reports the gap rather than
-  // reconnecting. Doing both would double the connections.
-  src.onerror = () => handlers.onError?.()
 
-  return { close: () => src.close() }
+    ws.onmessage = (raw) => {
+      let frame: { type: string; event?: ActivityEvent; replayed?: number }
+      try {
+        frame = JSON.parse(raw.data)
+      } catch {
+        return // one malformed frame is not a reason to drop the connection
+      }
+      if (frame.type === 'activity' && frame.event) {
+        after = frame.event.id
+        handlers.onEvent(frame.event)
+      } else if (frame.type === 'caught-up') {
+        // Only now is the connection known good, so the backoff resets here
+        // rather than on open — a socket that opens and immediately fails
+        // would otherwise never back off at all.
+        retry = RETRY_MIN
+        handlers.onState?.('live')
+        handlers.onCaughtUp?.(frame.replayed ?? 0)
+      }
+    }
+
+    const reconnect = () => {
+      if (closed || socket !== ws) return
+      socket = null
+      handlers.onState?.('reconnecting')
+      // Jitter keeps several tabs from retrying on the same tick.
+      const wait = retry + Math.random() * retry * 0.3
+      retry = Math.min(retry * 2, RETRY_MAX)
+      timer = window.setTimeout(connect, wait)
+    }
+    ws.onclose = reconnect
+    ws.onerror = () => ws.close()
+  }
+
+  connect()
+
+  return {
+    close() {
+      closed = true
+      window.clearTimeout(timer)
+      socket?.close()
+      socket = null
+    },
+  }
 }

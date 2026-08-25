@@ -399,12 +399,23 @@ all of which HTTP already has.
 Commands are request/response with a status code and a body, so they belong on REST: a rejected
 approval is a `409`, not a hand-rolled correlation id and an error frame invented for the occasion.
 
-The WebSocket is multiplexed by channel id, so events and a takeover pty share one connection and one
+The WebSocket is multiplexed by frame type, so events and a takeover pty share one connection and one
 auth path. On connect the client sends the last event id it saw and the server replays forward from
 `events` — the same mechanism that makes a browser reload cost a replay rather than a rescrape
-(§10.1). SSE would serve the event half equally well, and its built-in `Last-Event-ID` maps neatly
-onto that table; WebSocket wins only because takeover needs bidirectional bytes anyway, and one
-mechanism beats two.
+(§10.1).
+
+This was built as SSE first, and then moved, which is worth recording because both directions have a
+real case. SSE carries a one-way stream with materially less machinery: `EventSource` reconnects on
+its own and resends `Last-Event-ID`, and since event ids are monotonic ULIDs that header *is* the
+replay cursor. On a socket both are hand-written — backoff with jitter, an explicit cursor frame, a
+ping cadence — and every one of them is a thing that can be got wrong.
+
+What settled it is that takeover needs keystrokes flowing back at typing latency, which SSE plus a
+POST per keypress serves badly, and carrying two streaming transports until then would mean two
+implementations of replay that drift. One mechanism beats two, and the second one is easier to
+delete before it exists. A smaller reason found on the way: HTTP/1.1 allows about six connections
+per origin, and an SSE stream holds one open per tab for its lifetime — the daemon serves plain TCP,
+so there is no HTTP/2 multiplexing to make that free. WebSockets are not subject to that limit.
 
 Runs before every spawn. Each check yields `ok` or `blocked(reason, remedy)`. A blocked role renders
 in **Attention** with both — never as an idle pane that happens to be doing nothing.
@@ -800,22 +811,23 @@ Versions below are what the repository actually builds with, read from `go.mod`,
 
 ### Go
 
-The dependency list is deliberately close to empty. One non-stdlib import, and it is the one that
-cannot be avoided.
+The dependency list is deliberately close to empty: two non-stdlib imports, and neither has a
+stdlib equivalent.
 
 | Component | Version | Path | Note |
 |---|---|---|---|
 | toolchain | **1.27.0** | — | `go.mod` names it directly; needs macOS 13+ |
 | router | stdlib | `net/http` | Go 1.22+ method+wildcard patterns are enough; no third-party router |
 | sqlite | v1.57.0 | `modernc.org/sqlite` | pure Go — keeps `CGO_ENABLED=0` and a static binary |
+| websocket | v1.8.15 | `github.com/coder/websocket` | the cockpit's live stream (§7.5); successor to `nhooyr.io/websocket`, gorilla is maintenance-only |
 | embed | stdlib | `embed` | **must** be `//go:embed all:dist` — a plain directive skips Vite's `dist/.vite/` and the page fails to load with a successful build |
 
 Everything else — process supervision, the event bus, the unix socket, the agent client — is
 stdlib. `os/exec`, `net`, `encoding/json`, `log/slog`.
 
-**Planned, not yet present.** `github.com/coder/websocket` and `github.com/creack/pty` are named in
-§10.1 and §7.5 and are not in `go.mod`, because the activity view and terminal takeover are not
-built. They are listed here so the gap is visible rather than discovered.
+**Planned, not yet present.** `github.com/creack/pty` is named in §10.1 and is not in `go.mod`,
+because terminal takeover is not built. It is listed here so the gap is visible rather than
+discovered.
 
 ### Frontend
 
