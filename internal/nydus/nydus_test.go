@@ -22,6 +22,15 @@ type fakeIntegrator struct {
 	into      []string
 	published []string
 	err       error
+
+	// enter is closed as Merge begins and hold blocks it until released.
+	// Integration runs outside the write transaction — a git subprocess must
+	// never hold the single writer — and that gap is where a second decision
+	// can slip in. Without a way to widen it deterministically, a race test
+	// passes against unguarded code because a fake merge returns in
+	// nanoseconds.
+	enter chan struct{}
+	hold  chan struct{}
 }
 
 // Resolve is identity here: these tests pass shas already, and the point of
@@ -46,6 +55,11 @@ func (f *fakeIntegrator) MergeInto(_ context.Context, _, commit string) error {
 }
 
 func (f *fakeIntegrator) Merge(_ context.Context, _, _, commit string) error {
+	if f.enter != nil {
+		close(f.enter)
+		f.enter = nil
+		<-f.hold
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.err != nil {
@@ -1030,5 +1044,67 @@ func TestRejectedCompletionLandsNothing(t *testing.T) {
 	}
 	if got := f.reload(t, task.ID).State; got == store.TaskDone {
 		t.Error("a rejected completion left the card Done")
+	}
+}
+
+// Approving a terminal handoff merges before the decision is recorded, and the
+// merge cannot hold the write transaction — a git subprocess must never hold
+// the single writer. That gap used to be unguarded: two decisions could both
+// read pending, both integrate, and the later overwrite the earlier. An approve
+// racing a reject recorded "rejected" over a branch that had already landed.
+func TestOnlyOneDecisionSurvivesARace(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+
+	if _, err := f.db.SQL().ExecContext(ctx,
+		`UPDATE role_templates SET gate = ? WHERE name = 'reviewer'`, store.GateApproval); err != nil {
+		t.Fatalf("gating the reviewer: %v", err)
+	}
+	task := f.task(t, "Calculator")
+	if _, err := f.n.Send(ctx, f.project.ID, "reviewer", SendRequest{
+		TaskID: task.ID, Commit: "aaaaaaaaaa", Body: "done",
+	}); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	pending, _ := f.db.ListPendingApprovals(ctx, f.project.ID)
+	if len(pending) != 1 {
+		t.Fatalf("got %d approvals, want 1", len(pending))
+	}
+	id := pending[0].ID
+
+	// Hold the approver inside the merge, which is precisely the window the
+	// transaction is not covering, and let the rejecter run while it is open.
+	f.git.enter = make(chan struct{})
+	f.git.hold = make(chan struct{})
+
+	approveErr := make(chan error, 1)
+	go func() { approveErr <- f.n.Approve(ctx, id) }()
+
+	<-f.git.enter // the merge has begun and has not returned
+	rejectErr := f.n.Reject(ctx, id, "no")
+	close(f.git.hold)
+	approve := <-approveErr
+
+	if approve != nil {
+		t.Errorf("the decision that got there first failed: %v", approve)
+	}
+	if rejectErr == nil {
+		t.Error("a second decision succeeded while the first was mid-merge")
+	}
+
+	// The record must agree with what happened to the branch.
+	a, err := f.db.GetApproval(ctx, id)
+	if err != nil {
+		t.Fatalf("GetApproval: %v", err)
+	}
+	f.git.mu.Lock()
+	merged := len(f.git.merges) > 0
+	f.git.mu.Unlock()
+
+	if a.State != store.ApprovalApproved {
+		t.Errorf("approval recorded as %q, want approved", a.State)
+	}
+	if !merged {
+		t.Error("recorded a decision with nothing merged")
 	}
 }

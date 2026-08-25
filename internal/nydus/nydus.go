@@ -867,9 +867,36 @@ func (n *Nydus) decide(ctx context.Context, approvalID, decision, note string) e
 	// subprocess must never run while it holds the single write lock.
 	var landed string
 	if decision == store.ApprovalApproved && terminal != 0 && taskID.Valid {
-		tx.Rollback()
-		var err error
+		// Claim it before doing anything irreversible.
+		//
+		// The check above ran in a transaction that is about to be released,
+		// because a git subprocess must never hold the single writer. Without a
+		// claim, two decisions could both read pending, both merge, and the
+		// later one overwrite the earlier — an approve racing a reject recorded
+		// "rejected" over a branch that had already landed.
+		res, err := tx.ExecContext(ctx,
+			`UPDATE approvals SET state = ? WHERE id = ? AND state = ?`,
+			store.ApprovalIntegrating, approvalID, store.ApprovalPending)
+		if err != nil {
+			return fmt.Errorf("claiming approval: %w", err)
+		}
+		if n, err := res.RowsAffected(); err != nil {
+			return err
+		} else if n == 0 {
+			return invalid("approval %s is already being decided", approvalID)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("claiming approval: %w", err)
+		}
+
 		if landed, err = n.landApproved(ctx, projectID, taskID.String, commit.String, body); err != nil {
+			// Hand it back, or a failed merge would leave the card stuck
+			// mid-decision with no way to retry.
+			if _, rerr := n.db.SQL().ExecContext(ctx,
+				`UPDATE approvals SET state = ? WHERE id = ? AND state = ?`,
+				store.ApprovalPending, approvalID, store.ApprovalIntegrating); rerr != nil {
+				return fmt.Errorf("%w (and releasing the claim failed: %v)", err, rerr)
+			}
 			return err
 		}
 		if tx, err = n.db.SQL().BeginTx(ctx, nil); err != nil {
@@ -884,10 +911,23 @@ func (n *Nydus) decide(ctx context.Context, approvalID, decision, note string) e
 	if note != "" {
 		notePtr = &note
 	}
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE approvals SET state = ?, note = ?, decided_at = ? WHERE id = ?`,
-		decision, notePtr, now, approvalID); err != nil {
+	// Guarded on the state this decision left behind: pending for a routed
+	// handoff, integrating for one that just landed. A decision that lost the
+	// race writes nothing.
+	expect := store.ApprovalPending
+	if landed != "" || (decision == store.ApprovalApproved && terminal != 0 && taskID.Valid) {
+		expect = store.ApprovalIntegrating
+	}
+	res, err := tx.ExecContext(ctx,
+		`UPDATE approvals SET state = ?, note = ?, decided_at = ? WHERE id = ? AND state = ?`,
+		decision, notePtr, now, approvalID, expect)
+	if err != nil {
 		return fmt.Errorf("recording decision: %w", err)
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return err
+	} else if n == 0 {
+		return invalid("approval %s was decided by someone else", approvalID)
 	}
 
 	if decision == store.ApprovalApproved && terminal != 0 {

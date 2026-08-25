@@ -41,9 +41,12 @@ const (
 
 // Approval states.
 const (
-	ApprovalPending  = "pending"
-	ApprovalApproved = "approved"
-	ApprovalRejected = "rejected"
+	ApprovalPending = "pending"
+	// ApprovalIntegrating is claimed by whichever decision got there first,
+	// held across the merge or PR, and replaced by the outcome.
+	ApprovalIntegrating = "integrating"
+	ApprovalApproved    = "approved"
+	ApprovalRejected    = "rejected"
 )
 
 type Task struct {
