@@ -197,17 +197,15 @@ func (n *Nydus) Send(ctx context.Context, projectID, fromRole string, req SendRe
 		if !sender.Terminal {
 			return nil, invalid("role %q must name a recipient; only the terminal role finishes a task", fromRole)
 		}
-		// KNOWN GAP: a terminal role's approval gate is not honoured here. The
-		// gate is applied further down, to routed hand-offs, and completion
-		// returns before reaching it — so a reviewer set to require approval
-		// merges to the base branch without asking, which is the setting doing
-		// the opposite of what it says.
-		//
-		// Fixing it is not a one-line change: decide() releases held *routes*,
-		// and a completion has none, so a held completion would need
-		// integration to run on approval instead — outside the transaction,
-		// where complete() already does it. Left deliberately rather than
-		// half-built.
+		// A gated terminal role waits for a human before its work reaches the
+		// base branch. The gate used to be applied only further down, to
+		// routed hand-offs, and completion returned before reaching it — so a
+		// reviewer set to require approval merged without asking. The setting
+		// did the opposite of what it said, to the one action that modifies
+		// the repository.
+		if sender.Gate == store.GateApproval {
+			return n.holdCompletion(ctx, projectID, sender, req)
+		}
 		return n.complete(ctx, projectID, sender, req)
 	}
 
@@ -838,11 +836,17 @@ func (n *Nydus) decide(ctx context.Context, approvalID, decision, note string) e
 		state     string
 		taskID    sql.NullString
 		fromRole  string
+		terminal  int
+		commit    sql.NullString
+		body      string
+		projectID string
 	)
 	err = tx.QueryRowContext(ctx,
-		`SELECT a.message_id, a.state, m.task_id, m.from_role
+		`SELECT a.message_id, a.state, m.task_id, m.from_role,
+		        m.terminal, m.commit_sha, m.body, a.project_id
 		 FROM approvals a JOIN messages m ON m.id = a.message_id
-		 WHERE a.id = ?`, approvalID).Scan(&messageID, &state, &taskID, &fromRole)
+		 WHERE a.id = ?`, approvalID).Scan(&messageID, &state, &taskID, &fromRole,
+		&terminal, &commit, &body, &projectID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("approval %s: %w", approvalID, store.ErrNotFound)
 	}
@@ -852,6 +856,28 @@ func (n *Nydus) decide(ctx context.Context, approvalID, decision, note string) e
 	if state != store.ApprovalPending {
 		return invalid("approval %s was already %s", approvalID, state)
 	}
+
+	// Approving a completion lands it, and that happens before the decision is
+	// recorded — the same order complete() uses. If the merge fails nothing has
+	// been written, the approval is still pending, and it can be approved again
+	// once the cause is fixed. Recording first would leave a decision standing
+	// over a branch that never moved.
+	//
+	// The transaction is not holding anything yet that this needs, and a git
+	// subprocess must never run while it holds the single write lock.
+	var landed string
+	if decision == store.ApprovalApproved && terminal != 0 && taskID.Valid {
+		tx.Rollback()
+		var err error
+		if landed, err = n.landApproved(ctx, projectID, taskID.String, commit.String, body); err != nil {
+			return err
+		}
+		if tx, err = n.db.SQL().BeginTx(ctx, nil); err != nil {
+			return fmt.Errorf("reopening after landing: %w", err)
+		}
+		defer tx.Rollback()
+	}
+	_ = landed
 
 	now := n.now().Format(time.RFC3339Nano)
 	var notePtr *string
@@ -864,7 +890,16 @@ func (n *Nydus) decide(ctx context.Context, approvalID, decision, note string) e
 		return fmt.Errorf("recording decision: %w", err)
 	}
 
-	if decision == store.ApprovalApproved {
+	if decision == store.ApprovalApproved && terminal != 0 {
+		// A completion has no routes to release; approving it finishes the task.
+		if taskID.Valid {
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE tasks SET lane = ?, state = ?, completed_at = ? WHERE id = ?`,
+				store.LaneDone, store.TaskDone, now, taskID.String); err != nil {
+				return fmt.Errorf("closing card: %w", err)
+			}
+		}
+	} else if decision == store.ApprovalApproved {
 		if _, err := tx.ExecContext(ctx,
 			`UPDATE routes SET state = ?, enqueued_at = ? WHERE message_id = ? AND state = ?`,
 			store.RouteQueued, now, messageID, store.RouteHeld); err != nil {
@@ -1023,4 +1058,94 @@ func boolToInt(b bool) int {
 		return 1
 	}
 	return 0
+}
+
+// holdCompletion records a finished task that is waiting for a human.
+//
+// Nothing is integrated and the task is not marked done: it is finished as far
+// as the roles are concerned and not yet landed, which is a real state and
+// needs to be visible as one. The card stays with the role that finished it,
+// so the board does not claim Done over work nobody has approved.
+func (n *Nydus) holdCompletion(ctx context.Context, projectID string, sender store.ResolvedRole, req SendRequest) (*store.Message, error) {
+	if req.TaskID == "" {
+		return nil, invalid("completing a task requires its id")
+	}
+	if req.Commit == "" {
+		return nil, invalid("finishing a task requires the commit to integrate")
+	}
+	task, err := n.db.GetTask(ctx, req.TaskID)
+	if err != nil {
+		return nil, err
+	}
+
+	now := n.now()
+	msg := &store.Message{
+		ID: store.NewID(), ProjectID: projectID, TaskID: &task.ID,
+		FromRole: sender.Name, Kind: store.KindHandoff, Priority: 50,
+		Body: req.Body, Terminal: true, CreatedAt: now,
+	}
+	c := req.Commit
+	msg.CommitSHA = &c
+
+	tx, err := n.db.SQL().BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("beginning held completion: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO messages (id, project_id, task_id, from_role, kind, priority,
+		   commit_sha, body, terminal, created_at)
+		 VALUES (?,?,?,?,?,?,?,?,?,?)`,
+		msg.ID, msg.ProjectID, msg.TaskID, msg.FromRole, msg.Kind, msg.Priority,
+		msg.CommitSHA, msg.Body, true, now.Format(time.RFC3339Nano)); err != nil {
+		return nil, fmt.Errorf("recording held completion: %w", err)
+	}
+	// The approval is written in the same transaction as the message, so there
+	// is no instant where a completion exists with nothing asking about it.
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO approvals (id, project_id, message_id, state, created_at)
+		 VALUES (?,?,?,?,?)`,
+		store.NewID(), projectID, msg.ID, store.ApprovalPending,
+		now.Format(time.RFC3339Nano)); err != nil {
+		return nil, fmt.Errorf("recording approval: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("committing held completion: %w", err)
+	}
+	return msg, nil
+}
+
+// landApproved integrates a completion that a human has just approved, and
+// marks the task done.
+//
+// Integration runs before the decision is recorded, which is the same order
+// complete() uses and for the same reason: if the merge fails, nothing has been
+// written, the approval is still pending, and the operator can fix the cause
+// and approve again. The alternative records a decision over a branch that
+// never moved.
+func (n *Nydus) landApproved(ctx context.Context, projectID, taskID, commit, body string) (string, error) {
+	if n.integrator == nil {
+		return "", nil
+	}
+	project, err := n.db.GetProject(ctx, projectID)
+	if err != nil {
+		return "", err
+	}
+	task, err := n.db.GetTask(ctx, taskID)
+	if err != nil {
+		return "", err
+	}
+
+	switch project.Integration {
+	case store.IntegrateBranch:
+		return "", nil
+	case store.IntegratePR:
+		return n.integrator.Publish(ctx, project.Path, project.BaseBranch, commit, task.Name, body)
+	default:
+		if err := n.integrator.Merge(ctx, project.Path, project.BaseBranch, commit); err != nil {
+			return "", fmt.Errorf("merging %s into %s: %w", commit, project.BaseBranch, err)
+		}
+		return "", nil
+	}
 }

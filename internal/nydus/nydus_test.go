@@ -950,3 +950,85 @@ func mustDir(t *testing.T, name string) string {
 	}
 	return dir
 }
+
+// A terminal role with an approval gate must not reach the base branch until a
+// human says so. The gate used to be applied only to routed hand-offs, and
+// completion returned before reaching it — so a reviewer configured to require
+// approval merged without asking, which is the setting doing the opposite of
+// what it says, to the one action that changes the repository.
+func TestGatedTerminalRoleWaitsForApprovalBeforeLanding(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+
+	// reviewer is terminal in this fixture; give it a gate.
+	if _, err := f.db.SQL().ExecContext(ctx,
+		`UPDATE role_templates SET gate = ? WHERE name = 'reviewer'`, store.GateApproval); err != nil {
+		t.Fatalf("gating the reviewer: %v", err)
+	}
+	task := f.task(t, "Calculator")
+
+	if _, err := f.n.Send(ctx, f.project.ID, "reviewer", SendRequest{
+		TaskID: task.ID, Commit: "aaaaaaaaaa", Body: "approved by the reviewer",
+	}); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+
+	// Nothing has landed, and the card is not Done — it is finished by the
+	// roles and not yet landed, which is a real state.
+	if len(f.git.merges) != 0 {
+		t.Fatalf("merged %v before anyone approved", f.git.merges)
+	}
+	if got := f.reload(t, task.ID).State; got == store.TaskDone {
+		t.Error("the board says Done over work nobody has approved")
+	}
+
+	pending, err := f.db.ListPendingApprovals(ctx, f.project.ID)
+	if err != nil {
+		t.Fatalf("ListPendingApprovals: %v", err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("got %d approvals waiting, want 1", len(pending))
+	}
+	// The card has to say what is being approved, or it is asking someone to
+	// decide about something they cannot read.
+	if pending[0].Body != "approved by the reviewer" {
+		t.Errorf("approval carries body %q; the decision needs the note", pending[0].Body)
+	}
+
+	if err := f.n.Approve(ctx, pending[0].ID); err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+	if len(f.git.merges) != 1 {
+		t.Errorf("approving did not land the work: %v merges", len(f.git.merges))
+	}
+	if got := f.reload(t, task.ID).State; got != store.TaskDone {
+		t.Errorf("task state is %q after approval, want done", got)
+	}
+}
+
+// Rejecting a completion must land nothing and give the work back.
+func TestRejectedCompletionLandsNothing(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	if _, err := f.db.SQL().ExecContext(ctx,
+		`UPDATE role_templates SET gate = ? WHERE name = 'reviewer'`, store.GateApproval); err != nil {
+		t.Fatal(err)
+	}
+	task := f.task(t, "Calculator")
+
+	if _, err := f.n.Send(ctx, f.project.ID, "reviewer", SendRequest{
+		TaskID: task.ID, Commit: "aaaaaaaaaa", Body: "approved by the reviewer",
+	}); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	pending, _ := f.db.ListPendingApprovals(ctx, f.project.ID)
+	if err := f.n.Reject(ctx, pending[0].ID, "not yet"); err != nil {
+		t.Fatalf("Reject: %v", err)
+	}
+	if len(f.git.merges) != 0 {
+		t.Errorf("a rejected completion still merged: %v", f.git.merges)
+	}
+	if got := f.reload(t, task.ID).State; got == store.TaskDone {
+		t.Error("a rejected completion left the card Done")
+	}
+}
