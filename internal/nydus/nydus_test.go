@@ -158,8 +158,7 @@ func TestPipelineEndToEnd(t *testing.T) {
 
 	// planner hands to coder. planner gates on approval, so this is held.
 	if _, err := f.n.Send(ctx, f.project.ID, "planner", SendRequest{
-		TaskID: task.ID, To: "coder", Commit: "aaaaaaaaaa",
-	}); err != nil {
+		TaskID: task.ID, To: "coder", Commit: "aaaaaaaaaa", Body: "handed on"}); err != nil {
 		t.Fatalf("planner Send: %v", err)
 	}
 	if err := f.n.Ack(ctx, lease.ID); err != nil {
@@ -200,8 +199,7 @@ func TestPipelineEndToEnd(t *testing.T) {
 		t.Fatalf("coder Claim: %v (lease %v)", err, lease)
 	}
 	if _, err := f.n.Send(ctx, f.project.ID, "coder", SendRequest{
-		TaskID: task.ID, To: "reviewer", Commit: "bbbbbbbbbb",
-	}); err != nil {
+		TaskID: task.ID, To: "reviewer", Commit: "bbbbbbbbbb", Body: "handed on"}); err != nil {
 		t.Fatalf("coder Send: %v", err)
 	}
 	if err := f.n.Ack(ctx, lease.ID); err != nil {
@@ -214,8 +212,7 @@ func TestPipelineEndToEnd(t *testing.T) {
 		t.Fatalf("reviewer Claim: %v (lease %v)", err, lease)
 	}
 	if _, err := f.n.Send(ctx, f.project.ID, "reviewer", SendRequest{
-		TaskID: task.ID, Commit: "cccccccccc",
-	}); err != nil {
+		TaskID: task.ID, Commit: "cccccccccc", Body: "handed on"}); err != nil {
 		t.Fatalf("reviewer completion: %v", err)
 	}
 	if err := f.n.Ack(ctx, lease.ID); err != nil {
@@ -460,8 +457,7 @@ func TestBatchStopsAtAPriorityChange(t *testing.T) {
 
 	for _, p := range []int{10, 10, 50} {
 		if _, err := f.n.Send(ctx, f.project.ID, "coder", SendRequest{
-			To: "reviewer", Commit: "aaaaaaaaaa", Priority: p,
-		}); err != nil {
+			To: "reviewer", Commit: "aaaaaaaaaa", Priority: p, Body: "handed on"}); err != nil {
 			t.Fatalf("Send: %v", err)
 		}
 	}
@@ -513,8 +509,7 @@ func TestRejectReturnsTheCardToItsAuthor(t *testing.T) {
 		t.Fatalf("Claim: %v", err)
 	}
 	if _, err := f.n.Send(ctx, f.project.ID, "planner", SendRequest{
-		TaskID: task.ID, To: "coder", Commit: "aaaaaaaaaa",
-	}); err != nil {
+		TaskID: task.ID, To: "coder", Commit: "aaaaaaaaaa", Body: "handed on"}); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 	if err := f.n.Ack(ctx, lease.ID); err != nil {
@@ -546,8 +541,7 @@ func TestDecidingTwiceIsRejected(t *testing.T) {
 	task := f.task(t, "Calculator")
 
 	if _, err := f.n.Send(ctx, f.project.ID, "planner", SendRequest{
-		TaskID: task.ID, To: "coder", Commit: "aaaaaaaaaa",
-	}); err != nil {
+		TaskID: task.ID, To: "coder", Commit: "aaaaaaaaaa", Body: "handed on"}); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 	pending, _ := f.db.ListPendingApprovals(ctx, f.project.ID)
@@ -566,7 +560,7 @@ func TestOnlyTheTerminalRoleMayFinishATask(t *testing.T) {
 	f := newFixture(t)
 	task := f.task(t, "Calculator")
 
-	_, err := f.n.Send(ctx, f.project.ID, "coder", SendRequest{TaskID: task.ID, Commit: "aaaaaaaaaa"})
+	_, err := f.n.Send(ctx, f.project.ID, "coder", SendRequest{TaskID: task.ID, Commit: "aaaaaaaaaa", Body: "handed on"})
 	if err == nil {
 		t.Fatal("a mid-pipeline role finished a task")
 	}
@@ -586,8 +580,7 @@ func TestHandoffRequiresACommit(t *testing.T) {
 func TestSendToAnUnknownRoleIsRejected(t *testing.T) {
 	f := newFixture(t)
 	_, err := f.n.Send(context.Background(), f.project.ID, "coder", SendRequest{
-		To: "nobody", Commit: "aaaaaaaaaa",
-	})
+		To: "nobody", Commit: "aaaaaaaaaa", Body: "handed on"})
 	if err == nil {
 		t.Fatal("a handoff to a role outside the team was accepted")
 	}
@@ -601,7 +594,7 @@ func TestFailedMergeLeavesTheCardOpen(t *testing.T) {
 	f.git.err = errors.New("conflict")
 
 	task := f.task(t, "Calculator")
-	_, err := f.n.Send(ctx, f.project.ID, "reviewer", SendRequest{TaskID: task.ID, Commit: "cccccccccc"})
+	_, err := f.n.Send(ctx, f.project.ID, "reviewer", SendRequest{TaskID: task.ID, Commit: "cccccccccc", Body: "handed on"})
 	if err == nil {
 		t.Fatal("completion succeeded despite a failed merge")
 	}

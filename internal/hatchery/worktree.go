@@ -288,3 +288,15 @@ func dirSize(path string) int64 {
 	})
 	return total
 }
+
+// Subject is the first line of a commit's message.
+//
+// Best effort: a sha that is not in the repository returns empty rather than an
+// error, because a missing subject should degrade a detail view, not fail it.
+func (h *Hatchery) Subject(ctx context.Context, sha string) string {
+	out, err := git(ctx, h.repoPath, "log", "-1", "--format=%s", sha)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(out)
+}

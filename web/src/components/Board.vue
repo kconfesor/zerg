@@ -5,6 +5,7 @@ import { duration } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 
 const props = defineProps<{ team: ResolvedRole[]; tasks: Task[] }>()
+const emit = defineEmits<{ open: [task: Task] }>()
 
 /** Lanes are the enabled roles in pipeline order, then the Done well. */
 const lanes = computed(() => {
@@ -49,13 +50,18 @@ const byLane = computed(() => {
         </div>
 
         <div class="flex flex-col gap-2 pt-2">
-          <article
+          <!-- A card is a button: the account of what happened is behind it,
+               and a card that looks inert while holding the only record of a
+               task teaches you not to click it. -->
+          <button
             v-for="task in byLane.get(lane)"
             :key="task.id"
+            type="button"
             :class="[
-              'bg-card hover:border-primary/40 border p-2.5 transition-colors',
+              'bg-card hover:border-primary/40 focus-visible:outline-ring w-full border p-2.5 text-left transition-colors focus-visible:outline-2',
               task.state === 'working' && 'border-primary/50 bg-primary/[0.06]',
             ]"
+            @click="emit('open', task)"
           >
             <div class="mb-2 text-xs leading-snug font-medium break-words">{{ task.name }}</div>
             <div class="flex flex-wrap items-center gap-1.5">
@@ -72,7 +78,7 @@ const byLane = computed(() => {
                 {{ duration(task.activeMs) }}
               </span>
             </div>
-          </article>
+          </button>
 
           <!-- An empty lane is normal; it should read as quiet, not broken. -->
           <p

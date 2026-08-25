@@ -13,14 +13,14 @@ func TestReviewerCanReturnWorkToCoder(t *testing.T) {
 
 	// planner -> coder (approve the gated handoff)
 	l, _ := f.n.Claim(ctx, f.project.ID, "planner")
-	f.n.Send(ctx, f.project.ID, "planner", SendRequest{TaskID: task.ID, To: "coder", Commit: "aaaaaaaaaa"})
+	f.n.Send(ctx, f.project.ID, "planner", SendRequest{TaskID: task.ID, To: "coder", Commit: "aaaaaaaaaa", Body: "handed on"})
 	f.n.Ack(ctx, l.ID)
 	pend, _ := f.db.ListPendingApprovals(ctx, f.project.ID)
 	f.n.Approve(ctx, pend[0].ID)
 
 	// coder -> reviewer
 	l, _ = f.n.Claim(ctx, f.project.ID, "coder")
-	f.n.Send(ctx, f.project.ID, "coder", SendRequest{TaskID: task.ID, To: "reviewer", Commit: "bbbbbbbbbb"})
+	f.n.Send(ctx, f.project.ID, "coder", SendRequest{TaskID: task.ID, To: "reviewer", Commit: "bbbbbbbbbb", Body: "handed on"})
 	f.n.Ack(ctx, l.ID)
 
 	// reviewer claims and finds problems -> sends BACK to coder
@@ -64,8 +64,7 @@ func TestReviewerCanReturnWorkToCoder(t *testing.T) {
 
 	// And it can go round again — rework is allowed, just counted.
 	if _, err := f.n.Send(ctx, f.project.ID, "coder", SendRequest{
-		TaskID: task.ID, To: "reviewer", Commit: "dddddddddd",
-	}); err != nil {
+		TaskID: task.ID, To: "reviewer", Commit: "dddddddddd", Body: "handed on"}); err != nil {
 		t.Errorf("coder could not re-submit after fixing: %v", err)
 	}
 	if after := f.reload(t, task.ID); after.ReworkCount != 1 {
@@ -80,13 +79,13 @@ func TestForwardHandoffsAreNotRework(t *testing.T) {
 	task := f.task(t, "Calculator")
 
 	l, _ := f.n.Claim(ctx, f.project.ID, "planner")
-	f.n.Send(ctx, f.project.ID, "planner", SendRequest{TaskID: task.ID, To: "coder", Commit: "aaaaaaaaaa"})
+	f.n.Send(ctx, f.project.ID, "planner", SendRequest{TaskID: task.ID, To: "coder", Commit: "aaaaaaaaaa", Body: "handed on"})
 	f.n.Ack(ctx, l.ID)
 	pend, _ := f.db.ListPendingApprovals(ctx, f.project.ID)
 	f.n.Approve(ctx, pend[0].ID)
 
 	l, _ = f.n.Claim(ctx, f.project.ID, "coder")
-	f.n.Send(ctx, f.project.ID, "coder", SendRequest{TaskID: task.ID, To: "reviewer", Commit: "bbbbbbbbbb"})
+	f.n.Send(ctx, f.project.ID, "coder", SendRequest{TaskID: task.ID, To: "reviewer", Commit: "bbbbbbbbbb", Body: "handed on"})
 	f.n.Ack(ctx, l.ID)
 
 	if got := f.reload(t, task.ID); got.ReworkCount != 0 {
@@ -102,7 +101,7 @@ func TestRepeatedLoopsCrossTheThreshold(t *testing.T) {
 
 	// Get it into coder's hands once.
 	l, _ := f.n.Claim(ctx, f.project.ID, "planner")
-	f.n.Send(ctx, f.project.ID, "planner", SendRequest{TaskID: task.ID, To: "coder", Commit: "aaaaaaaaaa"})
+	f.n.Send(ctx, f.project.ID, "planner", SendRequest{TaskID: task.ID, To: "coder", Commit: "aaaaaaaaaa", Body: "handed on"})
 	f.n.Ack(ctx, l.ID)
 	pend, _ := f.db.ListPendingApprovals(ctx, f.project.ID)
 	f.n.Approve(ctx, pend[0].ID)
@@ -114,8 +113,7 @@ func TestRepeatedLoopsCrossTheThreshold(t *testing.T) {
 			t.Fatalf("lap %d: coder Claim: %v", i, err)
 		}
 		if _, err := f.n.Send(ctx, f.project.ID, "coder", SendRequest{
-			TaskID: task.ID, To: "reviewer", Commit: "bbbbbbbbbb",
-		}); err != nil {
+			TaskID: task.ID, To: "reviewer", Commit: "bbbbbbbbbb", Body: "handed on"}); err != nil {
 			t.Fatalf("lap %d: coder Send: %v", i, err)
 		}
 		f.n.Ack(ctx, lc.ID)
@@ -161,26 +159,25 @@ func TestFinishedCardsAreNotRaised(t *testing.T) {
 	task := f.task(t, "Calculator")
 
 	l, _ := f.n.Claim(ctx, f.project.ID, "planner")
-	f.n.Send(ctx, f.project.ID, "planner", SendRequest{TaskID: task.ID, To: "coder", Commit: "aaaaaaaaaa"})
+	f.n.Send(ctx, f.project.ID, "planner", SendRequest{TaskID: task.ID, To: "coder", Commit: "aaaaaaaaaa", Body: "handed on"})
 	f.n.Ack(ctx, l.ID)
 	pend, _ := f.db.ListPendingApprovals(ctx, f.project.ID)
 	f.n.Approve(ctx, pend[0].ID)
 
 	lc, _ := f.n.Claim(ctx, f.project.ID, "coder")
-	f.n.Send(ctx, f.project.ID, "coder", SendRequest{TaskID: task.ID, To: "reviewer", Commit: "bbbbbbbbbb"})
+	f.n.Send(ctx, f.project.ID, "coder", SendRequest{TaskID: task.ID, To: "reviewer", Commit: "bbbbbbbbbb", Body: "handed on"})
 	f.n.Ack(ctx, lc.ID)
 	lr, _ := f.n.Claim(ctx, f.project.ID, "reviewer")
-	f.n.Send(ctx, f.project.ID, "reviewer", SendRequest{TaskID: task.ID, To: "coder", Commit: "cccccccccc"})
+	f.n.Send(ctx, f.project.ID, "reviewer", SendRequest{TaskID: task.ID, To: "coder", Commit: "cccccccccc", Body: "handed on"})
 	f.n.Ack(ctx, lr.ID)
 
 	// coder fixes it, reviewer accepts and finishes.
 	lc, _ = f.n.Claim(ctx, f.project.ID, "coder")
-	f.n.Send(ctx, f.project.ID, "coder", SendRequest{TaskID: task.ID, To: "reviewer", Commit: "dddddddddd"})
+	f.n.Send(ctx, f.project.ID, "coder", SendRequest{TaskID: task.ID, To: "reviewer", Commit: "dddddddddd", Body: "handed on"})
 	f.n.Ack(ctx, lc.ID)
 	lr, _ = f.n.Claim(ctx, f.project.ID, "reviewer")
 	if _, err := f.n.Send(ctx, f.project.ID, "reviewer", SendRequest{
-		TaskID: task.ID, Commit: "eeeeeeeeee",
-	}); err != nil {
+		TaskID: task.ID, Commit: "eeeeeeeeee", Body: "handed on"}); err != nil {
 		t.Fatalf("completion: %v", err)
 	}
 	f.n.Ack(ctx, lr.ID)

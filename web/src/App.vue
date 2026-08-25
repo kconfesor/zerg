@@ -18,6 +18,7 @@ import Activity from '@/components/Activity.vue'
 import Board from '@/components/Board.vue'
 import Chat from '@/components/Chat.vue'
 import MarkdownEditor from '@/components/MarkdownEditor.vue'
+import TaskDetail from '@/components/TaskDetail.vue'
 import Settings from '@/components/Settings.vue'
 import ReadinessPanel from '@/components/Readiness.vue'
 import TeamEditor from '@/components/TeamEditor.vue'
@@ -42,6 +43,9 @@ const view = ref<View>('board')
 
 /** The nav drawer, which only exists below md. */
 const navOpen = ref(false)
+
+/** The task whose history is open, if any. */
+const openTask = ref<Task | null>(null)
 
 /**
  * True until the first load settles.
@@ -416,7 +420,7 @@ watch(current, () => (banner.value = null))
                 <Button @click="composing = true">New task</Button>
               </template>
             </PageHeader>
-            <div class="pt-4"><Board :team="team" :tasks="tasks" /></div>
+            <div class="pt-4"><Board :team="team" :tasks="tasks" @open="(t) => (openTask = t)" /></div>
           </template>
 
           <!-- Chat -->
@@ -538,6 +542,8 @@ watch(current, () => (banner.value = null))
 
     <!-- Opening a card. The name is the thing that follows this work through
          the whole pipeline, which is worth saying where it is being typed. -->
+    <TaskDetail :task="openTask" @close="openTask = null" />
+
     <Dialog v-model:open="composing">
       <DialogContent class="sm:max-w-lg">
         <DialogHeader>

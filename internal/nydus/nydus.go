@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/konfessor/zerg/internal/hatchery"
@@ -152,6 +153,15 @@ func (n *Nydus) Send(ctx context.Context, projectID, fromRole string, req SendRe
 	}
 	if kind == store.KindHandoff && req.Commit == "" {
 		return nil, invalid("a handoff must carry a commit; it points at committed state rather than a diff")
+	}
+	// And it must say what happened. A commit sha tells the next role where to
+	// look, not what was decided, what was left out, or what to check — and it
+	// tells the operator nothing at all. Without this a finished task reads as
+	// the word "done" and nothing else, which is what the board showed before
+	// this was required.
+	if kind == store.KindHandoff && strings.TrimSpace(req.Body) == "" {
+		return nil, invalid(
+			"a handoff needs --body: what you did, what you decided, and anything the next role should check")
 	}
 
 	// Pin the commit to an absolute sha, in the sender's own tree, before it

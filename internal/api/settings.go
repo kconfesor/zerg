@@ -151,3 +151,57 @@ func (s *Server) askChat(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "asked"})
 }
+
+// taskDetail is a finished task's account of itself.
+type taskDetail struct {
+	Task    *store.Task      `json:"task"`
+	History []taskStep       `json:"history"`
+	Usage   store.UsageTotal `json:"usage"`
+}
+
+type taskStep struct {
+	store.Handoff
+	// Subject is the commit's first line. The body says what a role decided;
+	// the subject says what it committed, and the two are rarely the same
+	// sentence.
+	Subject string `json:"subject,omitempty"`
+}
+
+// taskDetail answers "what actually happened here", which a lane called Done
+// cannot.
+func (s *Server) taskDetail(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	task, err := s.db.GetTask(r.Context(), id)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	history, err := s.db.TaskHistory(r.Context(), id)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	usage, err := s.db.UsageForTask(r.Context(), id)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+
+	// Commit subjects come from the repository, so the view can show what was
+	// committed alongside what was said about it.
+	var hat *hatchery.Hatchery
+	if project, err := s.db.GetProject(r.Context(), task.ProjectID); err == nil {
+		hat = hatchery.New(project.Path)
+	}
+
+	steps := make([]taskStep, 0, len(history))
+	for _, h := range history {
+		step := taskStep{Handoff: h}
+		if hat != nil && h.Commit != "" {
+			step.Subject = hat.Subject(r.Context(), h.Commit)
+		}
+		steps = append(steps, step)
+	}
+
+	writeJSON(w, http.StatusOK, taskDetail{Task: task, History: steps, Usage: usage})
+}

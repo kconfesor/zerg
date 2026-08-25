@@ -538,3 +538,52 @@ func (db *DB) GetTaskByName(ctx context.Context, projectID, name string) (*Task,
 	}
 	return t, err
 }
+
+// Handoff is one step of a task's history, as the detail view shows it.
+type Handoff struct {
+	From   string    `json:"from"`
+	To     string    `json:"to,omitempty"` // empty means this one finished the task
+	Kind   string    `json:"kind"`
+	Commit string    `json:"commit,omitempty"`
+	Body   string    `json:"body"`
+	At     time.Time `json:"at"`
+	Final  bool      `json:"final"`
+}
+
+// TaskHistory is every step a task took, oldest first.
+//
+// The bodies are the point. Each is what a role wrote when it handed the work
+// on — the verdict, the rework list, what was left out — and together they are
+// the account of what happened that a state of "done" cannot give.
+func (db *DB) TaskHistory(ctx context.Context, taskID string) ([]Handoff, error) {
+	rows, err := db.sql.QueryContext(ctx,
+		`SELECT m.from_role, COALESCE(r.to_role, ''), m.kind,
+		        COALESCE(m.commit_sha, ''), m.body, m.created_at, m.terminal
+		   FROM messages m
+		   LEFT JOIN routes r ON r.message_id = m.id
+		  WHERE m.task_id = ?
+		  ORDER BY m.created_at ASC`, taskID)
+	if err != nil {
+		return nil, fmt.Errorf("reading task history: %w", err)
+	}
+	defer rows.Close()
+
+	out := []Handoff{}
+	for rows.Next() {
+		var (
+			h     Handoff
+			at    string
+			final int
+		)
+		if err := rows.Scan(&h.From, &h.To, &h.Kind, &h.Commit, &h.Body, &at, &final); err != nil {
+			return nil, err
+		}
+		h.At, err = time.Parse(time.RFC3339Nano, at)
+		if err != nil {
+			return nil, fmt.Errorf("handoff has an unparseable timestamp %q: %w", at, err)
+		}
+		h.Final = final != 0
+		out = append(out, h)
+	}
+	return out, rows.Err()
+}

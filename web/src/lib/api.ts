@@ -199,6 +199,8 @@ export const api = {
       body: JSON.stringify({ message }),
     }),
 
+  taskDetail: (id: string) => call<TaskDetail>(`/tasks/${id}`),
+
   settings: () => call<SettingsResponse>('/settings'),
   setSettings: (cfg: DaemonConfig) =>
     call<SettingsResponse>('/settings', { method: 'PUT', body: JSON.stringify(cfg) }),
@@ -401,4 +403,25 @@ export interface SettingsResponse {
    *  settings have been saved but the daemon has not restarted. */
   applied: string
   restartNeeded: boolean
+}
+
+// ── task detail ─────────────────────────────────────────────────────────────
+
+/** One step of a task's history: who handed what to whom, and what they said. */
+export interface TaskStep {
+  from: string
+  to?: string
+  kind: string
+  commit?: string
+  body: string
+  at: string
+  final?: boolean
+  /** First line of the commit message. */
+  subject?: string
+}
+
+export interface TaskDetail {
+  task: Task
+  history: TaskStep[]
+  usage: UsageTotal
 }

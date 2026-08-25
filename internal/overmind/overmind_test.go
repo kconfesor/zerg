@@ -210,9 +210,12 @@ func idleAgent(adapter.Spec) string { return `printf 'ready\n'; sleep 30` }
 // workingAgent claims work through the real CLI, forwards or finishes, and
 // acknowledges — the loop a real agent's prompt asks it to run.
 func workingAgent(spec adapter.Spec) string {
-	forward := `"$ZERG_BIN" send --to reviewer --task "$TASK" --commit "$SHA" >/dev/null`
+	// --body is required on a handoff, so the scripted agent sends one too. A
+	// fake that skips what every real agent must do stops testing the path a
+	// real agent takes.
+	forward := `"$ZERG_BIN" send --to reviewer --task "$TASK" --commit "$SHA" --body "did the work" >/dev/null`
 	if spec.Role == "reviewer" {
-		forward = `"$ZERG_BIN" send --task "$TASK" --commit "$SHA" >/dev/null`
+		forward = `"$ZERG_BIN" send --task "$TASK" --commit "$SHA" --body "approved" >/dev/null`
 	}
 	return `printf 'ready\n'
 while IFS= read -r _line; do

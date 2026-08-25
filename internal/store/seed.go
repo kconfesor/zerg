@@ -47,12 +47,17 @@ change needed".
 
 Then commit, and pass the work on to the role the envelope named:
 
-    zerg send --to <next> --commit HEAD --task "<task name>"
+    zerg send --to <next> --commit HEAD --task "<task name>" --body "<what happened>"
+
+` + "`--body`" + ` is required, and it is read by the next role and by the operator.
+Cover what you did, what you decided and why, anything you deliberately left
+out, and what the next role should check. A commit sha says where to look; it
+does not say what you concluded. Two or three sentences is usually enough.
 
 If the envelope said ` + "`\"terminal\": true`" + `, you finish the task instead — omit
 ` + "`--to`" + ` entirely, and the commit is merged into the project's branch:
 
-    zerg send --commit HEAD --task "<task name>"
+    zerg send --commit HEAD --task "<task name>" --body "<what happened>"
 
 Keep the task name exactly as you received it. It is how one card is followed
 across the whole pipeline, and it is the handle ` + "`--task`" + ` expects.

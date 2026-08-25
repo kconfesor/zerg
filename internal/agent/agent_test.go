@@ -197,7 +197,7 @@ func TestTokenScopesTheSender(t *testing.T) {
 
 	// And a role cannot send as another: coder is not terminal, so an
 	// omitted recipient must be refused rather than treated as completion.
-	if _, err := f.client(t, "coder").Send(ctx, SendArgs{Commit: "aaaaaaaaaa"}); err == nil {
+	if _, err := f.client(t, "coder").Send(ctx, SendArgs{Commit: "aaaaaaaaaa", Body: "handed on"}); err == nil {
 		t.Error("a mid-pipeline role was allowed to finish a task")
 	}
 }
@@ -332,7 +332,7 @@ func TestTerminalRoleCompletesTheTask(t *testing.T) {
 	if err != nil {
 		t.Fatalf("coder Next: %v", err)
 	}
-	if _, err := coder.Send(ctx, SendArgs{To: "reviewer", TaskID: task.ID, Commit: "aaaaaaaaaa"}); err != nil {
+	if _, err := coder.Send(ctx, SendArgs{To: "reviewer", TaskID: task.ID, Commit: "aaaaaaaaaa", Body: "handed on"}); err != nil {
 		t.Fatalf("coder Send: %v", err)
 	}
 	if err := coder.Done(ctx, work.LeaseID); err != nil {
@@ -345,7 +345,7 @@ func TestTerminalRoleCompletesTheTask(t *testing.T) {
 		t.Fatalf("reviewer Next: %v", err)
 	}
 	// No recipient: the terminal role finishing the task.
-	if _, err := reviewer.Send(ctx, SendArgs{TaskID: task.ID, Commit: "cccccccccc"}); err != nil {
+	if _, err := reviewer.Send(ctx, SendArgs{TaskID: task.ID, Commit: "cccccccccc", Body: "handed on"}); err != nil {
 		t.Fatalf("reviewer completion: %v", err)
 	}
 	if err := reviewer.Done(ctx, rwork.LeaseID); err != nil {
