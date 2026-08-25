@@ -291,8 +291,8 @@ func TestFullPipelineWithScriptedAgents(t *testing.T) {
 
 // ── the readiness gate ────────────────────────────────────────────────────
 
-// A team that cannot work must never reach a running board. The predecessor's
-// launches always succeeded, whatever state its agents were in.
+// A team that cannot work must never reach a running board. Without the gate a
+// launch succeeds whatever state its agents are in.
 func TestStartRefusesWhenARoleIsBlocked(t *testing.T) {
 	blocked := adapter.Check{Name: "binary_version", Run: func(adapter.Ctx, adapter.Spec) adapter.Result {
 		return adapter.Result{Reason: "the CLI is too old for this model", Remedy: "upgrade it"}

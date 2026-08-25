@@ -1,10 +1,10 @@
 -- zerg schema, version 2: work.
 --
--- The coordination layer. Every table here exists to make one of the
--- predecessor's failure modes impossible rather than merely unlikely.
+-- The coordination layer. Every table here exists to make one observed failure
+-- mode impossible rather than merely unlikely.
 
--- A work period, Start to Stop. The predecessor had no such concept, so
--- "how many sessions, how long" was unanswerable.
+-- A work period, Start to Stop. Without the concept, "how many sessions, how
+-- long" is unanswerable after the fact.
 CREATE TABLE sessions (
     id         TEXT PRIMARY KEY,
     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -16,9 +16,8 @@ CREATE TABLE sessions (
 -- A card on the board.
 --
 -- lane says which role holds it; state says whether that role is actually
--- working on it. The predecessor had only the lane, so a card read as "in
--- cleaner's lane" the instant delivery happened, whether or not cleaner had
--- looked. Keeping both is what makes the board honest without delaying the
+-- working on it. With only the lane, a card reads as "in cleaner's lane" the
+-- instant delivery happens, whether or not cleaner has looked. Keeping both is what makes the board honest without delaying the
 -- move to a moment the operator would find confusing.
 --
 -- active_ms accumulates lease durations, so wall time (completed - created)
@@ -59,9 +58,9 @@ CREATE TABLE messages (
 
 -- One message's delivery to one recipient.
 --
--- The primary key is what makes delivery idempotent: the predecessor copied a
--- file per recipient and deduped on filename, so a genuinely different message
--- with a colliding name was silently dropped while its wake-up still fired.
+-- The primary key is what makes delivery idempotent. Copying a file per
+-- recipient and deduping on filename means a genuinely different message with a
+-- colliding name is silently dropped while its wake-up still fires.
 CREATE TABLE routes (
     message_id   TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
     to_role      TEXT NOT NULL,
@@ -75,10 +74,10 @@ CREATE INDEX idx_routes_queue ON routes (to_role, state);
 
 -- A claim with a deadline.
 --
--- This is the answer to the predecessor's permanent stall: an agent that
--- finished, saw an empty inbox, printed NO_TASK and stopped five milliseconds
--- before mail arrived left the queue wedged with no timer and no retry. Work
--- that is never acknowledged comes back.
+-- This is the answer to the permanent stall: an agent that finishes, sees an
+-- empty inbox, prints NO_TASK and stops five milliseconds before mail arrives
+-- leaves the queue wedged with no timer and no retry. Work that is never
+-- acknowledged comes back.
 CREATE TABLE leases (
     id         TEXT PRIMARY KEY,
     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,

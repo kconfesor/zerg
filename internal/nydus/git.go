@@ -11,10 +11,9 @@ import (
 // Git integrates a terminal commit into the project's base branch by shelling
 // out to git.
 //
-// Integration is the orchestrator's job, not an agent's. In the predecessor the
-// last role broadcast its commit to every other role so each could merge it,
-// which meant N chances to conflict and no single place that knew whether the
-// base branch had actually moved.
+// Integration is the orchestrator's job, not an agent's. Having the last role
+// broadcast its commit to every other role to merge means N chances to conflict
+// and no single place that knows whether the base branch actually moved.
 type Git struct{}
 
 // Merge integrates commit into baseBranch inside repoPath.

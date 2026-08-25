@@ -225,8 +225,8 @@ func TestBackoffGrowsBetweenRestarts(t *testing.T) {
 	}
 }
 
-// A fatal error is one a restart cannot fix. Respawning into it is precisely
-// what the predecessor did for twenty minutes.
+// A fatal error is one a restart cannot fix. Respawning into it burns twenty
+// minutes looking busy.
 func TestFatalErrorStopsSupervision(t *testing.T) {
 	a := &scriptedAdapter{script: `printf 'ready\nfatal:model requires a newer version\n'; exit 1`}
 	c, _ := newCerebrate(t, a)

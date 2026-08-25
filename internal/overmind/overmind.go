@@ -34,9 +34,8 @@ const (
 
 	// nudge is what an idle agent is told when work is queued for it.
 	//
-	// This is the descendant of the predecessor's wake-up, and the differences
-	// are the point. That one was a fixed string of keystrokes fired into
-	// whichever tmux pane happened to be focused, with one chance to land. This
+	// The alternative is a fixed string of keystrokes fired into whichever
+	// terminal pane happens to be focused, with exactly one chance to land. This
 	// is a structured message on a pipe, driven by durable queue state — a
 	// missed nudge is corrected on the next tick, because the work is still
 	// there to be found.
@@ -162,9 +161,9 @@ func (o *Overmind) Status(ctx context.Context, projectID string) ([]Status, erro
 // Start brings a project's swarm up.
 //
 // The readiness gate comes first and is absolute: a team that cannot work must
-// never reach a running board. The predecessor's launches always "succeeded" —
-// six sessions up, dashboard green, board drawn — while half the roles sat at a
-// prompt they could not pass, and nothing anywhere said so.
+// never reach a running board. Without it a launch always "succeeds" — sessions
+// up, dashboard green, board drawn — while half the roles sit at a prompt they
+// cannot pass and nothing anywhere says so.
 func (o *Overmind) Start(ctx context.Context, projectID string) error {
 	o.mu.Lock()
 	if _, ok := o.running[projectID]; ok {

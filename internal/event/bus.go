@@ -1,8 +1,8 @@
 // Package event carries typed events from agents to whoever is watching.
 //
-// The predecessor's answer to "what is this agent doing" was grepping a tmux
+// The alternative answer to "what is this agent doing" is grepping a terminal
 // pane for a line containing "I'm". Everything here exists so that question has
-// a real answer: structured, filterable, and replayable after a reload.
+// a real answer instead: structured, filterable, and replayable after a reload.
 package event
 
 import (

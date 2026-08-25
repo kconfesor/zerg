@@ -1,8 +1,7 @@
 // Package preflight decides whether a team can actually work before it reaches
 // a running board.
 //
-// This is the subsystem the predecessor lacked. A day of running it produced
-// four separate hangs — a corrupted global config, a CLI too old for its model,
+// A day of running without this produced four separate hangs — a corrupted global config, a CLI too old for its model,
 // an unanswered trust dialog, a broken plugin tree — and every one presented
 // identically: an agent that looked alive and did nothing. The launch itself
 // always succeeded. Six tmux sessions came up, the dashboard served, the board
@@ -208,8 +207,8 @@ func (r *Runner) run(ctx context.Context, check adapter.Check, spec adapter.Spec
 			res.Status = StatusBlocked
 		}
 	case <-checkCtx.Done():
-		// A hung probe is a finding. The predecessor's failure mode was
-		// precisely a thing that never answered and never said so.
+		// A hung probe is a finding. The failure mode this package exists for is
+		// precisely a thing that never answers and never says so.
 		res.Status = StatusBlocked
 		res.Reason = fmt.Sprintf("the %s check did not finish within %s", check.Name, r.timeout)
 		res.Remedy = "the harness may be hung; try running it once by hand"

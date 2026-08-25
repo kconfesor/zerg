@@ -326,8 +326,8 @@ func (a *Adapter) Parse(line []byte) ([]adapter.Event, error) {
 		}}
 		if w.IsError || w.APIError != nil {
 			// A turn that errored must surface as an error, not as a quiet end.
-			// The predecessor's agents returned HTTP 400 on every turn for
-			// twenty minutes while looking perfectly alive.
+			// Observed: agents returning HTTP 400 on every turn for twenty
+			// minutes while looking perfectly alive.
 			out = append(out, adapter.Event{
 				Kind:  adapter.EventError,
 				Text:  errorText(w),

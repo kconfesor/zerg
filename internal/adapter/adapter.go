@@ -1,9 +1,9 @@
 // Package adapter defines the contract every agent harness must satisfy.
 //
-// swarm-forge hardcoded its four backends into a validation set and a case
-// expression, so adding one meant editing the launcher. Here a harness is a
-// registered implementation of Adapter, and the orchestrator never names a
-// specific CLI.
+// Hardcoding backends into a validation set and a case expression means adding
+// one is an edit to the launcher, in every place the set appears. Here a
+// harness is a registered implementation of Adapter, and the orchestrator never
+// names a specific CLI.
 package adapter
 
 import (
@@ -76,10 +76,10 @@ type Spec struct {
 	ExtraArgs []string
 
 	// SystemFile is composed fresh at every spawn from the shared instructions
-	// plus this role's prompt, both read from the database. The predecessor
-	// copied prompt files into each worktree at creation time, so edits made
-	// afterward reached nobody: a config set to Rust produced a Clojure
-	// implementation across six agents, silently.
+	// plus this role's prompt, both read from the database. Copying prompt files
+	// into each worktree at creation time means edits made afterward reach
+	// nobody: a config set to Rust once produced a Clojure implementation across
+	// six agents, silently.
 	SystemFile string
 
 	// ConfigDir is a private, per-role harness config directory. Two agents
@@ -165,9 +165,9 @@ type Caps struct {
 // Ctx is context.Context, aliased so a Check reads on one line.
 type Ctx = context.Context
 
-// Check is one preflight probe. Every incident worth a postmortem in the
-// predecessor system — a stale CLI rejecting its model, a corrupted config, an
-// unanswered trust dialog, a broken plugin tree — was a Check that did not exist.
+// Check is one preflight probe. Every incident here that was worth a postmortem
+// — a stale CLI rejecting its model, a corrupted config, an unanswered trust
+// dialog, a broken plugin tree — was a Check that did not exist yet.
 type Check struct {
 	Name string
 	Run  func(ctx Ctx, spec Spec) Result
@@ -264,7 +264,7 @@ type Event struct {
 
 	// Fatal marks an error the agent cannot recover from, so the cerebrate
 	// stops instead of leaving a process that looks alive and answers nothing.
-	// The predecessor's codex agents sat at a prompt for 20 minutes returning
-	// HTTP 400 on every turn, indistinguishable from working.
+	// Observed: codex agents sitting at a prompt for 20 minutes returning HTTP
+	// 400 on every turn, indistinguishable from working.
 	Fatal bool
 }

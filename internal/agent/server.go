@@ -1,10 +1,10 @@
 // Package agent is the surface agents talk to.
 //
 // Four verbs over a unix socket, authenticated by a token minted at spawn.
-// The predecessor put helper scripts on each agent's PATH and had them infer
-// their own identity from the working directory, which meant running one from
-// a subdirectory silently created an empty queue there and reported no work.
-// Here identity arrives in the environment and is never guessed.
+// Helper scripts that infer their own identity from the working directory mean
+// running one from a subdirectory silently creates an empty queue there and
+// reports no work. Here identity arrives in the environment and is never
+// guessed.
 package agent
 
 import (
@@ -59,8 +59,8 @@ func NewServer(db *store.DB, nyd *nydus.Nydus, log *slog.Logger) *Server {
 // Mint issues a token for one role and returns it.
 //
 // Tokens are per-spawn and role-scoped, so an agent cannot claim work for
-// another role or send as one. The predecessor read the sender from an
-// environment variable any agent could set to any value.
+// another role or send as one. Reading the sender from an environment variable
+// lets any agent set it to any value.
 func (s *Server) Mint(projectID, role string) string {
 	token := store.NewID()
 	s.mu.Lock()
@@ -367,10 +367,9 @@ type askResponse struct {
 
 // ask raises a question and waits for a human.
 //
-// An agent that needs an answer must have somewhere to put the question. The
-// predecessor forbade asking in the pane and offered a helper instead, so an
-// unanswered question looked exactly like an agent that had stopped for no
-// reason.
+// An agent that needs an answer must have somewhere to put the question.
+// Forbid asking in the pane, offer a helper instead, and an unanswered question
+// looks exactly like an agent that stopped for no reason.
 func (s *Server) ask(w http.ResponseWriter, r *http.Request) {
 	id, ok := s.identify(r)
 	if !ok {

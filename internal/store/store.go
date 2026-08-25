@@ -1,9 +1,9 @@
 // Package store owns every byte of zerg's persistent state.
 //
 // One SQLite file holds both the global role library and per-project runtime.
-// The predecessor spread the same information across config files, prompt
-// files, and per-worktree snapshots of both, which is how a config edit could
-// silently reach nobody. There is exactly one source of truth here.
+// Spreading the same information across config files, prompt files, and
+// per-worktree snapshots of both is how a config edit silently reaches nobody.
+// There is exactly one source of truth here.
 package store
 
 import (

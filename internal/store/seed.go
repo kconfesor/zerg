@@ -7,16 +7,16 @@ import (
 )
 
 // SettingSharedInstructions is the key for the one document applied to every
-// role, replacing swarm-forge's constitution plus articles layering.
+// role. One document, not a constitution plus a directory of article fragments.
 const SettingSharedInstructions = "shared_instructions"
 
 // DefaultSharedInstructions covers the protocol every role obeys. Role prompts
 // cover the job; this covers the mechanics, so the two never drift apart and a
 // protocol change is a single edit.
 //
-// Note what is absent: any instruction to narrate status. The predecessor made
-// agents write sentences containing "I'm" so a dashboard could grep the pane
-// for them — output tokens spent on telemetry. Structured events carry that
+// Note what is absent: any instruction to narrate status. A dashboard that
+// greps a pane has to make agents write sentences containing "I'm" for it to
+// find — output tokens spent on telemetry. Structured events carry that
 // natively (ARCHITECTURE.md §11.1).
 const DefaultSharedInstructions = `# How work reaches you
 
@@ -81,9 +81,8 @@ type seedRole struct {
 	prompt  string
 }
 
-// builtinRoles is the library that ships. Eight templates cover every shape the
-// predecessor split across two-pack, four-pack and six-pack — except here they
-// are rows in a picker rather than branches you check out.
+// builtinRoles is the library that ships. Eight templates cover every team shape
+// worth presetting, as rows in a picker rather than branches you check out.
 //
 // Reviewing roles run the stronger model deliberately: catching a wrong change
 // is harder than making a plausible one.

@@ -16,7 +16,7 @@ const ink = {
 <template>
   <div v-if="readiness" class="flex flex-col gap-3">
     <!-- A blocked role reads as a blocked role with a remedy. It never reads as
-         a role that is simply idle, which is what the predecessor showed. -->
+         a role that is simply idle. -->
     <div v-for="role in readiness.roles" :key="role.role" class="border">
       <div class="flex items-center gap-2.5 border-b px-3 py-2">
         <span class="text-sm font-semibold">{{ role.role }}</span>

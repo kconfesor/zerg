@@ -162,9 +162,8 @@ func (db *DB) SelectDefaultTeam(ctx context.Context, projectID string) error {
 //
 // Terminal is computed here rather than stored: it is the last *enabled* role,
 // so disabling the final role promotes the one before it without an edit
-// anywhere else. The predecessor decided terminality from config-file line
-// order, which meant reordering a file silently relocated the end of the
-// pipeline.
+// anywhere else. Deciding terminality from config-file line order means
+// reordering a file silently relocates the end of the pipeline.
 func (db *DB) ResolveTeam(ctx context.Context, projectID string) ([]ResolvedRole, error) {
 	if _, err := db.GetProject(ctx, projectID); err != nil {
 		return nil, err

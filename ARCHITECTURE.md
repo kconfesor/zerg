@@ -5,34 +5,41 @@ A multi-agent coding orchestrator. Go core, Vue 3 cockpit, pluggable agent harne
 **Everything is configured in the UI.** There are no config files, no prompt files, no presets to
 copy. You point it at a repo, pick your roles, and start.
 
-Descended from [swarm-forge](https://github.com/unclebob/swarm-forge) in ideas, not in code. Each
-"why" below traces to a concrete failure mode observed in the predecessor.
+Every "why" below traces to a failure that was watched happening, not one that was imagined. Some
+were found running multi-agent orchestrators against real repositories; the rest are zerg's own,
+from its first live task (§6.1).
 
 ---
 
 ## 1. Thesis
 
-1. **The harness is an interface, not a branch in a switch statement.** swarm-forge hardcodes
-   `#{"claude" "codex" "copilot" "grok"}` in two places; adding a backend means editing the launcher.
+1. **The harness is an interface, not a branch in a switch statement.** Hardcoding a set of
+   supported backends means adding one is an edit to the launcher, in every place the set appears.
    Adapters here are a Go interface with a registry.
 
-2. **Agents emit events; they do not paint screens.** swarm-forge infers status by grepping a tmux
-   pane for a line containing `I'm`, and delivers work by injecting keystrokes into a TUI. Modern
-   harnesses expose structured output (`pi --mode json|rpc`, `claude --output-format stream-json`).
-   Consume that and the entire scraping layer disappears.
+2. **Agents emit events; they do not paint screens.** An orchestrator that infers status by
+   grepping a terminal pane for a line containing `I'm`, and delivers work by injecting keystrokes
+   into a TUI, is reimplementing a protocol on top of a display. Modern harnesses expose structured
+   output (`pi --mode json|rpc`, `claude --output-format stream-json`). Consume that and the entire
+   scraping layer disappears.
 
-3. **Configuration is a database, not a filesystem.** swarm-forge spreads config across
-   `swarmforge.conf`, `constitution.prompt`, `constitution/articles/*.prompt` and
-   `roles/<role>.prompt` — then copies *snapshots* of them into every worktree. Editing the original
-   after launch changes nothing, silently. (Verified the hard way: a `project.prompt` edit setting the
-   language to Rust never reached a single agent, because worktrees were cut from a commit made
-   before the edit. Six agents built the task in Clojure instead, with no warning.) One database,
-   one source of truth, composed fresh at every spawn.
+3. **Configuration is a database, not a filesystem.** Config spread across a conf file, a
+   constitution, article fragments and per-role prompt files — then *snapshotted* into every
+   worktree — means editing the original after launch changes nothing, silently.
 
-4. **Failure must be loud at the boundary.** Every incident in a day of running swarm-forge — a
-   corrupted global config, a CLI too old for its model, an unanswered trust dialog, a broken plugin
-   tree — presented identically: an agent that looked alive and did nothing. All four were detectable
+   Verified the hard way: an edit setting the project language to Rust never reached a single
+   agent, because the worktrees had been cut from a commit made before it. Six agents built the task
+   in Clojure, with no warning. That incident is why this project exists. One database, one source
+   of truth, composed fresh at every spawn.
+
+4. **Failure must be loud at the boundary.** A corrupted global config, a CLI too old for its
+   model, an unanswered trust dialog, a broken plugin tree — four separate incidents in one day, all
+   presenting identically as an agent that looked alive and did nothing. All four were detectable
    *before* spawning.
+
+5. **A green board must mean the work happened.** Added after §6.1, which is the record of a task
+   reaching Done over a branch that had never moved. Anything reporting success has to observe the
+   thing it claims, not a proxy for it.
 
 ---
 
@@ -64,7 +71,7 @@ the agent-facing client (§7).
 
 ## 4. Configuration model
 
-This is the part that most differs from the predecessor.
+This is the part everything else depends on: get it wrong and no amount of care downstream helps.
 
 ### 4.1 Library, team, runtime
 
@@ -107,7 +114,8 @@ visible — a role showing an override is badged in the team list, so a project 
 from the library is legible rather than mysterious.
 
 Plus one **shared instructions** document, global, applied to every role. That single editable
-document replaces swarm-forge's `constitution.prompt` + `constitution/articles/*.prompt` layering.
+document is the whole of it — there is no constitution file, no article fragments, no layering to
+reason about.
 
 ### 4.3 Model discovery
 
@@ -131,9 +139,8 @@ fix for the snapshot staleness that silently produced a Clojure calculator when 
 
 ### 4.5 The built-in library
 
-Eight templates ship, covering every shape swarm-forge split across `two-pack`, `four-pack` and
-`six-pack` — except here they are rows in a picker, not branches of the orchestrator you have to
-check out.
+Eight templates ship, covering every team shape worth presetting — as rows in a picker, rather than
+as branches of the orchestrator you have to check out to change your team.
 
 | Template | Model | Receive | Gate | Does |
 |---|---|---|---|---|
@@ -169,26 +176,33 @@ structural changes signed off, or on nothing at all for a repo you are happy to 
 
 ---
 
-## 5. What is kept from swarm-forge
+## 5. Foundations
+
+Four ideas the rest of the design is built on. They are load-bearing, and none of them is novel —
+they are here because they were tried and they held.
 
 - **Git worktree isolation per role.** One repo, one object store, N linked worktrees; peer commits
-  resolve without a fetch. The single best idea in the predecessor.
-- **Commit-pointer handoffs.** A handoff points at a SHA; the receiver merges. Git already solved the
-  hard parts.
+  resolve without a fetch. The single best structural idea available.
+- **Commit-pointer handoffs.** A handoff points at a SHA; the receiver merges. Git already solved
+  the hard parts of moving work between trees.
 - **Human gates** — approvals and clarification requests surfaced in the UI.
 - **A board of cards moving through lanes.** The right mental model for an operator.
 
-One change: swarm-forge required exactly one role to occupy the repo root (`master`), which made that
-role special in the config, in routing, and in the board. Here **every role gets a worktree** and the
-repo root is the integration branch. When the terminal role completes, the *overmind* merges to the
-base branch. Integration belongs to the orchestrator, not to whichever agent happened to be last.
+One consequence worth stating outright: **every role gets a worktree**, and the repo root is the
+integration branch, not a workspace. Letting one role occupy the repo root makes that role special
+in the config, in routing, and on the board — a special case that has to be handled everywhere it
+appears. When the terminal role completes, the *overmind* merges to the base branch. Integration
+belongs to the orchestrator, never to whichever agent happened to be last.
 
-## 6. What is replaced, and why
+## 6. Rejected approaches, and the failures behind them
 
-| Predecessor mechanism | Failure | Replacement |
+Every row is a design that was tried and observed failing, not a hypothetical. They are recorded
+because the reasoning is easy to lose once the code looks obvious.
+
+| Rejected approach | Failure | What zerg does |
 |---|---|---|
 | Config as files, snapshotted into each worktree | Post-launch edits silently invisible to every agent; a Rust config produced a Clojure implementation | Database is the only source of truth; prompts composed fresh at spawn |
-| Topology fixed by `swarmforge.conf` + preset branches (`two-pack`, `four-pack`, `six-pack`) | Changing the team means checking out a different git branch of the orchestrator | Roles are rows, edited in the UI; the team *is* the config |
+| Topology fixed by a conf file plus preset branches (`two-pack`, `four-pack`, `six-pack`) | Changing the team means checking out a different git branch of the orchestrator | Roles are rows, edited in the UI; the team *is* the config |
 | Handoff state as files across N worktrees, root path inferred by git heuristics | Two possible outbox locations with independent sequence counters; filename-keyed dedupe silently **drops** a colliding message while still firing its wake-up | Single SQLite (WAL) database, one writer, real transactions |
 | `deliver!` = N file copies + N notifies, then one move | Not transactional. Crash mid-loop re-delivers duplicates and re-moves the board. Nothing keys on message `id` | Outbox pattern in one transaction; idempotent on `(message_id, recipient)` |
 | Wake-up = `tmux send-keys` of a fixed literal into the session's active pane | Lands in whatever is focused; hardcoded 150ms/50ms sleeps race the TUI's paste debounce; tmux exit 0 means "keys accepted", never "agent read it" | Agent **pulls** via `zerg next` (long-poll) over a unix socket |
@@ -196,7 +210,7 @@ base branch. Integration belongs to the orchestrator, not to whichever agent hap
 | `PAYLOAD:` runs to EOF, unescaped | Any role can spoof protocol tokens at any other role in 80 chars — `message: NO_TASK` yields a payload line reading exactly `NO_TASK` | JSON envelopes end to end |
 | Check-then-move selection, no lock | Two concurrent claims create two batch dirs and split the queue; every later call errors `AMBIGUOUS_TASK_STATE` with **no recovery path** | Atomic claim: `UPDATE ... WHERE state='queued'` returning claimed rows |
 | Helpers resolve the inbox from process cwd | Run from a subdirectory → creates an empty queue there and reports `NO_TASK`. False negative *with* a side effect | Identity from a spawn-time token in env; no path inference anywhere |
-| Sender identity = `$SWARMFORGE_ROLE`, unvalidated | Any agent can `export SWARMFORGE_ROLE=architect` and send as the architect | Per-agent capability token minted at spawn |
+| Sender identity read from an environment variable, unvalidated | Any agent can export that variable as `architect` and send as the architect | Per-agent capability token minted at spawn |
 | Terminal role = last line of the config file | Reordering the file silently relocates the end of the pipeline | Last enabled role in the UI ordering, shown as a `terminal` badge |
 | Board lane moves at *enqueue* time | A card shows "in cleaner's lane" before cleaner has looked at it | Lane changes on **ack** |
 | Batch = every equal-priority item at an instant | Unbounded and unfair; a priority-00 item arriving 1ms late waits behind a 40-item batch | Batch policy (`max_items`, `max_age`) set per role in the UI; priority preemption at claim time |
@@ -206,14 +220,15 @@ base branch. Integration belongs to the orchestrator, not to whichever agent hap
 
 ### 6.1 What the first real run broke
 
-The table above was written before an agent had ever run. Every entry in it
-came from watching the predecessor fail. This section comes from watching
-*this* system fail, on its first live task, and it is kept because the entries
-share a shape the original list does not have.
+The table above was written before an agent had ever run: every entry came
+from watching an earlier design fail. This section comes from watching *this*
+one fail, on its first live task, and it is kept because the entries share a
+shape the original list does not have.
 
-The predecessor's failures were mostly **loud**: a stack trace, a stall, an
-`AMBIGUOUS_TASK_STATE` with no recovery. Zerg's first failures were all
-**quiet** — the board went green over work that had not happened.
+Those earlier failures were mostly **loud** — a stack trace, a stall, an
+unrecoverable state with no way forward. Zerg's first failures were all
+**quiet**: the board went green over work that had not happened. Quiet is
+worse. A stall gets investigated within the hour; a false green ships.
 
 | Mechanism | Failure | Fix |
 |---|---|---|
@@ -321,8 +336,8 @@ Work envelope:
 }
 ```
 
-`merged: true` states the overmind already merged. swarm-forge merged in the helper *and* told the
-agent to merge again in the payload; it worked only because the second merge was a no-op.
+`merged` states whether the overmind got that commit into the role's worktree, and it is set from
+the merge attempt's result. Never infer it from the presence of a commit: §6.1 is what that costs.
 
 **Leases.** A claim has a deadline. Ack closes it; expiry returns the work to the queue and marks the
 role degraded. This is the answer to "lost wake-up ⇒ permanent stall, no timer, no retry".
@@ -335,9 +350,9 @@ role degraded. This is the answer to "lost wake-up ⇒ permanent stall, no timer
 
 ### 7.4 No tmux
 
-swarm-forge is built on tmux: one session per role, a project-scoped socket, `send-keys` for
-delivery, `capture-pane` for the UI. zerg uses none of it. Agents are ordinary child processes of the
-daemon, supervised with `os/exec`.
+A tmux-based design — one session per role, `send-keys` for delivery, `capture-pane` for the UI —
+is the obvious way to build this, and zerg uses none of it. Agents are ordinary child processes of
+the daemon, supervised with `os/exec`.
 
 Every job tmux was doing has a better owner once agents emit structured events:
 
@@ -351,10 +366,10 @@ Every job tmux was doing has a better owner once agents emit structured events:
 | **surviving the operator's terminal closing** | See below — the one job that still needs an answer |
 
 That last row is the only real loss, and tmux's version of it was weaker than it looked: it keeps a
-*process* alive, which does nothing when the orchestrator has lost its *state*. swarm-forge's daemon
-terminated cleanly on a missing socket file — logging "stopped", removing its pid, indistinguishable
-from a normal shutdown — while agents sat there alive and idle and mail piled up in outboxes with no
-error surfaced anywhere.
+*process* alive, which does nothing when the orchestrator has lost its *state*. Observed: a daemon
+terminating cleanly on a missing socket file — logging "stopped", removing its pid, indistinguishable
+from a normal shutdown — while agents sat alive and idle and mail piled up in outboxes with no error
+surfaced anywhere.
 
 zerg answers it in two pieces:
 
@@ -434,7 +449,7 @@ so the spawn guard costs milliseconds.
 
 ### 8.2 Isolated harness config
 
-swarm-forge launched two codex agents 1.5s apart into fresh directories; both did a non-atomic
+Observed: two codex agents launched 1.5s apart into fresh directories, both doing a non-atomic
 read-modify-write of the **global** `~/.codex/config.toml` to register trust. The writes raced,
 producing a file containing three concatenated copies of itself, which then failed to parse for every
 codex invocation on the machine — including unrelated projects.
@@ -550,8 +565,8 @@ and the first is better than the thing it replaces.
 command with its stdout and exit code, every file edit as a diff, reasoning, errors. This is the
 "what is it doing right now" view. Because it is structured rather than scraped, it is searchable,
 filterable by role or tool, linkable per event, and replayable from the `events` table after a
-reload. A terminal scrape offers none of that, and swarm-forge's version of this question was
-grepping a pane for a line containing `I'm`.
+reload. A terminal scrape offers none of that; the version of this question it can answer is
+"does the pane contain a line matching `I'm`".
 
 **Raw stream**. The JSON lines as received. For debugging an adapter, not for watching work.
 
@@ -568,10 +583,10 @@ Both target harnesses accept **streaming structured input** alongside streaming 
 (`claude --input-format stream-json`, `pi --mode rpc`). Chat messages, clarification answers and
 follow-ups are therefore delivered as structured messages to a running agent.
 
-No keystrokes are ever injected. swarm-forge's wake-up was `tmux send-keys` of a fixed literal into
-whichever pane happened to be focused, with hardcoded 150ms/50ms sleeps racing the TUI's paste
-debounce — and a tmux exit code of 0 meant "keys accepted", never "the agent read it". Delivery here
-is a write to a pipe with a response event to confirm it landed.
+No keystrokes are ever injected. Keystroke delivery means sending a fixed literal to whichever pane
+happens to be focused, with hardcoded sleeps racing the TUI's paste debounce, and an exit code of 0
+that means "keys accepted" and never "the agent read it". Delivery here is a write to a pipe with a
+response event to confirm it landed.
 
 ---
 
@@ -586,9 +601,9 @@ them* and *how often it restarts them* — and both decide whether prompt cachin
 harness prints what it already received; the request and the completion are identical. Structured
 mode is not more expensive than a TUI.
 
-It is slightly *cheaper*, for one reason. swarm-forge's dashboard reads agent status by grepping the
-pane for a line containing `I'm`, so its constitution instructs every agent to narrate status in
-prose. Those are output tokens — the most expensive kind — spent producing telemetry for a scraper.
+It is slightly *cheaper*, for one reason. A dashboard that reads status by grepping a pane has to
+instruct every agent to narrate its status in prose. Those are output tokens — the most expensive
+kind — spent producing telemetry for a scraper.
 Structured mode carries tool calls, usage and turn boundaries natively. **No role prompt in zerg
 should ever ask an agent to describe what it is doing for the orchestrator's benefit.**
 
@@ -692,8 +707,8 @@ Two durations per task, and the gap between them is the interesting number:
 - **Active time** — summed lease durations. How long agents actually worked on it.
 
 A task showing 6 hours wall and 12 minutes active was not slow; it was **blocked** — waiting on an
-approval gate, a clarification, or a queue behind another card. swarm-forge could not distinguish
-these at all, so a stalled pipeline and a hard task looked identical. Charting them together turns
+approval gate, a clarification, or a queue behind another card. Without that distinction a stalled
+pipeline and a genuinely hard task look identical. Charting them together turns
 "where does our time go" from a guess into a reading.
 
 ### 12.3 What the history view answers
@@ -780,18 +795,27 @@ transcript is gone.
 
 ## 14. Stack
 
-Versions verified against npm dist-tags and `proxy.golang.org` on 2026-08-24.
+Versions below are what the repository actually builds with, read from `go.mod`, `package.json` and
+`components.json` on 2026-08-25 — not a plan.
 
 ### Go
 
+The dependency list is deliberately close to empty. One non-stdlib import, and it is the one that
+cannot be avoided.
+
 | Component | Version | Path | Note |
 |---|---|---|---|
-| toolchain | **1.26.7** | — | 1.27.0 is days old; pin conservative. 1.27 needs macOS 13+ |
-| router | stdlib | `net/http` | Go 1.22+ method+wildcard patterns suffice |
-| websocket | v1.8.15 | `github.com/coder/websocket` | successor to `nhooyr.io/websocket`; gorilla is maintenance-only |
-| pty | v1.1.24 | `github.com/creack/pty` | tag lags an active HEAD; pseudo-version if an ioctl bug bites |
-| sqlite | v1.57.0 | `modernc.org/sqlite` | pure Go — keeps `CGO_ENABLED=0` and the static binary |
-| embed | stdlib | `embed` | **must** be `//go:embed all:dist` |
+| toolchain | **1.27.0** | — | `go.mod` names it directly; needs macOS 13+ |
+| router | stdlib | `net/http` | Go 1.22+ method+wildcard patterns are enough; no third-party router |
+| sqlite | v1.57.0 | `modernc.org/sqlite` | pure Go — keeps `CGO_ENABLED=0` and a static binary |
+| embed | stdlib | `embed` | **must** be `//go:embed all:dist` — a plain directive skips Vite's `dist/.vite/` and the page fails to load with a successful build |
+
+Everything else — process supervision, the event bus, the unix socket, the agent client — is
+stdlib. `os/exec`, `net`, `encoding/json`, `log/slog`.
+
+**Planned, not yet present.** `github.com/coder/websocket` and `github.com/creack/pty` are named in
+§10.1 and §7.5 and are not in `go.mod`, because the activity view and terminal takeover are not
+built. They are listed here so the gap is visible rather than discovered.
 
 ### Frontend
 
@@ -800,38 +824,57 @@ Versions verified against npm dist-tags and `proxy.golang.org` on 2026-08-24.
 | Vue | 3.5.41 | 3.6 (Vapor) is RC — do not let `@next` in |
 | Vite | 8.2.2 | Rolldown is default, ESM-only, Node 20.19+/22.12+ |
 | shadcn-vue | 2.8.2 | CLI; `v3.shadcn-vue.com` is an **archived docs site**, not a package line |
-| reka-ui | 2.10.1 | the primitive layer; `radix-vue` was renamed to this and is frozen at 1.9.17 |
-| Tailwind | 4.3.3 | CSS-first: no `tailwind.config.js`; use `@tailwindcss/vite` + `@theme {}` |
-| @xterm/xterm | 6.0.0 | renamed from `xterm` (deprecated at 5.3.0); v6 **removed the canvas addon** — use WebGL |
-| TypeScript | **6.0.3 — pinned** | TS 7 is the Go-native rewrite, shipping without a stable programmatic compiler API; `vue-tsc` (Volar) is reported pinned to TS 6 until ~7.1. `vue-tsc`'s peer range says `>=5.0.0`, which is misleading. Verify before unpinning |
+| reka-ui | 2.10.3 | the primitive layer; `radix-vue` was renamed to this and is frozen at 1.9.17 |
+| Tailwind | 4.3.3 | CSS-first: no `tailwind.config.js`; `@tailwindcss/vite` + `@theme {}` |
+| TypeScript | **6.0.3 — pinned** | TS 7 is the Go-native rewrite, shipping without a stable programmatic compiler API; `vue-tsc` is pinned to TS 6 until ~7.1. Its peer range says `>=5.0.0`, which is misleading. Verify before unpinning |
+| vue-tsc | 3.3.11 | runs in `pnpm build` as `--noEmit`; `build:fast` skips it |
 | Pinia | 4.0.3 | |
 | vue-router | 5.2.0 | |
+| @vueuse/core | 14.4.0 | |
+| @lucide/vue | 1.33.0 | icon library |
 | JetBrains Mono | — | Google Fonts; the preset's face for headings *and* body |
-| HugeIcons | — | the preset's icon library, in place of Lucide |
+
+**pnpm, not npm**, at 11.22.0. This is not a preference — pnpm 11 blocks postinstall scripts unless
+a package is allowlisted, and `vue-demi` (which pinia and reka-ui both rely on) needs one. Without
+the allowlist the install exits non-zero, and that non-zero exit is what makes `shadcn-vue init`
+report a failed dependency step even though every package installed correctly. The allowlist lives
+in `web/pnpm-workspace.yaml`, which is where pnpm 11 moved it from `package.json`.
+
+**Not present:** `@xterm/xterm`. §10.1's terminal takeover is unbuilt, so the terminal *styling* in
+the cockpit is CSS over ordinary elements, not a real emulator.
 
 ### 14.1 UI foundation
 
-The cockpit starts from shadcn-vue preset **`awF4GHI`** — Style *Lyra*, JetBrains Mono for headings
-and body, **radius 0**, HugeIcons, Menu Default/Solid with a Subtle accent. Its structure is kept
-verbatim; only the hue moves, from the preset's Mauve to the zerg palette. Tokens live in
-[`web/theme.css`](web/theme.css) in shadcn-vue's own oklch format, so `npx shadcn-vue@latest add`
-components inherit them with no per-component styling.
+The cockpit was scaffolded with the shadcn-vue CLI:
 
-Two notes on that file:
+```sh
+pnpm dlx shadcn-vue@latest init --preset awGASPI --template vite
+```
 
+That resolves to style *reka-lyra*, JetBrains Mono, base color *mauve*, **radius 0**, Menu
+Default/Subtle, and **lucide** icons — recorded in `web/components.json`, which is the file to read
+rather than this paragraph if the two disagree.
+
+Two rules about it:
+
+- **Components in `src/components/ui/` are CLI output. Do not hand-write them.** Add with
+  `pnpm dlx shadcn-vue@latest add <name>`. Hand-written lookalikes drift from the registry and
+  silently miss the token wiring that makes theming work at all.
 - **Chart and tier colors are not decorative and must not be re-picked by eye.** `--chart-1..4`
-  (role identity) and `--tier-1..4` (the cost ramp of §11.4) were validated against the dark surface
-  and pass every gate — worst adjacent CVD ΔE 9.4. All four chart hues sit at L≈62%, which is *why*
-  they pass. Changing one means re-running the validator, not nudging a hex.
-- **Mono for body text is the preset's call, and it has a cost.** It suits dense tool UI — tables,
-  logs, the activity view — and it is why the terminal skin and the cockpit chrome feel continuous.
-  It is less comfortable for long prose, so watch the one screen that has any: the prompt editor. If
-  it reads tiring at length, that editor is the place to make an exception, not the whole app.
+  (role identity) and `--tier-1..4` (the cost ramp of §11.4) live in
+  [`web/theme.css`](web/theme.css) and were validated against the dark surface — worst adjacent CVD
+  ΔE 9.4. All four chart hues sit at L≈62%, which is *why* they pass. Changing one means re-running
+  the validator, not nudging a hex.
 
-> **Node floor:** `create-vue@3.23.0` requires Node `^22.18.0 || >=24.12.0`. This machine's shell
-> resolves to v22.12.0 while nvm's default alias is v24.19.0 — scaffolding must run under 24.19.0.
-> `.nvmrc` pins it rather than trusting ambient shell state; the same version-skew class broke `pi`
-> locally.
+One standing cost to watch: **mono for body text** is the preset's call. It suits dense tool UI —
+tables, logs, the activity view — and it is why the terminal skin and the cockpit chrome feel
+continuous. It is less comfortable for long prose, so watch the one screen that has any, the prompt
+editor. If it reads tiring at length, that editor is the place to make an exception, not the app.
+
+> **Node floor:** the shadcn-vue CLI and Vite 8 require Node `^22.18.0 || >=24.12.0`. This machine's
+> bare shell resolves to v22.12.0 while nvm's default alias is v24.19.0, so tooling must run under
+> 24.19.0. `.nvmrc` pins it rather than trusting ambient shell state — the same version-skew class
+> broke `pi` locally.
 
 ---
 
@@ -847,5 +890,6 @@ Two notes on that file:
 6. **pi adapter** — the second adapter is what proves the interface is real.
 7. pty attach + xterm.js; cost accounting; event replay.
 
-Milestones 1–2 are deliberately LLM-free. The coordination layer is where the predecessor's failure
-modes lived, and it is testable without spending a token.
+Milestones 1–2 are deliberately LLM-free. The coordination layer is where the interesting failure
+modes live — §6 and §6.1 are both almost entirely coordination bugs — and it is testable without
+spending a token.

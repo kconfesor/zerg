@@ -180,8 +180,8 @@ func TestNextWaitsForWorkToArrive(t *testing.T) {
 	}
 }
 
-// A token proves one role. The predecessor read the sender from an environment
-// variable any agent could set to any value.
+// A token proves one role. A sender read from an environment variable is a
+// sender any agent can set to any value.
 func TestTokenScopesTheSender(t *testing.T) {
 	ctx := context.Background()
 	f := newFixture(t)
@@ -254,7 +254,7 @@ func TestDoneRejectsAnUnknownLease(t *testing.T) {
 }
 
 // A question with no answer must not look like an agent that stopped for no
-// reason, which is what the predecessor's arrangement produced.
+// reason.
 func TestAskRecordsAQuestionAndReceivesAnAnswer(t *testing.T) {
 	ctx := context.Background()
 	f := newFixture(t)

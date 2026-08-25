@@ -56,8 +56,8 @@ const byLane = computed(() => {
             <div class="mb-2 text-xs leading-snug font-medium break-words">{{ task.name }}</div>
             <div class="flex flex-wrap items-center gap-1.5">
               <!-- lane says who holds the card, state says whether they are
-                   actually working it. The predecessor showed only the lane,
-                   so a card read as claimed the instant it was delivered. -->
+                   actually working it. Showing only the lane makes a card read
+                   as claimed the instant it is delivered. -->
               <Badge :variant="task.state === 'working' ? 'default' : 'outline'">
                 {{ task.state }}
               </Badge>

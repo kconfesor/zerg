@@ -122,9 +122,9 @@ func TestSetTeamNormalisesPositions(t *testing.T) {
 }
 
 // Terminality follows the last *enabled* role, so disabling the final role
-// promotes the one before it with no edit anywhere else. The predecessor took
-// this from config-file line order, where reordering a file silently moved the
-// end of the pipeline.
+// promotes the one before it with no edit anywhere else. Taken from
+// config-file line order instead, reordering a file silently moves the end of
+// the pipeline.
 func TestTerminalFollowsLastEnabledRole(t *testing.T) {
 	ctx := context.Background()
 	db, p := seeded(t)

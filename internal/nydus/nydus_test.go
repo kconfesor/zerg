@@ -240,9 +240,9 @@ func TestPipelineEndToEnd(t *testing.T) {
 
 // ── claiming ──────────────────────────────────────────────────────────────
 
-// Two claimers must never receive the same work. The predecessor listed a
-// directory and then moved a file, so the loser threw a stack trace — or in
-// batch mode split the queue into two directories with no recovery path.
+// Two claimers must never receive the same work. List a directory and then move
+// a file and the loser throws — or, in batch mode, the queue splits into two
+// directories with no recovery path.
 func TestConcurrentClaimsNeverDoubleTake(t *testing.T) {
 	ctx := context.Background()
 	f := newFixture(t)
@@ -326,8 +326,8 @@ func TestClaimOnEmptyQueueIsNilNotError(t *testing.T) {
 
 // ── leases ────────────────────────────────────────────────────────────────
 
-// This is the predecessor's permanent stall, made recoverable: an agent that
-// dies holding work must not take the work with it.
+// The permanent stall, made recoverable: an agent that dies holding work must
+// not take the work with it.
 func TestExpiredLeaseReturnsWorkToTheQueue(t *testing.T) {
 	ctx := context.Background()
 	f := newFixture(t, WithLease(time.Minute))

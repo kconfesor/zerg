@@ -1,8 +1,8 @@
 // Package hatchery manages a project's worktrees.
 //
-// One linked worktree per role is the predecessor's best idea, carried over
-// intact: a single repository and object store, so a peer's commit resolves
-// without a fetch, and roles that cannot overwrite each other's files.
+// One linked worktree per role: a single repository and object store, so a
+// peer's commit resolves without a fetch, and roles that cannot overwrite each
+// other's files.
 package hatchery
 
 import (

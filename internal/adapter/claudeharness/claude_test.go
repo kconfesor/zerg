@@ -128,9 +128,9 @@ func TestParseResultCarriesTheCacheSplit(t *testing.T) {
 	}
 }
 
-// A turn that errors must surface as an error rather than a quiet end. The
-// predecessor's agents returned HTTP 400 on every turn for twenty minutes while
-// looking perfectly alive.
+// A turn that errors must surface as an error rather than a quiet end. Observed:
+// agents returning HTTP 400 on every turn for twenty minutes while looking
+// perfectly alive.
 func TestParseResultErrorSurfaces(t *testing.T) {
 	line := `{"type":"result","subtype":"error","is_error":true,"total_cost_usd":0,
 		"result":"The 'gpt-5.6-sol' model requires a newer version of Codex.","usage":{}}`

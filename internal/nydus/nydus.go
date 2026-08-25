@@ -1,10 +1,10 @@
 // Package nydus routes work between roles.
 //
-// Everything here is a transaction against SQLite, which is the point. The
-// predecessor coordinated through files across N worktrees: delivery was a
-// loop of copies that could half-complete, claiming was check-then-move with
-// no lock, and a lost wake-up stalled a pipeline permanently with no timer and
-// no retry. Those are not bugs in that design so much as the design.
+// Everything here is a transaction against SQLite, which is the point.
+// Coordinating through files across N worktrees makes delivery a loop of copies
+// that can half-complete, claiming a check-then-move with no lock, and a lost
+// wake-up a permanent stall with no timer and no retry. Those are not bugs in
+// such a design so much as the design.
 package nydus
 
 import (
@@ -122,9 +122,8 @@ type SendRequest struct {
 // Send routes work from one role onward.
 //
 // A handoff from a gated role is held rather than queued: the recipient never
-// sees it until a human approves. The predecessor's equivalent moved the card
-// and told the sender it had queued successfully, then sat in a directory that
-// nothing pointed at.
+// sees it until a human approves — as opposed to moving the card, telling the
+// sender it queued successfully, and leaving it somewhere nothing points at.
 func (n *Nydus) Send(ctx context.Context, projectID, fromRole string, req SendRequest) (*store.Message, error) {
 	team, err := n.db.ResolveTeam(ctx, projectID)
 	if err != nil {
@@ -282,8 +281,7 @@ func (n *Nydus) send(ctx context.Context, req sendReq) (*store.Message, error) {
 		}
 	} else if req.TaskID != nil {
 		// The card follows the work. State stays "queued" until the recipient
-		// claims it, so the board distinguishes waiting from being worked on —
-		// which is the honest version of what the predecessor showed.
+		// claims it, so the board distinguishes waiting from being worked on.
 		//
 		// The rework counter moves with it, in the same transaction: a lap that
 		// was routed but not counted is exactly the invisible loop this exists
@@ -374,10 +372,10 @@ func (n *Nydus) complete(ctx context.Context, projectID string, sender store.Res
 // Claim takes work for a role, returning nil when the queue is empty.
 //
 // Selection and the state change happen in one transaction, so two concurrent
-// claims can never take the same message. The predecessor listed a directory
-// and then moved a file, so two runs picked the same item and the loser threw
-// a stack trace — or, in batch mode, split the queue into two directories that
-// every later call then refused to touch, with no recovery path.
+// claims can never take the same message. Listing a directory and then moving
+// a file lets two runs pick the same item, and the loser throws — or, in batch
+// mode, splits the queue into two directories that every later call then
+// refuses to touch, with no recovery path.
 func (n *Nydus) Claim(ctx context.Context, projectID, role string) (*store.Lease, error) {
 	team, err := n.db.ResolveTeam(ctx, projectID)
 	if err != nil {
@@ -654,8 +652,8 @@ func (n *Nydus) Ack(ctx context.Context, leaseID string) error {
 }
 
 // ExpireLeases returns unacknowledged work to the queue and reports how many
-// leases lapsed. Without this a crashed agent takes its work with it, which is
-// exactly how the predecessor stalled.
+// leases lapsed. Without this a crashed agent takes its work with it, and the
+// pipeline stalls with nothing to notice that it has.
 func (n *Nydus) ExpireLeases(ctx context.Context) (int, error) {
 	now := n.now()
 

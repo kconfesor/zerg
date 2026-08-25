@@ -180,8 +180,8 @@ func (c *Cerebrate) Run(ctx context.Context) error {
 			c.setState(StateStopped, "")
 			return nil
 		case fatal:
-			// Restarting into the same wall is what the predecessor did for
-			// twenty minutes. A fatal error means stop and say so.
+			// Restarting into the same wall is how twenty minutes gets spent on
+			// an agent that cannot work. A fatal error means stop and say so.
 			c.setState(StateFailed, errString(err))
 			c.publish(adapter.Event{
 				Kind: adapter.EventError, Fatal: true,

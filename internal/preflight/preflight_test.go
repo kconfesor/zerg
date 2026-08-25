@@ -124,7 +124,7 @@ func TestOneBlockedRoleBlocksTheTeam(t *testing.T) {
 			t.Error("a blocked check must say what is wrong")
 		}
 		if c.Remedy == "" {
-			t.Error("a blocked check must say how to fix it; a bare failure is what the predecessor already gave us")
+			t.Error("a blocked check must say how to fix it; a bare failure is the thing this replaces")
 		}
 	}
 	if !found {
@@ -179,8 +179,8 @@ func TestUnknownHarnessIsBlockedWithARemedy(t *testing.T) {
 	}
 }
 
-// A probe that never answers is itself the finding. That is precisely the
-// predecessor's failure mode, so it must not become this one's.
+// A probe that never answers is itself the finding — that is the exact failure
+// mode this package exists to catch, so it must not become its own.
 func TestHungCheckIsReportedNotWaitedOn(t *testing.T) {
 	hang := adapter.Check{Name: "hangs", Run: func(ctx adapter.Ctx, _ adapter.Spec) adapter.Result {
 		<-ctx.Done()

@@ -1,9 +1,9 @@
 -- zerg schema, version 3: clarifications.
 --
 -- An agent that needs a human answer must have somewhere to put the question.
--- The predecessor told agents not to ask in their pane and to use a helper
--- script instead, which meant a question with no answer looked exactly like an
--- agent that had stopped for no reason.
+-- Telling agents not to ask in their pane and to use a helper script instead
+-- means a question with no answer looks exactly like an agent that stopped for
+-- no reason.
 
 CREATE TABLE clarifications (
     id         TEXT NOT NULL PRIMARY KEY,

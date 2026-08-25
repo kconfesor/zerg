@@ -9,9 +9,9 @@ import (
 
 // Registry holds the harnesses this build knows about.
 //
-// swarm-forge kept its four backends in a validation set and a case expression,
-// so adding one meant editing the launcher in two places and re-reading it in a
-// third. Registering an implementation is the whole ceremony here.
+// Keeping backends in a validation set and a case expression means adding one
+// is an edit in two places and a re-read in a third. Registering an
+// implementation is the whole ceremony here.
 type Registry struct {
 	mu       sync.RWMutex
 	adapters map[string]Adapter

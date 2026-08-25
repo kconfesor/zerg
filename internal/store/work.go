@@ -11,9 +11,8 @@ import (
 )
 
 // Task states. lane says which role holds a card; state says whether that role
-// is actually working it. The predecessor had only the lane, so a card read as
-// "in cleaner's lane" the instant delivery happened, whether or not cleaner had
-// looked at it.
+// is actually working it. With only the lane, a card reads as "in cleaner's
+// lane" the instant delivery happens, whether or not cleaner has looked at it.
 const (
 	TaskQueued   = "queued"
 	TaskWorking  = "working"
@@ -80,7 +79,7 @@ type Message struct {
 }
 
 // Lease is a claim with a deadline. Expiry returns its work to the queue,
-// which is the answer to the predecessor's permanent stall.
+// which is what makes a missed hand-off recoverable rather than permanent.
 type Lease struct {
 	ID        string    `json:"id"`
 	ProjectID string    `json:"projectId"`

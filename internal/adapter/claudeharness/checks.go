@@ -81,8 +81,8 @@ func (*Adapter) configParsesCheck() adapter.Check {
 	}
 }
 
-// workspaceTrustedCheck looks for the dialog that silently blocked four roles
-// at once in the predecessor.
+// workspaceTrustedCheck looks for the dialog that once silently blocked four
+// roles at once.
 //
 // Headless runs do not hit the interactive prompt, so this is a warning rather
 // than a block: it matters for takeover (§10.1), where a real TUI attaches and
