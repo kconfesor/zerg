@@ -60,8 +60,12 @@ func (*Adapter) Capabilities() adapter.Caps {
 		StructuredOutput: true,
 		// --input-format stream-json accepts messages on stdin while the process
 		// keeps running, so chat and clarification answers reach a live agent.
-		StructuredInput:  true,
-		InteractiveTUI:   true,
+		StructuredInput: true,
+		InteractiveTUI:  true,
+		// Verified on macOS: credentials live in the keychain under
+		// "Claude Code-credentials", and setting CLAUDE_CONFIG_DIR makes the
+		// CLI report "Not logged in", even with .claude.json copied across.
+		PrivateConfigDir: false,
 		SystemPromptFile: true,
 		ModelFlag:        true,
 		ResumeSession:    true,
@@ -104,18 +108,16 @@ func (*Adapter) Command(ctx context.Context, spec adapter.Spec) (*exec.Cmd, erro
 
 	cmd := exec.CommandContext(ctx, binary, args...)
 	cmd.Dir = spec.Worktree
-	cmd.Env = append(os.Environ(),
-		"ZERG_SOCKET="+spec.Socket,
-		"ZERG_TOKEN="+spec.Token,
-		"ZERG_ROLE="+spec.Role,
-	)
-	// A private config directory keeps two agents from racing a shared global
-	// one. Two codex processes doing exactly that produced a config file
-	// containing three concatenated copies of itself, which then failed to
-	// parse for every invocation on the machine.
+	var extra []string
 	if spec.ConfigDir != "" {
-		cmd.Env = append(cmd.Env, "CLAUDE_CONFIG_DIR="+spec.ConfigDir)
+		// A private config directory keeps two agents from racing a shared
+		// global one. Two codex processes doing exactly that produced a config
+		// file holding three concatenated copies of itself, which then failed to
+		// parse for every invocation on the machine.
+		extra = append(extra, "CLAUDE_CONFIG_DIR="+spec.ConfigDir)
 	}
+	cmd.Env = adapter.AgentEnv(spec, extra...)
+
 	return cmd, nil
 }
 

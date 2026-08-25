@@ -202,6 +202,11 @@ func (o *Overmind) Start(ctx context.Context, projectID string) error {
 		return err
 	}
 
+	binDir, err := o.ensureAgentBin()
+	if err != nil {
+		return err
+	}
+
 	session, err := o.db.StartSession(ctx, projectID)
 	if err != nil {
 		return err
@@ -231,17 +236,24 @@ func (o *Overmind) Start(ctx context.Context, projectID string) error {
 		token := o.agents.Mint(projectID, role.Name)
 		s.tokens = append(s.tokens, token)
 
+		// A private config directory per role, but only where the harness can
+		// actually run with one. claude keeps credentials in the OS keychain
+		// and a relocated directory leaves it unauthenticated, so isolating it
+		// would trade a rare race for an agent that cannot work at all.
+		configDir := ""
+		if a.Capabilities().PrivateConfigDir {
+			configDir = o.roleDir(projectID, role.Name, "config")
+		}
+
 		c := cerebrate.New(cerebrate.Config{
-			ProjectID: projectID,
-			Role:      role,
-			Adapter:   a,
-			Worktree:  worktree,
-			// A private harness config directory per role. Two agents racing a
-			// read-modify-write of one shared global file is how a config ended
-			// up holding three concatenated copies of itself.
-			ConfigDir:    o.roleDir(projectID, role.Name, "config"),
+			ProjectID:    projectID,
+			Role:         role,
+			Adapter:      a,
+			Worktree:     worktree,
+			ConfigDir:    configDir,
 			Socket:       o.agents.Path(),
 			Token:        token,
+			BinDir:       binDir,
 			SystemPrompt: composePrompt(shared, role.Prompt),
 			Bus:          o.bus,
 			Log:          o.log,
@@ -331,15 +343,18 @@ func (o *Overmind) keepMoving(ctx context.Context, projectID string, s *swarm) {
 	}
 }
 
-// nudgeIdle tells agents that are ready, and only ready, to go and claim.
+// nudgeIdle tells agents that can take work to go and claim it.
 //
-// An agent mid-turn is left alone: interrupting it would either be ignored or
-// arrive as a second instruction inside work it is already doing. Because the
-// queue is durable, skipping a nudge costs nothing — the next tick finds the
-// same work still waiting.
+// The gate is "not mid-turn", not "has reported ready". A harness that only
+// initialises once it receives its first message would otherwise never be sent
+// one — no turn, no init, no ready, no turn. An agent already working is left
+// alone: a second instruction inside work in progress is at best ignored.
+//
+// Because the queue is durable, a skipped nudge costs nothing; the next tick
+// finds the same work still waiting.
 func (o *Overmind) nudgeIdle(ctx context.Context, projectID string, s *swarm) {
 	for role, c := range s.cerebrates {
-		if c.State() != cerebrate.StateReady {
+		if !c.Idle() {
 			continue
 		}
 		n, err := o.db.QueuedCount(ctx, projectID, role)
@@ -381,6 +396,40 @@ func composePrompt(shared, role string) string {
 	default:
 		return shared + "\n\n---\n\n" + role
 	}
+}
+
+// ensureAgentBin puts a `zerg` executable somewhere agents can find it.
+//
+// The prompts tell agents to run `zerg next`. Whether that resolves depends on
+// how the daemon itself was started — by absolute path, from a build
+// directory, from anywhere not already on PATH — and when it does not resolve
+// the agent simply cannot do what it was asked, with no way to report why. A
+// symlink under the state directory makes the name true regardless.
+func (o *Overmind) ensureAgentBin() (string, error) {
+	self, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("locating the zerg binary: %w", err)
+	}
+	self, err = filepath.EvalSymlinks(self)
+	if err != nil {
+		return "", fmt.Errorf("resolving the zerg binary: %w", err)
+	}
+
+	binDir := filepath.Join(o.stateDir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		return "", fmt.Errorf("creating %s: %w", binDir, err)
+	}
+
+	link := filepath.Join(binDir, "zerg")
+	// Replace rather than reuse: a link left by a previous build would point
+	// at a binary that no longer matches this daemon's protocol.
+	if err := os.Remove(link); err != nil && !os.IsNotExist(err) {
+		return "", fmt.Errorf("clearing %s: %w", link, err)
+	}
+	if err := os.Symlink(self, link); err != nil {
+		return "", fmt.Errorf("linking %s: %w", link, err)
+	}
+	return binDir, nil
 }
 
 func (o *Overmind) roleDir(projectID, role, kind string) string {

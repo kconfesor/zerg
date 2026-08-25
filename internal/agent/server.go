@@ -153,6 +153,13 @@ type NextResponse struct {
 	ExpiresAt time.Time   `json:"expiresAt"`
 	Items     []Item      `json:"items"`
 	Task      *store.Task `json:"task,omitempty"`
+
+	// Next is the role this work goes to when finished, and Terminal says this
+	// role finishes the task instead. Without these an agent has to guess a
+	// recipient, and a wrong guess is rejected — which is exactly what
+	// happened the first time a real agent ran this.
+	Next     string `json:"next,omitempty"`
+	Terminal bool   `json:"terminal"`
 }
 
 // Item is one unit of work inside a lease.
@@ -195,7 +202,12 @@ func (s *Server) next(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if lease != nil {
-			writeJSON(w, http.StatusOK, s.describe(r.Context(), lease))
+			out, err := s.describe(r.Context(), id, lease)
+			if err != nil {
+				s.fail(w, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, out)
 			return
 		}
 		if !time.Now().Before(deadline) {
@@ -212,10 +224,31 @@ func (s *Server) next(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) describe(ctx context.Context, lease *store.Lease) NextResponse {
+func (s *Server) describe(ctx context.Context, id Identity, lease *store.Lease) (NextResponse, error) {
 	out := NextResponse{
 		LeaseID: lease.ID, Role: lease.Role, ExpiresAt: lease.ExpiresAt,
 		Items: make([]Item, 0, len(lease.Items)),
+	}
+
+	// Where this work goes next, so the agent is told rather than guessing.
+	team, err := s.db.ResolveTeam(ctx, id.ProjectID)
+	if err != nil {
+		return out, err
+	}
+	var enabled []store.ResolvedRole
+	for _, r := range team {
+		if r.Enabled {
+			enabled = append(enabled, r)
+		}
+	}
+	for i, r := range enabled {
+		if r.Name != id.Role {
+			continue
+		}
+		out.Terminal = r.Terminal
+		if !r.Terminal && i+1 < len(enabled) {
+			out.Next = enabled[i+1].Name
+		}
 	}
 	for _, m := range lease.Items {
 		item := Item{
@@ -233,7 +266,7 @@ func (s *Server) describe(ctx context.Context, lease *store.Lease) NextResponse 
 		}
 		out.Items = append(out.Items, item)
 	}
-	return out
+	return out, nil
 }
 
 // ── done ──────────────────────────────────────────────────────────────────
@@ -284,6 +317,22 @@ func (s *Server) send(w http.ResponseWriter, r *http.Request) {
 	var req sendRequest
 	if !decode(w, r, &req) {
 		return
+	}
+
+	// Agents are told the task name, and the name is what every handoff
+	// carries, so --task accepts either form. Resolving it here also means a
+	// wrong value reports itself rather than arriving as a foreign-key
+	// violation from inside the router.
+	if req.TaskID != "" {
+		if _, err := s.db.GetTask(r.Context(), req.TaskID); err != nil {
+			task, nameErr := s.db.GetTaskByName(r.Context(), id.ProjectID, req.TaskID)
+			if nameErr != nil {
+				writeError(w, http.StatusNotFound,
+					fmt.Sprintf("no task with id or name %q in this project", req.TaskID))
+				return
+			}
+			req.TaskID = task.ID
+		}
 	}
 
 	// The sender is the token's role. There is no --from to forge.

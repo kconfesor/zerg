@@ -8,7 +8,9 @@ package adapter
 
 import (
 	"context"
+	"os"
 	"os/exec"
+	"strings"
 	"time"
 )
 
@@ -90,6 +92,39 @@ type Spec struct {
 	// the overmind with Token; there is no --from flag to forge.
 	Socket string
 	Token  string
+
+	// BinDir holds the zerg executable and is prepended to the agent's PATH.
+	//
+	// Agents are instructed to run `zerg next`, `zerg done` and `zerg send`.
+	// Inheriting the daemon's PATH is not enough: a daemon started by absolute
+	// path, or installed anywhere not already on PATH, leaves those commands
+	// unresolvable — and the failure is quiet, because the agent simply cannot
+	// do what it was told and has no way to say why.
+	BinDir string
+}
+
+// AgentEnv builds the environment for a spawned agent: the current environment
+// with BinDir prepended to PATH, plus the identity the agent authenticates with.
+func AgentEnv(spec Spec, extra ...string) []string {
+	path := os.Getenv("PATH")
+	if spec.BinDir != "" {
+		path = spec.BinDir + string(os.PathListSeparator) + path
+	}
+
+	out := make([]string, 0, len(os.Environ())+4+len(extra))
+	for _, kv := range os.Environ() {
+		if strings.HasPrefix(kv, "PATH=") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	out = append(out,
+		"PATH="+path,
+		"ZERG_SOCKET="+spec.Socket,
+		"ZERG_TOKEN="+spec.Token,
+		"ZERG_ROLE="+spec.Role,
+	)
+	return append(out, extra...)
 }
 
 // Caps declares what a harness can actually do, so the orchestrator can degrade
@@ -110,6 +145,17 @@ type Caps struct {
 	// switch, not a parallel view: a process is either emitting structured
 	// events or painting a screen, never both.
 	InteractiveTUI bool
+
+	// PrivateConfigDir says whether this harness can run with its config
+	// relocated per role.
+	//
+	// Isolation exists because two agents racing a read-modify-write of one
+	// shared global config produced a file holding three concatenated copies
+	// of itself. But it is not universally safe: claude keeps credentials in
+	// the OS keychain and a relocated config directory breaks the lookup, so
+	// an isolated agent launches unauthenticated. Losing auth entirely is
+	// strictly worse than a rare race, so each adapter decides for itself.
+	PrivateConfigDir bool
 
 	SystemPromptFile bool // accepts a system prompt as a file rather than an argv blob
 	ModelFlag        bool // model selectable per invocation

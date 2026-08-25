@@ -136,6 +136,10 @@ func runUp(args []string) error {
 	nyd := nydus.New(db, nydus.WithIntegrator(nydus.Git{}))
 	bus := event.NewBus()
 
+	// Something has to watch the agents, or the orchestrator reproduces the
+	// failure it was built to prevent.
+	event.LogEvents(ctx, bus, log)
+
 	agents := agent.NewServer(db, nyd, log)
 	socket := filepath.Join(stateDir, "agent.sock")
 	if err := agents.Listen(socket); err != nil {

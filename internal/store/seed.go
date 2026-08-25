@@ -21,8 +21,15 @@ const SettingSharedInstructions = "shared_instructions"
 const DefaultSharedInstructions = `# How work reaches you
 
 Claim work with ` + "`zerg next`" + `. It blocks until something is queued for you and
-prints JSON: the task name, who sent it, and the payload. If it prints nothing,
-there is no work; do not poll in a loop.
+prints JSON: the task name, who sent it, the payload, and two fields that tell
+you where the work goes when you are finished —
+
+    "next":     the role to hand off to
+    "terminal": true if you are the last role, and finish the task instead
+
+Use those. Never guess a recipient: the team is configured per project and the
+pipeline is not the same everywhere. If it prints nothing, there is no work; do
+not poll in a loop.
 
 When a handoff carries a commit, it has already been merged into your worktree
 before you were handed it. Do not merge it again.
@@ -33,12 +40,17 @@ Run ` + "`zerg done`" + ` to acknowledge. Your claim has a deadline; work that i
 acknowledged returns to the queue, so acknowledge even when the outcome is "no
 change needed".
 
-To pass work on, commit first, then:
+Then commit, and pass the work on to the role the envelope named:
 
-    zerg send --to <role> --commit HEAD --task "<task name>"
+    zerg send --to <next> --commit HEAD --task "<task name>"
+
+If the envelope said ` + "`\"terminal\": true`" + `, you finish the task instead — omit
+` + "`--to`" + ` entirely, and the commit is merged into the project's branch:
+
+    zerg send --commit HEAD --task "<task name>"
 
 Keep the task name exactly as you received it. It is how one card is followed
-across the whole pipeline.
+across the whole pipeline, and it is the handle ` + "`--task`" + ` expects.
 
 # When you are stuck
 

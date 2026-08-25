@@ -36,8 +36,11 @@ func (*Adapter) Capabilities() adapter.Caps {
 		// Verified: --mode rpc reads newline-delimited commands on stdin and
 		// answers {"type":"response","command":"prompt","success":true} while
 		// streaming the same events as --mode json.
-		StructuredInput:  true,
-		InteractiveTUI:   true,
+		StructuredInput: true,
+		InteractiveTUI:  true,
+		// pi keeps credentials in auth.json inside its config directory, so a
+		// private directory is safe once that file is seeded across.
+		PrivateConfigDir: true,
 		SystemPromptFile: true, // --append-system-prompt resolves a path
 		ModelFlag:        true,
 		ResumeSession:    true, // --session <path|id>
@@ -79,14 +82,23 @@ func (*Adapter) Command(ctx context.Context, spec adapter.Spec) (*exec.Cmd, erro
 
 	cmd := exec.CommandContext(ctx, binary, args...)
 	cmd.Dir = spec.Worktree
-	cmd.Env = append(os.Environ(),
-		"ZERG_SOCKET="+spec.Socket,
-		"ZERG_TOKEN="+spec.Token,
-		"ZERG_ROLE="+spec.Role,
-	)
+	var extra []string
 	if spec.ConfigDir != "" {
-		cmd.Env = append(cmd.Env, "PI_CODING_AGENT_DIR="+spec.ConfigDir)
+		// A private config directory keeps two agents from racing a shared
+		// global one. Two codex processes doing exactly that produced a config
+		// file holding three concatenated copies of itself, which then failed to
+		// parse for every invocation on the machine.
+		//
+		// It has to be seeded first: pi keeps credentials in auth.json inside
+		// that directory, so an unseeded private directory means an agent that
+		// launches with no way to reach any provider.
+		if err := seedConfigDir(spec.ConfigDir); err != nil {
+			return nil, err
+		}
+		extra = append(extra, "PI_CODING_AGENT_DIR="+spec.ConfigDir)
 	}
+	cmd.Env = adapter.AgentEnv(spec, extra...)
+
 	return cmd, nil
 }
 
@@ -339,4 +351,39 @@ func (*Adapter) EncodeTurn(text string) ([]byte, error) {
 		return nil, fmt.Errorf("pi: encoding turn: %w", err)
 	}
 	return append(b, '\n'), nil
+}
+
+// seedConfigDir copies what a private config directory needs from the user's
+// real one: credentials, settings, and the model cache.
+//
+// Only files that already exist are copied, and an existing copy is left
+// alone — an agent may have written to its own directory since, and
+// overwriting that on every spawn would discard it.
+func seedConfigDir(dir string) error {
+	source := userConfigDir()
+	if source == "" || source == dir {
+		return nil
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("pi: creating %s: %w", dir, err)
+	}
+
+	for _, name := range []string{"auth.json", "settings.json", "models-store.json"} {
+		dst := filepath.Join(dir, name)
+		if _, err := os.Stat(dst); err == nil {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(source, name))
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("pi: reading %s: %w", name, err)
+		}
+		// Credentials: readable by their owner and nobody else.
+		if err := os.WriteFile(dst, data, 0o600); err != nil {
+			return fmt.Errorf("pi: seeding %s: %w", name, err)
+		}
+	}
+	return nil
 }

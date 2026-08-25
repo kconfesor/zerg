@@ -74,6 +74,9 @@ type Config struct {
 	Socket    string
 	Token     string
 
+	// BinDir holds the zerg executable the agent is told to run.
+	BinDir string
+
 	// SystemPrompt is composed fresh by the caller from shared instructions
 	// plus the role prompt, so an edit is live on restart and no stale copy
 	// can survive in a worktree.
@@ -98,6 +101,15 @@ type Cerebrate struct {
 
 	stdin io.WriteCloser
 	ready chan struct{} // closed when the agent first reports ready
+
+	// busy is true between submitting a turn and the agent finishing it.
+	//
+	// Readiness cannot be the gate for sending work. claude in stream-json
+	// mode emits its init event only after it receives a first message, so
+	// waiting for "ready" before submitting is a circular wait: no turn, no
+	// init, no ready, no turn. What matters is whether the agent is mid-turn,
+	// which is a thing the supervisor knows without being told.
+	busy bool
 }
 
 func New(cfg Config) *Cerebrate {
@@ -131,6 +143,12 @@ func (c *Cerebrate) Restarts() int {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.restarts
+}
+
+func (c *Cerebrate) setBusy(b bool) {
+	c.mu.Lock()
+	c.busy = b
+	c.mu.Unlock()
 }
 
 func (c *Cerebrate) setState(s State, reason string) {
@@ -211,6 +229,7 @@ func (c *Cerebrate) runOnce(ctx context.Context) (fatal bool, ranFor time.Durati
 		ConfigDir: c.cfg.ConfigDir,
 		Socket:    c.cfg.Socket,
 		Token:     c.cfg.Token,
+		BinDir:    c.cfg.BinDir,
 	}
 
 	// Preflight runs before every spawn, not only at Start: a token expires, a
@@ -256,6 +275,7 @@ func (c *Cerebrate) runOnce(ctx context.Context) (fatal bool, ranFor time.Durati
 	c.mu.Lock()
 	c.stdin = stdin
 	c.ready = make(chan struct{})
+	c.busy = false
 	c.mu.Unlock()
 
 	// Read on a goroutine so Wait is always reached. Wait is what enforces
@@ -331,10 +351,14 @@ func (c *Cerebrate) observe(ev adapter.Event) {
 		}
 	case adapter.EventTurnEnd:
 		c.setState(StateReady, "")
+		c.setBusy(false)
 	case adapter.EventError:
 		if ev.Fatal {
 			c.setState(StateFailed, ev.Text)
 		}
+		// A failed turn is a finished turn: leaving the agent marked busy
+		// would strand it, holding a lease it can no longer satisfy.
+		c.setBusy(false)
 	}
 }
 
@@ -349,6 +373,21 @@ func (c *Cerebrate) publish(ev adapter.Event) {
 		Role:      c.cfg.Role.Name,
 		At:        c.cfg.clock(),
 	})
+}
+
+// Idle reports whether the agent can take work now: its input is open and it
+// is not already mid-turn.
+func (c *Cerebrate) Idle() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.stdin == nil || c.busy {
+		return false
+	}
+	switch c.state {
+	case StateFailed, StateBlocked, StateStopped:
+		return false
+	}
+	return true
 }
 
 // Submit hands a turn to the running agent.
@@ -372,6 +411,10 @@ func (c *Cerebrate) Submit(text string) error {
 	if _, err := w.Write(payload); err != nil {
 		return fmt.Errorf("submitting a turn to %s: %w", c.cfg.Role.Name, err)
 	}
+
+	c.mu.Lock()
+	c.busy = true
+	c.mu.Unlock()
 	return nil
 }
 

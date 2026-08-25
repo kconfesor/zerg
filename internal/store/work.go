@@ -519,3 +519,16 @@ func (db *DB) ListReworkedTasks(ctx context.Context, projectID string, threshold
 	}
 	return out, rows.Err()
 }
+
+// GetTaskByName resolves a card by the name that follows it through the
+// pipeline. Agents think in names — the name is what every handoff carries —
+// so the name has to be a usable handle, not just a label.
+func (db *DB) GetTaskByName(ctx context.Context, projectID, name string) (*Task, error) {
+	row := db.sql.QueryRowContext(ctx,
+		`SELECT `+taskCols+` FROM tasks WHERE project_id = ? AND name = ?`, projectID, name)
+	t, err := scanTask(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("task %q: %w", name, ErrNotFound)
+	}
+	return t, err
+}
