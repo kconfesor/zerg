@@ -2,36 +2,52 @@
 
 A multi-agent coding orchestrator. Go core, Vue 3 cockpit, pluggable agent harnesses.
 
-Descended from [swarm-forge](https://github.com/unclebob/swarm-forge) in ideas, not in code. This
-document states what is kept, what is replaced, and why — each "why" traces to a concrete failure
-mode observed in the predecessor.
+**Everything is configured in the UI.** There are no config files, no prompt files, no presets to
+copy. You point it at a repo, pick your roles, and start.
+
+Descended from [swarm-forge](https://github.com/unclebob/swarm-forge) in ideas, not in code. Each
+"why" below traces to a concrete failure mode observed in the predecessor.
 
 ---
 
 ## 1. Thesis
 
-Three claims drive every decision below.
-
 1. **The harness is an interface, not a branch in a switch statement.** swarm-forge hardcodes
-   `#{"claude" "codex" "copilot" "grok"}` in two places (`swarmforge.bb:166`, `:486`); adding a
-   backend means editing the launcher. Adapters here are a Go interface with a registry.
+   `#{"claude" "codex" "copilot" "grok"}` in two places; adding a backend means editing the launcher.
+   Adapters here are a Go interface with a registry.
 
-2. **Agents should emit events, not paint screens.** swarm-forge infers agent status by grepping the
-   tmux pane for a line containing `I'm`, and delivers work by injecting synthetic keystrokes into a
-   TUI. Modern harnesses expose structured output (`pi --mode json|rpc`,
-   `claude --output-format stream-json`). Consume that instead and the entire scraping layer vanishes.
+2. **Agents emit events; they do not paint screens.** swarm-forge infers status by grepping a tmux
+   pane for a line containing `I'm`, and delivers work by injecting keystrokes into a TUI. Modern
+   harnesses expose structured output (`pi --mode json|rpc`, `claude --output-format stream-json`).
+   Consume that and the entire scraping layer disappears.
 
-3. **Failure must be loud at the boundary.** Every incident in a day of running swarm-forge —
-   a corrupted global config, a model the CLI was too old to call, a first-run trust dialog, a broken
-   extension tree — presented identically: an agent that looked alive and did nothing. All four were
-   detectable *before* spawning. Preflight is a first-class subsystem, not an afterthought.
+3. **Configuration is a database, not a filesystem.** swarm-forge spreads config across
+   `swarmforge.conf`, `constitution.prompt`, `constitution/articles/*.prompt` and
+   `roles/<role>.prompt` — then copies *snapshots* of them into every worktree. Editing the original
+   after launch changes nothing, silently. (Verified the hard way: a `project.prompt` edit setting the
+   language to Rust never reached a single agent, because worktrees were cut from a commit made
+   before the edit. Six agents built the task in Clojure instead, with no warning.) One database,
+   one source of truth, composed fresh at every spawn.
+
+4. **Failure must be loud at the boundary.** Every incident in a day of running swarm-forge — a
+   corrupted global config, a CLI too old for its model, an unanswered trust dialog, a broken plugin
+   tree — presented identically: an agent that looked alive and did nothing. All four were detectable
+   *before* spawning.
 
 ---
 
-## 2. Naming
+## 2. Scope boundary: provider setup
 
-The StarCraft metaphor is load-bearing for user-facing concepts; code uses plain names where clarity
-beats theme.
+zerg **does not** manage provider credentials. It never runs a login flow, stores an API key, or
+edits a harness's auth file. Users log into `pi`, `claude`, etc. themselves, using those tools.
+
+zerg **does** detect credential state and say so plainly. `pi: no credentials for provider 'openai'
+— run /login in pi` is a blocked role with a remedy, not a silent hang. Detection is in scope;
+setup is not.
+
+---
+
+## 3. Naming
 
 | Term | Is | Code |
 |---|---|---|
@@ -39,265 +55,288 @@ beats theme.
 | **cerebrate** | per-role supervisor; owns exactly one agent process | `internal/cerebrate` |
 | **nydus** | message transport between roles | `internal/nydus` |
 | **hatchery** | a project workspace + its worktrees | `internal/hatchery` |
-| **brood** | one named topology (roles + pipeline + prompts) | `brood/<name>/` |
 | **larva** | a queued, unassigned task | `board.Task{state:larva}` |
 
-One binary, `zerg`. Subcommands split it into the daemon (`zerg up`) and the agent-facing client
-(`zerg next`, `zerg done`, `zerg send`) — see §6.
+One binary, `zerg`. `zerg up` runs the daemon and opens the cockpit; `zerg next|done|send|ask` is
+the agent-facing client (§7).
 
 ---
 
-## 3. What is kept from swarm-forge
+## 4. Configuration model
 
-These were genuinely right and are carried forward:
+This is the part that most differs from the predecessor.
 
-- **Config-driven topology.** Swarm shape lives in a file, not in code.
-- **Git worktree isolation per role.** One repo, one object store, N linked worktrees. Peer commits
-  resolve without a fetch. This is the single best idea in the predecessor.
-- **Commit-pointer handoffs.** A handoff points at a committed SHA rather than shipping a diff. The
-  receiving side merges. Cheap, durable, and git already solved the hard parts.
-- **Layered prompts.** A shared constitution plus per-role prompts plus local overrides.
-- **Human gates.** Approval before a spec propagates; clarification requests that surface in the UI.
-- **A board of cards moving through lanes.** The right mental model for the operator.
+### 4.1 Two scopes
 
-## 4. What is replaced, and why
+**Global** — `~/.zerg/zerg.db`. Your team of roles, defined once, reused across every project.
+Adding a project is two clicks and your roles are already there.
 
-Each row cites the predecessor's failure mode.
+**Per-project** — runtime state (tasks, messages, leases, events, cost) keyed by `project_id` in the
+same database. On disk, a project contains only git artifacts: `<repo>/.worktrees/<role>`.
+
+Nothing zerg writes is meant to be hand-edited. There is no file to copy between machines and no
+snapshot to go stale.
+
+### 4.2 A role, in full
+
+Everything below is a form field in the UI. There is no other way to set any of it, by design.
+
+| Field | UI control | Notes |
+|---|---|---|
+| name | text | also names the worktree: `.worktrees/<name>` |
+| harness | select | populated from the adapter registry — `claude`, `pi` |
+| model | combobox | options fetched live from the harness (§4.3); free text accepted |
+| args | tag input | extra CLI flags, e.g. `--no-extensions` |
+| receive | select | `task` (one at a time) or `batch` |
+| batch policy | number + duration | `max_items`, `max_age` — only when receive is `batch` |
+| prompt | editor | this role's instructions |
+| position | drag handle | order in the pipeline |
+| enabled | toggle | disabled roles are skipped in the chain |
+| gate | select | `none` or `approval` — hold this role's handoffs for a human |
+
+Plus one **shared instructions** document, global, applied to every role. That single editable
+document replaces swarm-forge's `constitution.prompt` + `constitution/articles/*.prompt` layering.
+
+### 4.3 Model discovery
+
+Typing model ids by hand is how you get `Model metadata for 'gpt-5.6-sol' not found` and
+`The 'gpt-5.6-sol' model requires a newer version of Codex` — twenty minutes of an agent looking
+alive while every turn 400s.
+
+So `Adapter.ListModels()` asks the harness what it can actually run (`pi --list-models`, claude's
+alias set) and the UI renders a picker. The field still accepts free text, because a harness catalog
+can lag a working model — `gpt-5.6-sol` is absent from pi's catalog and runs fine. Free text gets a
+warning, not a block.
+
+### 4.4 Prompt composition
+
+At **every spawn**, the overmind composes `shared instructions + role prompt` from the database into
+a temp file and hands it to the adapter. Nothing is copied into a worktree; nothing persists between
+runs.
+
+Consequence: edit a prompt in the UI, restart the role, and the change is live. This is the direct
+fix for the snapshot staleness that silently produced a Clojure calculator when the config said Rust.
+
+### 4.5 Defaults
+
+A fresh install seeds two roles, ready to run:
+
+| # | name | harness | model | receive | prompt |
+|---|---|---|---|---|---|
+| 1 | `coder` | claude | `sonnet` | task | implement the task, write tests, commit |
+| 2 | `qa` | claude | `sonnet` | batch | verify against the task, run tests, report or hand back |
+
+`qa` is last, therefore terminal. Both are ordinary rows — rename them, replace them, add four more.
+There are no presets and nothing is special-cased.
+
+---
+
+## 5. What is kept from swarm-forge
+
+- **Git worktree isolation per role.** One repo, one object store, N linked worktrees; peer commits
+  resolve without a fetch. The single best idea in the predecessor.
+- **Commit-pointer handoffs.** A handoff points at a SHA; the receiver merges. Git already solved the
+  hard parts.
+- **Human gates** — approvals and clarification requests surfaced in the UI.
+- **A board of cards moving through lanes.** The right mental model for an operator.
+
+One change: swarm-forge required exactly one role to occupy the repo root (`master`), which made that
+role special in the config, in routing, and in the board. Here **every role gets a worktree** and the
+repo root is the integration branch. When the terminal role completes, the *overmind* merges to the
+base branch. Integration belongs to the orchestrator, not to whichever agent happened to be last.
+
+## 6. What is replaced, and why
 
 | Predecessor mechanism | Failure | Replacement |
 |---|---|---|
-| Handoff state as files across N worktrees, root-path inferred by git heuristics | Two possible outbox locations with independent sequence counters; filename-keyed dedupe silently **drops** a colliding message while still firing its wake-up | Single SQLite (WAL) database at the hatchery root. One writer, real transactions. Optional read-only file mirror for inspection. |
-| `deliver!` = N file copies + N notifies, then one move | Not transactional. Crash mid-loop re-delivers duplicates, re-moves the board, re-notifies. Nothing keys on message `id`. | Outbox pattern in one transaction; delivery is idempotent on `(message_id, recipient)`. |
-| Wake-up = `tmux send-keys` of a fixed literal into the session's active pane | Lands in whatever is focused. Hardcoded 150ms/50ms sleeps race the TUI's paste debounce. tmux exit 0 means "keys accepted", never "agent read it". | No push into a TUI. Agent **pulls** via `zerg next` (long-poll) over a unix socket. Delivery is a queue read, not a keystroke. |
-| Lost wake-up recovery: none | Agent finishes → peeks empty inbox → prints `NO_TASK` → stops → mail arrives 5ms later → permanent stall, no timer, no retry | Claim/lease model. Work is leased with a deadline; an unacked lease returns to the queue. A stalled role is a visible state, not silence. |
-| `PAYLOAD:` runs to EOF, unescaped | Any role can spoof protocol tokens at any other role in 80 chars — `message: NO_TASK` produces a payload line reading exactly `NO_TASK` | JSON envelopes end to end. Protocol tokens cannot appear in user data. |
-| Check-then-move selection, no lock | Two concurrent `ready_for_next.sh` runs create two batch dirs and split the queue; every later call then errors `AMBIGUOUS_TASK_STATE` with **no recovery path** | Atomic claim: `UPDATE ... WHERE state='queued'` returning the claimed rows. Concurrency is the database's problem. |
-| Helpers resolve the inbox from process cwd | Run from a subdirectory → creates an empty queue there and reports `NO_TASK`. False negative *with* a side effect. | Agent identity comes from a spawn-time token in env. No path inference anywhere. |
-| Sender identity = `$SWARMFORGE_ROLE`, unvalidated | Any agent can `export SWARMFORGE_ROLE=architect` and send as the architect | Per-agent capability token minted at spawn, scoped to that role. |
-| Terminal role = last line of the config file | Reordering the config silently relocates the end of the pipeline. The other mechanism (exact set-equality broadcast) breaks whenever a utility role is added. | Pipeline declared explicitly, including `terminal`. |
-| Board lane moves at *enqueue* time | A card shows "in cleaner's lane" before cleaner has looked at it. Terminal sweep can close unrelated cards. | Lane changes on **ack**, driven by the receiving cerebrate. |
-| Batch = every equal-priority item at an instant | Unbounded, unfair. A priority-00 item arriving 1ms late waits behind a 40-item batch. | Batch policy with `max_items` / `max_age`, and priority preemption at claim time. |
-| Notes occupy the work queue | One 80-char informational note blocks a role's entire queue until an LLM turn consumes it | Two planes: **work** (tasks) and **control** (notes, answers, cancels). Control never blocks work. |
-| Daemon reads socket/roles outside its try block | A deleted socket file terminates the transport *cleanly* — logs "stopped", removes its pid, indistinguishable from normal shutdown. Nothing supervises it. | Supervised components with health endpoints; a dead subsystem is a red banner, not silence. |
-| Nothing checks the harness before launching | 40 minutes lost to: triplicated `~/.codex/config.toml`, a CLI too old for its model, an unanswered trust dialog, a broken extension tree | **Preflight** (§5.2). Every one of those is a check that runs before spawn. |
+| Config as files, snapshotted into each worktree | Post-launch edits silently invisible to every agent; a Rust config produced a Clojure implementation | Database is the only source of truth; prompts composed fresh at spawn |
+| Topology fixed by `swarmforge.conf` + preset branches (`two-pack`, `four-pack`, `six-pack`) | Changing the team means checking out a different git branch of the orchestrator | Roles are rows, edited in the UI; the team *is* the config |
+| Handoff state as files across N worktrees, root path inferred by git heuristics | Two possible outbox locations with independent sequence counters; filename-keyed dedupe silently **drops** a colliding message while still firing its wake-up | Single SQLite (WAL) database, one writer, real transactions |
+| `deliver!` = N file copies + N notifies, then one move | Not transactional. Crash mid-loop re-delivers duplicates and re-moves the board. Nothing keys on message `id` | Outbox pattern in one transaction; idempotent on `(message_id, recipient)` |
+| Wake-up = `tmux send-keys` of a fixed literal into the session's active pane | Lands in whatever is focused; hardcoded 150ms/50ms sleeps race the TUI's paste debounce; tmux exit 0 means "keys accepted", never "agent read it" | Agent **pulls** via `zerg next` (long-poll) over a unix socket |
+| Lost wake-up recovery: none | Agent finishes → peeks empty inbox → prints `NO_TASK` → stops → mail arrives 5ms later → permanent stall, no timer, no retry | Leases with deadlines; unacked work returns to the queue and the role shows degraded |
+| `PAYLOAD:` runs to EOF, unescaped | Any role can spoof protocol tokens at any other role in 80 chars — `message: NO_TASK` yields a payload line reading exactly `NO_TASK` | JSON envelopes end to end |
+| Check-then-move selection, no lock | Two concurrent claims create two batch dirs and split the queue; every later call errors `AMBIGUOUS_TASK_STATE` with **no recovery path** | Atomic claim: `UPDATE ... WHERE state='queued'` returning claimed rows |
+| Helpers resolve the inbox from process cwd | Run from a subdirectory → creates an empty queue there and reports `NO_TASK`. False negative *with* a side effect | Identity from a spawn-time token in env; no path inference anywhere |
+| Sender identity = `$SWARMFORGE_ROLE`, unvalidated | Any agent can `export SWARMFORGE_ROLE=architect` and send as the architect | Per-agent capability token minted at spawn |
+| Terminal role = last line of the config file | Reordering the file silently relocates the end of the pipeline | Last enabled role in the UI ordering, shown as a `terminal` badge |
+| Board lane moves at *enqueue* time | A card shows "in cleaner's lane" before cleaner has looked at it | Lane changes on **ack** |
+| Batch = every equal-priority item at an instant | Unbounded and unfair; a priority-00 item arriving 1ms late waits behind a 40-item batch | Batch policy (`max_items`, `max_age`) set per role in the UI; priority preemption at claim time |
+| Notes occupy the work queue | One 80-char informational note blocks a role's queue until an LLM turn consumes it | Two planes: work and control (§7.3) |
+| Daemon reads socket/roles outside its try block | A deleted socket file terminates the transport *cleanly* — logs "stopped", removes its pid, indistinguishable from normal shutdown | Supervised components with health endpoints |
+| Nothing checks the harness before launching | 40 minutes lost to a triplicated `~/.codex/config.toml`, a CLI too old for its model, an unanswered trust dialog, a broken extension tree | **Preflight** (§8) |
 
 ---
 
-## 5. Component model
+## 7. Component model
 
 ```
-┌──────────────────────────────── zerg (one static binary) ─────────────────────────────────┐
-│                                                                                            │
-│  ┌─ overmind ────────────────────────────────────────────────────────────────────────┐    │
-│  │                                                                                     │    │
-│  │   brood config ──▶ pipeline (explicit DAG, terminal declared)                       │    │
-│  │                                                                                     │    │
-│  │   ┌─ nydus ─────────────┐   ┌─ board ──────────┐   ┌─ store ─────────────────┐     │    │
-│  │   │ work plane (leases) │   │ cards & lanes    │   │ SQLite WAL              │     │    │
-│  │   │ control plane       │◀─▶│ ack-driven moves │◀─▶│ single writer, txns     │     │    │
-│  │   └─────────────────────┘   └──────────────────┘   └─────────────────────────┘     │    │
-│  │              ▲                        ▲                                             │    │
-│  │              │                        │                                             │    │
-│  │   ┌──────────┴────────────────────────┴──────────┐        ┌─ event bus ─────────┐  │    │
-│  │   │ cerebrate[specifier]  cerebrate[coder]  ...  │───────▶│ typed, fan-out      │  │    │
-│  │   │   ├ preflight                                │        └──────────┬──────────┘  │    │
-│  │   │   ├ adapter (claude | pi | …)                │                   │             │    │
-│  │   │   ├ structured stdio  ◀── primary            │                   ▼             │    │
-│  │   │   └ pty (optional)    ◀── debug attach       │        ┌─ api ───────────────┐  │    │
-│  │   └───────────────────────────────────────────────┘        │ net/http + WS      │  │    │
-│  │                                                             │ embed.FS → SPA     │  │    │
-│  └─────────────────────────────────────────────────────────────┴────────────────────┘    │
-│                                          ▲                                                 │
-│                    unix socket           │            http/ws                              │
-│                          ▲               │               ▲                                 │
-└──────────────────────────┼───────────────┴───────────────┼─────────────────────────────────┘
-                           │                               │
-              ┌────────────┴─────────────┐      ┌──────────┴──────────────┐
-              │ agent subprocess         │      │ browser — Vue 3 cockpit │
-              │  runs `zerg next/done/   │      │  board, panes, costs    │
-              │  send` (same binary)     │      │  attention, chat        │
-              └──────────────────────────┘      └─────────────────────────┘
+┌──────────────────────────── zerg (one static binary) ─────────────────────────────┐
+│                                                                                    │
+│  ┌─ overmind ──────────────────────────────────────────────────────────────────┐  │
+│  │                                                                              │  │
+│  │  ┌─ config ────────────┐   ┌─ nydus ─────────────┐   ┌─ board ───────────┐  │  │
+│  │  │ roles (UI CRUD)     │   │ work plane (leases) │   │ cards & lanes     │  │  │
+│  │  │ shared instructions │──▶│ control plane       │◀─▶│ ack-driven moves  │  │  │
+│  │  │ projects            │   └─────────────────────┘   └───────────────────┘  │  │
+│  │  └─────────┬───────────┘              ▲                       ▲             │  │
+│  │            │                          │                       │             │  │
+│  │            ▼            ┌─────────────┴───────────────────────┴──────────┐  │  │
+│  │  ┌─ store ───────────┐  │ cerebrate[coder]   cerebrate[qa]   ...         │  │  │
+│  │  │ SQLite WAL        │  │   ├ preflight                                  │  │  │
+│  │  │ ~/.zerg/zerg.db   │  │   ├ adapter (claude | pi | …)                   │  │  │
+│  │  │ single writer     │  │   ├ structured stdio ◀── primary                │  │  │
+│  │  └───────────────────┘  │   └ pty              ◀── debug attach           │  │  │
+│  │                         └───────────────────┬────────────────────────────┘  │  │
+│  │                                             ▼                               │  │
+│  │  ┌─ event bus ─────────┐        ┌─ api ─────────────────┐                   │  │
+│  │  │ typed, fan-out      │───────▶│ net/http + WS         │                   │  │
+│  │  └─────────────────────┘        │ embed.FS → Vue SPA    │                   │  │
+│  └──────────────────────────────────┴───────────────────────┴──────────────────┘  │
+│                        ▲                              ▲                            │
+│           unix socket  │                    http/ws   │                            │
+└────────────────────────┼──────────────────────────────┼────────────────────────────┘
+                         │                              │
+          ┌──────────────┴───────────┐      ┌───────────┴─────────────┐
+          │ agent subprocess         │      │ browser — Vue 3 cockpit │
+          │  runs `zerg next|done|   │      │  configure · observe    │
+          │  send` (same binary)     │      │                         │
+          └──────────────────────────┘      └─────────────────────────┘
 ```
 
-### 5.1 cerebrate
+### 7.1 cerebrate
 
-One per role. Owns the agent process lifecycle and nothing else.
+One per enabled role. Owns the agent process lifecycle and nothing else: preflight → spawn → parse
+structured output into typed events → publish → track liveness → restart with backoff. It does not
+decide routing; nydus does.
 
-```go
-type Cerebrate struct {
-    Role     string
-    Adapter  adapter.Adapter
-    Worktree string
-    Lease    *nydus.Lease   // work currently held
-}
-```
+### 7.2 Agent-facing protocol
 
-Responsibilities: preflight → spawn → parse structured output into typed events → publish to the bus
-→ track liveness → restart on crash with backoff. It does **not** decide routing; nydus does.
-
-### 5.2 preflight — the headline subsystem
-
-Runs before every spawn. Each check yields `ok` / `blocked(reason, remedy)`. A blocked role appears
-in the UI as a blocked role with a stated remedy, never as a silent idle pane.
-
-```go
-type Check struct {
-    Name   string
-    Run    func(ctx context.Context, spec AgentSpec) Result
-}
-```
-
-Baseline checks, all drawn from real incidents:
-
-| Check | Catches |
-|---|---|
-| `binary_present` | harness not on PATH |
-| `binary_version` | *codex 0.134.0 cannot call `gpt-5.6-sol`* — compare CLI version against model requirement |
-| `config_parses` | *triplicated `[features]` key in `~/.codex/config.toml`* — parse the harness's own config before trusting it |
-| `auth_valid` | *pi: "No API key found for openai"* — probe credentials for the selected provider |
-| `workspace_trusted` | *claude's first-run trust dialog blocking 4 roles* — pre-seed or detect the trust gate |
-| `model_available` | model id not in the harness's catalog |
-| `plugins_loadable` | *pi's broken extension tree* — a smoke run with the real flags |
-
-`config_parses` and `auth_valid` are per-harness, supplied by the adapter. The rest are generic.
-
-### 5.3 Isolated harness config
-
-swarm-forge launched two codex agents 1.5s apart into fresh directories; both did a non-atomic
-read-modify-write of the **global** `~/.codex/config.toml` to register trust, and the writes raced —
-producing a file containing three concatenated copies of itself, which then failed to parse for
-every codex invocation on the machine, including unrelated projects.
-
-Mitigation: each cerebrate gets a private config directory (`CODEX_HOME`, `PI_CODING_AGENT_DIR`, …)
-seeded from the user's real one. Agents never write to shared global state. Adapters declare which
-env var relocates their config.
-
----
-
-## 6. Agent-facing protocol
-
-The agent's whole world is three verbs against a unix socket. Same binary, different subcommand —
-no PATH-synced script directory, no `.sh`/`.bb` wrapper pairs, no cwd inference.
+The agent's whole world is four verbs against a unix socket. Same binary, different subcommand — no
+PATH-synced script directory, no `.sh`/`.bb` wrapper pairs, no cwd inference.
 
 ```
-zerg next  [--wait 30s]   → claim work (long-poll). JSON on stdout.
-zerg done  [--result f]   → ack the lease, optionally attach a result
-zerg send  --to <role> --type handoff --commit HEAD --task <name>
-zerg ask   "<question>"   → raise a clarification to the operator
+zerg next [--wait 30s]   claim work (long-poll); JSON on stdout
+zerg done [--result f]   ack the lease
+zerg send --to <role> --commit HEAD --task <name>
+zerg ask  "<question>"   raise a clarification to the operator
 ```
 
-Identity and authorization come from two env vars injected at spawn:
-`ZERG_SOCKET`, `ZERG_TOKEN`. The token is role-scoped and per-spawn; `zerg send --from` does not
-exist.
+Identity arrives as `ZERG_SOCKET` and `ZERG_TOKEN`, injected at spawn. The token is role-scoped and
+per-spawn; there is no `--from` flag to forge.
 
-### 6.1 Work envelope
+Work envelope:
 
 ```json
 {
-  "lease_id":  "01JQ...",
-  "task":      { "id": "01JQ...", "name": "Calculator" },
-  "from":      "specifier",
-  "type":      "handoff",
-  "commit":    "a1b2c3d4e5",
-  "merged":    true,
-  "payload":   "…",
-  "batch":     [ { "…": "…" } ],
-  "expires_at":"2026-08-25T00:31:00Z"
+  "lease_id": "01JQ…", "task": {"id": "01JQ…", "name": "Calculator"},
+  "from": "coder", "type": "handoff", "commit": "a1b2c3d4e5",
+  "merged": true, "payload": "…", "expires_at": "2026-08-25T00:31:00Z"
 }
 ```
 
-`merged: true` states that the overmind already performed the merge. swarm-forge merged in the
-helper *and* told the agent to merge again in the payload body; it worked only because the second
-merge was a no-op. Here the merge happens once, server-side, and the envelope says so.
+`merged: true` states the overmind already merged. swarm-forge merged in the helper *and* told the
+agent to merge again in the payload; it worked only because the second merge was a no-op.
 
-### 6.2 Leases
+**Leases.** A claim has a deadline. Ack closes it; expiry returns the work to the queue and marks the
+role degraded. This is the answer to "lost wake-up ⇒ permanent stall, no timer, no retry".
 
-A claim is a lease with a deadline, not a file move. Ack (`zerg done`) closes it. Expiry returns the
-work to the queue and marks the role degraded. This is the direct answer to *"lost wake-up ⇒
-permanent stall, with no timer, no retry, no watchdog."*
+### 7.3 Two planes
 
-### 6.3 Two planes
-
-- **work plane** — tasks and handoffs. Leased, ordered by priority, one unit at a time (or one batch).
-- **control plane** — notes, operator answers, cancellations. Delivered out-of-band, never occupies
-  a lease, never blocks work.
+- **work** — tasks and handoffs. Leased, priority-ordered, one unit (or one batch) at a time.
+- **control** — notes, operator answers, cancellations. Out-of-band, never occupies a lease, never
+  blocks work.
 
 ---
 
-## 7. Pipeline declaration
+## 8. Preflight
 
-Terminality is declared, never inferred from file order.
+Runs before every spawn. Each check yields `ok` or `blocked(reason, remedy)`. A blocked role renders
+in **Attention** with both — never as an idle pane that happens to be doing nothing.
 
-```toml
-[brood]
-name = "six-pack"
+| Check | Catches | Source |
+|---|---|---|
+| `binary_present` | harness not on PATH | generic |
+| `binary_version` | *codex 0.134.0 cannot call `gpt-5.6-sol`* | adapter |
+| `config_parses` | *triplicated `[features]` key in `~/.codex/config.toml`* | adapter |
+| `auth_valid` | *pi: "No API key found for openai"* → "log in with pi" (detect only, §2) | adapter |
+| `workspace_trusted` | *claude's first-run trust dialog blocking four roles* | adapter |
+| `model_available` | model id absent from the harness catalog → warn, don't block | adapter |
+| `plugins_loadable` | *pi's broken extension tree* — smoke run with the real flags | adapter |
 
-[[role]]
-name     = "specifier"
-harness  = "claude"
-model    = "opus"
-worktree = "master"
-receive  = "task"
-gate     = "approval"          # handoffs from this role wait for a human
+### 8.1 Isolated harness config
 
-[[role]]
-name     = "cleaner"
-harness  = "pi"
-model    = "openai-codex/gpt-5.6-sol"
-args     = ["--no-extensions"]
-worktree = "cleaner"
-receive  = "batch"
+swarm-forge launched two codex agents 1.5s apart into fresh directories; both did a non-atomic
+read-modify-write of the **global** `~/.codex/config.toml` to register trust. The writes raced,
+producing a file containing three concatenated copies of itself, which then failed to parse for every
+codex invocation on the machine — including unrelated projects.
 
-  [role.batch]
-  max_items = 8
-  max_age   = "5m"
-
-[pipeline]
-flow     = ["specifier", "coder", "cleaner", "architect", "hardener", "qa"]
-terminal = "qa"                 # explicit. moving a role does not move the finish line.
-```
+Each cerebrate therefore gets a private harness config directory (`CODEX_HOME`,
+`PI_CODING_AGENT_DIR`, …) seeded from the user's real one. Agents never write shared global state.
+Adapters declare which env var relocates their config.
 
 ---
 
-## 8. Data model
+## 9. Data model
 
-SQLite, WAL, single writer inside the overmind. Sketch:
+SQLite, WAL, single writer inside the overmind.
 
 ```sql
-tasks     (id, name, lane, state, created_at, updated_at)
-messages  (id, from_role, type, priority, task_id, commit_sha, body, created_at)
-routes    (message_id, to_role, state, enqueued_at, delivered_at)   -- idempotent per recipient
-leases    (id, role, message_id, expires_at, acked_at)
-events    (id, ts, role, kind, payload)                             -- append-only, feeds UI + replay
-approvals (id, message_id, state, decided_at, decided_by)
-runs      (id, role, pid, started_at, exited_at, exit_code, tokens_in, tokens_out, cost_usd)
+-- global config, edited exclusively through the UI
+roles       (id, name, harness, model, args, receive, batch_max_items, batch_max_age,
+             prompt, position, enabled, gate, created_at, updated_at)
+settings    (key, value)          -- shared instructions, preferences
+projects    (id, path, name, base_branch, last_opened_at)
+
+-- optional per-project role overrides (phase 2; the price of global roles)
+role_overrides (project_id, role_id, model, enabled)
+
+-- per-project runtime
+tasks       (id, project_id, name, lane, state, created_at, updated_at)
+messages    (id, project_id, from_role, type, priority, task_id, commit_sha, body, created_at)
+routes      (message_id, to_role, state, enqueued_at, delivered_at)   -- idempotent per recipient
+leases      (id, project_id, role, message_id, expires_at, acked_at)
+events      (id, project_id, ts, role, kind, payload)                 -- append-only
+runs        (id, project_id, role, pid, started_at, exited_at, exit_code,
+             tokens_in, tokens_out, cost_usd)
+approvals   (id, project_id, message_id, state, decided_at)
 ```
 
-`events` being append-only gives the cockpit free time-travel: the UI is a projection, and a reload
+`events` being append-only gives the cockpit free time travel: the UI is a projection, so a reload
 replays rather than re-scrapes.
 
 ---
 
-## 9. Cockpit (frontend)
+## 10. Cockpit
 
-`web/`, built by Vite, embedded into the binary with `//go:embed all:dist` (the `all:` prefix is
-required — plain `//go:embed dist` silently skips Vite's `.vite/` manifest directory).
+`web/`, built by Vite, embedded with `//go:embed all:dist` — the `all:` prefix is required, since
+plain `//go:embed dist` silently skips Vite's `.vite/` manifest directory.
 
-Panels, in priority order:
+**Configure**
 
-1. **Attention** — blocked preflights, approvals, clarifications. Anything needing a human.
-2. **Board** — one lane per role plus Done. Cards move on ack.
-3. **Roles** — per-role health, current lease, live/idle, tokens, cost.
-4. **Stream** — typed event feed per role: tool calls, diffs, errors. Not a terminal scrape.
-5. **Terminal** *(on demand)* — attach a real pty to a role for debugging, rendered with xterm.js.
-6. **Chat** — talk to the master role.
+- **Projects** — list, add by directory picker, set base branch, open. Two clicks to a running swarm.
+- **Team** — the role list. Drag to reorder; the last enabled role wears a `terminal` badge. Add,
+  duplicate, disable, delete.
+- **Role editor** — every field in §4.2. Harness select, model combobox populated from the live
+  harness catalog, prompt editor, batch policy. Saving a field on a running role restarts just that
+  cerebrate.
+- **Shared instructions** — one editor, applies to all roles.
 
-Transport: one WebSocket carrying the typed event stream; REST for commands. The UI subscribes to a
-projection, so a browser reload costs a replay, not a rescrape.
+**Observe**
+
+- **Attention** — blocked preflights (with remedies), approvals, clarifications. Anything needing a
+  human, first.
+- **Board** — one lane per enabled role plus Done. Cards move on ack.
+- **Roles** — per-role health, current lease, live/idle, tokens, cost.
+- **Stream** — typed event feed: tool calls, diffs, errors. Not a terminal scrape.
+- **Terminal** *(on demand)* — attach a real pty to a role for debugging, via xterm.js.
+- **Chat** — talk to the first role in the pipeline.
+
+Transport: one WebSocket carrying typed events; REST for commands.
 
 ---
 
-## 10. Stack
+## 11. Stack
 
 Versions verified against npm dist-tags and `proxy.golang.org` on 2026-08-24.
 
@@ -305,8 +344,8 @@ Versions verified against npm dist-tags and `proxy.golang.org` on 2026-08-24.
 
 | Component | Version | Path | Note |
 |---|---|---|---|
-| toolchain | **1.26.7** | — | 1.27.0 is 5 days old; pin conservative. 1.27 needs macOS 13+. |
-| router | stdlib | `net/http` | Go 1.22+ method+wildcard patterns are enough |
+| toolchain | **1.26.7** | — | 1.27.0 is days old; pin conservative. 1.27 needs macOS 13+ |
+| router | stdlib | `net/http` | Go 1.22+ method+wildcard patterns suffice |
 | websocket | v1.8.15 | `github.com/coder/websocket` | successor to `nhooyr.io/websocket`; gorilla is maintenance-only |
 | pty | v1.1.24 | `github.com/creack/pty` | tag lags an active HEAD; pseudo-version if an ioctl bug bites |
 | sqlite | v1.57.0 | `modernc.org/sqlite` | pure Go — keeps `CGO_ENABLED=0` and the static binary |
@@ -319,29 +358,30 @@ Versions verified against npm dist-tags and `proxy.golang.org` on 2026-08-24.
 | Vue | 3.5.41 | 3.6 (Vapor) is RC — do not let `@next` in |
 | Vite | 8.2.2 | Rolldown is default, ESM-only, Node 20.19+/22.12+ |
 | shadcn-vue | 2.8.2 | CLI; `v3.shadcn-vue.com` is an **archived docs site**, not a package line |
-| reka-ui | 2.10.1 | the primitive layer — `radix-vue` was renamed to this and is frozen at 1.9.17 |
-| Tailwind | 4.3.3 | CSS-first: no `tailwind.config.js`, use `@tailwindcss/vite` + `@theme {}` |
-| @xterm/xterm | 6.0.0 | renamed from `xterm` (deprecated at 5.3.0). v6 **removed the canvas addon** — use WebGL |
-| TypeScript | **6.0.3 — pinned** | TS 7 is the Go-native rewrite and ships without a stable programmatic compiler API; `vue-tsc` (Volar) is reported pinned to TS 6 until ~7.1. `vue-tsc`'s peer range says `>=5.0.0`, which is misleading. Verify empirically before unpinning. |
+| reka-ui | 2.10.1 | the primitive layer; `radix-vue` was renamed to this and is frozen at 1.9.17 |
+| Tailwind | 4.3.3 | CSS-first: no `tailwind.config.js`; use `@tailwindcss/vite` + `@theme {}` |
+| @xterm/xterm | 6.0.0 | renamed from `xterm` (deprecated at 5.3.0); v6 **removed the canvas addon** — use WebGL |
+| TypeScript | **6.0.3 — pinned** | TS 7 is the Go-native rewrite, shipping without a stable programmatic compiler API; `vue-tsc` (Volar) is reported pinned to TS 6 until ~7.1. `vue-tsc`'s peer range says `>=5.0.0`, which is misleading. Verify before unpinning |
 | Pinia | 4.0.3 | |
 | vue-router | 5.2.0 | |
 
-> **Node floor:** `create-vue@3.23.0` requires Node `^22.18.0 \|\| >=24.12.0`. This machine's shell
+> **Node floor:** `create-vue@3.23.0` requires Node `^22.18.0 || >=24.12.0`. This machine's shell
 > resolves to v22.12.0 while nvm's default alias is v24.19.0 — scaffolding must run under 24.19.0.
-> This is the same version-skew class of bug that broke `pi` locally; pin the Node version in the
-> repo (`.nvmrc`) rather than relying on ambient shell state.
+> `.nvmrc` pins it rather than trusting ambient shell state; the same version-skew class broke `pi`
+> locally.
 
 ---
 
-## 11. Build order
+## 12. Build order
 
-1. `store` + `board` + `nydus` with an in-memory harness stub — prove the protocol without any LLM.
-2. `adapter` interface + **claude** adapter (structured mode) + preflight.
-3. `cerebrate` supervision, lease expiry, crash/backoff.
-4. `api` + minimal cockpit: attention, board, roles.
-5. **pi** adapter — the second adapter is what proves the interface is real.
-6. pty attach + xterm.js.
-7. Cost/token accounting, event replay, time travel.
+1. **store + config + role CRUD API** — roles as rows, seeded with coder and qa.
+2. **nydus + board** against an in-memory harness stub — prove leases, claims, acks, terminal merge
+   with zero LLM calls.
+3. **adapter interface + claude adapter + preflight.**
+4. **cerebrate** supervision, lease expiry, crash/backoff.
+5. **Cockpit v1** — projects, team, role editor, attention, board.
+6. **pi adapter** — the second adapter is what proves the interface is real.
+7. pty attach + xterm.js; cost accounting; event replay.
 
-Milestone 1 is deliberately LLM-free: the coordination layer is where the predecessor's 22 failure
+Milestones 1–2 are deliberately LLM-free. The coordination layer is where the predecessor's failure
 modes lived, and it is testable without spending a token.

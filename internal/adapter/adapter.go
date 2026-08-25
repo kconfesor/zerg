@@ -23,6 +23,16 @@ type Adapter interface {
 	// credential probing, model catalog.
 	Checks() []Check
 
+	// ListModels asks the harness what it can actually run, so the role editor
+	// renders a picker instead of a text box. Typing model ids by hand is how
+	// you get "Model metadata for 'gpt-5.6-sol' not found" followed by twenty
+	// minutes of an agent that looks alive while every turn returns HTTP 400.
+	//
+	// A catalog may lag reality — gpt-5.6-sol is absent from pi's list and runs
+	// fine — so the UI still accepts free text. An unlisted model warns; it
+	// does not block.
+	ListModels(ctx context.Context) ([]Model, error)
+
 	// Command builds the process to run. It must not mutate global state:
 	// anything the harness would write to a shared config directory belongs
 	// under Spec.ConfigDir.
@@ -36,13 +46,29 @@ type Adapter interface {
 	Capabilities() Caps
 }
 
-// Spec is everything needed to launch one agent.
+// Model is one entry from a harness's own catalog.
+type Model struct {
+	ID       string // harness-native id, e.g. "opus" or "openai-codex/gpt-5.6-sol"
+	Label    string // display name for the picker
+	Provider string // grouping in the UI; empty when the harness has one provider
+	Context  int    // context window in tokens, 0 when unknown
+}
+
+// Spec is everything needed to launch one agent. Every field originates in the
+// database — there is no config file to read and no snapshot in a worktree to
+// go stale.
 type Spec struct {
-	Role       string
-	Worktree   string // agent cwd; a git worktree owned by this role
-	Model      string // harness-native id, e.g. "opus" or "openai-codex/gpt-5.6-sol"
-	SystemFile string // path to the composed constitution + role prompt
-	ExtraArgs  []string
+	Role     string
+	Worktree string // agent cwd; a git worktree owned by this role
+	Model    string
+	ExtraArgs []string
+
+	// SystemFile is composed fresh at every spawn from the shared instructions
+	// plus this role's prompt, both read from the database. The predecessor
+	// copied prompt files into each worktree at creation time, so edits made
+	// afterward reached nobody: a config set to Rust produced a Clojure
+	// implementation across six agents, silently.
+	SystemFile string
 
 	// ConfigDir is a private, per-role harness config directory. Two agents
 	// launching concurrently must never read-modify-write one shared global
@@ -77,9 +103,17 @@ type Check struct {
 type Result struct {
 	OK bool
 
+	// Warn reports a concern that must not block the spawn — an unlisted model
+	// id, for instance, since a harness catalog can lag a model that works.
+	Warn bool
+
 	// Reason states what is wrong, Remedy states the command that fixes it.
 	// A blocked role renders in the cockpit with both. It never renders as an
 	// idle pane that happens to be doing nothing.
+	//
+	// Credentials are detect-only: zerg reports "pi: no credentials for
+	// provider 'openai'" with the remedy, and never runs a login flow or
+	// touches a harness auth file.
 	Reason string
 	Remedy string
 }
