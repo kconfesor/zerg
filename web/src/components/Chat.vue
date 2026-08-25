@@ -10,8 +10,12 @@
 import { nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { api, streamActivity, type ActivityEvent, type ActivityStream } from '@/lib/api'
 import { renderMarkdown } from '@/lib/markdown'
-import { Button } from '@/components/ui/button'
-import { Textarea } from '@/components/ui/textarea'
+import {
+  InputGroup,
+  InputGroupAddon,
+  InputGroupButton,
+  InputGroupTextarea,
+} from '@/components/ui/input-group'
 
 const props = defineProps<{ projectId: string | null }>()
 
@@ -153,8 +157,11 @@ onBeforeUnmount(() => stream?.close())
 
     <p v-if="error" class="bg-destructive/10 text-destructive px-3 py-2 text-xs">{{ error }}</p>
 
-    <div class="flex items-end gap-2">
-      <Textarea
+    <!-- One control rather than a field with a button parked beside it. The
+         two belong together — the button does nothing except to this text —
+         and a separate box made them read as two decisions. -->
+    <InputGroup>
+      <InputGroupTextarea
         v-model="draft"
         rows="2"
         class="text-xs"
@@ -162,10 +169,19 @@ onBeforeUnmount(() => stream?.close())
         :disabled="!projectId"
         @keydown="onKeydown"
       />
-      <Button :disabled="sending || !draft.trim() || !projectId" @click="send">
-        {{ sending ? '…' : 'Ask' }}
-      </Button>
-    </div>
+      <InputGroupAddon align="block-end">
+        <span class="text-muted-foreground text-[10px]">enter to send</span>
+        <InputGroupButton
+          variant="default"
+          size="sm"
+          class="ml-auto"
+          :disabled="sending || !draft.trim() || !projectId"
+          @click="send"
+        >
+          {{ sending ? '…' : 'Ask' }}
+        </InputGroupButton>
+      </InputGroupAddon>
+    </InputGroup>
     <p class="text-muted-foreground text-[11px]">
       Runs in its own worktree with no access to the work queue, so a question cannot disturb
       anything in flight.

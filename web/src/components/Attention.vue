@@ -6,8 +6,12 @@ import { api, type ChangedFile } from '@/lib/api'
 import { renderMarkdown } from '@/lib/markdown'
 import DiffView from '@/components/DiffView.vue'
 import { Badge } from '@/components/ui/badge'
-import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
+import {
+  InputGroup,
+  InputGroupAddon,
+  InputGroupButton,
+  InputGroupInput,
+} from '@/components/ui/input-group'
 
 const props = defineProps<{ attention: Attention | null; compact?: boolean }>()
 const emit = defineEmits<{
@@ -239,17 +243,27 @@ function empty(a: Attention | null): boolean {
         </div>
       </div>
 
-      <div class="flex flex-wrap gap-2">
-        <Input
+      <!-- The note and the two decisions are one control: the text only means
+           anything to Reject, and a field floating beside two buttons did not
+           say which. -->
+      <InputGroup>
+        <InputGroupInput
           v-model="notes[a.id]"
           placeholder="reason, if rejecting"
-          class="min-w-0 flex-1"
         />
-        <Button size="sm" @click="emit('approve', a.id)">Approve</Button>
-        <Button size="sm" variant="destructive" @click="emit('reject', a.id, notes[a.id] ?? '')">
-          Reject
-        </Button>
-      </div>
+        <InputGroupAddon align="inline-end">
+          <InputGroupButton variant="default" size="sm" @click="emit('approve', a.id)">
+            Approve
+          </InputGroupButton>
+          <InputGroupButton
+            variant="destructive"
+            size="sm"
+            @click="emit('reject', a.id, notes[a.id] ?? '')"
+          >
+            Reject
+          </InputGroupButton>
+        </InputGroupAddon>
+      </InputGroup>
     </article>
 
     <!-- Questions. Without somewhere to put these, an agent waiting on an
@@ -271,15 +285,22 @@ function empty(a: Attention | null): boolean {
            question into a wall. The renderer escapes before it builds any tag,
            so nothing an agent read out of the repository becomes markup. -->
       <div class="md mb-2.5 min-w-0 overflow-x-auto text-xs leading-relaxed break-words" v-html="renderMarkdown(c.question)" />
-      <div class="flex gap-2">
-        <Input
+      <InputGroup>
+        <InputGroupInput
           v-model="answers[c.id]"
           placeholder="your answer"
-          class="min-w-0 flex-1"
           @keyup.enter="emit('answer', c.id, answers[c.id] ?? '')"
         />
-        <Button size="sm" @click="emit('answer', c.id, answers[c.id] ?? '')">Answer</Button>
-      </div>
+        <InputGroupAddon align="inline-end">
+          <InputGroupButton
+            variant="default"
+            size="sm"
+            @click="emit('answer', c.id, answers[c.id] ?? '')"
+          >
+            Answer
+          </InputGroupButton>
+        </InputGroupAddon>
+      </InputGroup>
     </article>
 
     <!-- Cards going in circles. Informational: rework is legitimate, and
