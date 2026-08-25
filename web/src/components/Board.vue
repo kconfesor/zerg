@@ -3,15 +3,14 @@ import { computed } from 'vue'
 import type { ResolvedRole, Task } from '@/lib/api'
 import { duration } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
-import { Card, CardContent } from '@/components/ui/card'
 
 const props = defineProps<{ team: ResolvedRole[]; tasks: Task[] }>()
 
-/** Lanes are the enabled roles in pipeline order, plus the Done well. */
-const lanes = computed(() => [
-  ...props.team.filter((r) => r.enabled).map((r) => r.name),
-  'done',
-])
+/** Lanes are the enabled roles in pipeline order, then the Done well. */
+const lanes = computed(() => {
+  const roles = props.team.filter((r) => r.enabled).map((r) => r.name)
+  return [...roles, 'done']
+})
 
 const byLane = computed(() => {
   const map = new Map<string, Task[]>()
@@ -22,34 +21,64 @@ const byLane = computed(() => {
 </script>
 
 <template>
-  <div class="overflow-x-auto">
-    <div class="flex min-w-max gap-3">
-      <div v-for="lane in lanes" :key="lane" class="flex w-60 shrink-0 flex-col gap-2">
-        <div class="flex items-baseline gap-2 border-b pb-1.5">
-          <span class="text-xs font-semibold">{{ lane }}</span>
-          <span class="text-muted-foreground text-xs">{{ byLane.get(lane)?.length ?? 0 }}</span>
+  <!-- Lanes share the width when there are few and scroll sideways when there
+       are many. The page itself never scrolls horizontally. -->
+  <div class="-mx-[var(--gutter)] overflow-x-auto px-[var(--gutter)] pb-2">
+    <div class="flex items-start gap-3">
+      <section
+        v-for="(lane, i) in lanes"
+        :key="lane"
+        class="rise flex min-w-56 max-w-96 flex-1 basis-60 flex-col"
+        :style="{ animationDelay: `${i * 40}ms` }"
+      >
+        <!-- A lane header that reads as a column, not floating text. -->
+        <div
+          :class="[
+            'flex items-baseline gap-2 border-b-2 px-1 pb-2',
+            lane === 'done' ? 'border-[var(--status-good)]/50' : 'border-primary/45',
+          ]"
+        >
+          <span class="text-xs font-semibold tracking-wide">{{ lane }}</span>
+          <span class="tabular text-muted-foreground ml-auto text-[11px]">
+            {{ byLane.get(lane)?.length ?? 0 }}
+          </span>
         </div>
 
-        <Card v-for="task in byLane.get(lane)" :key="task.id" class="py-0">
-          <CardContent class="p-2.5">
-            <div class="mb-1.5 text-xs font-medium break-words">{{ task.name }}</div>
+        <div class="flex flex-col gap-2 pt-2">
+          <article
+            v-for="task in byLane.get(lane)"
+            :key="task.id"
+            :class="[
+              'bg-card hover:border-primary/40 border p-2.5 transition-colors',
+              task.state === 'working' && 'border-primary/50 bg-primary/[0.06]',
+            ]"
+          >
+            <div class="mb-2 text-xs leading-snug font-medium break-words">{{ task.name }}</div>
             <div class="flex flex-wrap items-center gap-1.5">
-              <!-- lane says who holds the card; state says whether they are
-                   actually working it. Both, because the lane alone is what
-                   made the predecessor's board dishonest. -->
+              <!-- lane says who holds the card, state says whether they are
+                   actually working it. The predecessor showed only the lane,
+                   so a card read as claimed the instant it was delivered. -->
               <Badge :variant="task.state === 'working' ? 'default' : 'outline'">
                 {{ task.state }}
               </Badge>
-              <Badge v-if="task.reworkCount > 0" variant="secondary">↩ {{ task.reworkCount }}</Badge>
-              <span v-if="task.activeMs > 0" class="text-muted-foreground text-xs">
-                {{ duration(task.activeMs) }} worked
+              <Badge v-if="task.reworkCount > 0" variant="secondary" :title="`sent backward ${task.reworkCount} times`">
+                ↩ {{ task.reworkCount }}
+              </Badge>
+              <span v-if="task.activeMs > 0" class="tabular text-muted-foreground ml-auto text-[10px]">
+                {{ duration(task.activeMs) }}
               </span>
             </div>
-          </CardContent>
-        </Card>
+          </article>
 
-        <p v-if="!byLane.get(lane)?.length" class="text-muted-foreground px-1 py-2 text-xs">—</p>
-      </div>
+          <!-- An empty lane is normal; it should read as quiet, not broken. -->
+          <p
+            v-if="!byLane.get(lane)?.length"
+            class="text-muted-foreground/50 px-1 py-3 text-[11px]"
+          >
+            empty
+          </p>
+        </div>
+      </section>
     </div>
   </div>
 </template>

@@ -17,24 +17,24 @@ import Attention from '@/components/Attention.vue'
 import Board from '@/components/Board.vue'
 import ReadinessPanel from '@/components/Readiness.vue'
 import TeamEditor from '@/components/TeamEditor.vue'
-import { Badge } from '@/components/ui/badge'
+import AppSidebar, { type View } from '@/components/layout/AppSidebar.vue'
+import PageHeader from '@/components/layout/PageHeader.vue'
 import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
-import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { Label } from '@/components/ui/label'
+import { Textarea } from '@/components/ui/textarea'
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
-
-type Tab = 'board' | 'team' | 'readiness'
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 
 const projects = ref<Project[]>([])
 const current = ref<Project | null>(null)
-const tab = ref<Tab>('board')
+const view = ref<View>('board')
 
 const library = ref<RoleTemplate[]>([])
 const team = ref<ResolvedRole[]>([])
@@ -49,6 +49,7 @@ const banner = ref<{ tone: 'bad' | 'ok'; text: string } | null>(null)
 const newPath = ref('')
 const taskName = ref('')
 const taskBody = ref('')
+const composing = ref(false)
 
 let timer: number | undefined
 
@@ -56,6 +57,14 @@ const attentionCount = computed(() => {
   const a = attention.value
   if (!a) return 0
   return a.approvals.length + a.clarifications.length + a.rework.tasks.length
+})
+
+const working = computed(() => tasks.value.filter((t) => t.state === 'working').length)
+
+const boardSubtitle = computed(() => {
+  const n = tasks.value.length
+  if (!n) return 'No cards yet. Open one below.'
+  return `${n} ${n === 1 ? 'card' : 'cards'} · ${working.value} being worked`
 })
 
 function fail(err: unknown) {
@@ -69,9 +78,7 @@ async function loadGlobals() {
       api.roles(),
       api.harnesses(),
     ])
-    for (const h of harnesses.value) {
-      models.value[h] = await api.models(h).catch(() => [])
-    }
+    for (const h of harnesses.value) models.value[h] = await api.models(h).catch(() => [])
   } catch (err) {
     fail(err)
   }
@@ -99,7 +106,7 @@ async function refresh() {
 
 async function open(project: Project) {
   current.value = project
-  tab.value = 'board'
+  view.value = 'board'
   readiness.value = null
   await refresh()
 }
@@ -120,7 +127,7 @@ async function checkReadiness() {
   if (!current.value) return
   try {
     readiness.value = await api.readiness(current.value.id)
-    tab.value = 'readiness'
+    view.value = 'readiness'
   } catch (err) {
     fail(err)
   }
@@ -139,7 +146,7 @@ async function start() {
       const body = err.body as { readiness?: Readiness } | undefined
       if (body?.readiness) {
         readiness.value = body.readiness
-        tab.value = 'readiness'
+        view.value = 'readiness'
       }
     }
     fail(err)
@@ -164,6 +171,7 @@ async function createTask() {
     await api.newTask(current.value.id, taskName.value.trim(), taskBody.value)
     taskName.value = ''
     taskBody.value = ''
+    composing.value = false
     await refresh()
   } catch (err) {
     fail(err)
@@ -184,7 +192,10 @@ async function saveRole(role: RoleTemplate) {
     await api.updateRole(role)
     await loadGlobals()
     await refresh()
-    banner.value = { tone: 'ok', text: `Saved ${role.name}. Restart the role for it to take effect.` }
+    banner.value = {
+      tone: 'ok',
+      text: `Saved ${role.name}. Restart the role for it to take effect.`,
+    }
   } catch (err) {
     fail(err)
   }
@@ -218,9 +229,6 @@ const act = {
   },
 }
 
-const stateVariant = (s: string) =>
-  s === 'ready' || s === 'working' ? 'default' : s === 'blocked' || s === 'failed' ? 'destructive' : 'outline'
-
 onMounted(async () => {
   await loadGlobals()
   if (projects.value.length) await open(projects.value[0])
@@ -233,61 +241,55 @@ watch(current, () => (banner.value = null))
 </script>
 
 <template>
-  <div class="flex min-h-dvh flex-col">
-    <header class="bg-card flex flex-wrap items-center gap-3 border-b px-4 py-2.5">
-      <div class="flex items-center gap-2">
-        <span
-          class="bg-primary text-primary-foreground grid size-5 place-items-center text-xs font-bold"
-          >z</span
-        >
-        <span class="text-sm font-bold tracking-tight">zerg</span>
-      </div>
+  <div class="flex h-full">
+    <AppSidebar
+      :projects="projects"
+      :current="current"
+      :view="view"
+      :status="status"
+      :attention-count="attentionCount"
+      :task-count="tasks.length"
+      @navigate="(v) => (view = v)"
+      @open-project="open"
+      @start="start"
+      @stop="stop"
+      @check="checkReadiness"
+    />
 
-      <Select
-        v-if="projects.length"
-        :model-value="current?.id"
-        @update:model-value="(v) => open(projects.find((p) => p.id === v)!)"
+    <div class="flex min-w-0 flex-1 flex-col overflow-hidden">
+      <p
+        v-if="banner"
+        :class="[
+          'hairline-b shrink-0 px-[var(--gutter)] py-2 text-xs',
+          banner.tone === 'bad'
+            ? 'bg-destructive/10 text-destructive'
+            : 'bg-[var(--status-good)]/10 text-[var(--status-good)]',
+        ]"
       >
-        <SelectTrigger size="sm" class="w-44"><SelectValue /></SelectTrigger>
-        <SelectContent>
-          <SelectItem v-for="p in projects" :key="p.id" :value="p.id">{{ p.name }}</SelectItem>
-        </SelectContent>
-      </Select>
-      <span v-if="current" class="text-muted-foreground text-xs">
-        {{ current.path }} · {{ current.baseBranch }}
-      </span>
+        {{ banner.text }}
+      </p>
 
-      <div class="ml-auto flex items-center gap-2">
-        <Badge :variant="status.running ? 'default' : 'outline'">
-          {{ status.running ? 'running' : 'stopped' }}
-        </Badge>
-        <Button v-if="!status.running" size="sm" variant="outline" @click="checkReadiness">
-          Check
-        </Button>
-        <Button v-if="!status.running" size="sm" :disabled="!current" @click="start">Start</Button>
-        <Button v-else size="sm" variant="destructive" @click="stop">Stop</Button>
-      </div>
-    </header>
+      <!-- Something waiting on a human follows you between views. A count in
+           the sidebar is easy to walk past; this is not. -->
+      <button
+        v-if="attentionCount && view !== 'attention'"
+        class="hairline-b flex shrink-0 items-center gap-2 bg-[var(--status-warning)]/10 px-[var(--gutter)] py-2 text-left text-xs text-[var(--status-warning)] transition-colors hover:bg-[var(--status-warning)]/15"
+        @click="view = 'attention'"
+      >
+        <span class="pulse-dot size-1.5 rounded-full bg-current" />
+        <span class="tabular font-semibold">{{ attentionCount }}</span>
+        {{ attentionCount === 1 ? 'item needs' : 'items need' }} you
+        <span class="ml-auto opacity-70">Review →</span>
+      </button>
 
-    <p
-      v-if="banner"
-      :class="[
-        'border-b px-4 py-2 text-xs',
-        banner.tone === 'bad'
-          ? 'border-destructive/40 bg-destructive/10 text-destructive'
-          : 'border-[var(--status-good)]/40 bg-[var(--status-good)]/10 text-[var(--status-good)]',
-      ]"
-    >
-      {{ banner.text }}
-    </p>
-
-    <!-- No project yet. -->
-    <main v-if="!current" class="mx-auto w-full max-w-2xl p-6">
-      <Card>
-        <CardHeader>
-          <CardTitle>Add a project</CardTitle>
-        </CardHeader>
-        <CardContent>
+      <!-- No project yet: one job on screen, centred, nothing else. -->
+      <main v-if="!current" class="grid flex-1 place-items-center overflow-y-auto p-8">
+        <div class="w-full max-w-md">
+          <h1 class="text-lg font-semibold tracking-tight">Add a project</h1>
+          <p class="text-muted-foreground mt-1.5 mb-4 text-xs leading-relaxed">
+            Point zerg at a git repository. It starts with coder → reviewer selected; everything
+            else is a checkbox in Team.
+          </p>
           <div class="flex gap-2">
             <Input
               v-model="newPath"
@@ -297,55 +299,28 @@ watch(current, () => (banner.value = null))
             />
             <Button @click="addProject">Add</Button>
           </div>
-          <p class="text-muted-foreground mt-2 text-xs">
-            A new project starts with coder → reviewer selected. Everything else is a checkbox in
-            Team.
-          </p>
-        </CardContent>
-      </Card>
-    </main>
+        </div>
+      </main>
 
-    <main v-else class="flex-1 p-4">
-      <div class="mb-4 flex flex-wrap items-center gap-3">
-        <Tabs v-model="tab">
-          <TabsList>
-            <TabsTrigger value="board">Board</TabsTrigger>
-            <TabsTrigger value="team">Team</TabsTrigger>
-            <TabsTrigger value="readiness">Readiness</TabsTrigger>
-          </TabsList>
-        </Tabs>
-        <Badge v-if="attentionCount" variant="secondary">{{ attentionCount }} needs you</Badge>
-      </div>
-
-      <div class="grid gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
-        <div class="flex min-w-0 flex-col gap-4">
-          <template v-if="tab === 'board'">
-            <Card>
-              <CardHeader><CardTitle>New task</CardTitle></CardHeader>
-              <CardContent>
-                <div class="flex flex-wrap gap-2">
-                  <Input v-model="taskName" placeholder="short, stable name" class="w-48" />
-                  <Input
-                    v-model="taskBody"
-                    placeholder="what to do"
-                    class="min-w-0 flex-1"
-                    @keyup.enter="createTask"
-                  />
-                  <Button @click="createTask">Open card</Button>
-                </div>
-              </CardContent>
-            </Card>
-            <Card>
-              <CardHeader>
-                <CardTitle>Board <span class="text-muted-foreground font-normal">{{ tasks.length }} cards</span></CardTitle>
-              </CardHeader>
-              <CardContent><Board :team="team" :tasks="tasks" /></CardContent>
-            </Card>
+      <main v-else class="min-h-0 flex-1 overflow-y-auto">
+        <div class="mx-auto w-full max-w-[1200px] p-[var(--gutter)]">
+          <!-- Board -->
+          <template v-if="view === 'board'">
+            <PageHeader title="Board" :subtitle="boardSubtitle">
+              <template #actions>
+                <Button @click="composing = true">New card</Button>
+              </template>
+            </PageHeader>
+            <div class="pt-4"><Board :team="team" :tasks="tasks" /></div>
           </template>
 
-          <Card v-else-if="tab === 'team'">
-            <CardHeader><CardTitle>Team</CardTitle></CardHeader>
-            <CardContent>
+          <!-- Team -->
+          <template v-else-if="view === 'team'">
+            <PageHeader
+              title="Team"
+              subtitle="The library is shared by every project. The pipeline is this one's."
+            />
+            <div class="pt-4">
               <TeamEditor
                 :library="library"
                 :team="team"
@@ -355,62 +330,81 @@ watch(current, () => (banner.value = null))
                 @set-team="setTeam"
                 @save-role="saveRole"
               />
-            </CardContent>
-          </Card>
+            </div>
+          </template>
 
-          <Card v-else>
-            <CardHeader class="flex-row items-center justify-between">
-              <CardTitle>
-                Readiness
-                <span class="text-muted-foreground font-normal">
-                  a team that cannot work must not reach a running board
-                </span>
-              </CardTitle>
-              <Button size="sm" variant="outline" @click="checkReadiness">Re-check</Button>
-            </CardHeader>
-            <CardContent>
-              <ReadinessPanel :readiness="readiness" />
-              <p v-if="!readiness" class="text-muted-foreground text-xs">
-                Not checked yet. Press Re-check.
-              </p>
-            </CardContent>
-          </Card>
-        </div>
-
-        <aside class="flex min-w-0 flex-col gap-4">
-          <Card>
-            <CardHeader><CardTitle>Attention</CardTitle></CardHeader>
-            <CardContent>
+          <!-- Attention -->
+          <template v-else-if="view === 'attention'">
+            <PageHeader
+              title="Attention"
+              :subtitle="
+                attentionCount
+                  ? `${attentionCount} waiting on a decision`
+                  : 'Everything waiting on a human appears here'
+              "
+            />
+            <div class="max-w-3xl pt-4">
               <Attention
                 :attention="attention"
                 @approve="act.approve"
                 @reject="act.reject"
                 @answer="act.answer"
               />
-            </CardContent>
-          </Card>
+            </div>
+          </template>
 
-          <Card v-if="status.roles.length">
-            <CardHeader><CardTitle>Roles</CardTitle></CardHeader>
-            <CardContent>
-              <ul class="flex flex-col gap-2">
-                <li v-for="r in status.roles" :key="r.role" class="flex flex-wrap items-center gap-2">
-                  <span class="w-20 text-xs font-medium">{{ r.role }}</span>
-                  <Badge :variant="stateVariant(r.state)">{{ r.state }}</Badge>
-                  <Badge v-if="r.terminal" variant="secondary">terminal</Badge>
-                  <span v-if="r.restarts" class="text-muted-foreground text-xs">
-                    {{ r.restarts }} restarts
-                  </span>
-                  <!-- A failed role says why. It never reads as merely idle. -->
-                  <span v-if="r.lastError" class="text-destructive w-full text-xs break-words">
-                    {{ r.lastError }}
-                  </span>
-                </li>
-              </ul>
-            </CardContent>
-          </Card>
-        </aside>
-      </div>
-    </main>
+          <!-- Readiness -->
+          <template v-else>
+            <PageHeader
+              title="Readiness"
+              subtitle="A team that cannot work must not reach a running board."
+            >
+              <template #actions>
+                <Button size="sm" variant="outline" @click="checkReadiness">Re-check</Button>
+              </template>
+            </PageHeader>
+            <div class="max-w-4xl pt-4">
+              <ReadinessPanel :readiness="readiness" />
+              <p v-if="!readiness" class="text-muted-foreground py-10 text-center text-xs">
+                Not checked yet. Press Re-check to probe every enabled role.
+              </p>
+            </div>
+          </template>
+        </div>
+      </main>
+    </div>
+
+    <!-- Opening a card. The name is the thing that follows this work through
+         the whole pipeline, which is worth saying where it is being typed. -->
+    <Dialog v-model:open="composing">
+      <DialogContent class="sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>New card</DialogTitle>
+          <DialogDescription>
+            Queued for {{ team.find((r) => r.enabled)?.name ?? 'the first role' }}, the first role
+            in the pipeline.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div class="flex flex-col gap-3">
+          <div class="flex flex-col gap-1.5">
+            <Label>Name</Label>
+            <Input v-model="taskName" placeholder="Expression parser" autofocus />
+            <span class="text-muted-foreground text-[11px]">
+              Short and stable — it follows the card through every role.
+            </span>
+          </div>
+          <div class="flex flex-col gap-1.5">
+            <Label>What to do</Label>
+            <Textarea v-model="taskBody" rows="5" placeholder="Describe the work." />
+          </div>
+        </div>
+
+        <DialogFooter>
+          <Button variant="outline" @click="composing = false">Cancel</Button>
+          <Button :disabled="!taskName.trim()" @click="createTask">Open card</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   </div>
 </template>

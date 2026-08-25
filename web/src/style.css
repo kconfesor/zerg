@@ -137,3 +137,72 @@
   --sidebar-border: oklch(1 0 0 / 10%);
   --sidebar-ring: oklch(0.542 0.034 322.5);
 }
+/* ── atmosphere ───────────────────────────────────────────────────────────
+   A cockpit is looked at for hours. Flat cards on a flat ground give the eye
+   nothing to hold onto, so surfaces are separated by light rather than by
+   drawing more lines: the shell recedes, the working surface sits forward.
+   ───────────────────────────────────────────────────────────────────────── */
+@layer base {
+  :root {
+    /* One spacing rhythm for the whole app. Ad-hoc padding is what made the
+       first pass feel loose. */
+    --gutter: 1.25rem;
+    --rail: 15rem;
+
+    /* Surfaces, darkest to lightest. */
+    --surface-sunken: oklch(15.5% 0.017 305);
+    --surface-raised: oklch(22.5% 0.030 301.6);
+    --hairline: oklch(24.5% 0.038 300);
+  }
+
+  html, body, #app { height: 100%; }
+
+  body {
+    /* A faint glow behind the working area, so the page has a top and the
+       eye starts where the content does. */
+    background-image: radial-gradient(
+      120rem 45rem at 60% -12rem,
+      oklch(28% 0.055 302 / 0.5),
+      transparent 60%
+    );
+    background-attachment: fixed;
+  }
+
+  ::-webkit-scrollbar { width: 9px; height: 9px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--hairline); }
+  ::-webkit-scrollbar-thumb:hover { background: var(--muted-foreground); }
+
+  /* Numbers in a column must line up or the eye cannot compare them. */
+  .tabular { font-variant-numeric: tabular-nums; }
+}
+
+@layer components {
+  /* A live swarm should be visible from across the room. */
+  .pulse-dot {
+    box-shadow: 0 0 0 0 currentColor;
+    animation: pulse 2.4s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  }
+  @keyframes pulse {
+    0%   { box-shadow: 0 0 0 0 currentColor; opacity: 1; }
+    70%  { box-shadow: 0 0 0 0.375rem transparent; opacity: 0.85; }
+    100% { box-shadow: 0 0 0 0 transparent; opacity: 1; }
+  }
+
+  /* One orchestrated entrance beats scattered micro-animations. */
+  .rise {
+    animation: rise 0.34s cubic-bezier(0.16, 1, 0.3, 1) both;
+  }
+  @keyframes rise {
+    from { opacity: 0; transform: translateY(0.375rem); }
+    to   { opacity: 1; transform: none; }
+  }
+
+  .hairline-t { border-top: 1px solid var(--hairline); }
+  .hairline-b { border-bottom: 1px solid var(--hairline); }
+  .hairline-r { border-right: 1px solid var(--hairline); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pulse-dot, .rise { animation: none; }
+}
