@@ -114,6 +114,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/projects/{id}/stream", s.stream)
 	mux.HandleFunc("GET /api/tasks/{id}", s.taskDetail)
 	mux.HandleFunc("GET /api/tasks/{id}/usage", s.taskUsage)
+	mux.HandleFunc("GET /api/approvals/{id}/diff", s.approvalDiff)
 	mux.HandleFunc("POST /api/approvals/{id}/approve", s.approve)
 	mux.HandleFunc("POST /api/approvals/{id}/reject", s.reject)
 	mux.HandleFunc("POST /api/clarifications/{id}/answer", s.answer)

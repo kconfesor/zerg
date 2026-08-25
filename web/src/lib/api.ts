@@ -113,6 +113,9 @@ export interface Approval {
   taskName?: string
   taskId?: string
   fromRole?: string
+  /** What the role wrote when it handed the work on. */
+  body?: string
+  commit?: string
   createdAt: string
 }
 
@@ -214,6 +217,8 @@ export const api = {
     }),
 
   taskDetail: (id: string) => call<TaskDetail>(`/tasks/${id}`),
+  approvalDiff: (id: string) =>
+    call<{ diff: string; truncated: boolean }>(`/approvals/${id}/diff`),
   setIntegration: (id: string, integration: Integration) =>
     call<Project>(`/projects/${id}/integration`, {
       method: 'PUT',

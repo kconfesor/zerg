@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import type { Attention } from '@/lib/api'
+import { ChevronRight } from '@lucide/vue'
+import { api } from '@/lib/api'
+import { renderMarkdown } from '@/lib/markdown'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -11,6 +14,30 @@ const emit = defineEmits<{
   reject: [id: string, note: string]
   answer: [id: string, answer: string]
 }>()
+
+const diffs = ref<Record<string, { open: boolean; text: string; truncated: boolean }>>({})
+
+async function toggleDiff(id: string) {
+  const cur = diffs.value[id]
+  if (cur?.open) {
+    diffs.value = { ...diffs.value, [id]: { ...cur, open: false } }
+    return
+  }
+  diffs.value = { ...diffs.value, [id]: { open: true, text: cur?.text ?? '', truncated: false } }
+  if (cur?.text) return
+  try {
+    const r = await api.approvalDiff(id)
+    diffs.value = {
+      ...diffs.value,
+      [id]: { open: true, text: r.diff || '(this commit changed nothing)', truncated: r.truncated },
+    }
+  } catch (e) {
+    diffs.value = {
+      ...diffs.value,
+      [id]: { open: true, text: `Could not read the diff: ${e}`, truncated: false },
+    }
+  }
+}
 
 const notes = ref<Record<string, string>>({})
 const answers = ref<Record<string, string>>({})
@@ -44,6 +71,38 @@ function empty(a: Attention | null): boolean {
         <span class="text-xs font-semibold">{{ a.taskName || 'untitled' }}</span>
         <span class="text-muted-foreground text-[11px]">from {{ a.fromRole }}</span>
       </div>
+      <!-- What the role decided. The note is the substance of the decision and
+           was the first thing missing from this card. -->
+      <div v-if="a.body" class="md mb-2.5 text-xs leading-relaxed" v-html="renderMarkdown(a.body)" />
+
+      <!-- And what it actually wrote. Deciding from a description of a change
+           rather than the change is approving blind, and for a planner's spec
+           the committed file *is* the deliverable. Loaded on demand: most
+           approvals are read, not all are expanded, and a diff is far larger
+           than anything else here. -->
+      <div v-if="a.commit" class="mb-2.5">
+        <button
+          type="button"
+          class="text-muted-foreground hover:text-foreground flex items-center gap-1 text-[11px]"
+          @click="toggleDiff(a.id)"
+        >
+          <ChevronRight
+            :size="12"
+            :class="['transition-transform', diffs[a.id]?.open ? 'rotate-90' : '']"
+            aria-hidden="true"
+          />
+          {{ diffs[a.id]?.open ? 'Hide' : 'View' }} changes
+          <code class="ml-1 opacity-70">{{ a.commit.slice(0, 8) }}</code>
+        </button>
+        <pre
+          v-if="diffs[a.id]?.open"
+          class="bg-muted mt-1.5 max-h-80 overflow-auto p-2 font-mono text-[10px] leading-relaxed"
+        >{{ diffs[a.id]?.text || 'Loading…' }}</pre>
+        <p v-if="diffs[a.id]?.truncated" class="text-muted-foreground mt-1 text-[10px]">
+          Truncated — read the rest in the worktree.
+        </p>
+      </div>
+
       <div class="flex flex-wrap gap-2">
         <Input
           v-model="notes[a.id]"

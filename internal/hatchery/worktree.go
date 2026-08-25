@@ -300,3 +300,20 @@ func (h *Hatchery) Subject(ctx context.Context, sha string) string {
 	}
 	return strings.TrimSpace(out)
 }
+
+// Diff returns what a commit changed, as unified diff text.
+//
+// Capped, because an approval needs to show the work and a browser does not
+// need a megabyte of it: past the cap the reader is better served by the file
+// than by more diff. Best effort — a sha that is not here returns empty rather
+// than an error, so a missing diff degrades the view instead of failing it.
+func (h *Hatchery) Diff(ctx context.Context, sha string, maxBytes int) (string, bool) {
+	out, err := git(ctx, h.repoPath, "show", "--format=", "--patch", sha)
+	if err != nil {
+		return "", false
+	}
+	if maxBytes > 0 && len(out) > maxBytes {
+		return out[:maxBytes], true
+	}
+	return out, false
+}

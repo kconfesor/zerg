@@ -223,3 +223,32 @@ func (s *Server) setIntegration(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, project)
 }
+
+// approvalDiff serves what a pending approval is asking about.
+//
+// The note says what the role decided; this is what it actually wrote. Deciding
+// from the note alone means approving a description of a change rather than the
+// change — which for a planner's spec is the whole deliverable.
+//
+// Lazily, on its own endpoint: most approvals are read, not all are expanded,
+// and a diff is far larger than everything else on the card.
+func (s *Server) approvalDiff(w http.ResponseWriter, r *http.Request) {
+	approval, err := s.db.GetApproval(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	project, err := s.db.GetProject(r.Context(), approval.ProjectID)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if approval.Commit == "" {
+		writeJSON(w, http.StatusOK, map[string]any{"diff": "", "truncated": false})
+		return
+	}
+
+	const maxDiff = 256 * 1024
+	diff, truncated := hatchery.New(project.Path).Diff(r.Context(), approval.Commit, maxDiff)
+	writeJSON(w, http.StatusOK, map[string]any{"diff": diff, "truncated": truncated})
+}

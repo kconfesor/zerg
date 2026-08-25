@@ -667,3 +667,37 @@ func (db *DB) TaskHistory(ctx context.Context, taskID string) ([]Handoff, error)
 	}
 	return out, rows.Err()
 }
+
+// GetApproval reads one approval, with the message detail the UI needs to show
+// what is being decided about.
+func (db *DB) GetApproval(ctx context.Context, id string) (*Approval, error) {
+	row := db.sql.QueryRowContext(ctx,
+		`SELECT a.id, a.project_id, a.message_id, a.state, a.note, a.created_at,
+		        COALESCE(t.name, ''), COALESCE(m.task_id, ''), m.from_role,
+		        m.body, COALESCE(m.commit_sha, '')
+		   FROM approvals a
+		   JOIN messages m ON m.id = a.message_id
+		   LEFT JOIN tasks t ON t.id = m.task_id
+		  WHERE a.id = ?`, id)
+
+	var (
+		a       Approval
+		note    sql.NullString
+		created string
+	)
+	err := row.Scan(&a.ID, &a.ProjectID, &a.MessageID, &a.State, &note, &created,
+		&a.TaskName, &a.TaskID, &a.FromRole, &a.Body, &a.Commit)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("approval %s: %w", id, ErrNotFound)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reading approval: %w", err)
+	}
+	if note.Valid {
+		a.Note = &note.String
+	}
+	if a.CreatedAt, err = time.Parse(time.RFC3339Nano, created); err != nil {
+		return nil, err
+	}
+	return &a, nil
+}
