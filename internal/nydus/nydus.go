@@ -99,13 +99,50 @@ func (n *Nydus) NewTask(ctx context.Context, projectID, name, body string) (*sto
 		return nil, errNoEnabledRoles(projectID)
 	}
 
-	task, err := n.db.CreateTask(ctx, projectID, name, body, first.Name)
+	if name == "" {
+		return nil, invalid("a task needs a name; the name follows the card through the whole pipeline")
+	}
+
+	// The card and the message that starts it are written together. Created
+	// separately, a failure in between left a task on the board that nothing
+	// had queued and nothing would ever move — a card that looks like work and
+	// is not.
+	tx, err := n.db.SQL().BeginTx(ctx, nil)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("beginning task: %w", err)
+	}
+	defer tx.Rollback()
+
+	now := n.now()
+	task := &store.Task{
+		ID:        store.NewID(),
+		ProjectID: projectID,
+		Name:      name,
+		Body:      body,
+		Lane:      first.Name,
+		State:     store.TaskQueued,
+		CreatedAt: now.UTC(),
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO tasks (id, project_id, name, body, lane, state, created_at)
+		 VALUES (?,?,?,?,?,?,?)`,
+		task.ID, task.ProjectID, task.Name, task.Body, task.Lane, task.State,
+		task.CreatedAt.Format(time.RFC3339Nano)); err != nil {
+		return nil, fmt.Errorf("creating task %q: %w", name, err)
 	}
 
 	// The opening message comes from the operator, not from a role.
-	_, err = n.send(ctx, sendReq{
+	msg := &store.Message{
+		ID:        store.NewID(),
+		ProjectID: projectID,
+		TaskID:    &task.ID,
+		FromRole:  "operator",
+		Kind:      store.KindNote,
+		Priority:  50,
+		Body:      body,
+		CreatedAt: now,
+	}
+	if err := n.sendIn(ctx, tx, msg, sendReq{
 		ProjectID: projectID,
 		TaskID:    &task.ID,
 		FromRole:  "operator",
@@ -114,9 +151,12 @@ func (n *Nydus) NewTask(ctx context.Context, projectID, name, body string) (*sto
 		Priority:  50,
 		Body:      body,
 		gate:      store.GateNone, // the operator does not gate their own request
-	})
-	if err != nil {
+	}, now); err != nil {
 		return nil, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("committing task: %w", err)
 	}
 	return task, nil
 }
@@ -282,13 +322,29 @@ func (n *Nydus) send(ctx context.Context, req sendReq) (*store.Message, error) {
 	}
 	defer tx.Rollback()
 
+	if err := n.sendIn(ctx, tx, msg, req, now); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("committing send: %w", err)
+	}
+	return msg, nil
+}
+
+// sendIn writes a message and its routes inside a caller's transaction.
+//
+// Separate from send so a caller that has more to write can do it atomically —
+// NewTask creates the card and its opening message together, and a failure
+// after the card existed left a task on the board that nothing had queued and
+// nothing would ever move.
+func (n *Nydus) sendIn(ctx context.Context, tx *sql.Tx, msg *store.Message, req sendReq, now time.Time) error {
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO messages (id, project_id, task_id, from_role, kind, priority,
 		   commit_sha, body, terminal, created_at)
 		 VALUES (?,?,?,?,?,?,?,?,?,?)`,
 		msg.ID, msg.ProjectID, msg.TaskID, msg.FromRole, msg.Kind, msg.Priority,
 		msg.CommitSHA, msg.Body, msg.Terminal, now.Format(time.RFC3339Nano)); err != nil {
-		return nil, fmt.Errorf("recording message: %w", err)
+		return fmt.Errorf("recording message: %w", err)
 	}
 
 	// A gated handoff is held; everything else is immediately claimable. The
@@ -302,7 +358,7 @@ func (n *Nydus) send(ctx context.Context, req sendReq) (*store.Message, error) {
 		if _, err := tx.ExecContext(ctx,
 			`INSERT INTO routes (message_id, to_role, state, enqueued_at) VALUES (?,?,?,?)`,
 			msg.ID, to, state, now.Format(time.RFC3339Nano)); err != nil {
-			return nil, fmt.Errorf("routing to %s: %w", to, err)
+			return fmt.Errorf("routing to %s: %w", to, err)
 		}
 	}
 
@@ -312,7 +368,7 @@ func (n *Nydus) send(ctx context.Context, req sendReq) (*store.Message, error) {
 			 VALUES (?,?,?,?,?)`,
 			store.NewID(), req.ProjectID, msg.ID, store.ApprovalPending,
 			now.Format(time.RFC3339Nano)); err != nil {
-			return nil, fmt.Errorf("opening approval: %w", err)
+			return fmt.Errorf("opening approval: %w", err)
 		}
 	} else if req.TaskID != nil {
 		// The card follows the work. State stays "queued" until the recipient
@@ -324,14 +380,10 @@ func (n *Nydus) send(ctx context.Context, req sendReq) (*store.Message, error) {
 		if _, err := tx.ExecContext(ctx,
 			`UPDATE tasks SET lane = ?, state = ?, rework_count = rework_count + ? WHERE id = ?`,
 			req.ToRoles[0], store.TaskQueued, boolToInt(req.rework), *req.TaskID); err != nil {
-			return nil, fmt.Errorf("moving card: %w", err)
+			return fmt.Errorf("moving card: %w", err)
 		}
 	}
-
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("committing send: %w", err)
-	}
-	return msg, nil
+	return nil
 }
 
 // complete finishes a task: the overmind merges the terminal commit into the

@@ -783,6 +783,12 @@ useless as an invoice. Tokens are always real; dollars sometimes are not.
 
 ## 12. History and metrics
 
+> **Status: partly built.** `usage_turns` exists and is what the cost panel
+> reads. `daily_rollup`, the price table and task pinning are described below as
+> the design they will follow and are **not implemented** — §9 lists the tables
+> that actually exist. The retention arithmetic in §12.1 is the reasoning for the
+> tiering, not a description of a running sweep.
+
 The database makes history nearly free — but only if the three kinds of record are kept on different
 terms. Treating them alike is how a local SQLite file becomes a 14 GB liability.
 
@@ -818,7 +824,7 @@ approval gate, a clarification, or a queue behind another card. Without that dis
 pipeline and a genuinely hard task look identical. Charting them together turns
 "where does our time go" from a guess into a reading.
 
-### 12.3 What the history view answers
+### 12.3 What the history view answers — planned
 
 Every panel below is a query against `daily_rollup` joined to `tasks`, scoped by project:
 

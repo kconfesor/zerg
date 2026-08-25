@@ -9,9 +9,12 @@ package adapter
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -106,19 +109,84 @@ type Spec struct {
 
 // AgentEnv builds the environment for a spawned agent: the current environment
 // with BinDir prepended to PATH, plus the identity the agent authenticates with.
+// envAllow is what an agent inherits by name.
+//
+// Everything else is dropped. The daemon runs in whatever shell you started it
+// from, and that shell routinely holds cloud keys, database URLs and CI tokens
+// that have nothing to do with writing code — an agent given the whole
+// environment can reach every one of them, and the first sign would be
+// something it did with them.
+//
+// Kept: what a process needs to run at all, what a harness needs to find its
+// own credentials, and what a build needs to work in a repository.
+var envAllow = map[string]bool{
+	"HOME": true, "USER": true, "LOGNAME": true, "SHELL": true, "TMPDIR": true,
+	"LANG": true, "LC_ALL": true, "TZ": true, "TERM": true, "COLORTERM": true,
+	"SSL_CERT_FILE": true, "SSL_CERT_DIR": true, "CURL_CA_BUNDLE": true,
+	"NO_PROXY": true, "HTTP_PROXY": true, "HTTPS_PROXY": true,
+	"no_proxy": true, "http_proxy": true, "https_proxy": true,
+	// Toolchains an agent is likely to invoke inside a repository.
+	"GOPATH": true, "GOMODCACHE": true, "GOCACHE": true, "GOFLAGS": true,
+	"CARGO_HOME": true, "RUSTUP_HOME": true, "JAVA_HOME": true,
+	"PNPM_HOME": true, "NODE_OPTIONS": true,
+}
+
+// envAllowPrefix keeps whole families rather than naming every member.
+//
+// The provider variables are here because zerg deliberately does not manage
+// credentials (§2): a harness authenticates itself, and stripping the variable
+// it authenticates with would break the agent to protect a secret it is
+// supposed to have.
+var envAllowPrefix = []string{
+	"LC_",
+	"ANTHROPIC_", "CLAUDE_", "OPENAI_", "GEMINI_", "GOOGLE_API", "GROQ_",
+	"DEEPSEEK_", "MISTRAL_", "OPENROUTER_", "XAI_", "PI_",
+	"XDG_",
+}
+
+// droppedOnce reports the names withheld from agents, once per process, so a
+// harness that suddenly cannot see something has a place to look.
+var droppedOnce sync.Once
+
+func agentEnvAllows(name string) bool {
+	if envAllow[name] {
+		return true
+	}
+	for _, p := range envAllowPrefix {
+		if strings.HasPrefix(name, p) {
+			return true
+		}
+	}
+	return false
+}
+
 func AgentEnv(spec Spec, extra ...string) []string {
 	path := os.Getenv("PATH")
 	if spec.BinDir != "" {
 		path = spec.BinDir + string(os.PathListSeparator) + path
 	}
 
-	out := make([]string, 0, len(os.Environ())+4+len(extra))
+	out := make([]string, 0, 32+len(extra))
+	var dropped []string
 	for _, kv := range os.Environ() {
-		if strings.HasPrefix(kv, "PATH=") {
+		name, _, ok := strings.Cut(kv, "=")
+		if !ok || name == "PATH" {
+			continue
+		}
+		if !agentEnvAllows(name) {
+			dropped = append(dropped, name)
 			continue
 		}
 		out = append(out, kv)
 	}
+	if len(dropped) > 0 {
+		droppedOnce.Do(func() {
+			sort.Strings(dropped)
+			slog.Debug("agents do not inherit these environment variables",
+				"names", strings.Join(dropped, " "))
+		})
+	}
+
 	out = append(out,
 		"PATH="+path,
 		"ZERG_SOCKET="+spec.Socket,

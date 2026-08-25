@@ -1,0 +1,95 @@
+name: ci
+
+# The checks that were being run by hand. Several findings in the last review
+# were things a machine notices reliably and a person notices sometimes: a data
+# race that only appears under load, a Vue type error behind a template, a file
+# that stopped being gofmt-clean.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Formatting first: it is the cheapest failure to read.
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l . | grep -v '^web/' || true)
+          if [ -n "$unformatted" ]; then
+            echo "not gofmt-clean:"; echo "$unformatted"; exit 1
+          fi
+
+      - name: vet
+        run: go vet ./...
+
+      - name: test
+        run: go test ./...
+
+      # The concurrency findings were races and orderings. Running the packages
+      # that supervise processes and route work under -race is what makes the
+      # next one fail here rather than in someone's transcript.
+      - name: race
+        run: go test -race ./internal/agent ./internal/event ./internal/cerebrate ./internal/nydus ./internal/overmind
+
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - run: pnpm install --frozen-lockfile
+
+      # vue-tsc checks templates as well as script blocks, which is where the
+      # type errors that matter actually live.
+      - name: typecheck
+        run: pnpm exec vue-tsc --noEmit
+
+      - run: pnpm build
+
+  embedded:
+    # The cockpit is committed under internal/api/dist because go:embed needs it
+    # at compile time. Nothing enforced that it matched web/ — a build could
+    # ship the previous UI and every test would pass.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - run: pnpm --dir web install --frozen-lockfile
+      - run: pnpm --dir web build
+      - name: the committed cockpit matches the sources
+        run: |
+          rm -rf internal/api/dist
+          cp -R web/dist internal/api/dist
+          if ! git diff --quiet -- internal/api/dist; then
+            echo "internal/api/dist is stale; run ./build.sh and commit the result"
+            git diff --stat -- internal/api/dist
+            exit 1
+          fi

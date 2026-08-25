@@ -668,11 +668,13 @@ func (c *Cerebrate) writeSystemPrompt() (string, error) {
 	if dir == "" {
 		dir = os.TempDir()
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", fmt.Errorf("creating %s: %w", dir, err)
 	}
 	path := filepath.Join(dir, c.cfg.Role.Name+".system.md")
-	if err := os.WriteFile(path, []byte(c.cfg.SystemPrompt), 0o644); err != nil {
+	// 0600: a composed prompt carries the operator's own instructions, and it
+	// sits in a shared temporary directory where anything can read a 0644 file.
+	if err := os.WriteFile(path, []byte(c.cfg.SystemPrompt), 0o600); err != nil {
 		return "", fmt.Errorf("writing the composed prompt: %w", err)
 	}
 	return path, nil

@@ -70,7 +70,9 @@ func DefaultPath() (string, error) {
 // Pass ":memory:" for tests.
 func Open(ctx context.Context, path string) (*DB, error) {
 	if path != ":memory:" {
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		// 0700: the database holds every prompt, transcript and cost this
+		// machine has produced, and nothing else on it has a reason to read them.
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			return nil, fmt.Errorf("creating %s: %w", filepath.Dir(path), err)
 		}
 	}
