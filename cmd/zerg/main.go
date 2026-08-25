@@ -100,6 +100,7 @@ Everything is configured in the cockpit; there are no config files.
 func runUp(args []string) error {
 	fs := flag.NewFlagSet("up", flag.ContinueOnError)
 	addr := fs.String("addr", "", "override the stored bind address for this run only")
+	noTLS := fs.Bool("no-tls", false, "serve plain HTTP for this run, ignoring the stored TLS setting")
 	dbPath := fs.String("db", "", "database path (default ~/.zerg/zerg.db)")
 	verbose := fs.Bool("verbose", false, "log every request")
 	if err := fs.Parse(args); err != nil {
@@ -173,6 +174,12 @@ func runUp(args []string) error {
 	if *addr != "" {
 		cfg.Addr = *addr
 	}
+	// The way out of a TLS setting that cannot be satisfied. Without it, saving
+	// one locks you out of the settings view that sets it: the daemon refuses
+	// to start, and the only remaining repair is editing the database by hand.
+	if *noTLS {
+		cfg.TLSMode = store.TLSOff
+	}
 
 	// Events are the expensive tier and exist to replay recent work, so they
 	// age out. Costs and outcomes live elsewhere and do not.
@@ -216,7 +223,10 @@ func runUp(args []string) error {
 
 	tlsCert, tlsKey, err := resolveTLS(ctx, cfg, filepath.Join(stateDir, "certs"))
 	if err != nil {
-		return err
+		// Loud, and with the way out. Starting on plain HTTP instead would
+		// serve an address the operator asked to be encrypted, which is the
+		// one outcome worse than not starting.
+		return fmt.Errorf("%w\n\nTo start anyway and change it in Settings, run: zerg up --no-tls", err)
 	}
 
 	// Listen before announcing, so the printed URL is always a port that is

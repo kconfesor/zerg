@@ -109,13 +109,33 @@ func EnsureCert(ctx context.Context, host, dir string) (certFile, keyFile string
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		msg := strings.TrimSpace(string(out))
-		if strings.Contains(msg, "HTTPS") || strings.Contains(msg, "https") {
+		// The message for a tailnet without certificates enabled says neither
+		// "HTTPS" nor anything about where to switch it on — the observed text
+		// is "your Tailscale account does not support getting TLS certs", which
+		// reads like a billing problem and is usually a toggle. Match what it
+		// actually says, and answer the question it raises.
+		lower := strings.ToLower(msg)
+		if strings.Contains(lower, "does not support") ||
+			strings.Contains(lower, "https") ||
+			strings.Contains(lower, "not enabled") {
 			return "", "", fmt.Errorf(
-				"tailscale could not issue a certificate for %s: HTTPS is off for this tailnet. "+
-					"Turn it on under DNS → HTTPS Certificates in the admin console, then try again (%s)",
+				"tailscale will not issue a certificate for %s yet: HTTPS Certificates are off "+
+					"for this tailnet. Enable them at https://login.tailscale.com/admin/dns "+
+					"(under HTTPS Certificates), then try again. tailscale said: %s",
 				host, msg)
 		}
 		return "", "", fmt.Errorf("tailscale cert %s: %v (%s)", host, err, msg)
+	}
+
+	// A zero exit is the command's account of itself, not proof of a file. The
+	// two agree in every observed case — a failure exits 1 and writes nothing —
+	// but handing back paths to files that do not exist would surface as an
+	// opaque TLS error at bind time, several steps from the cause.
+	for _, f := range []string{certFile, keyFile} {
+		if _, err := os.Stat(f); err != nil {
+			return "", "", fmt.Errorf(
+				"tailscale reported success but did not write %s: %w", f, err)
+		}
 	}
 	return certFile, keyFile, nil
 }
