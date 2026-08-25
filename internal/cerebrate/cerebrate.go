@@ -78,6 +78,13 @@ type Refreshed struct {
 	Gone bool
 }
 
+// liveConfig is the part of Config that changes while the role runs.
+type liveConfig struct {
+	role         store.ResolvedRole
+	systemPrompt string
+	harnessFlags []string
+}
+
 type Config struct {
 	ProjectID string
 	Role      store.ResolvedRole
@@ -125,6 +132,16 @@ type Cerebrate struct {
 	state    State
 	lastErr  string
 	restarts int
+	// live is the configuration as of the last spawn: the role, its composed
+	// prompt and its harness flags.
+	//
+	// Separate from cfg and behind the mutex because it is rewritten on every
+	// spawn by the run goroutine and read by others — the quota poller asks
+	// which harness this role is on while a respawn is rewriting exactly that.
+	// Two changes that were each correct alone: re-reading configuration per
+	// spawn, and polling quota per harness.
+	live liveConfig
+
 	// session is this process's own adapter instance, so state latched from
 	// one agent's stream cannot be read as another's. Replaced at every spawn.
 	session adapter.Adapter
@@ -163,7 +180,17 @@ func New(cfg Config) *Cerebrate {
 	if cfg.backoffBase == 0 {
 		cfg.backoffBase = minBackoff
 	}
-	return &Cerebrate{cfg: cfg, state: StateIdle, ready: make(chan struct{})}
+	return &Cerebrate{
+		cfg:   cfg,
+		state: StateIdle,
+		ready: make(chan struct{}),
+		// Seeded from Config, then owned by the spawn loop.
+		live: liveConfig{
+			role:         cfg.Role,
+			systemPrompt: cfg.SystemPrompt,
+			harnessFlags: cfg.HarnessFlags,
+		},
+	}
 }
 
 func (c *Cerebrate) State() State {
@@ -182,7 +209,25 @@ func (c *Cerebrate) LastError() string {
 // Restarts counts respawns since the last stable run.
 // Harness names the CLI this role runs on. Quota is reported per harness,
 // because that is what an account belongs to.
-func (c *Cerebrate) Harness() string { return c.cfg.Role.Harness }
+func (c *Cerebrate) Harness() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.live.role.Harness
+}
+
+// Role is the role as currently configured.
+func (c *Cerebrate) Role() store.ResolvedRole {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.live.role
+}
+
+// name is the role's name, for logs and errors.
+func (c *Cerebrate) name() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.live.role.Name
+}
 
 // Quota is the subscription headroom last reported for this role, and when it
 // was learned. Nil until something reports it, which for an API-key provider
@@ -337,7 +382,7 @@ func (c *Cerebrate) Run(ctx context.Context) error {
 			c.setState(StateFailed, errString(err))
 			c.publish(adapter.Event{
 				Kind: adapter.EventError, Fatal: true,
-				Text: fmt.Sprintf("%s stopped: %s", c.cfg.Role.Name, errString(err)),
+				Text: fmt.Sprintf("%s stopped: %s", c.name(), errString(err)),
 			})
 			return nil
 		}
@@ -354,7 +399,7 @@ func (c *Cerebrate) Run(ctx context.Context) error {
 		c.mu.Unlock()
 
 		c.cfg.Log.Warn("agent exited, restarting",
-			"role", c.cfg.Role.Name, "after", ranFor, "attempt", attempts,
+			"role", c.name(), "after", ranFor, "attempt", attempts,
 			"backoff", backoff, "err", errString(err))
 
 		// A blocked role keeps saying blocked while it retries.
@@ -392,15 +437,25 @@ func (c *Cerebrate) runOnce(ctx context.Context) (fatal bool, ranFor time.Durati
 		case err != nil:
 			// Keep going with what we have: a database hiccup should not take
 			// a working role down, and the next respawn tries again.
-			c.cfg.Log.Warn("re-reading role configuration", "role", c.cfg.Role.Name, "err", err)
+			c.cfg.Log.Warn("re-reading role configuration", "role", c.name(), "err", err)
 		case fresh.Gone:
-			return true, 0, fmt.Errorf("role %s is no longer part of this team", c.cfg.Role.Name)
+			return true, 0, fmt.Errorf("role %s is no longer part of this team", c.name())
 		default:
-			c.cfg.Role = fresh.Role
-			c.cfg.SystemPrompt = fresh.SystemPrompt
-			c.cfg.HarnessFlags = fresh.HarnessFlags
+			c.mu.Lock()
+			c.live = liveConfig{
+				role:         fresh.Role,
+				systemPrompt: fresh.SystemPrompt,
+				harnessFlags: fresh.HarnessFlags,
+			}
+			c.mu.Unlock()
 		}
 	}
+
+	// One consistent read for the whole spawn: a refresh landing midway would
+	// otherwise build a spec from two different configurations.
+	c.mu.RLock()
+	live := c.live
+	c.mu.RUnlock()
 
 	// A private instance for this process. claude latches the model and
 	// billing mode a turn actually used, and a shared instance would let three
@@ -411,14 +466,14 @@ func (c *Cerebrate) runOnce(ctx context.Context) (fatal bool, ranFor time.Durati
 	c.mu.Unlock()
 
 	spec := adapter.Spec{
-		Role:     c.cfg.Role.Name,
+		Role:     live.role.Name,
 		Worktree: c.cfg.Worktree,
-		Model:    c.cfg.Role.Model,
+		Model:    live.role.Model,
 		// Harness flags first, the role's own args after. Later wins in every
 		// CLI here, so the more specific statement is the one that takes
 		// effect: a role that sets --permission-mode overrides the default for
 		// its harness without having to know what that default was.
-		ExtraArgs: append(append([]string{}, c.cfg.HarnessFlags...), c.cfg.Role.Args...),
+		ExtraArgs: append(append([]string{}, live.harnessFlags...), live.role.Args...),
 		ConfigDir: c.cfg.ConfigDir,
 		Socket:    c.cfg.Socket,
 		Token:     c.cfg.Token,
@@ -462,7 +517,7 @@ func (c *Cerebrate) runOnce(ctx context.Context) (fatal bool, ranFor time.Durati
 	c.setState(StateStarting, "")
 	started := c.cfg.clock()
 	if err := cmd.Start(); err != nil {
-		return false, 0, fmt.Errorf("starting %s: %w", c.cfg.Role.Name, err)
+		return false, 0, fmt.Errorf("starting %s: %w", c.name(), err)
 	}
 
 	c.mu.Lock()
@@ -520,7 +575,7 @@ func (c *Cerebrate) readStream(stdout io.Reader) error {
 			// An unparseable line is worth knowing about but is not grounds to
 			// kill a working agent: harnesses print things adapters have not
 			// seen yet.
-			c.cfg.Log.Debug("unparsed agent output", "role", c.cfg.Role.Name, "err", err)
+			c.cfg.Log.Debug("unparsed agent output", "role", c.name(), "err", err)
 			continue
 		}
 		for _, ev := range events {
@@ -543,7 +598,7 @@ func (c *Cerebrate) readStream(stdout io.Reader) error {
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		c.cfg.Log.Debug("agent output ended", "role", c.cfg.Role.Name, "err", err)
+		c.cfg.Log.Debug("agent output ended", "role", c.name(), "err", err)
 	}
 	return fatal
 }
@@ -585,7 +640,7 @@ func (c *Cerebrate) publish(ev adapter.Event) {
 		Event:     ev,
 		ID:        store.NewID(),
 		ProjectID: c.cfg.ProjectID,
-		Role:      c.cfg.Role.Name,
+		Role:      c.name(),
 		At:        c.cfg.clock(),
 	})
 }
@@ -616,7 +671,7 @@ func (c *Cerebrate) Submit(text string) error {
 	w := c.stdin
 	c.mu.RUnlock()
 	if w == nil {
-		return fmt.Errorf("%s is not running", c.cfg.Role.Name)
+		return fmt.Errorf("%s is not running", c.name())
 	}
 
 	payload, err := c.sessionAdapter().EncodeTurn(text)
@@ -624,7 +679,7 @@ func (c *Cerebrate) Submit(text string) error {
 		return err
 	}
 	if _, err := w.Write(payload); err != nil {
-		return fmt.Errorf("submitting a turn to %s: %w", c.cfg.Role.Name, err)
+		return fmt.Errorf("submitting a turn to %s: %w", c.name(), err)
 	}
 
 	c.mu.Lock()
@@ -649,9 +704,9 @@ func (c *Cerebrate) WaitReady(ctx context.Context) error {
 		case StateReady, StateWorking:
 			return nil
 		case StateFailed:
-			return fmt.Errorf("%s failed: %s", c.cfg.Role.Name, c.LastError())
+			return fmt.Errorf("%s failed: %s", c.name(), c.LastError())
 		case StateStopped:
-			return fmt.Errorf("%s is stopped", c.cfg.Role.Name)
+			return fmt.Errorf("%s is stopped", c.name())
 		}
 
 		select {
@@ -671,7 +726,11 @@ func (c *Cerebrate) WaitReady(ctx context.Context) error {
 // snapshot to go stale — the failure that had six agents build a task in the
 // wrong language because a config edit reached none of them.
 func (c *Cerebrate) writeSystemPrompt() (string, error) {
-	if c.cfg.SystemPrompt == "" {
+	c.mu.RLock()
+	prompt, roleName := c.live.systemPrompt, c.live.role.Name
+	c.mu.RUnlock()
+
+	if prompt == "" {
 		return "", nil
 	}
 	dir := c.cfg.StateDir
@@ -681,10 +740,10 @@ func (c *Cerebrate) writeSystemPrompt() (string, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", fmt.Errorf("creating %s: %w", dir, err)
 	}
-	path := filepath.Join(dir, c.cfg.Role.Name+".system.md")
+	path := filepath.Join(dir, roleName+".system.md")
 	// 0600: a composed prompt carries the operator's own instructions, and it
 	// sits in a shared temporary directory where anything can read a 0644 file.
-	if err := os.WriteFile(path, []byte(c.cfg.SystemPrompt), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(prompt), 0o600); err != nil {
 		return "", fmt.Errorf("writing the composed prompt: %w", err)
 	}
 	return path, nil
@@ -755,11 +814,11 @@ func (c *Cerebrate) waitOutThrottle(ctx context.Context, t adapter.Throttle) boo
 		detail = "the provider refused work on quota"
 	}
 	c.cfg.Log.Warn("provider quota spent, waiting",
-		"role", c.cfg.Role.Name, "resumes_in", wait.Round(time.Second), "detail", detail)
+		"role", c.name(), "resumes_in", wait.Round(time.Second), "detail", detail)
 	c.publish(adapter.Event{
 		Kind: adapter.EventError,
 		Text: fmt.Sprintf("%s is waiting on a provider limit, resuming in %s — %s",
-			c.cfg.Role.Name, wait.Round(time.Minute), detail),
+			c.name(), wait.Round(time.Minute), detail),
 	})
 
 	select {
