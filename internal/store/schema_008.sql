@@ -1,0 +1,12 @@
+-- zerg schema, version 8: cards a person has put away.
+--
+-- Done is where finished work accumulates, and on an old board most of it is
+-- work nobody needs to look at again. Hiding is per card and deliberate: the
+-- alternative considered was an age cutoff, which hides the wrong things — a
+-- month-old card you still refer to goes, and this morning's dead end stays.
+--
+-- In the database rather than the browser because the same board is read from
+-- a laptop and a phone over the tailnet, and a card put away on one should be
+-- away on the other. It is not a lane or a state: a hidden card is finished
+-- work that is still finished, and unhiding must return it unchanged.
+ALTER TABLE tasks ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0;

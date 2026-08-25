@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -294,4 +295,28 @@ func (s *Server) openProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, project)
+}
+
+// setTaskHidden puts a finished card away, or brings it back.
+//
+// PUT rather than POST: sending the same body twice leaves the same state, and
+// the switch that calls this can be flipped by two devices watching one board.
+func (s *Server) setTaskHidden(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Hidden bool `json:"hidden"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.fail(w, r, fmt.Errorf("reading request: %w", err))
+		return
+	}
+	if err := s.db.SetTaskHidden(r.Context(), r.PathValue("id"), req.Hidden); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	task, err := s.db.GetTask(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, task)
 }

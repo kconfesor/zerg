@@ -27,7 +27,7 @@ function compactTokens(n: number): string {
 function money(n: number): string {
   return n >= 1 ? `$${n.toFixed(2)}` : `$${n.toFixed(3)}`
 }
-import { Bell } from '@lucide/vue'
+import { Bell, Eye, EyeOff } from '@lucide/vue'
 import { Badge } from '@/components/ui/badge'
 
 const props = defineProps<{
@@ -35,24 +35,31 @@ const props = defineProps<{
   tasks: Task[]
   /** Ids of tasks with something waiting on a person. */
   needsAttention?: string[]
-  /** Whether the Done well is shown. Finished work is the bulk of an old
-   *  board and none of the work in front of you. */
-  showDone?: boolean
+  /** Whether cards a person has put away are shown. */
+  showHidden?: boolean
 }>()
-const emit = defineEmits<{ open: [task: Task]; review: [task: Task] }>()
+const emit = defineEmits<{
+  open: [task: Task]
+  review: [task: Task]
+  hide: [task: Task]
+  unhide: [task: Task]
+}>()
 
 /** Lanes are the enabled roles in pipeline order, then the Done well. */
 const lanes = computed(() => {
   const roles = props.team.filter((r) => r.enabled).map((r) => r.name)
-  // The whole lane goes, not its cards: an empty "done" column reading 0 next
-  // to five finished tasks says something false.
-  return props.showDone === false ? roles : [...roles, 'done']
+  return [...roles, 'done']
 })
 
 const byLane = computed(() => {
   const map = new Map<string, Task[]>()
   for (const lane of lanes.value) map.set(lane, [])
-  for (const task of props.tasks) map.get(task.lane)?.push(task)
+  for (const task of props.tasks) {
+    // A hidden card is skipped rather than dimmed: the lane count has to agree
+    // with the cards under it, or the header is lying about the column.
+    if (task.hidden && !props.showHidden) continue
+    map.get(task.lane)?.push(task)
+  }
   return map
 })
 </script>
@@ -97,6 +104,9 @@ const byLane = computed(() => {
               task.state === 'working' && 'border-primary/50 bg-primary/[0.06]',
               needsAttention?.includes(task.id) &&
                 'border-[var(--status-warning)]/60 bg-[var(--status-warning)]/[0.06]',
+              // Visible only because the switch is on. Dimmed so the board
+              // still reads as the work you did not put away.
+              task.hidden && 'opacity-55',
             ]"
           >
           <button
@@ -165,6 +175,19 @@ const byLane = computed(() => {
               </span>
             </div>
           </button>
+
+            <!-- Put away, on the card itself. Finished work accumulates, and
+                 the person reading a card is the one who knows whether they
+                 will want it again — which no age cutoff can guess. -->
+            <button
+              v-if="task.state === 'done'"
+              type="button"
+              class="hairline-t text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-ring flex w-full items-center gap-1.5 px-2.5 py-1.5 text-left text-[11px] focus-visible:outline-2 focus-visible:-outline-offset-2"
+              @click="task.hidden ? emit('unhide', task) : emit('hide', task)"
+            >
+              <component :is="task.hidden ? Eye : EyeOff" :size="12" aria-hidden="true" />
+              {{ task.hidden ? 'Unhide' : 'Hide' }}
+            </button>
 
             <!-- The action the card is waiting for, on the card. Reaching a
                  decision through a notification means finding the card again

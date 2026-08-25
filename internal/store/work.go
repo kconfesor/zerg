@@ -64,6 +64,10 @@ type Task struct {
 	// nobody is paying attention to.
 	ReworkCount int `json:"reworkCount"`
 
+	// Hidden is a card the person has put away. Finished work that is still
+	// finished — the board stops showing it, nothing else changes.
+	Hidden bool `json:"hidden"`
+
 	// Tokens and CostUSD are what this card has cost across every role and
 	// every lap. A board that shows only a lane says nothing about the price
 	// of what it is showing.
@@ -167,13 +171,13 @@ func (db *DB) CreateTask(ctx context.Context, projectID, name, body, lane string
 }
 
 const taskCols = `id, project_id, session_id, name, body, lane, state,
-	created_at, first_claimed_at, completed_at, active_ms, rework_count`
+	created_at, first_claimed_at, completed_at, active_ms, rework_count, hidden`
 
 // taskColsT is the same list qualified to the tasks table, for the queries that
 // join. Unqualified names resolve today and would become ambiguous the moment a
 // joined table gained a column of the same name.
 const taskColsT = `t.id, t.project_id, t.session_id, t.name, t.body, t.lane, t.state,
-	t.created_at, t.first_claimed_at, t.completed_at, t.active_ms, t.rework_count`
+	t.created_at, t.first_claimed_at, t.completed_at, t.active_ms, t.rework_count, t.hidden`
 
 func (db *DB) GetTask(ctx context.Context, id string) (*Task, error) {
 	row := db.sql.QueryRowContext(ctx, `SELECT `+taskCols+` FROM tasks WHERE id = ?`, id)
@@ -239,7 +243,7 @@ func scanTaskWithSummary(s scanner) (*Task, error) {
 		completedAt sql.NullString
 	)
 	if err := s.Scan(&t.ID, &t.ProjectID, &sessionID, &t.Name, &t.Body, &t.Lane, &t.State,
-		&created, &firstClaim, &completedAt, &t.ActiveMS, &t.ReworkCount,
+		&created, &firstClaim, &completedAt, &t.ActiveMS, &t.ReworkCount, &t.Hidden,
 		&t.Tokens, &t.CostUSD, &t.Doing); err != nil {
 		return nil, err
 	}
@@ -258,7 +262,7 @@ func scanTask(s scanner) (*Task, error) {
 		completedAt sql.NullString
 	)
 	if err := s.Scan(&t.ID, &t.ProjectID, &sessionID, &t.Name, &t.Body, &t.Lane, &t.State,
-		&created, &firstClaim, &completedAt, &t.ActiveMS, &t.ReworkCount); err != nil {
+		&created, &firstClaim, &completedAt, &t.ActiveMS, &t.ReworkCount, &t.Hidden); err != nil {
 		return nil, err
 	}
 	if err := fillTaskTimes(&t, sessionID, created, firstClaim, completedAt); err != nil {
@@ -711,4 +715,26 @@ func (db *DB) GetApproval(ctx context.Context, id string) (*Approval, error) {
 		return nil, err
 	}
 	return &a, nil
+}
+
+// SetTaskHidden puts a card away, or brings it back.
+//
+// No state or lane change: a hidden card is finished work that is still
+// finished, and unhiding must return it exactly as it was. Only tasks that
+// have actually finished can be hidden — putting away something still moving
+// through the pipeline would hide the work, not the record of it.
+func (db *DB) SetTaskHidden(ctx context.Context, id string, hidden bool) error {
+	res, err := db.sql.ExecContext(ctx,
+		`UPDATE tasks SET hidden = ? WHERE id = ? AND state = 'done'`, hidden, id)
+	if err != nil {
+		return fmt.Errorf("setting hidden on %s: %w", id, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("task %s is not a finished card", id)
+	}
+	return nil
 }

@@ -66,6 +66,8 @@ export interface Task {
   costUsd: number
   /** The most recent thing an agent did on this card. */
   doing?: string
+  /** Put away by a person. Finished work that is still finished. */
+  hidden?: boolean
 }
 
 export interface CheckResult {
@@ -220,6 +222,8 @@ export const api = {
     }),
 
   taskDetail: (id: string) => call<TaskDetail>(`/tasks/${id}`),
+  setTaskHidden: (id: string, hidden: boolean) =>
+    call<Task>(`/tasks/${id}/hidden`, { method: 'PUT', body: JSON.stringify({ hidden }) }),
   approvalDiff: (id: string) =>
     call<{ files: ChangedFile[]; range: boolean; base: string }>(`/approvals/${id}/diff`),
   setIntegration: (id: string, integration: Integration) =>

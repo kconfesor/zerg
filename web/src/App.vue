@@ -69,14 +69,24 @@ const openTask = ref<Task | null>(null)
 const attentionOpen = ref(false)
 
 /**
- * Whether the Done well is shown, remembered across reloads.
+ * Whether cards a person has put away are shown. Off by default — the whole
+ * point of hiding one is not to see it again.
  *
- * A view preference, so localStorage rather than the database: it belongs to
- * this browser, not to the project, and someone else looking at the same board
- * should not have their lanes rearranged by it.
+ * This is the view preference, so localStorage. Which cards are hidden lives in
+ * the database instead: the same board is read from a laptop and a phone, and
+ * a card put away on one should be away on the other.
  */
-const showDone = ref(localStorage.getItem('zerg.showDone') !== 'false')
-watch(showDone, (v) => localStorage.setItem('zerg.showDone', String(v)))
+const showHidden = ref(localStorage.getItem('zerg.showHidden') === 'true')
+watch(showHidden, (v) => localStorage.setItem('zerg.showHidden', String(v)))
+
+const hiddenCount = computed(() => tasks.value.filter((t) => t.hidden).length)
+
+/** Put a finished card away, or bring it back. */
+async function setHidden(task: Task, hidden: boolean) {
+  const updated = await api.setTaskHidden(task.id, hidden)
+  const i = tasks.value.findIndex((t) => t.id === task.id)
+  if (i !== -1) tasks.value[i] = updated
+}
 
 /** Which cards are the ones waiting, so the board can mark them rather than
  *  leaving you to work out which of five is holding the pipeline. */
@@ -510,9 +520,13 @@ watch(current, () => (banner.value = null))
                 <!-- A switch, not a button: the state is visible when you are
                      not using it, so a board with no Done column explains
                      itself rather than looking like lost work. -->
-                <div class="flex items-center gap-2">
-                  <Switch id="show-done" v-model="showDone" />
-                  <Label for="show-done" class="cursor-pointer text-xs font-normal">Done</Label>
+                <!-- Only offered when there is something to reveal. A switch
+                     for an empty set is a control that does nothing. -->
+                <div v-if="hiddenCount" class="flex items-center gap-2">
+                  <Switch id="show-hidden" v-model="showHidden" />
+                  <Label for="show-hidden" class="cursor-pointer text-xs font-normal">
+                    Show hidden ({{ hiddenCount }})
+                  </Label>
                 </div>
                 <Button @click="composing = true">New task</Button>
               </template>
@@ -520,10 +534,12 @@ watch(current, () => (banner.value = null))
             <div class="pt-4"><Board
                 :team="team"
                 :tasks="tasks"
-                :show-done="showDone"
+                :show-hidden="showHidden"
                 :needs-attention="attentionTaskIds"
                 @open="(t) => (openTask = t)"
                 @review="() => (attentionOpen = true)"
+                @hide="(t: Task) => setHidden(t, true)"
+                @unhide="(t: Task) => setHidden(t, false)"
               /></div>
           </template>
 

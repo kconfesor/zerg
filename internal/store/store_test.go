@@ -362,3 +362,60 @@ func sampleTemplate(name string) *RoleTemplate {
 		Gate:           GateNone,
 	}
 }
+
+// Hiding must not disturb the work. The card is finished either way, and
+// unhiding has to give back exactly what was put away — the temptation is to
+// implement it as a lane or state change, which would lose that.
+func TestHidingLeavesTheCardOtherwiseUntouched(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	p, err := db.CreateProject(ctx, t.TempDir(), "calc", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	task, err := db.CreateTask(ctx, p.ID, "Doc", "write a doc", "coder")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A card still moving cannot be put away: that would hide the work rather
+	// than the record of it.
+	if err := db.SetTaskHidden(ctx, task.ID, true); err == nil {
+		t.Fatal("hid a task that was not finished")
+	}
+
+	if _, err := db.sql.ExecContext(ctx,
+		`UPDATE tasks SET state = 'done', lane = 'done' WHERE id = ?`, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	before, err := db.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := db.SetTaskHidden(ctx, task.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	hidden, err := db.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hidden.Hidden {
+		t.Error("hidden did not stick")
+	}
+	if hidden.State != before.State || hidden.Lane != before.Lane {
+		t.Errorf("hiding moved the card: %s/%s became %s/%s",
+			before.Lane, before.State, hidden.Lane, hidden.State)
+	}
+
+	if err := db.SetTaskHidden(ctx, task.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	back, err := db.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if back.Hidden || back.State != before.State || back.Lane != before.Lane {
+		t.Errorf("unhiding did not restore the card: %+v", back)
+	}
+}
