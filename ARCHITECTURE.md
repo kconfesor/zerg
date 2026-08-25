@@ -367,7 +367,58 @@ is a write to a pipe with a response event to confirm it landed.
 
 ---
 
-## 11. Stack
+## 11. Token economics
+
+zerg does not call the Messages API; the harnesses do. What zerg controls is the *bytes it hands
+them* and *how often it restarts them* — and both decide whether prompt caching works.
+
+### 11.1 Output format costs nothing
+
+`--output-format stream-json` is a serialization choice for the CLI's stdout. It changes how the
+harness prints what it already received; the request and the completion are identical. Structured
+mode is not more expensive than a TUI.
+
+It is slightly *cheaper*, for one reason. swarm-forge's dashboard reads agent status by grepping the
+pane for a line containing `I'm`, so its constitution instructs every agent to narrate status in
+prose. Those are output tokens — the most expensive kind — spent producing telemetry for a scraper.
+Structured mode carries tool calls, usage and turn boundaries natively. **No role prompt in zerg
+should ever ask an agent to describe what it is doing for the orchestrator's benefit.**
+
+### 11.2 The system prompt must be byte-frozen
+
+Caching is a prefix match over `tools` → `system` → `messages`. One changed byte invalidates
+everything after it.
+
+§4.4 composes the system prompt fresh at every spawn from the database. That is correct for
+staleness and **dangerous for caching**: interpolating anything volatile into it — task name, task
+id, timestamp, worktree path, role position, run counter — changes the prefix on every spawn, so
+nothing ever caches and the failure is silent (no error, just `cache_read_input_tokens: 0`).
+
+Rule: the composed system prompt contains **shared instructions + role prompt and nothing else**.
+Task-specific content belongs in the first user message, after the cached prefix. Everything the
+role needs to know that varies per task travels in the work envelope, never in the system prompt.
+
+Worth the discipline: cache reads cost ~0.1× input, writes 1.25× (5-minute TTL) or 2× (1-hour), so
+break-even is two requests. A 3K-token composed prompt over a twenty-turn task costs roughly $0.18
+uncached against $0.03 cached on Sonnet 5 — and the same ratio applies to the accumulated
+conversation history, which is far larger. Minimum cacheable prefix is 1024 tokens on Sonnet 5 and
+512 on Opus 5; a composed prompt below that silently will not cache at all.
+
+### 11.3 Session lifecycle
+
+Respawning a process per task means a cold session every time: the system prompt is re-sent and the
+conversation restarts. Keeping one long-lived session per role lets the harness cache both the
+system prefix and the accumulated history.
+
+This is the second argument for the long-lived structured session of §7.2 — the first was
+bidirectional input. Restart a cerebrate when its configuration changes or it crashes, not between
+tasks.
+
+Corollary for the role editor: changing a role's **model** invalidates every cache tier, since
+caches are model-scoped. That is unavoidable and correct — the change requires a restart anyway —
+but the UI should not present model switching as free.
+
+## 12. Stack
 
 Versions verified against npm dist-tags and `proxy.golang.org` on 2026-08-24.
 
@@ -403,7 +454,7 @@ Versions verified against npm dist-tags and `proxy.golang.org` on 2026-08-24.
 
 ---
 
-## 12. Build order
+## 13. Build order
 
 1. **store + config + role CRUD API** — roles as rows, seeded with coder and qa.
 2. **nydus + board** against an in-memory harness stub — prove leases, claims, acks, terminal merge
