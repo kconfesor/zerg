@@ -9,6 +9,7 @@
  */
 import { nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { api, streamActivity, type ActivityEvent, type ActivityStream } from '@/lib/api'
+import { renderMarkdown } from '@/lib/markdown'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 
@@ -126,7 +127,13 @@ onBeforeUnmount(() => stream?.close())
             >
               {{ l.who === 'you' ? 'you' : 'agent' }}
             </p>
-            <p class="leading-relaxed whitespace-pre-wrap">{{ l.text }}</p>
+            <!-- The agent writes Markdown, so it is rendered as Markdown. The
+                 renderer escapes first and builds tags only from characters it
+                 put there, so nothing an agent read out of the repository can
+                 become HTML. Your own messages stay literal — you typed them,
+                 and showing them back reformatted is confusing. -->
+            <p v-if="l.who === 'you'" class="leading-relaxed whitespace-pre-wrap">{{ l.text }}</p>
+            <div v-else class="md leading-relaxed" v-html="renderMarkdown(l.text)" />
           </template>
         </div>
 

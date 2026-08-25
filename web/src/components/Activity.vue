@@ -14,6 +14,7 @@ import {
   type ActivityStream,
   type StreamState,
 } from '@/lib/api'
+import { renderMarkdown } from '@/lib/markdown'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 
@@ -206,9 +207,7 @@ const roleCounts = computed(() => {
             {{ e.fatal ? 'fatal: ' : 'error: ' }}{{ e.text }}
           </span>
 
-          <span v-else-if="e.kind === 'message'" class="min-w-0 flex-1 whitespace-pre-wrap">
-            {{ e.text }}
-          </span>
+          <span v-else-if="e.kind === 'message'" class="md min-w-0 flex-1" v-html="renderMarkdown(e.text ?? '')" />
 
           <span v-else class="text-muted-foreground min-w-0 flex-1">{{ e.kind }}</span>
         </li>

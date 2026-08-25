@@ -220,3 +220,14 @@
 @media (prefers-reduced-motion: reduce) {
   .loading-pulse { animation: none; opacity: 0.6; }
 }
+
+/* Rendered agent output.
+   Tight vertical rhythm on purpose: these are log lines and chat turns, not
+   prose pages, and a paragraph gap sized for an article would push a short
+   answer over two screens. */
+.md p { margin: 0; }
+.md p + p { margin-top: 0.35rem; }
+.md ul { margin: 0.25rem 0; }
+.md pre { white-space: pre; }
+.md code { font-family: inherit; }
+.md a { color: var(--primary); }
