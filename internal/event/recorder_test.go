@@ -35,8 +35,10 @@ func TestABurstDoesNotLoseUsageRows(t *testing.T) {
 	rec := Record(ctx, bus, db, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	// Comfortably more than the old 1024 buffer, published as fast as the bus
-	// will take them.
-	const burst = 5000
+	// will take them. Not larger: the point is that nothing is dropped between
+	// the bus and the queue, and every extra row past that only measures how
+	// fast the runner commits to SQLite.
+	const burst = 2000
 	for range burst {
 		bus.Publish(Event{
 			Event: adapter.Event{
@@ -48,7 +50,7 @@ func TestABurstDoesNotLoseUsageRows(t *testing.T) {
 	}
 
 	// Drained and written.
-	deadline := time.Now().Add(60 * time.Second)
+	deadline := time.Now().Add(120 * time.Second)
 	var turns int
 	for time.Now().Before(deadline) {
 		rows, err := db.UsageByGroup(ctx, p.ID, "role", time.Time{})

@@ -17,7 +17,7 @@ import { renderMarkdown } from '@/lib/markdown'
 import { Textarea } from '@/components/ui/textarea'
 
 const model = defineModel<string>({ required: true })
-const props = withDefaults(defineProps<{ rows?: number }>(), { rows: 8 })
+withDefaults(defineProps<{ rows?: number }>(), { rows: 8 })
 
 const area = ref<InstanceType<typeof Textarea> | null>(null)
 const tab = ref<'write' | 'preview'>('write')

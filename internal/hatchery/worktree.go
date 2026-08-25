@@ -57,7 +57,21 @@ func (h *Hatchery) EnsureRepo(ctx context.Context, baseBranch string) error {
 	if _, err := git(ctx, h.repoPath, "add", "-A"); err != nil {
 		return fmt.Errorf("staging the initial commit: %w", err)
 	}
-	if _, err := git(ctx, h.repoPath, "commit", "-q", "--allow-empty", "-m", "Initial commit"); err != nil {
+	// zerg's own identity, for zerg's own commit.
+	//
+	// This is the one commit the orchestrator authors rather than an agent, and
+	// it happens while bootstrapping a repository that may have nothing in it —
+	// including, on a fresh machine or a CI runner, no configured user.name.
+	// git then refuses with "Please tell me who you are", and a project fails
+	// to open for a reason that has nothing to do with the project.
+	//
+	// Passed with -c rather than written to the config: it applies to this
+	// invocation only, so nothing is left behind in a repository someone else
+	// owns, and an operator who does have an identity keeps it for every commit
+	// that is actually theirs.
+	if _, err := git(ctx, h.repoPath,
+		"-c", "user.name=zerg", "-c", "user.email=zerg@localhost",
+		"commit", "-q", "--allow-empty", "-m", "Initial commit"); err != nil {
 		return fmt.Errorf("creating the initial commit: %w", err)
 	}
 	return nil

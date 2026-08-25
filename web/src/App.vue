@@ -341,7 +341,11 @@ async function open(project: Project) {
   // not walk through it.
   if (route.params.projectId !== project.id) {
     const to = viewPath(project.id, view.value)
-    switching ? router.push(to) : router.replace(to)
+    // push when changing project, replace when only filling the id into the
+    // URL: arriving at /board and landing on /p/<id>/board is one destination,
+    // and back should not walk through it.
+    if (switching) router.push(to)
+    else router.replace(to)
   }
   // Record it, so the next start opens what you were last working on rather
   // than whichever project happened to be created most recently. The column

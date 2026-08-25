@@ -1,8 +1,7 @@
-# pnpm blocks postinstall scripts unless a package is allowlisted here. Without
-# vue-demi, which pinia and reka-ui rely on, the install exits non-zero — and
-# that non-zero exit is what made `shadcn-vue init` report a failed dependency
-# step even though everything had actually installed.
-onlyBuiltDependencies:
-  - esbuild
-  - fsevents
-  - vue-demi
+# vue-demi's postinstall picks which Vue version pinia builds against. pnpm 11
+# refuses an install with undeclared build scripts rather than running them
+# silently — the right default, and it means the ones that are wanted have to be
+# named here. Without this a fresh install fails, which is invisible locally
+# where node_modules already exists and fatal in CI, where it never does.
+allowBuilds:
+  vue-demi: true

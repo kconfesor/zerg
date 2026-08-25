@@ -57,6 +57,11 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
+      # Errors, not style: a promise nobody awaits, a prop mutated in place, a
+      # v-for without a key. Types are vue-tsc's job, below.
+      - name: lint
+        run: pnpm lint
+
       # vue-tsc checks templates as well as script blocks, which is where the
       # type errors that matter actually live.
       - name: typecheck
