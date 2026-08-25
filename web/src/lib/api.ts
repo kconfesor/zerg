@@ -24,6 +24,10 @@ export interface ResolvedRole extends RoleTemplate {
   position: number
   enabled: boolean
   overridden: boolean
+  /** What this project set, as opposed to what it resolved to. Both are needed
+   *  to round-trip a team edit without inventing or erasing an override. */
+  modelOverride?: string | null
+  argsOverride?: string[] | null
   terminal: boolean
 }
 
@@ -316,7 +320,7 @@ export interface ActivityStream {
 }
 
 /** Where a stream currently is, so the UI can say so rather than guess. */
-export type StreamState = 'connecting' | 'live' | 'reconnecting'
+export type StreamState = 'connecting' | 'live' | 'reconnecting' | 'error'
 
 /**
  * Subscribe to a project's activity: history first, then live.
@@ -340,6 +344,9 @@ export function streamActivity(
     onEvent: (e: ActivityEvent) => void
     onCaughtUp?: (replayed: number) => void
     onState?: (state: StreamState) => void
+    /** The server reported a problem in-band. It stays connected long enough
+     *  to say so, which is why this is not the same as a dropped socket. */
+    onError?: (message: string) => void
   },
   opts: { role?: string; limit?: number } = {},
 ): ActivityStream {
@@ -377,7 +384,7 @@ export function streamActivity(
     }
 
     ws.onmessage = (raw) => {
-      let frame: { type: string; event?: ActivityEvent; replayed?: number }
+      let frame: { type: string; event?: ActivityEvent; replayed?: number; message?: string }
       try {
         frame = JSON.parse(raw.data)
       } catch {
@@ -393,6 +400,14 @@ export function streamActivity(
         retry = RETRY_MIN
         handlers.onState?.('live')
         handlers.onCaughtUp?.(frame.replayed ?? 0)
+      } else if (frame.type === 'error') {
+        // The server says the replay query failed, and will not send
+        // caught-up. Unhandled, the view sat on "connecting" for ever — a
+        // failure that looked exactly like a slow connection. Say so, then
+        // close so the existing backoff retries it.
+        handlers.onState?.('error')
+        handlers.onError?.(frame.message ?? 'the server could not read history')
+        ws.close()
       }
     }
 

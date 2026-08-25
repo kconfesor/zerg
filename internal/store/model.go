@@ -75,6 +75,15 @@ type ResolvedRole struct {
 	Enabled    bool `json:"enabled"`
 	Overridden bool `json:"overridden"`
 	Terminal   bool `json:"terminal"`
+
+	// ModelOverride and ArgsOverride are what this project set, as opposed to
+	// what it ended up with. Both are needed to round-trip a team edit: with
+	// only the resolved values and one Overridden flag, a reorder had to guess,
+	// and it guessed by sending the resolved model as an override and dropping
+	// the argument override entirely — so changing a role's position silently
+	// erased its arguments and pinned a model nobody had pinned.
+	ModelOverride *string  `json:"modelOverride,omitempty"`
+	ArgsOverride  []string `json:"argsOverride,omitempty"`
 }
 
 // ValidationError marks a caller mistake — something a user can fix by

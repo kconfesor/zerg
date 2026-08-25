@@ -153,19 +153,62 @@ function toggleFlag(h: string, seq: string[], on: boolean) {
   setFlags(h, f)
 }
 
+/**
+ * Split the flag list into the switches this UI offers and everything else.
+ *
+ * By index, matching whole sequences. The previous version tested membership
+ * against a flattened set of every known token and also treated any argument
+ * whose predecessor was a known token as belonging to it — so a custom flag
+ * written after a known one vanished from the text box while staying in the
+ * database, where nothing could edit or remove it.
+ */
+function classify(h: string): { known: boolean[]; extra: string[] } {
+  const flags = flagsOf(h)
+  const seqs = HARNESS_OPTIONS[h].map((o) => o.flag)
+  const known = new Array<boolean>(flags.length).fill(false)
+
+  for (let i = 0; i < flags.length; i++) {
+    if (known[i]) continue
+    const seq = seqs.find((q) => q.every((part, j) => flags[i + j] === part))
+    if (!seq) continue
+    for (let j = 0; j < seq.length; j++) known[i + j] = true
+    i += seq.length - 1
+  }
+  return { known, extra: flags.filter((_, i) => !known[i]) }
+}
+
 /** Whatever is set beyond the offered switches, as text. */
 function extraFor(h: string): string {
-  const known = HARNESS_OPTIONS[h].flatMap((o) => o.flag)
-  return flagsOf(h)
-    .filter((f, i, arr) => !known.includes(f) && !known.includes(arr[i - 1] ?? ''))
-    .join(' ')
+  return joinArgs(classify(h).extra)
 }
+
 function setExtra(h: string, text: string) {
-  const known = HARNESS_OPTIONS[h].flatMap((o) => o.flag)
-  const kept = flagsOf(h).filter(
-    (f, i, arr) => known.includes(f) || known.includes(arr[i - 1] ?? ''),
-  )
-  setFlags(h, [...kept, ...text.split(/\s+/).filter(Boolean)])
+  const flags = flagsOf(h)
+  const { known } = classify(h)
+  setFlags(h, [...flags.filter((_, i) => known[i]), ...splitArgs(text)])
+}
+
+/**
+ * Shell-ish splitting, so an argument can contain a space.
+ *
+ * Splitting on whitespace made `--flag "two words"` unrepresentable: it came
+ * back as two arguments and the harness saw a flag with a truncated value and
+ * a stray one after it. Only quoting is honoured — no expansion, no escapes
+ * beyond the quotes themselves — because this is a list of arguments, not a
+ * shell command, and anything cleverer would invite it to be treated as one.
+ */
+function splitArgs(text: string): string[] {
+  const out: string[] = []
+  const re = /"([^"]*)"|'([^']*)'|(\S+)/g
+  for (let m = re.exec(text); m; m = re.exec(text)) {
+    out.push(m[1] ?? m[2] ?? m[3])
+  }
+  return out
+}
+
+/** The inverse: anything containing a space comes back quoted. */
+function joinArgs(args: string[]): string {
+  return args.map((a) => (/\s|"/.test(a) ? JSON.stringify(a) : a)).join(' ')
 }
 
 const ts = computed(() => data.value?.tailnet)

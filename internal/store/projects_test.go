@@ -407,3 +407,83 @@ func TestCreateProjectReturnsWhatWasStored(t *testing.T) {
 		t.Errorf("a new project defaults to %q, want %q", created.Integration, IntegrateMerge)
 	}
 }
+
+// A team edit sends the whole team, so every role's overrides have to survive
+// an edit that was not about them. The UI could only see resolved values and a
+// single Overridden flag, so a reorder sent the resolved model as an override —
+// pinning a model nobody had pinned — and dropped the argument override, which
+// erased arguments silently.
+func TestOverridesSurviveAnEditThatIsNotAboutThem(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	if err := Seed(ctx, db, "claude"); err != nil {
+		t.Fatal(err)
+	}
+	p, err := db.CreateProject(ctx, t.TempDir(), "calc", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SelectDefaultTeam(ctx, p.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	team, err := db.ResolveTeam(ctx, p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(team) < 2 {
+		t.Fatalf("default team has %d roles, want at least 2", len(team))
+	}
+
+	// Give the first role an argument override and no model override.
+	args := []string{"--verbose", "--flag=with value"}
+	if err := db.SetTeam(ctx, p.ID, []ProjectRole{
+		{TemplateID: team[0].ID, Position: 0, Enabled: true, ArgsOverride: args},
+		{TemplateID: team[1].ID, Position: 1, Enabled: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	team, err = db.ResolveTeam(ctx, p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if team[0].ModelOverride != nil {
+		t.Errorf("a model override appeared from nowhere: %q", *team[0].ModelOverride)
+	}
+	if len(team[0].ArgsOverride) != len(args) {
+		t.Fatalf("args override came back as %v, want %v", team[0].ArgsOverride, args)
+	}
+
+	// Now the edit that is not about it: swap the order, round-tripping what
+	// the API reported, which is what the UI does.
+	if err := db.SetTeam(ctx, p.ID, []ProjectRole{
+		{TemplateID: team[1].ID, Position: 0, Enabled: team[1].Enabled,
+			ModelOverride: team[1].ModelOverride, ArgsOverride: team[1].ArgsOverride},
+		{TemplateID: team[0].ID, Position: 1, Enabled: team[0].Enabled,
+			ModelOverride: team[0].ModelOverride, ArgsOverride: team[0].ArgsOverride},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	after, err := db.ResolveTeam(ctx, p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var moved *ResolvedRole
+	for i := range after {
+		if after[i].ID == team[0].ID {
+			moved = &after[i]
+		}
+	}
+	if moved == nil {
+		t.Fatal("the role disappeared from the team")
+	}
+	if len(moved.ArgsOverride) != len(args) {
+		t.Errorf("reordering erased the argument override: got %v, want %v",
+			moved.ArgsOverride, args)
+	}
+	if moved.ModelOverride != nil {
+		t.Errorf("reordering invented a model override: %q", *moved.ModelOverride)
+	}
+}

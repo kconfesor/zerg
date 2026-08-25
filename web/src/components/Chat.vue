@@ -27,6 +27,13 @@ interface Line {
   tool?: string
 }
 
+/**
+ * A conversation is not a transcript, and an unbounded one costs a re-render
+ * of every line for each new one. Old turns scroll out of reach long before
+ * this; the durable record is the event stream, which keeps everything.
+ */
+const MAX_LINES = 500
+
 const lines = ref<Line[]>([])
 const draft = ref('')
 const sending = ref(false)
@@ -53,6 +60,9 @@ function accept(e: ActivityEvent) {
   } else if (e.kind === 'error') {
     thinking.value = false
     error.value = e.text ?? 'the agent failed'
+  }
+  if (lines.value.length > MAX_LINES) {
+    lines.value.splice(0, lines.value.length - MAX_LINES)
   }
   scrollToEnd()
 }

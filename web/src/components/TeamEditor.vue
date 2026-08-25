@@ -64,10 +64,15 @@ const selectedIds = computed(() => new Set(props.team.map((r) => r.id)))
 function submit(roles: ResolvedRole[]) {
   emit(
     'setTeam',
+    // Both overrides round-trip exactly as they came. Deriving them from the
+    // resolved values instead meant a reorder sent the resolved model as an
+    // override — pinning a model nobody had pinned — and dropped argsOverride
+    // entirely, erasing arguments that were never part of the edit.
     roles.map((r) => ({
       templateId: r.id,
       enabled: r.enabled,
-      modelOverride: r.overridden ? r.model : null,
+      modelOverride: r.modelOverride ?? null,
+      argsOverride: r.argsOverride ?? null,
     })),
   )
 }

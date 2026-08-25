@@ -23,6 +23,8 @@ const props = defineProps<{ projectId: string; roles: string[] }>()
 const events = ref<ActivityEvent[]>([])
 const roleFilter = ref<string>('')
 const state = ref<StreamState>('connecting')
+/** What the server said went wrong, when it stayed up long enough to say. */
+const streamError = ref('')
 const follow = ref(true)
 const viewport = ref<HTMLElement | null>(null)
 
@@ -37,6 +39,11 @@ const MAX_LINES = 2000
 
 function connect() {
   stream?.close()
+  if (frame) {
+    cancelAnimationFrame(frame)
+    frame = 0
+  }
+  pending = []
   events.value = []
   state.value = 'connecting'
   if (!props.projectId) return
@@ -44,18 +51,43 @@ function connect() {
   stream = streamActivity(
     props.projectId,
     {
-      onEvent: (e) => {
-        events.value.push(e)
-        if (events.value.length > MAX_LINES) {
-          events.value.splice(0, events.value.length - MAX_LINES)
-        }
-        if (follow.value) scrollToEnd()
-      },
+      onEvent: (e) => queue(e),
       onCaughtUp: () => scrollToEnd(),
-      onState: (s) => (state.value = s),
+      onState: (s) => {
+        state.value = s
+        if (s === 'live') streamError.value = ''
+      },
+      onError: (m) => (streamError.value = m),
     },
     { role: roleFilter.value || undefined },
   )
+}
+
+/**
+ * Events arrive faster than a screen can usefully change.
+ *
+ * A busy replay delivers hundreds in a burst, and pushing each one onto a
+ * reactive array re-rendered the list and scheduled a scroll every time — the
+ * work grows with the number of events while the visible result is identical.
+ * They are collected and applied once per frame instead, which is as often as
+ * anything can actually be seen.
+ */
+let pending: ActivityEvent[] = []
+let frame = 0
+
+function queue(e: ActivityEvent) {
+  pending.push(e)
+  if (frame) return
+  frame = requestAnimationFrame(() => {
+    frame = 0
+    const batch = pending
+    pending = []
+    events.value.push(...batch)
+    if (events.value.length > MAX_LINES) {
+      events.value.splice(0, events.value.length - MAX_LINES)
+    }
+    if (follow.value) scrollToEnd()
+  })
 }
 
 function scrollToEnd() {
@@ -74,7 +106,10 @@ function onScroll() {
 }
 
 watch(() => [props.projectId, roleFilter.value], connect, { immediate: true })
-onBeforeUnmount(() => stream?.close())
+onBeforeUnmount(() => {
+  stream?.close()
+  if (frame) cancelAnimationFrame(frame)
+})
 
 /** Role identity is categorical: a fixed hue per role, assigned by position and
  * never recycled, so a role keeps its colour as the filter changes. */
@@ -148,7 +183,10 @@ const roleCounts = computed(() => {
              is distinct from "connecting" on purpose: the first means the feed
              dropped and is being resumed from its cursor, which is worth
              seeing, and the second is just startup. -->
-        <Badge :variant="state === 'live' ? 'default' : 'outline'">
+        <Badge
+          :variant="state === 'live' ? 'default' : state === 'error' ? 'destructive' : 'outline'"
+          :title="streamError || undefined"
+        >
           {{ state }}
         </Badge>
         <Button v-if="!follow" variant="outline" size="sm" @click="follow = true; scrollToEnd()">
@@ -162,7 +200,12 @@ const roleCounts = computed(() => {
       class="bg-card h-[70vh] overflow-y-auto border font-mono text-[11px] leading-relaxed md:h-[62vh] md:text-xs"
       @scroll="onScroll"
     >
-      <p v-if="!events.length" class="text-muted-foreground p-4">
+      <!-- A feed that failed must not read as a project with nothing in it.
+           Those look identical, and only one of them is worth acting on. -->
+      <p v-if="streamError && !events.length" class="text-destructive p-4 text-xs">
+        {{ streamError }} — retrying.
+      </p>
+      <p v-else-if="!events.length" class="text-muted-foreground p-4">
         Nothing recorded yet. Start the agents and give them a task — this fills in as they work.
       </p>
 

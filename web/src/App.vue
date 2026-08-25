@@ -225,9 +225,20 @@ async function loadGlobals() {
 }
 
 /** Refreshes everything scoped to the open project. */
+/**
+ * Which project the newest refresh was for.
+ *
+ * Four requests go out per refresh and each takes its own time. Switch project
+ * while they are in flight and the older set can land after the newer one,
+ * putting one project's board under another project's name — briefly, and
+ * exactly when someone is looking to see whether the switch worked.
+ */
+let refreshFor = ''
+
 async function refresh() {
   const project = current.value
   if (!project) return
+  refreshFor = project.id
   try {
     const [t, tk, at, st] = await Promise.all([
       api.team(project.id),
@@ -235,6 +246,10 @@ async function refresh() {
       api.attention(project.id),
       api.status(project.id),
     ])
+    // Someone switched project while these were in flight; this data is for
+    // a project nobody is looking at.
+    if (refreshFor !== project.id) return
+
     team.value = t
     tasks.value = tk
     attention.value = at
@@ -434,6 +449,23 @@ onMounted(async () => {
   }
   schedulePoll(0)
 })
+/**
+ * The URL is the project selection, not a record of it.
+ *
+ * Only onMounted read the route, so browser back and forward between two
+ * project URLs moved the address bar and left the board showing the project
+ * from before — the two disagreed with no way to tell which was real.
+ */
+watch(
+  () => route.params.projectId,
+  async (id) => {
+    const asked = String(id ?? '')
+    if (!asked || asked === current.value?.id) return
+    const wanted = projects.value.find((p) => p.id === asked)
+    if (wanted) await open(wanted)
+  },
+)
+
 onUnmounted(() => window.clearTimeout(timer))
 watch(current, () => (banner.value = null))
 </script>

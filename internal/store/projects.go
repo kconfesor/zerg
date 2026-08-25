@@ -230,15 +230,23 @@ func (db *DB) ResolveTeam(ctx context.Context, projectID string) ([]ResolvedRole
 			return nil, fmt.Errorf("role %s has an unreadable updated_at: %w", r.ID, err)
 		}
 
-		if modelOverride.Valid && modelOverride.String != r.Model {
-			r.Model = modelOverride.String
-			r.Overridden = true
+		// The stored override is kept whether or not it differs from the
+		// template, because it is what this project chose. Overridden stays a
+		// question about divergence, which is what the badge asks.
+		if modelOverride.Valid {
+			v := modelOverride.String
+			r.ModelOverride = &v
+			if v != r.Model {
+				r.Model = v
+				r.Overridden = true
+			}
 		}
 		if argsOverride.Valid {
 			args, err := unmarshalArgs(argsOverride.String)
 			if err != nil {
 				return nil, err
 			}
+			r.ArgsOverride = args
 			if !slices.Equal(args, r.Args) {
 				r.Args = args
 				r.Overridden = true
