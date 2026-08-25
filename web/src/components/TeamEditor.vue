@@ -37,6 +37,26 @@ const emit = defineEmits<{
 
 const editing = ref<RoleTemplate | null>(null)
 const open = ref(false)
+const custom = ref(false)
+
+/** What the Select shows: a catalogued id, or the Custom sentinel when the
+ *  role runs something the harness never listed. */
+const modelChoice = computed(() => {
+  const m = editing.value?.model ?? ''
+  if (custom.value || !m) return custom.value ? '__custom__' : ''
+  const known = (props.models[editing.value!.harness] ?? []).some((x) => x.ID === m)
+  return known ? m : '__custom__'
+})
+
+function pickModel(value: unknown) {
+  const v = String(value ?? '')
+  if (v === '__custom__') {
+    custom.value = true
+    return
+  }
+  custom.value = false
+  if (editing.value) editing.value.model = v
+}
 
 const selectedIds = computed(() => new Set(props.team.map((r) => r.id)))
 
@@ -78,6 +98,8 @@ function setEnabled(role: ResolvedRole, enabled: boolean) {
 
 function edit(tpl: RoleTemplate) {
   editing.value = { ...tpl, args: [...tpl.args] }
+  custom.value =
+    !!tpl.model && !(props.models[tpl.harness] ?? []).some((m) => m.ID === tpl.model)
   open.value = true
 }
 
@@ -196,12 +218,22 @@ function save() {
 
         <div class="flex flex-col gap-1.5">
           <Label>Model</Label>
-          <Input v-model="editing.model" list="model-options" />
-          <datalist id="model-options">
-            <option v-for="m in models[editing.harness] ?? []" :key="m.ID" :value="m.ID" />
-          </datalist>
+          <Select :model-value="modelChoice" @update:model-value="pickModel">
+            <SelectTrigger class="w-full"><SelectValue placeholder="harness default" /></SelectTrigger>
+            <SelectContent>
+              <SelectItem v-for="m in models[editing.harness] ?? []" :key="m.ID" :value="m.ID">
+                {{ m.ID }}
+              </SelectItem>
+              <SelectItem value="__custom__">Custom…</SelectItem>
+            </SelectContent>
+          </Select>
+          <Input
+            v-if="modelChoice === '__custom__'"
+            v-model="editing.model"
+            placeholder="openai-codex/gpt-5.6-sol"
+          />
           <span class="text-muted-foreground text-xs">
-            Free text is allowed — a catalog can lag a model that works.
+            A working model can be absent from a catalog, so custom ids are allowed.
           </span>
         </div>
 

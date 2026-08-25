@@ -1,32 +1,16 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import type { Project, RoleStatus, SwarmStatus } from '@/lib/api'
-import { Button } from '@/components/ui/button'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
+import type { RoleStatus, SwarmStatus } from '@/lib/api'
 
 export type View = 'board' | 'team' | 'attention' | 'readiness'
 
 const props = defineProps<{
-  projects: Project[]
-  current: Project | null
   view: View
   status: SwarmStatus
   attentionCount: number
   taskCount: number
 }>()
-const emit = defineEmits<{
-  navigate: [view: View]
-  openProject: [project: Project]
-  start: []
-  stop: []
-  check: []
-}>()
+const emit = defineEmits<{ navigate: [view: View] }>()
 
 const nav = computed(() => [
   { key: 'board' as const, label: 'Board', count: props.taskCount },
@@ -51,36 +35,20 @@ function live(r: RoleStatus): boolean {
   <aside
     class="bg-[var(--surface-sunken)] hairline-r flex w-[var(--rail)] shrink-0 flex-col"
   >
-    <!-- Identity and which repository is in view. -->
-    <div class="hairline-b flex flex-col gap-3 px-3 py-3">
-      <div class="flex items-center gap-2">
-        <span
-          class="bg-primary text-primary-foreground grid size-5 shrink-0 place-items-center text-[11px] font-bold"
-          >z</span
-        >
-        <span class="text-sm font-bold tracking-tight">zerg</span>
-        <span
-          v-if="status.running"
-          class="ml-auto flex items-center gap-1.5 text-[10px] font-semibold tracking-wider text-[var(--status-good)] uppercase"
-        >
-          <span class="pulse-dot size-1.5 rounded-full bg-current" />
-          live
-        </span>
-      </div>
-
-      <Select
-        v-if="projects.length"
-        :model-value="current?.id"
-        @update:model-value="(v) => emit('openProject', projects.find((p) => p.id === v)!)"
+    <!-- Identity, and whether anything is running at all. -->
+    <div class="hairline-b flex items-center gap-2 px-3 py-3">
+      <span
+        class="bg-primary text-primary-foreground grid size-5 shrink-0 place-items-center text-[11px] font-bold"
+        >z</span
       >
-        <SelectTrigger size="sm" class="w-full"><SelectValue placeholder="project" /></SelectTrigger>
-        <SelectContent>
-          <SelectItem v-for="p in projects" :key="p.id" :value="p.id">{{ p.name }}</SelectItem>
-        </SelectContent>
-      </Select>
-      <p v-if="current" class="text-muted-foreground truncate text-[10px]" :title="current.path">
-        {{ current.path }}
-      </p>
+      <span class="text-sm font-bold tracking-tight">zerg</span>
+      <span
+        v-if="status.running"
+        class="ml-auto flex items-center gap-1.5 text-[10px] font-semibold tracking-wider text-[var(--status-good)] uppercase"
+      >
+        <span class="pulse-dot size-1.5 rounded-full bg-current" />
+        live
+      </span>
     </div>
 
     <!-- Where to go. Counts sit right-aligned so the column scans vertically. -->
@@ -143,20 +111,5 @@ function live(r: RoleStatus): boolean {
     </div>
     <div v-else class="flex-1" />
 
-    <!-- Swarm control, pinned. Starting and stopping is the one thing that
-         must never be hunted for. -->
-    <div class="hairline-t flex flex-col gap-1.5 p-2">
-      <template v-if="!status.running">
-        <Button size="sm" class="w-full" :disabled="!current" @click="emit('start')">
-          Start swarm
-        </Button>
-        <Button size="sm" variant="ghost" class="w-full" :disabled="!current" @click="emit('check')">
-          Check readiness
-        </Button>
-      </template>
-      <Button v-else size="sm" variant="destructive" class="w-full" @click="emit('stop')">
-        Stop swarm
-      </Button>
-    </div>
   </aside>
 </template>

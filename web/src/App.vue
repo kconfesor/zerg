@@ -18,6 +18,7 @@ import Board from '@/components/Board.vue'
 import ReadinessPanel from '@/components/Readiness.vue'
 import TeamEditor from '@/components/TeamEditor.vue'
 import AppSidebar, { type View } from '@/components/layout/AppSidebar.vue'
+import ProjectBar from '@/components/layout/ProjectBar.vue'
 import PageHeader from '@/components/layout/PageHeader.vue'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -50,6 +51,7 @@ const newPath = ref('')
 const taskName = ref('')
 const taskBody = ref('')
 const composing = ref(false)
+const addingProject = ref(false)
 
 let timer: number | undefined
 
@@ -63,7 +65,7 @@ const working = computed(() => tasks.value.filter((t) => t.state === 'working').
 
 const boardSubtitle = computed(() => {
   const n = tasks.value.length
-  if (!n) return 'No cards yet. Open one below.'
+  if (!n) return 'No cards yet. Open one to give the agents something to do.'
   return `${n} ${n === 1 ? 'card' : 'cards'} · ${working.value} being worked`
 })
 
@@ -116,6 +118,7 @@ async function addProject() {
   try {
     const p = await api.createProject(newPath.value.trim(), 'main')
     newPath.value = ''
+    addingProject.value = false
     await loadGlobals()
     await open(p)
   } catch (err) {
@@ -243,20 +246,24 @@ watch(current, () => (banner.value = null))
 <template>
   <div class="flex h-full">
     <AppSidebar
-      :projects="projects"
-      :current="current"
       :view="view"
       :status="status"
       :attention-count="attentionCount"
       :task-count="tasks.length"
       @navigate="(v) => (view = v)"
-      @open-project="open"
-      @start="start"
-      @stop="stop"
-      @check="checkReadiness"
     />
 
     <div class="flex min-w-0 flex-1 flex-col overflow-hidden">
+      <ProjectBar
+        :projects="projects"
+        :current="current"
+        :status="status"
+        @open-project="open"
+        @add-project="addingProject = true"
+        @start="start"
+        @stop="stop"
+      />
+
       <p
         v-if="banner"
         :class="[
@@ -282,28 +289,20 @@ watch(current, () => (banner.value = null))
         <span class="ml-auto opacity-70">Review →</span>
       </button>
 
-      <!-- No project yet: one job on screen, centred, nothing else. -->
+      <!-- No project yet: one job on screen, nothing else. -->
       <main v-if="!current" class="grid flex-1 place-items-center overflow-y-auto p-8">
-        <div class="w-full max-w-md">
-          <h1 class="text-lg font-semibold tracking-tight">Add a project</h1>
+        <div class="w-full max-w-md text-center">
+          <h1 class="text-lg font-semibold tracking-tight">No project yet</h1>
           <p class="text-muted-foreground mt-1.5 mb-4 text-xs leading-relaxed">
             Point zerg at a git repository. It starts with coder → reviewer selected; everything
             else is a checkbox in Team.
           </p>
-          <div class="flex gap-2">
-            <Input
-              v-model="newPath"
-              placeholder="/Users/you/source/your-repo"
-              class="min-w-0 flex-1"
-              @keyup.enter="addProject"
-            />
-            <Button @click="addProject">Add</Button>
-          </div>
+          <Button @click="addingProject = true">Add a project</Button>
         </div>
       </main>
 
       <main v-else class="min-h-0 flex-1 overflow-y-auto">
-        <div class="mx-auto w-full max-w-[1200px] p-[var(--gutter)]">
+        <div class="w-full p-[var(--gutter)]">
           <!-- Board -->
           <template v-if="view === 'board'">
             <PageHeader title="Board" :subtitle="boardSubtitle">
@@ -373,6 +372,31 @@ watch(current, () => (banner.value = null))
         </div>
       </main>
     </div>
+
+    <Dialog v-model:open="addingProject">
+      <DialogContent class="sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>Add a project</DialogTitle>
+          <DialogDescription>
+            An absolute path to a git repository. zerg initialises one if the directory is not a
+            repository yet.
+          </DialogDescription>
+        </DialogHeader>
+        <div class="flex flex-col gap-1.5">
+          <Label>Path</Label>
+          <Input
+            v-model="newPath"
+            placeholder="/Users/you/source/your-repo"
+            autofocus
+            @keyup.enter="addProject"
+          />
+        </div>
+        <DialogFooter>
+          <Button variant="outline" @click="addingProject = false">Cancel</Button>
+          <Button :disabled="!newPath.trim()" @click="addProject">Add</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
 
     <!-- Opening a card. The name is the thing that follows this work through
          the whole pipeline, which is worth saying where it is being typed. -->
