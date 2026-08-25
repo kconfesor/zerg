@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -57,6 +59,11 @@ type Task struct {
 	FirstClaimedAt *time.Time `json:"firstClaimedAt,omitempty"`
 	CompletedAt    *time.Time `json:"completedAt,omitempty"`
 	ActiveMS       int64      `json:"activeMs"`
+
+	// ReworkCount is how many times this card has gone backward through the
+	// pipeline. Rework is legitimate; an unbounded amount of it is a loop
+	// nobody is paying attention to.
+	ReworkCount int `json:"reworkCount"`
 }
 
 type Message struct {
@@ -129,7 +136,7 @@ func (db *DB) CreateTask(ctx context.Context, projectID, name, body, lane string
 }
 
 const taskCols = `id, project_id, session_id, name, body, lane, state,
-	created_at, first_claimed_at, completed_at, active_ms`
+	created_at, first_claimed_at, completed_at, active_ms, rework_count`
 
 func (db *DB) GetTask(ctx context.Context, id string) (*Task, error) {
 	row := db.sql.QueryRowContext(ctx, `SELECT `+taskCols+` FROM tasks WHERE id = ?`, id)
@@ -169,7 +176,7 @@ func scanTask(s scanner) (*Task, error) {
 		completedAt sql.NullString
 	)
 	if err := s.Scan(&t.ID, &t.ProjectID, &sessionID, &t.Name, &t.Body, &t.Lane, &t.State,
-		&created, &firstClaim, &completedAt, &t.ActiveMS); err != nil {
+		&created, &firstClaim, &completedAt, &t.ActiveMS, &t.ReworkCount); err != nil {
 		return nil, err
 	}
 	if sessionID.Valid {
@@ -461,4 +468,54 @@ func (db *DB) QueuedCount(ctx context.Context, projectID, role string) (int, err
 		return 0, fmt.Errorf("counting queued work for %s: %w", role, err)
 	}
 	return n, nil
+}
+
+// SettingReworkThreshold is how many backward handoffs a card may take before
+// it is raised for a human. Stored rather than hardcoded, because how much
+// rework is normal is a judgement about a project, not a fact about zerg.
+const SettingReworkThreshold = "rework_threshold"
+
+// DefaultReworkThreshold is deliberately low. Three laps between the same two
+// roles usually means they disagree about something a human should settle,
+// not that the work is nearly done.
+const DefaultReworkThreshold = 3
+
+// ReworkThreshold reads the configured threshold, falling back to the default.
+func (db *DB) ReworkThreshold(ctx context.Context) int {
+	raw, err := db.GetSetting(ctx, SettingReworkThreshold)
+	if err != nil {
+		return DefaultReworkThreshold
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || n < 1 {
+		return DefaultReworkThreshold
+	}
+	return n
+}
+
+// ListReworkedTasks returns open cards that have bounced at least threshold
+// times, for Attention to raise.
+//
+// Finished cards are excluded: a card that took four laps and then shipped is
+// history worth keeping, not a decision anyone still needs to make.
+func (db *DB) ListReworkedTasks(ctx context.Context, projectID string, threshold int) ([]Task, error) {
+	rows, err := db.sql.QueryContext(ctx,
+		`SELECT `+taskCols+` FROM tasks
+		 WHERE project_id = ? AND rework_count >= ? AND state NOT IN (?, ?)
+		 ORDER BY rework_count DESC, created_at`,
+		projectID, threshold, TaskDone, TaskRejected)
+	if err != nil {
+		return nil, fmt.Errorf("listing reworked tasks: %w", err)
+	}
+	defer rows.Close()
+
+	var out []Task
+	for rows.Next() {
+		t, err := scanTask(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *t)
+	}
+	return out, rows.Err()
 }

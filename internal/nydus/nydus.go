@@ -142,9 +142,17 @@ func (n *Nydus) Send(ctx context.Context, projectID, fromRole string, req SendRe
 		return n.complete(ctx, projectID, sender, req)
 	}
 
-	if _, ok := roleNamed(team, req.To); !ok {
+	recipient, ok := roleNamed(team, req.To)
+	if !ok {
 		return nil, invalid("role %q is not on this project's team", req.To)
 	}
+
+	// A handoff to an earlier position is rework — a reviewer returning work to
+	// the coder that produced it, most often. This is allowed and expected;
+	// forbidding it would leave a reviewer unable to act on what it found. It
+	// is counted because backward edges make cycles possible, and a pipeline
+	// that bills per lap should not be able to loop quietly.
+	backward := kind == store.KindHandoff && recipient.Position < sender.Position
 
 	priority := req.Priority
 	if priority == 0 {
@@ -165,6 +173,7 @@ func (n *Nydus) Send(ctx context.Context, projectID, fromRole string, req SendRe
 		Commit:    req.Commit,
 		Body:      req.Body,
 		gate:      sender.Gate,
+		rework:    backward,
 	})
 }
 
@@ -179,6 +188,7 @@ type sendReq struct {
 	Body      string
 	terminal  bool
 	gate      string
+	rework    bool
 }
 
 func (n *Nydus) send(ctx context.Context, req sendReq) (*store.Message, error) {
@@ -241,9 +251,13 @@ func (n *Nydus) send(ctx context.Context, req sendReq) (*store.Message, error) {
 		// The card follows the work. State stays "queued" until the recipient
 		// claims it, so the board distinguishes waiting from being worked on —
 		// which is the honest version of what the predecessor showed.
+		//
+		// The rework counter moves with it, in the same transaction: a lap that
+		// was routed but not counted is exactly the invisible loop this exists
+		// to prevent.
 		if _, err := tx.ExecContext(ctx,
-			`UPDATE tasks SET lane = ?, state = ? WHERE id = ?`,
-			req.ToRoles[0], store.TaskQueued, *req.TaskID); err != nil {
+			`UPDATE tasks SET lane = ?, state = ?, rework_count = rework_count + ? WHERE id = ?`,
+			req.ToRoles[0], store.TaskQueued, boolToInt(req.rework), *req.TaskID); err != nil {
 			return nil, fmt.Errorf("moving card: %w", err)
 		}
 	}
@@ -802,4 +816,11 @@ func invalid(format string, args ...any) error {
 
 func errNoEnabledRoles(projectID string) error {
 	return invalid("project %s has no enabled roles; select at least one before starting work", projectID)
+}
+
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }

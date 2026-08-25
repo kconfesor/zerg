@@ -407,9 +407,22 @@ func (s *Server) attention(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
+	// Cards that keep going backward. Not a blocked state and not an error —
+	// two roles disagreeing about something a human should probably settle,
+	// surfaced before the laps become expensive rather than after.
+	threshold := s.db.ReworkThreshold(r.Context())
+	looping, err := s.db.ListReworkedTasks(r.Context(), id, threshold)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"approvals":      orEmpty(approvals),
 		"clarifications": orEmpty(questions),
+		"rework": map[string]any{
+			"threshold": threshold,
+			"tasks":     orEmpty(looping),
+		},
 	})
 }
 
