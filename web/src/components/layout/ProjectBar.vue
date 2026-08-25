@@ -21,7 +21,6 @@ const props = defineProps<{
 const emit = defineEmits<{
   menu: []
   openProject: [project: Project]
-  addProject: []
   start: []
   stop: []
 }>()
@@ -64,9 +63,6 @@ function liveCount(s: SwarmStatus): number {
       </SelectContent>
     </Select>
 
-    <Button size="icon-sm" variant="outline" title="Add a project" @click="emit('addProject')">
-      +
-    </Button>
 
     <span
       v-if="current"

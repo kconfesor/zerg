@@ -15,6 +15,7 @@ import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 /** The view names, which double as the path segments. */
 export const VIEWS = [
   'board',
+  'projects',
   'activity',
   'chat',
   'team',

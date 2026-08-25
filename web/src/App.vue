@@ -18,6 +18,7 @@ import Activity from '@/components/Activity.vue'
 import Board from '@/components/Board.vue'
 import Chat from '@/components/Chat.vue'
 import MarkdownEditor from '@/components/MarkdownEditor.vue'
+import Projects from '@/components/Projects.vue'
 import TaskDetail from '@/components/TaskDetail.vue'
 import Settings from '@/components/Settings.vue'
 import ReadinessPanel from '@/components/Readiness.vue'
@@ -212,6 +213,20 @@ async function open(project: Project) {
   await refresh()
 }
 
+/** Reload the list after one is added or removed, and pick a sensible current
+ *  project when the one that was open has just gone. */
+async function onProjectsChanged() {
+  try {
+    projects.value = await api.projects()
+    if (!projects.value.some((p) => p.id === current.value?.id)) {
+      current.value = null
+      if (projects.value.length) await open(projects.value[0])
+    }
+  } catch (err) {
+    fail(err)
+  }
+}
+
 async function addProject() {
   if (!newPath.value.trim()) return
   try {
@@ -362,6 +377,7 @@ watch(current, () => (banner.value = null))
       :status="status"
       :attention-count="attentionCount"
       :task-count="tasks.length"
+      :project-count="projects.length"
       :open="navOpen"
       @close="navOpen = false"
       @navigate="go"
@@ -375,7 +391,6 @@ watch(current, () => (banner.value = null))
         :usage-key="usageKey"
         @menu="navOpen = true"
         @open-project="open"
-        @add-project="addingProject = true"
         @start="start"
         @stop="stop"
       />
@@ -447,13 +462,30 @@ watch(current, () => (banner.value = null))
             <div class="pt-4"><Chat :project-id="current?.id ?? null" /></div>
           </template>
 
+          <!-- Projects -->
+          <template v-else-if="view === 'projects'">
+            <PageHeader
+              title="Projects"
+              subtitle="The repositories zerg knows about, and what is configured about each."
+            />
+            <div class="pt-4">
+              <Projects
+                :projects="projects"
+                :current="current"
+                @open="open"
+                @updated="(p) => (current = p)"
+                @changed="onProjectsChanged"
+              />
+            </div>
+          </template>
+
           <!-- Settings -->
           <template v-else-if="view === 'settings'">
             <PageHeader
               title="Settings"
               subtitle="How the daemon serves the cockpit, and what it keeps on disk."
             />
-            <div class="pt-4"><Settings :project="current" @project-changed="(p) => (current = p)" /></div>
+            <div class="pt-4"><Settings /></div>
           </template>
 
           <!-- Activity -->

@@ -4,6 +4,7 @@ import {
   Activity as ActivityIcon,
   Bell,
   Columns3,
+  FolderGit2,
   MessageSquare,
   Settings as SettingsIcon,
   ShieldCheck,
@@ -18,6 +19,7 @@ const props = defineProps<{
   status: SwarmStatus
   attentionCount: number
   taskCount: number
+  projectCount: number
   /** Whether the drawer is showing. Ignored at md and above, where the rail
    *  is always part of the layout. */
   open: boolean
@@ -34,6 +36,7 @@ const nav = computed(() => [
   { key: 'team' as const, label: 'Team', icon: Users, count: 0 },
   { key: 'attention' as const, label: 'Attention', icon: Bell, count: props.attentionCount },
   { key: 'readiness' as const, label: 'Readiness', icon: ShieldCheck, count: 0 },
+  { key: 'projects' as const, label: 'Projects', icon: FolderGit2, count: props.projectCount },
   { key: 'settings' as const, label: 'Settings', icon: SettingsIcon, count: 0 },
 ])
 

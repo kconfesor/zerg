@@ -7,7 +7,7 @@
  * next to the fields beats a paragraph nobody reads.
  */
 import { computed, ref, watch } from 'vue'
-import { api, type DaemonConfig, type Integration, type Project, type SettingsResponse } from '@/lib/api'
+import { api, type DaemonConfig, type SettingsResponse } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -15,7 +15,6 @@ import { Checkbox } from '@/components/ui/checkbox'
 import { Textarea } from '@/components/ui/textarea'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
-import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import {
   Select,
@@ -25,14 +24,61 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 
-const props = defineProps<{ project: Project | null }>()
-const emit = defineEmits<{ projectChanged: [project: Project] }>()
+
 
 const data = ref<SettingsResponse | null>(null)
 const form = ref<DaemonConfig | null>(null)
 const saving = ref(false)
 const note = ref<{ tone: 'ok' | 'bad'; text: string } | null>(null)
-const sweeping = ref(false)
+
+/** The protocol document every role is given, on top of its own prompt. */
+const instructions = ref('')
+const savingInstructions = ref(false)
+
+async function load() {
+  try {
+    data.value = await api.settings()
+    form.value = { ...data.value.config }
+    instructions.value = (await api.sharedInstructions()).text
+  } catch (e) {
+    note.value = { tone: 'bad', text: e instanceof Error ? e.message : String(e) }
+  }
+}
+load()
+
+async function save() {
+  if (!form.value) return
+  saving.value = true
+  note.value = null
+  try {
+    data.value = await api.setSettings(form.value)
+    form.value = { ...data.value.config }
+    note.value = data.value.restartNeeded
+      ? { tone: 'ok', text: 'Saved. The address and TLS take effect when the daemon restarts.' }
+      : { tone: 'ok', text: 'Saved.' }
+  } catch (e) {
+    note.value = { tone: 'bad', text: e instanceof Error ? e.message : String(e) }
+  } finally {
+    saving.value = false
+  }
+}
+
+async function saveInstructions() {
+  savingInstructions.value = true
+  note.value = null
+  try {
+    await api.setSharedInstructions(instructions.value)
+    note.value = {
+      tone: 'ok',
+      text: 'Shared instructions saved. Roles pick them up the next time they spawn.',
+    }
+  } catch (e) {
+    note.value = { tone: 'bad', text: e instanceof Error ? e.message : String(e) }
+  } finally {
+    savingInstructions.value = false
+  }
+}
+
 /**
  * The open tab, mirrored out of the uncontrolled Tabs so the save button can
  * key off it.
@@ -41,50 +87,15 @@ const sweeping = ref(false)
  * drifted immediately — the ref said "project" while the component opened on
  * "network", so the state the button read was never the tab on screen.
  */
-const FIRST_TAB = 'project'
+const FIRST_TAB = 'network'
 const tab = ref(FIRST_TAB)
-
-const INTEGRATIONS: { value: Integration; label: string; why: string }[] = [
-  {
-    value: 'merge',
-    label: 'Merge into the base branch',
-    why: 'The terminal role fast-forwards the base branch when it approves. Right for a repository you own outright; wrong wherever the base is protected.',
-  },
-  {
-    value: 'pr',
-    label: 'Open a pull request',
-    why: "Pushes the work to its own branch and opens a PR, using the terminal role's handoff note as the description. Needs the gh CLI and a remote.",
-  },
-  {
-    value: 'branch',
-    label: 'Leave it on a branch',
-    why: 'The task finishes and nothing else happens. Landing it is your decision, taken later.',
-  },
-]
-
-const savingIntegration = ref(false)
-async function setIntegration(mode: Integration) {
-  if (!props.project || props.project.integration === mode) return
-  savingIntegration.value = true
-  note.value = null
-  try {
-    emit('projectChanged', await api.setIntegration(props.project.id, mode))
-    note.value = { tone: 'ok', text: 'Saved. It applies to the next task that finishes.' }
-  } catch (e) {
-    note.value = { tone: 'bad', text: e instanceof Error ? e.message : String(e) }
-  } finally {
-    savingIntegration.value = false
-  }
-}
 
 /**
  * The harness flags worth offering as a switch, with what each one is for.
  *
- * Every flag here was verified against the CLI's own --help rather than
- * recalled, and each recommendation traces to something that went wrong
- * without it. Anything else a harness accepts goes in the free-text field —
- * the set changes when a CLI does, and a fixed schema here would be stale by
- * the next release.
+ * Every flag was verified against the CLI's own --help rather than recalled.
+ * Anything else a harness accepts goes in the free-text field: the set changes
+ * when a CLI does, and a fixed list here would be stale by the next release.
  */
 const HARNESS_OPTIONS: Record<string, { flag: string[]; label: string; why: string }[]> = {
   claude: [
@@ -146,89 +157,15 @@ function toggleFlag(h: string, seq: string[], on: boolean) {
 function extraFor(h: string): string {
   const known = HARNESS_OPTIONS[h].flatMap((o) => o.flag)
   return flagsOf(h)
-    .filter((f, i, arr) => {
-      const prev = arr[i - 1]
-      return !known.includes(f) && !known.includes(prev ?? '')
-    })
+    .filter((f, i, arr) => !known.includes(f) && !known.includes(arr[i - 1] ?? ''))
     .join(' ')
 }
 function setExtra(h: string, text: string) {
-  const kept = flagsOf(h).filter((f, i, arr) => {
-    const known = HARNESS_OPTIONS[h].flatMap((o) => o.flag)
-    return known.includes(f) || known.includes(arr[i - 1] ?? '')
-  })
+  const known = HARNESS_OPTIONS[h].flatMap((o) => o.flag)
+  const kept = flagsOf(h).filter(
+    (f, i, arr) => known.includes(f) || known.includes(arr[i - 1] ?? ''),
+  )
   setFlags(h, [...kept, ...text.split(/\s+/).filter(Boolean)])
-}
-
-/** The protocol document every role is given, on top of its own prompt. It had
- *  an endpoint and no UI, so until now it could only be edited with curl. */
-const instructions = ref('')
-const savingInstructions = ref(false)
-
-async function load() {
-  try {
-    data.value = await api.settings()
-    form.value = { ...data.value.config }
-    instructions.value = (await api.sharedInstructions()).text
-  } catch (e) {
-    note.value = { tone: 'bad', text: e instanceof Error ? e.message : String(e) }
-  }
-}
-load()
-
-async function save() {
-  if (!form.value) return
-  saving.value = true
-  note.value = null
-  try {
-    data.value = await api.setSettings(form.value)
-    form.value = { ...data.value.config }
-    note.value = data.value.restartNeeded
-      ? { tone: 'ok', text: 'Saved. The address and TLS take effect when the daemon restarts.' }
-      : { tone: 'ok', text: 'Saved.' }
-  } catch (e) {
-    note.value = { tone: 'bad', text: e instanceof Error ? e.message : String(e) }
-  } finally {
-    saving.value = false
-  }
-}
-
-async function sweepNow() {
-  if (!props.project) return
-  sweeping.value = true
-  note.value = null
-  try {
-    const r = await api.sweep(props.project.id)
-    const mb = (r.bytesFreed / 1048576).toFixed(1)
-    const branches = r.branchesPruned?.length ?? 0
-    note.value = {
-      tone: 'ok',
-      text:
-        r.bytesFreed === 0 && !branches
-          ? 'Nothing to reclaim — the worktrees are already clean.'
-          : `Freed ${mb} MB${branches ? `, pruned ${branches} branch${branches > 1 ? 'es' : ''}` : ''}.`,
-    }
-  } catch (e) {
-    note.value = { tone: 'bad', text: e instanceof Error ? e.message : String(e) }
-  } finally {
-    sweeping.value = false
-  }
-}
-
-async function saveInstructions() {
-  savingInstructions.value = true
-  note.value = null
-  try {
-    await api.setSharedInstructions(instructions.value)
-    note.value = {
-      tone: 'ok',
-      text: 'Shared instructions saved. Roles pick them up the next time they spawn.',
-    }
-  } catch (e) {
-    note.value = { tone: 'bad', text: e instanceof Error ? e.message : String(e) }
-  } finally {
-    savingInstructions.value = false
-  }
 }
 
 const ts = computed(() => data.value?.tailnet)
@@ -277,48 +214,11 @@ const loopback = computed(() => {
          out for the save button. -->
     <Tabs :default-value="FIRST_TAB" @update:model-value="(v) => (tab = String(v))">
       <TabsList>
-        <TabsTrigger value="project">Project</TabsTrigger>
         <TabsTrigger value="network">Network</TabsTrigger>
         <TabsTrigger value="disk">Disk</TabsTrigger>
         <TabsTrigger value="harness">Harness</TabsTrigger>
         <TabsTrigger value="instructions">Instructions</TabsTrigger>
       </TabsList>
-
-      <!-- ── Project ──────────────────────────────────────────────────── -->
-      <TabsContent value="project" class="pt-4">
-        <Card>
-          <CardHeader>
-            <CardTitle class="flex items-center gap-2 text-sm">
-              Where finished work goes
-              <Badge variant="outline">{{ project?.name ?? 'no project' }}</Badge>
-            </CardTitle>
-            <CardDescription class="text-[11px]">
-              What the last role does when it approves. Per project, not per role: only the terminal
-              role integrates, and which role that is changes when you change the team.
-            </CardDescription>
-          </CardHeader>
-          <CardContent class="flex flex-col gap-3">
-            <p v-if="!project" class="text-muted-foreground text-xs">Open a project first.</p>
-            <RadioGroup
-              v-else
-              :model-value="project.integration"
-              :disabled="savingIntegration"
-              class="gap-3"
-              @update:model-value="(v) => setIntegration(v as Integration)"
-            >
-              <div v-for="opt in INTEGRATIONS" :key="opt.value" class="flex items-start gap-2">
-                <RadioGroupItem :id="`int-${opt.value}`" :value="opt.value" class="mt-0.5" />
-                <Label :for="`int-${opt.value}`" class="cursor-pointer text-xs font-normal">
-                  {{ opt.label }}
-                  <span class="text-muted-foreground block text-[11px] leading-snug">
-                    {{ opt.why }}
-                  </span>
-                </Label>
-              </div>
-            </RadioGroup>
-          </CardContent>
-        </Card>
-      </TabsContent>
 
       <!-- ── Network ──────────────────────────────────────────────────── -->
       <TabsContent value="network" class="pt-4">
@@ -477,11 +377,6 @@ const loopback = computed(() => {
         </p>
       </div>
 
-      <div>
-        <Button size="sm" variant="outline" :disabled="!project || sweeping" @click="sweepNow">
-          {{ sweeping ? 'Sweeping…' : 'Sweep this project now' }}
-        </Button>
-      </div>
           </CardContent>
         </Card>
       </TabsContent>
