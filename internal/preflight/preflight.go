@@ -223,3 +223,22 @@ func (r *Runner) run(ctx context.Context, check adapter.Check, spec adapter.Spec
 func worktreePath(projectPath, role string) string {
 	return filepath.Join(projectPath, ".worktrees", role)
 }
+
+// CheckRole runs one role's checks and reports the first blocking finding.
+//
+// This is the spawn guard, the same suite the readiness panel runs. State
+// drifts between setup and launch and between one task and the next: a token
+// expires, a binary is upgraded, another tool rewrites a shared config. A role
+// that cannot work must not be spawned into looking like it can.
+func (r *Runner) CheckRole(ctx context.Context, spec adapter.Spec, a adapter.Adapter) error {
+	for _, check := range a.Checks() {
+		res := r.run(ctx, check, spec)
+		if res.Status == StatusBlocked {
+			if res.Remedy != "" {
+				return fmt.Errorf("%s: %s (%s)", res.Name, res.Reason, res.Remedy)
+			}
+			return fmt.Errorf("%s: %s", res.Name, res.Reason)
+		}
+	}
+	return nil
+}

@@ -445,3 +445,20 @@ func scanClarification(s scanner) (*Clarification, error) {
 	}
 	return &c, nil
 }
+
+// QueuedCount reports how much work is waiting for a role.
+//
+// The overmind uses this to decide whether an idle agent is worth nudging.
+// Held routes are excluded: work behind an approval gate is not the agent's to
+// see yet, and nudging over it would have the agent claim nothing and stop.
+func (db *DB) QueuedCount(ctx context.Context, projectID, role string) (int, error) {
+	var n int
+	err := db.sql.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM routes r JOIN messages m ON m.id = r.message_id
+		 WHERE r.to_role = ? AND r.state = ? AND m.project_id = ?`,
+		role, RouteQueued, projectID).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("counting queued work for %s: %w", role, err)
+	}
+	return n, nil
+}

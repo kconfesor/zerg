@@ -16,13 +16,19 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/konfessor/zerg/internal/adapter"
 	"github.com/konfessor/zerg/internal/adapter/claudeharness"
 	"github.com/konfessor/zerg/internal/adapter/piharness"
+	"github.com/konfessor/zerg/internal/agent"
 	"github.com/konfessor/zerg/internal/api"
+	"github.com/konfessor/zerg/internal/event"
+	"github.com/konfessor/zerg/internal/nydus"
+	"github.com/konfessor/zerg/internal/overmind"
+	"github.com/konfessor/zerg/internal/preflight"
 	"github.com/konfessor/zerg/internal/store"
 )
 
@@ -123,8 +129,34 @@ func runUp(args []string) error {
 	registry.Register(claudeharness.New())
 	registry.Register(piharness.New())
 
+	// State lives beside the database, so a project directory holds nothing but
+	// git artifacts.
+	stateDir := filepath.Join(filepath.Dir(*dbPath), "state")
+
+	nyd := nydus.New(db, nydus.WithIntegrator(nydus.Git{}))
+	bus := event.NewBus()
+
+	agents := agent.NewServer(db, nyd, log)
+	socket := filepath.Join(stateDir, "agent.sock")
+	if err := agents.Listen(socket); err != nil {
+		return err
+	}
+	defer agents.Close()
+
+	over := overmind.New(overmind.Config{
+		DB: db, Nydus: nyd, Registry: registry,
+		Preflight: preflight.NewRunner(db, registry),
+		Bus:       bus, Agents: agents, Log: log, StateDir: stateDir,
+	})
+	// Agents are children of this process, so leaving them running after the
+	// daemon exits would orphan work nobody is supervising.
+	defer over.StopAll(context.Background(), "the daemon shut down")
+
 	srv := &http.Server{
-		Handler:           api.New(db, log, registry).Routes(),
+		Handler: api.New(api.Deps{
+			DB: db, Log: log, Registry: registry,
+			Overmind: over, Nydus: nyd,
+		}).Routes(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
@@ -135,7 +167,7 @@ func runUp(args []string) error {
 		return fmt.Errorf("listening on %s: %w", *addr, err)
 	}
 
-	log.Info("overmind up", "url", "http://"+ln.Addr().String(), "db", *dbPath)
+	log.Info("overmind up", "url", "http://"+ln.Addr().String(), "db", *dbPath, "socket", socket)
 	fmt.Printf("Cockpit: http://%s\n", ln.Addr().String())
 
 	errCh := make(chan error, 1)

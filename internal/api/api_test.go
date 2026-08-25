@@ -32,7 +32,7 @@ func newTestServer(t *testing.T) (http.Handler, *store.DB) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	reg := adapter.NewRegistry()
 	reg.Register(claudeharness.New())
-	return New(db, log, reg).Routes(), db
+	return New(Deps{DB: db, Log: log, Registry: reg}).Routes(), db
 }
 
 func do(t *testing.T, h http.Handler, method, path string, body any) *httptest.ResponseRecorder {

@@ -14,6 +14,8 @@ import (
 	"strings"
 
 	"github.com/konfessor/zerg/internal/adapter"
+	"github.com/konfessor/zerg/internal/nydus"
+	"github.com/konfessor/zerg/internal/overmind"
 	"github.com/konfessor/zerg/internal/preflight"
 	"github.com/konfessor/zerg/internal/store"
 )
@@ -24,14 +26,28 @@ type Server struct {
 	log      *slog.Logger
 	registry *adapter.Registry
 	preflt   *preflight.Runner
+	over     *overmind.Overmind
+	nyd      *nydus.Nydus
 }
 
-func New(db *store.DB, log *slog.Logger, reg *adapter.Registry) *Server {
+// Deps are what the API needs to serve the cockpit.
+type Deps struct {
+	DB        *store.DB
+	Log       *slog.Logger
+	Registry  *adapter.Registry
+	Preflight *preflight.Runner
+	Overmind  *overmind.Overmind
+	Nydus     *nydus.Nydus
+}
+
+func New(d Deps) *Server {
+	pf := d.Preflight
+	if pf == nil {
+		pf = preflight.NewRunner(d.DB, d.Registry)
+	}
 	return &Server{
-		db:       db,
-		log:      log,
-		registry: reg,
-		preflt:   preflight.NewRunner(db, reg),
+		db: d.DB, log: d.Log, registry: d.Registry,
+		preflt: pf, over: d.Overmind, nyd: d.Nydus,
 	}
 }
 
@@ -64,6 +80,19 @@ func (s *Server) Routes() http.Handler {
 
 	// The readiness gate: a team that cannot work must not reach a board.
 	mux.HandleFunc("GET /api/projects/{id}/readiness", s.readiness)
+
+	// Running a swarm.
+	mux.HandleFunc("POST /api/projects/{id}/start", s.start)
+	mux.HandleFunc("POST /api/projects/{id}/stop", s.stop)
+	mux.HandleFunc("GET /api/projects/{id}/status", s.status)
+
+	// The board and what needs a human.
+	mux.HandleFunc("GET /api/projects/{id}/tasks", s.listTasks)
+	mux.HandleFunc("POST /api/projects/{id}/tasks", s.newTask)
+	mux.HandleFunc("GET /api/projects/{id}/attention", s.attention)
+	mux.HandleFunc("POST /api/approvals/{id}/approve", s.approve)
+	mux.HandleFunc("POST /api/approvals/{id}/reject", s.reject)
+	mux.HandleFunc("POST /api/clarifications/{id}/answer", s.answer)
 
 	mux.HandleFunc("GET /api/settings/shared-instructions", s.getSharedInstructions)
 	mux.HandleFunc("PUT /api/settings/shared-instructions", s.setSharedInstructions)
@@ -267,6 +296,171 @@ func (s *Server) readiness(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, report)
+}
+
+// ── running a swarm ───────────────────────────────────────────────────────
+
+// start brings a project up, refusing when the team cannot work.
+func (s *Server) start(w http.ResponseWriter, r *http.Request) {
+	if s.over == nil {
+		writeError(w, http.StatusNotImplemented, "this build cannot run swarms")
+		return
+	}
+	err := s.over.Start(r.Context(), r.PathValue("id"))
+
+	var notReady *overmind.ErrNotReady
+	if errors.As(err, &notReady) {
+		// 409, with the readiness report attached: the caller needs to know
+		// which role failed which check and what fixes it, not merely that
+		// something was wrong.
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"error":     err.Error(),
+			"readiness": notReady.Report,
+		})
+		return
+	}
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	s.statusBody(w, r, r.PathValue("id"))
+}
+
+func (s *Server) stop(w http.ResponseWriter, r *http.Request) {
+	if s.over == nil {
+		writeError(w, http.StatusNotImplemented, "this build cannot run swarms")
+		return
+	}
+	if err := s.over.Stop(r.Context(), r.PathValue("id"), "stopped by the operator"); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "stopped"})
+}
+
+func (s *Server) status(w http.ResponseWriter, r *http.Request) {
+	s.statusBody(w, r, r.PathValue("id"))
+}
+
+func (s *Server) statusBody(w http.ResponseWriter, r *http.Request, projectID string) {
+	if s.over == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"running": false, "roles": []any{}})
+		return
+	}
+	roles, err := s.over.Status(r.Context(), projectID)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"running": s.over.Running(projectID),
+		"roles":   orEmpty(roles),
+	})
+}
+
+// ── board ─────────────────────────────────────────────────────────────────
+
+func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
+	tasks, err := s.db.ListTasks(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, orEmpty(tasks))
+}
+
+type newTaskRequest struct {
+	Name string `json:"name"`
+	Body string `json:"body"`
+}
+
+// newTask opens a card and queues it for the first role in the pipeline.
+func (s *Server) newTask(w http.ResponseWriter, r *http.Request) {
+	if s.nyd == nil {
+		writeError(w, http.StatusNotImplemented, "this build cannot route work")
+		return
+	}
+	var req newTaskRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	task, err := s.nyd.NewTask(r.Context(), r.PathValue("id"), req.Name, req.Body)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, task)
+}
+
+// ── attention ─────────────────────────────────────────────────────────────
+
+// attention is everything waiting on a human, in one place.
+func (s *Server) attention(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	approvals, err := s.db.ListPendingApprovals(r.Context(), id)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	questions, err := s.db.ListOpenClarifications(r.Context(), id)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"approvals":      orEmpty(approvals),
+		"clarifications": orEmpty(questions),
+	})
+}
+
+func (s *Server) approve(w http.ResponseWriter, r *http.Request) {
+	if s.nyd == nil {
+		writeError(w, http.StatusNotImplemented, "this build cannot route work")
+		return
+	}
+	if err := s.nyd.Approve(r.Context(), r.PathValue("id")); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "approved"})
+}
+
+type rejectRequest struct {
+	Note string `json:"note"`
+}
+
+func (s *Server) reject(w http.ResponseWriter, r *http.Request) {
+	if s.nyd == nil {
+		writeError(w, http.StatusNotImplemented, "this build cannot route work")
+		return
+	}
+	var req rejectRequest
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	if err := s.nyd.Reject(r.Context(), r.PathValue("id"), req.Note); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "rejected"})
+}
+
+type answerRequest struct {
+	Answer string `json:"answer"`
+}
+
+func (s *Server) answer(w http.ResponseWriter, r *http.Request) {
+	var req answerRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	if req.Answer == "" {
+		badRequest(w, "an answer cannot be empty")
+		return
+	}
+	if err := s.db.AnswerClarification(r.Context(), r.PathValue("id"), req.Answer); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "answered"})
 }
 
 // ── settings ──────────────────────────────────────────────────────────────
