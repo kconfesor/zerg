@@ -25,7 +25,7 @@ import ReadinessPanel from '@/components/Readiness.vue'
 import TeamEditor from '@/components/TeamEditor.vue'
 import AppSidebar from '@/components/layout/AppSidebar.vue'
 import { useRoute, useRouter } from 'vue-router'
-import { type View } from '@/router'
+import { viewOf, viewPath, type View } from '@/router'
 import ProjectBar from '@/components/layout/ProjectBar.vue'
 import PageHeader from '@/components/layout/PageHeader.vue'
 import { Button } from '@/components/ui/button'
@@ -48,9 +48,11 @@ const current = ref<Project | null>(null)
  */
 const route = useRoute()
 const router = useRouter()
-const view = computed<View>(() => (route.name as View) ?? 'board')
+const view = computed<View>(() => viewOf(route.name))
+
+/** Navigate within the current project, keeping it in the path. */
 function go(v: View) {
-  router.push({ name: v })
+  router.push(viewPath(current.value?.id, v))
 }
 
 /** The nav drawer, which only exists below md. */
@@ -219,7 +221,16 @@ async function refresh() {
 }
 
 async function open(project: Project) {
+  const switching = current.value?.id !== project.id
   current.value = project
+  // The project belongs in the URL, so a reload comes back to it. Replace
+  // rather than push when only the id is being filled in: arriving at /board
+  // and landing on /p/<id>/board is one destination, not two, and back should
+  // not walk through it.
+  if (route.params.projectId !== project.id) {
+    const to = viewPath(project.id, view.value)
+    switching ? router.push(to) : router.replace(to)
+  }
   // Record it, so the next start opens what you were last working on rather
   // than whichever project happened to be created most recently. The column
   // and the ordering both existed; nothing was writing it.
@@ -369,7 +380,11 @@ const act = {
 onMounted(async () => {
   try {
     await loadGlobals()
-    if (projects.value.length) await open(projects.value[0])
+    // The URL wins over recency: someone who asked for a project by link means
+    // that one, whatever was opened last.
+    const asked = String(route.params.projectId ?? '')
+    const wanted = projects.value.find((p) => p.id === asked) ?? projects.value[0]
+    if (wanted) await open(wanted)
   } finally {
     // In a finally: a failed load must still stop claiming to be loading, or
     // the spinner becomes its own kind of lie.
