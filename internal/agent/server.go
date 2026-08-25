@@ -391,6 +391,16 @@ func (s *Server) ask(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		taskID = &resolved
+	} else if held, err := s.db.CurrentTaskFor(r.Context(), id.ProjectID, id.Role); err == nil {
+		// No --task given: use the card this role is holding a lease on.
+		//
+		// The daemon knows which one that is, and the agent has to remember to
+		// say. When it forgets, the question reaches the queue attached to
+		// nothing — the bell counts it and no card shows it, so on a board with
+		// several tasks there is no way to see which one is blocked. Inferring
+		// it here is the same principle as resolving a commit in the sender's
+		// worktree rather than trusting what was passed.
+		taskID = held
 	}
 	c, err := s.db.AskClarification(r.Context(), id.ProjectID, id.Role, req.Question, taskID)
 	if err != nil {

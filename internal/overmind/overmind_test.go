@@ -519,3 +519,44 @@ func TestConcurrentStartsBringUpOneSwarm(t *testing.T) {
 		t.Error("still running after Stop — a second swarm was left behind")
 	}
 }
+
+// Stopping a swarm kills its agents, so their claims are dead too. Left to
+// lapse on their own the work sits claimed for up to the full lease period, and
+// a swarm started again in the meantime stands idle beside a card that says it
+// is being worked on — which is exactly what a stop-and-start looked like.
+func TestStoppingReturnsInFlightWorkToTheQueue(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t, &scriptedHarness{script: idleAgent})
+
+	if err := h.over.Start(ctx, h.project.ID); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	task, err := h.nyd.NewTask(ctx, h.project.ID, "Held", "do it")
+	if err != nil {
+		t.Fatalf("NewTask: %v", err)
+	}
+
+	// The first role claims it, and never acknowledges — an agent killed
+	// mid-turn.
+	lease, err := h.nyd.Claim(ctx, h.project.ID, "coder")
+	if err != nil || lease == nil {
+		t.Fatalf("Claim: %v (lease %v)", err, lease)
+	}
+	if n, err := h.db.QueuedCount(ctx, h.project.ID, "coder"); err != nil || n != 0 {
+		t.Fatalf("queued before stop = %d (err %v), want 0 — it is claimed", n, err)
+	}
+
+	if err := h.over.Stop(ctx, h.project.ID, "test"); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+
+	// Back in the queue immediately, not in twenty minutes.
+	n, err := h.db.QueuedCount(ctx, h.project.ID, "coder")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Errorf("queued after stop = %d, want 1 — the work is still held by a dead agent", n)
+	}
+	_ = task
+}

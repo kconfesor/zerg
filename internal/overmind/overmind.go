@@ -454,6 +454,17 @@ func (o *Overmind) Stop(ctx context.Context, projectID, reason string) error {
 	if err := o.db.EndSession(ctx, s.session.ID, reason); err != nil {
 		o.log.Warn("could not close the session record", "err", err)
 	}
+
+	// The agents are gone, so their claims are too. Left to lapse on their own
+	// the work sits `claimed` for up to the full lease period, and a swarm
+	// started again in the meantime stands idle next to a card that says it is
+	// being worked on.
+	if n, err := o.nyd.ReclaimLeases(ctx, projectID); err != nil {
+		o.log.Warn("could not return in-flight work to the queue", "project", projectID, "err", err)
+	} else if n > 0 {
+		o.log.Info("returned in-flight work to the queue", "project", projectID, "leases", n)
+	}
+
 	o.log.Info("swarm down", "project", projectID, "reason", reason)
 	return nil
 }

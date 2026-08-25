@@ -782,14 +782,26 @@ func (n *Nydus) Ack(ctx context.Context, leaseID string) error {
 // Observed after a routine restart — a card reading "working" with a lease
 // twenty minutes from expiry and two live agents that had been handed nothing.
 func (n *Nydus) ReclaimOrphanedLeases(ctx context.Context) (int, error) {
-	return n.expire(ctx, time.Time{})
+	return n.expire(ctx, time.Time{}, "")
+}
+
+// ReclaimLeases returns one project's in-flight work to the queue.
+//
+// Called when a swarm is stopped. The daemon has just killed those agents, so
+// it knows the leases cannot have holders — leaving them to lapse on their own
+// means the work sits `claimed` for up to the full lease period while the
+// replacement agents stand idle beside it. Observed: a card reading "working"
+// for twenty minutes after a stop and start, with three ready agents and
+// nothing handed to any of them.
+func (n *Nydus) ReclaimLeases(ctx context.Context, projectID string) (int, error) {
+	return n.expire(ctx, time.Time{}, projectID)
 }
 
 // ExpireLeases returns unacknowledged work to the queue and reports how many
 // leases lapsed. Without this a crashed agent takes its work with it, and the
 // pipeline stalls with nothing to notice that it has.
 func (n *Nydus) ExpireLeases(ctx context.Context) (int, error) {
-	return n.expire(ctx, n.now())
+	return n.expire(ctx, n.now(), "")
 }
 
 // expire requeues open leases. A zero deadline means every one of them,
@@ -797,7 +809,7 @@ func (n *Nydus) ExpireLeases(ctx context.Context) (int, error) {
 //
 // One body for both callers on purpose: requeueing is the delicate part, and
 // two copies of it would be two chances to get the route state wrong.
-func (n *Nydus) expire(ctx context.Context, deadline time.Time) (int, error) {
+func (n *Nydus) expire(ctx context.Context, deadline time.Time, projectID string) (int, error) {
 	now := n.now()
 
 	where := `acked_at IS NULL AND expired_at IS NULL`
@@ -805,6 +817,10 @@ func (n *Nydus) expire(ctx context.Context, deadline time.Time) (int, error) {
 	if !deadline.IsZero() {
 		where += ` AND expires_at < ?`
 		args = append(args, deadline.Format(time.RFC3339Nano))
+	}
+	if projectID != "" {
+		where += ` AND project_id = ?`
+		args = append(args, projectID)
 	}
 
 	tx, err := n.db.SQL().BeginTx(ctx, nil)

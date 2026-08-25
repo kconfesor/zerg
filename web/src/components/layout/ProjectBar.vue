@@ -131,25 +131,28 @@ const resumesIn = computed(() => {
       <!-- An icon, with the words in the tooltip and the aria label. The pair
            reads as one control at a glance, and on a phone it stops the bar
            wrapping for a verb. -->
+      <!-- Bigger than the rest of the bar's controls, deliberately: it is the
+           one that acts on the whole project, and on a phone it is also the one
+           you reach for with a thumb. -->
       <Button
         v-if="!status.running"
-        size="icon-sm"
+        size="icon-lg"
         :disabled="!current"
         title="Start agents"
         aria-label="Start agents"
         @click="emit('start')"
       >
-        <Play :size="14" aria-hidden="true" />
+        <Play :size="17" aria-hidden="true" />
       </Button>
       <Button
         v-else
-        size="icon-sm"
+        size="icon-lg"
         variant="destructive"
         title="Stop agents"
         aria-label="Stop agents"
         @click="emit('stop')"
       >
-        <Square :size="13" aria-hidden="true" />
+        <Square :size="15" aria-hidden="true" />
       </Button>
     </div>
   </div>

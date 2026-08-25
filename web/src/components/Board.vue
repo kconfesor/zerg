@@ -27,7 +27,7 @@ function compactTokens(n: number): string {
 function money(n: number): string {
   return n >= 1 ? `$${n.toFixed(2)}` : `$${n.toFixed(3)}`
 }
-import { Bell, Eye, EyeOff } from '@lucide/vue'
+import { Bell, Eye, EyeOff, MessageCircleQuestion } from '@lucide/vue'
 import { Badge } from '@/components/ui/badge'
 
 const props = defineProps<{
@@ -35,6 +35,8 @@ const props = defineProps<{
   tasks: Task[]
   /** Ids of tasks with something waiting on a person. */
   needsAttention?: string[]
+  /** What each is waiting for, so the card can say which kind. */
+  blockedOn?: Map<string, 'question' | 'approval'>
   /** Whether cards a person has put away are shown. */
   showHidden?: boolean
 }>()
@@ -144,10 +146,16 @@ const byLane = computed(() => {
                 v-if="needsAttention?.includes(task.id)"
                 variant="secondary"
                 class="gap-1 text-[var(--status-warning)]"
-                title="waiting on you"
+                :title="blockedOn?.get(task.id) === 'question'
+                  ? 'an agent asked you something'
+                  : 'waiting on your decision'"
               >
-                <Bell :size="10" aria-hidden="true" />
-                waiting
+                <component
+                  :is="blockedOn?.get(task.id) === 'question' ? MessageCircleQuestion : Bell"
+                  :size="10"
+                  aria-hidden="true"
+                />
+                {{ blockedOn?.get(task.id) === 'question' ? 'answer' : 'approve' }}
               </Badge>
               <Badge v-if="task.reworkCount > 0" variant="secondary" :title="`sent backward ${task.reworkCount} times`">
                 ↩ {{ task.reworkCount }}
@@ -199,8 +207,12 @@ const byLane = computed(() => {
               class="hairline-t hover:bg-[var(--status-warning)]/10 focus-visible:outline-ring flex w-full items-center gap-1.5 px-2.5 py-1.5 text-left text-[11px] font-medium text-[var(--status-warning)] focus-visible:outline-2 focus-visible:-outline-offset-2"
               @click="emit('review', task)"
             >
-              <Bell :size="12" aria-hidden="true" />
-              Review and decide
+              <component
+                :is="blockedOn?.get(task.id) === 'question' ? MessageCircleQuestion : Bell"
+                :size="12"
+                aria-hidden="true"
+              />
+              {{ blockedOn?.get(task.id) === 'question' ? 'Answer the question' : 'Review and decide' }}
             </button>
           </div>
 

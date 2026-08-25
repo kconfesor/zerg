@@ -65,8 +65,10 @@ across the whole pipeline, and it is the handle ` + "`--task`" + ` expects.
 
 # When you are stuck
 
-Ask with ` + "`zerg ask \"<question>\"`" + `. It reaches the operator and blocks until they
-answer. Do not guess at a requirement you could ask about, and do not write
+Ask with ` + "`zerg ask \"<question>\" --task \"<task name>\"`" + `. It reaches the operator
+and blocks until they answer. Name the task: the question is shown on that
+card, and a question attached to nothing is one the operator has to go looking
+for. Do not guess at a requirement you could ask about, and do not write
 questions into your output hoping someone reads them.
 
 # Ground rules

@@ -90,14 +90,28 @@ async function setHidden(task: Task, hidden: boolean) {
 
 /** Which cards are the ones waiting, so the board can mark them rather than
  *  leaving you to work out which of five is holding the pipeline. */
-const attentionTaskIds = computed(() => {
+/**
+ * What each blocked card is blocked on.
+ *
+ * A question and a merge approval both stopped the pipeline, and the card said
+ * "waiting" for both — so on a board with several tasks you could see that
+ * something needed you and not what, or which one. They read differently and
+ * are answered differently, so the card says which.
+ */
+type Blocker = 'question' | 'approval'
+
+const attentionByTask = computed(() => {
   const a = attention.value
-  if (!a) return []
-  return [
-    ...a.approvals.map((x) => x.taskId),
-    ...a.clarifications.map((x) => x.taskId),
-  ].filter((id): id is string => !!id)
+  const map = new Map<string, Blocker>()
+  if (!a) return map
+  // Approvals first, then questions: a question is the more specific ask, and
+  // a card carrying both should send you to the one that needs words.
+  for (const x of a.approvals) if (x.taskId) map.set(x.taskId, 'approval')
+  for (const x of a.clarifications) if (x.taskId) map.set(x.taskId, 'question')
+  return map
 })
+
+const attentionTaskIds = computed(() => [...attentionByTask.value.keys()])
 
 /**
  * True until the first load settles.
@@ -573,6 +587,7 @@ watch(current, () => (banner.value = null))
                 :tasks="tasks"
                 :show-hidden="showHidden"
                 :needs-attention="attentionTaskIds"
+                :blocked-on="attentionByTask"
                 @open="(t) => (openTask = t)"
                 @review="() => (attentionOpen = true)"
                 @hide="(t: Task) => setHidden(t, true)"

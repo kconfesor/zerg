@@ -263,7 +263,14 @@ function empty(a: Attention | null): boolean {
         <Badge variant="secondary">question</Badge>
         <span class="text-muted-foreground text-[11px]">{{ c.role }} asks</span>
       </div>
-      <p class="mb-2.5 text-xs leading-relaxed break-words">{{ c.question }}</p>
+      <!-- Markdown, as an approval's note already is. An agent writes its
+           question the way it writes everything else — backticks around the
+           values it is asking about, a blank line between the decision and the
+           ones it is only flagging — and rendering it as one flat string
+           collapsed the paragraph breaks too, which is what turned a structured
+           question into a wall. The renderer escapes before it builds any tag,
+           so nothing an agent read out of the repository becomes markup. -->
+      <div class="md mb-2.5 text-xs leading-relaxed break-words" v-html="renderMarkdown(c.question)" />
       <div class="flex gap-2">
         <Input
           v-model="answers[c.id]"
