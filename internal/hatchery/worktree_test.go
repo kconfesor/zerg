@@ -2,6 +2,7 @@ package hatchery
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -458,4 +459,53 @@ func TestMain(m *testing.M) {
 		os.Setenv(k, v)
 	}
 	os.Exit(m.Run())
+}
+
+// A ref this repository does not have is reported as that, and separately from
+// everything else that can go wrong, because the two are answered differently:
+// one is the operator's to fix, the other is the daemon's.
+func TestChangedFilesSeparatesUnknownRevisionsFromRealFailures(t *testing.T) {
+	h, dir := newProject(t)
+	ctx := context.Background()
+
+	head, err := git(ctx, dir, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("a commit that does not exist", func(t *testing.T) {
+		_, err := h.ChangedFiles(ctx, "0000000000000000000000000000000000000000", 0)
+		if !errors.Is(err, ErrNoSuchRevision) {
+			t.Errorf("err = %v, want ErrNoSuchRevision", err)
+		}
+	})
+
+	t.Run("a base branch that does not exist", func(t *testing.T) {
+		_, err := h.RangeFiles(ctx, "no-such-branch", head, 0)
+		if !errors.Is(err, ErrNoSuchRevision) {
+			t.Errorf("err = %v, want ErrNoSuchRevision", err)
+		}
+		if !strings.Contains(err.Error(), "no-such-branch") {
+			t.Errorf("err = %v, want it to name the branch", err)
+		}
+	})
+
+	t.Run("a repository that is not one", func(t *testing.T) {
+		// Operational: git runs and fails for a reason that has nothing to do
+		// with the revision, which must not be reported as a missing revision.
+		other := New(t.TempDir())
+		_, err := other.ChangedFiles(ctx, head, 0)
+		if err == nil {
+			t.Fatal("reading a diff out of a non-repository succeeded")
+		}
+		if errors.Is(err, ErrNoSuchRevision) {
+			t.Errorf("err = %v; a broken repository is not a missing revision", err)
+		}
+	})
+
+	t.Run("a revision that does exist", func(t *testing.T) {
+		if _, err := h.ChangedFiles(ctx, head, 0); err != nil {
+			t.Errorf("ChangedFiles on HEAD: %v", err)
+		}
+	})
 }

@@ -8,6 +8,7 @@ package hatchery
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -371,7 +372,64 @@ func (h *Hatchery) RangeFiles(ctx context.Context, base, sha string, maxBytes in
 	return h.changed(ctx, sha, base, maxBytes)
 }
 
+// ErrNoSuchRevision means git could not resolve a ref this repository was asked
+// about: a branch deleted, a worktree pruned, a clone that never had it.
+//
+// A distinct error because it is the operator's problem rather than the
+// daemon's, and the two must not be answered the same way. Everything else that
+// can fail here (git missing from PATH, an unreadable repository, a cancelled
+// request) really is a server fault, and telling someone their commit does not
+// exist when git itself is not installed sends them looking in the wrong place.
+var ErrNoSuchRevision = errors.New("no such revision")
+
+// resolves reports whether git can turn a ref into a commit in this repository.
+//
+// Asked explicitly rather than inferred from the failure of the command that
+// wanted it: matching on git's stderr means matching on prose that changes
+// between versions and locales, and `rev-parse --verify` answers exactly this
+// question with an exit code.
+//
+// The exit code is the whole point, so this does not go through git() above,
+// which collapses every failure into one message. `--quiet` makes an unknown
+// ref exit 1 and print nothing; anything else, including exit 128 for "not a
+// git repository", is an operational failure and is returned as one. Without
+// that distinction a broken repository reports every commit as missing.
+func (h *Hatchery) resolves(ctx context.Context, ref string) (bool, error) {
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--verify", "--quiet", ref+"^{commit}")
+	cmd.Dir = h.repoPath
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		var exit *exec.ExitError
+		if errors.As(err, &exit) && exit.ExitCode() == 1 && stderr.Len() == 0 {
+			return false, nil
+		}
+		msg := strings.TrimSpace(stderr.String())
+		if msg == "" {
+			msg = err.Error()
+		}
+		return false, fmt.Errorf("resolving %s in %s: %s", ref, h.repoPath, msg)
+	}
+	return true, nil
+}
+
 func (h *Hatchery) changed(ctx context.Context, sha, base string, maxBytes int) ([]ChangedFile, error) {
+	// Checked before the diff, so a ref this repository does not have is
+	// reported as that rather than as whatever the diff command said about it.
+	for _, ref := range []struct{ what, ref string }{{"", sha}, {"base branch ", base}} {
+		if ref.ref == "" {
+			continue
+		}
+		ok, err := h.resolves(ctx, ref.ref)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return nil, fmt.Errorf("%w: %s%s is not in %s",
+				ErrNoSuchRevision, ref.what, ref.ref, h.repoPath)
+		}
+	}
+
 	var out string
 	var err error
 	if base != "" {

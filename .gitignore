@@ -21,5 +21,6 @@ web/node_modules/
 # output. Twenty commits in a row touched it.
 internal/api/dist/*
 !internal/api/dist/.gitkeep
-# another agent's scratch directory, if you run one here
+# another agent's scratch directories, if you run one here
 .pi/
+.pi-subagents/

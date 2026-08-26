@@ -94,8 +94,9 @@ Changing a team changes it everywhere it is used, which the view says out loud.
 
 ![The team editor](docs/screenshots/04-team.png)
 
-**Settings.** Network and TLS, the role library, disk and retention, harness flags, and the shared
-instructions every role is given.
+**Settings.** The role library, where a role's harness, model, prompt and gate are defined once for
+every team that uses it, alongside network and TLS, disk and retention, harness flags, and the
+shared instructions every role is given.
 
 ![Settings](docs/screenshots/07-settings.png)
 

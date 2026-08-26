@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -333,19 +334,25 @@ func (s *Server) approvalDiff(w http.ResponseWriter, r *http.Request) {
 		files, err = hat.ChangedFiles(r.Context(), approval.Commit, maxFile)
 	}
 	if err != nil {
-		// A commit git cannot resolve is a fact about the repository, not a
-		// fault in the daemon, and it happens: a worktree pruned by hand, a
-		// branch deleted, a clone that never had the role's branch. Rendered as
-		// a 500 it reached the operator as "internal error" over the approval
-		// they were being asked to decide, which says nothing about what to do.
-		sha := approval.Commit
-		if len(sha) > 8 {
-			sha = sha[:8]
+		// A ref this repository does not have is the operator's problem, not the
+		// daemon's: a branch deleted, a worktree pruned by hand, a clone that
+		// never had it. Rendered as a 500 it reached them as "internal error"
+		// over the approval they were being asked to decide, which says nothing
+		// about what to do next.
+		//
+		// Only that case. Everything else the diff can fail on -- git missing
+		// from PATH, an unreadable repository, a cancelled request -- is a
+		// server fault, and answering it with "your commit does not exist"
+		// would send someone looking in the wrong place entirely.
+		if errors.Is(err, hatchery.ErrNoSuchRevision) {
+			badRequest(w, fmt.Sprintf(
+				"cannot read what this approval changed: %v. The role's branch may have been deleted, or its worktree pruned.",
+				err))
+			s.log.Warn("an approval points at a revision this repository does not have",
+				"approval", approval.ID, "commit", approval.Commit, "err", err)
+			return
 		}
-		badRequest(w, fmt.Sprintf(
-			"cannot read what %s changed: git could not resolve it in %s. The role's branch may have been deleted, or its worktree pruned.",
-			sha, project.Path))
-		s.log.Warn("reading an approval's diff", "approval", approval.ID, "commit", approval.Commit, "err", err)
+		s.fail(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
