@@ -26,7 +26,6 @@ import MarkdownEditor from '@/components/MarkdownEditor.vue'
 import Projects from '@/components/Projects.vue'
 import TaskDetail from '@/components/TaskDetail.vue'
 import Settings from '@/components/Settings.vue'
-import ReadinessPanel from '@/components/Readiness.vue'
 import TeamEditor from '@/components/TeamEditor.vue'
 import AppSidebar from '@/components/layout/AppSidebar.vue'
 import { useRoute, useRouter } from 'vue-router'
@@ -244,6 +243,18 @@ const team = ref<ResolvedRole[]>([])
 const tasks = ref<Task[]>([])
 const attention = ref<AttentionData | null>(null)
 const readiness = ref<Readiness | null>(null)
+
+/**
+ * Which Settings tab to open. Set when a start is refused, so the report lands
+ * in front of the person who pressed the button rather than behind a tab they
+ * have to think to open.
+ */
+const settingsTab = ref('')
+
+function showReadiness() {
+  settingsTab.value = 'readiness'
+  go('settings')
+}
 const status = ref<SwarmStatus>({ running: false, roles: [] })
 const harnesses = ref<string[]>([])
 const models = ref<Record<string, Model[]>>({})
@@ -467,7 +478,7 @@ async function checkReadiness() {
   if (!current.value) return
   try {
     readiness.value = await api.readiness(current.value.id)
-    go('readiness')
+    showReadiness()
   } catch (err) {
     fail(err)
   }
@@ -493,7 +504,7 @@ async function start() {
         const body = err.body as { readiness?: Readiness } | undefined
         if (body?.readiness) {
           readiness.value = body.readiness
-          go('readiness')
+          showReadiness()
         }
       }
       fail(err)
@@ -817,9 +828,15 @@ watch(current, () => (banner.value = null))
           <template v-else-if="view === 'settings'">
             <PageHeader
               title="Settings"
-              subtitle="How the daemon serves the cockpit, and what it keeps on disk."
+              subtitle="Everything a project is set up with: whether its team can work, what each role is, how the daemon serves the cockpit, and what it keeps on disk."
             />
-            <div class="pt-4"><Settings /></div>
+            <div class="pt-4">
+              <Settings
+                :readiness="readiness"
+                :open-tab="settingsTab"
+                @recheck="checkReadiness"
+              />
+            </div>
           </template>
 
           <!-- Spend -->
@@ -870,23 +887,7 @@ watch(current, () => (banner.value = null))
             </div>
           </template>
 
-          <!-- Readiness -->
-          <template v-else>
-            <PageHeader
-              title="Readiness"
-              subtitle="A team that cannot work must not reach a running board."
-            >
-              <template #actions>
-                <Button size="sm" variant="outline" @click="checkReadiness">Re-check</Button>
-              </template>
-            </PageHeader>
-            <div class="pt-4">
-              <ReadinessPanel :readiness="readiness" />
-              <p v-if="!readiness" class="text-muted-foreground py-10 text-center text-xs">
-                Not checked yet. Press Re-check to probe every enabled role.
-              </p>
-            </div>
-          </template>
+
         </div>
       </main>
     </div>

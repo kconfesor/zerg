@@ -22,7 +22,6 @@ export const VIEWS = [
   'spend',
   'chat',
   'team',
-  'readiness',
   'settings',
 ] as const
 
@@ -53,6 +52,12 @@ const routes: RouteRecordRaw[] = [
     name: `bare-${name}`,
     component: blank,
   })),
+
+  // Readiness stopped being a screen and became a tab in Settings, since it is
+  // a setup step rather than something you watch. Old links still land
+  // somewhere sensible instead of on the board with no explanation.
+  { path: '/p/:projectId/readiness', redirect: (to) => `/p/${to.params.projectId}/settings` },
+  { path: '/readiness', redirect: '/settings' },
 
   // An unknown path is a typo or a stale link, and the board is the honest
   // place to land rather than a 404 page for an app with seven screens.

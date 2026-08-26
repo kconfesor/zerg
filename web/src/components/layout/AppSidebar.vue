@@ -12,7 +12,6 @@ import {
   MessageSquare,
   Receipt,
   Settings as SettingsIcon,
-  ShieldCheck,
   Users,
 } from '@lucide/vue'
 import type { Project, ResolvedRole, RoleStatus, SwarmStatus } from '@/lib/api'
@@ -79,13 +78,15 @@ function pick(id: unknown) {
 // board, a pulse for the live stream, a bell for the one screen that is
 // waiting on a person.
 const nav = computed(() => [
+  // Ordered by how a project is actually used: the board first, then what it
+  // runs on, then what it costs, then how it is configured. Readiness is not
+  // here — it is a setup step, and it lives in Settings with the rest of them.
   { key: 'board' as const, label: 'Board', icon: Columns3, count: props.taskCount },
   { key: 'projects' as const, label: 'Projects', icon: FolderGit2, count: props.projectCount },
-  { key: 'activity' as const, label: 'Activity', icon: ActivityIcon, count: 0 },
-  { key: 'spend' as const, label: 'Spend', icon: Receipt, count: 0 },
-  { key: 'chat' as const, label: 'Chat', icon: MessageSquare, count: 0 },
   { key: 'team' as const, label: 'Team', icon: Users, count: 0 },
-  { key: 'readiness' as const, label: 'Readiness', icon: ShieldCheck, count: 0 },
+  { key: 'chat' as const, label: 'Chat', icon: MessageSquare, count: 0 },
+  { key: 'spend' as const, label: 'Spend', icon: Receipt, count: 0 },
+  { key: 'activity' as const, label: 'Activity', icon: ActivityIcon, count: 0 },
   { key: 'settings' as const, label: 'Settings', icon: SettingsIcon, count: 0 },
 ])
 

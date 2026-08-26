@@ -8,7 +8,7 @@
  */
 import { computed, ref, watch } from 'vue'
 import { joinArgs, splitArgs } from '@/lib/args'
-import { api, type DaemonConfig, type SettingsResponse } from '@/lib/api'
+import { api, type DaemonConfig, type Readiness, type SettingsResponse } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -18,6 +18,7 @@ import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import RoleLibrary from '@/components/RoleLibrary.vue'
+import ReadinessPanel from '@/components/Readiness.vue'
 import {
   Select,
   SelectContent,
@@ -89,8 +90,29 @@ async function saveInstructions() {
  * drifted immediately — the ref said "project" while the component opened on
  * "network", so the state the button read was never the tab on screen.
  */
-const FIRST_TAB = 'network'
-const tab = ref(FIRST_TAB)
+const props = defineProps<{
+  /** The last readiness report, if one has been run. */
+  readiness?: Readiness | null
+  /** Which tab to open on. A refused Start sets this to "readiness". */
+  openTab?: string
+}>()
+const emit = defineEmits<{ recheck: [] }>()
+
+const FIRST_TAB = 'readiness'
+
+/**
+ * The open tab. A prop, not just local state, because a refused Start has to
+ * be able to put you on Readiness: this is where a person sets a project up,
+ * and the report saying which role cannot work belongs in that sequence rather
+ * than on a screen of its own.
+ */
+// || not ??: the parent holds "" until a start is refused, and ?? falls back
+// only on null, so the empty string reached Tabs and it opened on nothing.
+const tab = ref(props.openTab || FIRST_TAB)
+watch(
+  () => props.openTab,
+  (t) => t && (tab.value = t),
+)
 
 /**
  * The harness flags worth offering as a switch, with what each one is for.
@@ -265,8 +287,9 @@ const loopback = computed(() => {
          with no visible error — which is exactly what happened. Uncontrolled
          plus a listener keeps reka-ui in charge of the switching and mirrors it
          out for the save button. -->
-    <Tabs :default-value="FIRST_TAB" @update:model-value="(v) => (tab = String(v))">
+    <Tabs v-model="tab" @update:model-value="(v) => (tab = String(v))">
       <TabsList>
+        <TabsTrigger value="readiness">Readiness</TabsTrigger>
         <TabsTrigger value="network">Network</TabsTrigger>
         <TabsTrigger value="roles">Roles</TabsTrigger>
         <TabsTrigger value="disk">Disk</TabsTrigger>
@@ -278,6 +301,27 @@ const loopback = computed(() => {
       <!-- The role library. Here rather than beside the team editor because a
            role is not a team: a team is an ordering of roles for one project,
            and a role is what those entries mean everywhere. -->
+      <!-- First, because it is first in time: a project is added, its team is
+           chosen, and then this says whether that team can actually work.
+           It was a menu item of its own, which put a setup step in the same
+           list as the board and the spend dashboard. -->
+      <TabsContent value="readiness" class="flex flex-col gap-3 pt-4">
+        <div class="flex items-start justify-between gap-3">
+          <p class="text-muted-foreground max-w-[70ch] text-[11px] leading-snug">
+            Every check for every enabled role, with a remedy for each failure. A team that
+            cannot work must not reach a running board, so Start refuses while any enabled role
+            is blocked — and lands you here, with the report.
+          </p>
+          <Button size="sm" variant="outline" class="shrink-0" @click="emit('recheck')">
+            Re-check
+          </Button>
+        </div>
+        <ReadinessPanel :readiness="readiness ?? null" />
+        <p v-if="!readiness" class="text-muted-foreground py-10 text-center text-xs">
+          Not checked yet. Press Re-check to probe every enabled role.
+        </p>
+      </TabsContent>
+
       <TabsContent value="roles" class="pt-4">
         <RoleLibrary />
       </TabsContent>
