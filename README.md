@@ -13,6 +13,25 @@ teams once, clone one when a project needs different settings, and choose which 
 Status: **running.** Coordination, harnesses, preflight, board and cockpit are implemented and have
 completed real tasks end to end. See [ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
+```sh
+git clone https://github.com/kconfesor/zerg.git && cd zerg
+./build.sh && ./zerg up          # http://127.0.0.1:7717
+```
+
+Two things to know before you point it at a repository. **It runs agent CLIs as child processes**,
+with your permissions, doing whatever the task requires — the same thing you accept by running
+`claude` or `pi` yourself, several at a time and unattended. And **the API has no authentication**:
+bind it to loopback or a Tailscale tailnet and nothing else. [SECURITY.md](SECURITY.md) is the
+short version of what is and is not defended.
+
+| | |
+|---|---|
+| [Set it up](#setting-up-on-a-new-machine) | toolchain, harness login, first project |
+| [Reach it from a phone](#reaching-it-from-a-phone) | Tailscale, TLS, installing it as an app |
+| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | how it works, and the failures behind each decision |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | building, testing, and the traps in this codebase |
+| [SECURITY.md](SECURITY.md) | threat model, and reporting a vulnerability |
+
 ## Why
 
 Agents in separate git worktrees handing each other committed SHAs is the right shape for this
@@ -319,3 +338,27 @@ Neither spends a token. The coordination layer is testable without one, and is t
 assert an effect check the system that was supposed to change — git, the database — rather than
 reading back a field the code set. [§6.1](docs/ARCHITECTURE.md#61-what-the-first-real-run-broke) is what
 happens when they don't.
+
+## Scope
+
+What this is not, so you can decide quickly whether it is for you:
+
+- **Not a hosted service.** One daemon, one machine, your repositories, your provider accounts.
+  There is no multi-tenancy and no account system, which is why there is no authentication either.
+- **Not a model provider.** zerg drives coding CLIs you have already logged into. It never runs a
+  login flow, never writes an auth file, and cannot spend on an account you have not set up.
+- **Not an autonomous engineer.** It routes work between agents and holds the gates where you asked
+  for one. What lands is what a role committed and what you approved.
+- **Not stable yet.** `main` is the only branch, the database migrates forward in place, and
+  nothing here is versioned for compatibility.
+
+## Contributing
+
+Bugs, ideas and pull requests are welcome — [CONTRIBUTING.md](CONTRIBUTING.md) covers building it,
+testing it, and the handful of things in this codebase that bite (the committed cockpit, append-only
+migrations, and why `DROP TABLE` is never the answer). Security issues go
+[privately](SECURITY.md).
+
+## Licence
+
+[Apache License 2.0](LICENSE). Copyright 2026 Kelvin Confesor.

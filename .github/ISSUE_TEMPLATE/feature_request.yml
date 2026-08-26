@@ -1,0 +1,25 @@
+name: Idea
+description: Something zerg should do and does not.
+labels: [idea]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do
+      description: >
+        The situation, not the feature. "I cannot tell which role is holding a stalled card" leads
+        somewhere better than "add a status column".
+    validations:
+      required: true
+  - type: textarea
+    id: today
+    attributes:
+      label: What happens today
+      description: What you do instead, and where that falls down.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What you have in mind
+      description: Optional. A shape for the solution, if you have one.

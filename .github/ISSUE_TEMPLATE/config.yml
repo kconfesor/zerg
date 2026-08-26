@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/kconfesor/zerg/security/advisories/new
+    about: Report privately, not in a public issue.
+  - name: How it works, and why
+    url: https://github.com/kconfesor/zerg/blob/main/docs/ARCHITECTURE.md
+    about: The architecture document records the reasoning behind most of the surprising parts.

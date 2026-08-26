@@ -17,6 +17,9 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
+	"runtime/debug"
+	"strings"
 	"syscall"
 	"time"
 
@@ -72,6 +75,9 @@ func run(args []string) error {
 		return runSend(args[1:])
 	case "ask":
 		return runAsk(args[1:])
+	case "version", "--version", "-v":
+		printVersion()
+		return nil
 	case "help", "-h", "--help":
 		usage()
 		return nil
@@ -79,6 +85,54 @@ func run(args []string) error {
 		usage()
 		return fmt.Errorf("unknown command %q", args[0])
 	}
+}
+
+// printVersion reports what this binary was built from.
+//
+// Read out of the build info rather than stamped by ldflags, so a plain
+// `go build` and `go install` say something true instead of "dev". It is the
+// first thing worth knowing about a bug report, which is why the issue template
+// asks for it.
+func printVersion() {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		fmt.Println("zerg (unknown build)")
+		return
+	}
+	var revision, modified, when string
+	for _, s := range info.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			revision = s.Value
+		case "vcs.modified":
+			modified = s.Value
+		case "vcs.time":
+			when = s.Value
+		}
+	}
+	// A pseudo-version already contains the revision, and printing both says
+	// the same hash twice.
+	version := info.Main.Version
+	if version == "" || version == "(devel)" || strings.HasPrefix(version, "v0.0.0-") {
+		version = "devel"
+	}
+	out := "zerg " + version
+	if revision != "" {
+		if len(revision) > 12 {
+			revision = revision[:12]
+		}
+		out += " (" + revision
+		if modified == "true" {
+			// Says so plainly: a report against a dirty tree is a report about
+			// code nobody else has.
+			out += ", dirty"
+		}
+		if when != "" {
+			out += ", " + when
+		}
+		out += ")"
+	}
+	fmt.Println(out + ", " + info.GoVersion + " " + runtime.GOOS + "/" + runtime.GOARCH)
 }
 
 func usage() {
@@ -93,6 +147,8 @@ Run by agents, not by you:
   zerg done --lease <id>              acknowledge it
   zerg send --to <role> --commit HEAD --task <id>
   zerg ask "<question>"               ask the operator
+
+  zerg version                        what this binary was built from
 
 Everything is configured in the cockpit; there are no config files.
 `)

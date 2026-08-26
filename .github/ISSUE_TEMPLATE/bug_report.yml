@@ -1,0 +1,54 @@
+name: Bug report
+description: Something behaves differently from what it says it does.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Security problems go through [private reporting](https://github.com/kconfesor/zerg/security/advisories/new)
+        instead — see [SECURITY.md](https://github.com/kconfesor/zerg/blob/main/SECURITY.md).
+
+        Transcripts and logs contain whatever your agents read out of your repository. Read what you
+        are about to paste.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what happened, and what you expected instead.
+      placeholder: |
+        Pressed Approve on a card whose project integrates by pull request.
+        Got "internal error"; expected either the PR to open or a message saying why not.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce it
+      description: The shortest sequence that shows it. A project with two roles beats one with eight.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: "`zerg --version`, or the commit you built from."
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Platform
+      options: [macOS, Linux, Windows (WSL), Other]
+    validations:
+      required: true
+  - type: input
+    id: harness
+    attributes:
+      label: Harness and model
+      description: Which agent CLI was involved, if any — `claude`, `pi` — and on which model.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Log or transcript
+      description: The daemon's output around the failure, or the card's activity. Redact first.
+      render: text
