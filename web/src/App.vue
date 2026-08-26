@@ -729,8 +729,24 @@ watch(current, () => (banner.value = null))
         </div>
       </main>
 
-      <main v-else class="min-h-0 flex-1 overflow-y-auto">
-        <div class="w-full p-[var(--gutter)]">
+      <!-- The board owns its own scrolling; every other view scrolls the page.
+           Lanes have to scroll under a heading that stays put, and a heading
+           can only stick to the box that scrolls it — so on the board the
+           scrolling moves inside, and main must not scroll too or the two
+           fight over the same gesture. -->
+      <main
+        v-else
+        :class="[
+          'min-h-0 flex-1',
+          view === 'board' ? 'flex flex-col overflow-hidden' : 'overflow-y-auto',
+        ]"
+      >
+        <div
+          :class="[
+            'w-full p-[var(--gutter)]',
+            view === 'board' && 'flex min-h-0 flex-1 flex-col',
+          ]"
+        >
           <!-- Board -->
           <template v-if="view === 'board'">
             <BoardHeader
@@ -748,7 +764,7 @@ watch(current, () => (banner.value = null))
                 <Button @click="composing = true">New task</Button>
               </template>
             </BoardHeader>
-            <div class="pt-4"><Board
+            <div class="flex min-h-0 flex-1 flex-col pt-4"><Board
                 :team="team"
                 :tasks="tasks"
                 :show-hidden="showHidden"

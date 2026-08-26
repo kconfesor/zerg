@@ -72,7 +72,15 @@ const byLane = computed(() => {
 <template>
   <!-- Lanes share the width when there are few and scroll sideways when there
        are many. The page itself never scrolls horizontally. -->
-  <div class="-mx-[var(--gutter)] overflow-x-auto px-[var(--gutter)] pb-2 sm:pr-0">
+  <!-- One box, both axes. The lanes scroll inside it rather than the page
+       scrolling under them, which is what lets a lane heading stay put: sticky
+       positions against the nearest scrolling ancestor, and this is it.
+       It also gives the horizontal bar somewhere fixed to live — with every
+       card hidden the board used to collapse to a strip 83px tall, and the
+       scrollbar with it. -->
+  <div
+    class="-mx-[var(--gutter)] min-h-0 flex-1 overflow-x-auto overflow-y-auto px-[var(--gutter)] pb-2 sm:pr-0"
+  >
     <!-- Lanes stack on a phone and sit in one row above it. basis-full below
          sm rather than a width: flex-1 overrides width but respects basis, so
          without it lanes would silently share a phone row — tolerable at three
@@ -86,17 +94,25 @@ const byLane = computed(() => {
          lanes, so the pipeline no longer read left to right and a card's lane
          had to be found rather than seen. A board scrolls sideways; that is
          what a board is. -->
-    <div class="flex flex-wrap items-start gap-3 sm:flex-nowrap">
+    <!-- items-stretch, so every lane is as tall as the tallest and its heading
+         stays put for the whole scroll. Sized to their own content, the short
+         lanes' headings scrolled away while the busy lane's stayed, which reads
+         as the headings being broken rather than as the lanes being empty. -->
+    <div class="flex flex-wrap items-stretch gap-3 sm:flex-nowrap">
       <section
         v-for="(lane, i) in lanes"
         :key="lane"
         class="rise flex min-w-0 flex-1 basis-full flex-col sm:min-w-44 sm:max-w-96 sm:basis-48 sm:shrink-0"
         :style="{ animationDelay: `${i * 40}ms` }"
       >
-        <!-- A lane header that reads as a column, not floating text. -->
+        <!-- A lane header that reads as a column, not floating text.
+             Sticky, because a board tall enough to scroll is a board where the
+             names have left the screen: a card halfway down belongs to a role
+             you can no longer see. The background is opaque for the same
+             reason a sticky header always is — cards pass underneath it. -->
         <div
           :class="[
-            'flex items-baseline gap-2 border-b-2 px-1 pb-2',
+            'bg-background sticky top-0 z-10 flex items-baseline gap-2 border-b-2 px-1 pt-1 pb-2',
             lane === 'done' ? 'border-[var(--status-good)]/50' : 'border-primary/45',
           ]"
         >
