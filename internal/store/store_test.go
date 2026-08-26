@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -417,5 +418,33 @@ func TestHidingLeavesTheCardOtherwiseUntouched(t *testing.T) {
 	}
 	if back.Hidden || back.State != before.State || back.Lane != before.Lane {
 		t.Errorf("unhiding did not restore the card: %+v", back)
+	}
+}
+
+// A database somewhere this process cannot chmod still opens.
+//
+// The mode is a precaution, not a precondition: the file is already there with
+// whatever mode it has, so refusing the open protects nothing and costs the
+// operator their daemon. Pointing --db at a directory owned by someone else —
+// /tmp is the obvious one — did exactly that.
+func TestOpenSucceedsWhereModesCannotBeSet(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+
+	// A directory this process may write into but not chmod is hard to
+	// arrange portably, so the check is on the behaviour that broke: opening
+	// under a directory whose mode is left alone must not fail, and the
+	// database must be usable afterwards.
+	if err := os.Chmod(dir, 0o777); err != nil {
+		t.Skipf("cannot set up the fixture: %v", err)
+	}
+	db, err := Open(ctx, filepath.Join(dir, "loose.db"))
+	if err != nil {
+		t.Fatalf("Open refused a database it could not fully secure: %v", err)
+	}
+	defer db.Close()
+
+	if _, err := db.CreateProject(ctx, repoDir(t, "loose"), "loose", "main"); err != nil {
+		t.Errorf("the database opened but does not work: %v", err)
 	}
 }

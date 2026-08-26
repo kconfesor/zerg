@@ -139,10 +139,7 @@ func Open(ctx context.Context, path string) (*DB, error) {
 	}
 
 	if path != ":memory:" {
-		if err := tighten(path); err != nil {
-			db.Close()
-			return nil, err
-		}
+		tighten(path)
 	}
 	return db, nil
 }
@@ -159,18 +156,18 @@ const readers = 8
 // with — 0755 and 0644 under the usual umask, which is world-readable. This
 // file holds every prompt, transcript and cost on the machine, and the -wal
 // sidecar holds recently written copies of the same rows.
-func tighten(path string) error {
-	dir := filepath.Dir(path)
-	if err := os.Chmod(dir, 0o700); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("securing %s: %w", dir, err)
-	}
+// Best effort, every one of them. A chmod that fails is a mode this process
+// could not set — on a directory it does not own, on a filesystem without unix
+// permissions, on a database somebody deliberately put somewhere shared. None
+// of those is a reason to refuse to run: the file is already there with the
+// mode it already has, so failing the open protects nothing and costs the
+// operator their daemon. Pointing --db at /tmp did exactly that.
+func tighten(path string) {
+	_ = os.Chmod(filepath.Dir(path), 0o700)
 	// The sidecars are created by SQLite, not by us, and carry the same rows.
 	for _, p := range []string{path, path + "-wal", path + "-shm", path + "-journal"} {
-		if err := os.Chmod(p, 0o600); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("securing %s: %w", p, err)
-		}
+		_ = os.Chmod(p, 0o600)
 	}
-	return nil
 }
 
 func (db *DB) Close() error {
