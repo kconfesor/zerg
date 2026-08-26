@@ -1,121 +1,246 @@
 <script setup lang="ts">
 /**
- * A Markdown editor with a formatting toolbar.
+ * The brief editor: rich text on screen, Markdown in the database.
  *
- * Markdown rather than a WYSIWYG, because of where this text goes: straight to
- * an agent, as text. A rich-text editor would produce HTML, and the agent would
- * have to read past the tags to find the brief. Markdown is what these models
- * read natively — and it is what the reviewer's output already is, so the
- * whole system speaks one format.
+ * What it replaced was a textarea with five buttons that inserted literal
+ * asterisks. It failed at being an editor in ways that were not about missing
+ * features: writing to the model directly meant the browser's undo stack never
+ * saw a toolbar edit, so Cmd-Z could not undo a bold; pressing Bold twice wrote
+ * `******like this******` rather than turning it off; Enter did not continue a
+ * list and Tab left the field.
  *
- * That also means no editor dependency: a textarea, a toolbar that inserts the
- * marks, and the renderer already used to display agent messages.
+ * TipTap is a ProseMirror document with a schema, so those are all properties
+ * of the model rather than features to add: a mark toggles, history is real,
+ * lists behave like lists.
+ *
+ * **The stored format is still Markdown**, and that is not negotiable — this
+ * text goes to an agent as text, and Markdown is what the models read. So the
+ * document is parsed from Markdown on the way in and serialised back on every
+ * change. A rich-text editor that stored HTML would send the agent tags to read
+ * past.
+ *
+ * Two consequences worth knowing:
+ *
+ *   - The round trip is lossy for anything the schema does not model, so the
+ *     **Source** tab is not a nicety. It is the escape hatch: see exactly what
+ *     will be sent, and edit it as text when the editor gets in the way.
+ *   - `html: false` on the serialiser. Raw HTML in a brief stays literal text
+ *     rather than becoming nodes, which keeps this consistent with the renderer
+ *     used for agent output, where escaping first is a security property.
+ *
+ * `tiptap-markdown` is a thin wrapper over prosemirror-markdown and its author
+ * has said he is not maintaining it further (TipTap's own Markdown conversion
+ * is a paid extension). It is MIT and small; if it ever breaks against a TipTap
+ * release, the replacement is prosemirror-markdown directly, which is what it
+ * already delegates to.
  */
-import { computed, ref } from 'vue'
-import { Bold, Code, Italic, List, ListOrdered } from '@lucide/vue'
-import { renderMarkdown } from '@/lib/markdown'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { EditorContent, useEditor } from '@tiptap/vue-3'
+import StarterKit from '@tiptap/starter-kit'
+import { CharacterCount, Placeholder } from '@tiptap/extensions'
+import { Markdown } from 'tiptap-markdown'
+import {
+  Bold,
+  Code,
+  Heading1,
+  Heading2,
+  Heading3,
+  Italic,
+  Link2,
+  List,
+  ListOrdered,
+  Minus,
+  Quote,
+  Redo2,
+  SquareCode,
+  Strikethrough,
+  Undo2,
+} from '@lucide/vue'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 
 const model = defineModel<string>({ required: true })
-// id is declared rather than left to fall through: an unclaimed attribute lands
-// on the wrapping div, and a <label for> pointing at a div labels nothing.
-withDefaults(defineProps<{ rows?: number; id?: string }>(), { rows: 8, id: undefined })
+const props = withDefaults(
+  defineProps<{ rows?: number; id?: string; placeholder?: string }>(),
+  { rows: 8, id: undefined, placeholder: 'Write the brief…' },
+)
 
-const area = ref<InstanceType<typeof Textarea> | null>(null)
-const tab = ref<'write' | 'preview'>('write')
+const tab = ref<'write' | 'source'>('write')
 
-function el(): HTMLTextAreaElement | null {
-  // shadcn's Textarea wraps the element, so reach the real one to touch the
-  // selection.
-  const root = (area.value as unknown as { $el?: HTMLElement })?.$el
-  return (root instanceof HTMLTextAreaElement ? root : root?.querySelector('textarea')) ?? null
+/** Roughly the height the old textarea had, so dialogs keep their proportions. */
+const minHeight = computed(() => `${Math.max(props.rows, 3) * 1.5 + 1}rem`)
+
+const editor = useEditor({
+  content: model.value,
+  extensions: [
+    StarterKit.configure({
+      // The brief is a brief. Deeper headings than these are a document
+      // structure nobody is going to read on a card.
+      heading: { levels: [1, 2, 3] },
+      link: { openOnClick: false, autolink: true },
+    }),
+    Markdown.configure({
+      html: false,
+      linkify: true,
+      breaks: false,
+      // Pasting Markdown into a rich-text editor and getting literal asterisks
+      // is the thing people notice first, and everything upstream of this box —
+      // an agent message, a spec file, another card — is Markdown.
+      transformPastedText: true,
+      transformCopiedText: true,
+    }),
+    Placeholder.configure({ placeholder: () => props.placeholder }),
+    CharacterCount,
+  ],
+  editorProps: {
+    attributes: {
+      class: 'wysiwyg focus:outline-none',
+      ...(props.id ? { id: props.id } : {}),
+    },
+  },
+  onUpdate: ({ editor }) => {
+    // Serialise on every change rather than on save: the model is the Markdown,
+    // so anything reading it mid-edit — a dirty check, a draft — sees the truth.
+    model.value = editor.storage.markdown.getMarkdown()
+  },
+})
+
+// Only when the change came from outside. Without the comparison, serialising
+// on update and re-parsing on watch is a loop that fights the caret on every
+// keystroke.
+watch(model, (v) => {
+  const ed = editor.value
+  if (!ed || tab.value === 'source') return
+  if (v === ed.storage.markdown.getMarkdown()) return
+  ed.commands.setContent(v, { emitUpdate: false })
+})
+
+// Leaving the source tab re-parses what was typed there.
+watch(tab, (t) => {
+  const ed = editor.value
+  if (t !== 'write' || !ed) return
+  if (model.value !== ed.storage.markdown.getMarkdown()) {
+    ed.commands.setContent(model.value, { emitUpdate: false })
+  }
+})
+
+onBeforeUnmount(() => editor.value?.destroy())
+
+const words = computed(() => editor.value?.storage.characterCount.words() ?? 0)
+
+/** A link needs a URL, and a URL needs somewhere to type it. */
+const linking = ref(false)
+const linkUrl = ref('')
+const linkText = ref('')
+
+function openLink() {
+  const ed = editor.value
+  if (!ed) return
+  const { from, to } = ed.state.selection
+  linkText.value = ed.state.doc.textBetween(from, to, ' ')
+  linkUrl.value = ed.getAttributes('link').href ?? ''
+  linking.value = true
+}
+
+function applyLink() {
+  const ed = editor.value
+  if (!ed) return
+  const href = linkUrl.value.trim()
+  if (!href) {
+    ed.chain().focus().extendMarkRange('link').unsetLink().run()
+  } else if (ed.state.selection.empty) {
+    // No selection: insert the text as the link, falling back to the URL
+    // itself, which is what every other editor does and what a paste expects.
+    const text = linkText.value.trim() || href
+    ed.chain().focus().insertContent({ type: 'text', text, marks: [{ type: 'link', attrs: { href } }] }).run()
+  } else {
+    ed.chain().focus().extendMarkRange('link').setLink({ href }).run()
+  }
+  linking.value = false
+}
+
+type Tool = {
+  icon: unknown
+  label: string
+  run: () => void
+  active?: () => boolean
+  disabled?: () => boolean
+  group?: boolean
 }
 
 /**
- * Wrap the selection, or insert the marks and put the caret between them.
+ * The marks worth a button, in the order a brief uses them.
  *
- * Selection is restored afterwards: an editor that formats your text and then
- * dumps the caret at the end makes you find your place again on every click.
+ * Everything here is also a keystroke that TipTap already binds — Cmd-B,
+ * Cmd-I, `## ` at the start of a line, `- ` for a list. The toolbar is for
+ * people who do not know that, and the shortcuts are for people who do.
  */
-function wrap(mark: string) {
-  const t = el()
-  if (!t) return
-  const { selectionStart: a, selectionEnd: b } = t
-  const chosen = model.value.slice(a, b)
-  model.value = model.value.slice(0, a) + mark + chosen + mark + model.value.slice(b)
-  requestAnimationFrame(() => {
-    t.focus()
-    t.setSelectionRange(a + mark.length, a + mark.length + chosen.length)
-  })
-}
+const tools = computed<Tool[]>(() => {
+  const ed = editor.value
+  const chain = () => ed!.chain().focus()
+  return [
+    { icon: Heading1, label: 'Heading 1', run: () => chain().toggleHeading({ level: 1 }).run(), active: () => !!ed?.isActive('heading', { level: 1 }) },
+    { icon: Heading2, label: 'Heading 2', run: () => chain().toggleHeading({ level: 2 }).run(), active: () => !!ed?.isActive('heading', { level: 2 }) },
+    { icon: Heading3, label: 'Heading 3', run: () => chain().toggleHeading({ level: 3 }).run(), active: () => !!ed?.isActive('heading', { level: 3 }), group: true },
 
-/** Prefix every selected line, which is what a list button has to do — one
- *  marker on the first line of a five-line selection is not a list. */
-function prefixLines(make: (i: number) => string) {
-  const t = el()
-  if (!t) return
-  const { selectionStart: a, selectionEnd: b } = t
+    { icon: Bold, label: 'Bold', run: () => chain().toggleBold().run(), active: () => !!ed?.isActive('bold') },
+    { icon: Italic, label: 'Italic', run: () => chain().toggleItalic().run(), active: () => !!ed?.isActive('italic') },
+    { icon: Strikethrough, label: 'Strikethrough', run: () => chain().toggleStrike().run(), active: () => !!ed?.isActive('strike') },
+    { icon: Code, label: 'Inline code', run: () => chain().toggleCode().run(), active: () => !!ed?.isActive('code') },
+    { icon: Link2, label: 'Link', run: openLink, active: () => !!ed?.isActive('link'), group: true },
 
-  const start = model.value.lastIndexOf('\n', a - 1) + 1
-  const end = model.value.indexOf('\n', b)
-  const stop = end === -1 ? model.value.length : end
+    { icon: List, label: 'Bullet list', run: () => chain().toggleBulletList().run(), active: () => !!ed?.isActive('bulletList') },
+    { icon: ListOrdered, label: 'Numbered list', run: () => chain().toggleOrderedList().run(), active: () => !!ed?.isActive('orderedList') },
+    { icon: Quote, label: 'Quote', run: () => chain().toggleBlockquote().run(), active: () => !!ed?.isActive('blockquote') },
+    { icon: SquareCode, label: 'Code block', run: () => chain().toggleCodeBlock().run(), active: () => !!ed?.isActive('codeBlock') },
+    { icon: Minus, label: 'Divider', run: () => chain().setHorizontalRule().run(), group: true },
 
-  const block = model.value.slice(start, stop) || ''
-  const marked = block
-    .split('\n')
-    .map((line, i) => (line.trim() === '' ? line : make(i) + line))
-    .join('\n')
-
-  model.value = model.value.slice(0, start) + marked + model.value.slice(stop)
-  requestAnimationFrame(() => {
-    t.focus()
-    t.setSelectionRange(start, start + marked.length)
-  })
-}
-
-const tools = [
-  { icon: Bold, label: 'Bold', run: () => wrap('**') },
-  { icon: Italic, label: 'Italic', run: () => wrap('*') },
-  { icon: Code, label: 'Code', run: () => wrap('`') },
-  { icon: List, label: 'Bullet list', run: () => prefixLines(() => '- ') },
-  { icon: ListOrdered, label: 'Numbered list', run: () => prefixLines((i) => `${i + 1}. `) },
-]
-
-/** Cmd/Ctrl shortcuts for the two people reach for without looking. */
-function onKeydown(ev: KeyboardEvent) {
-  if (!(ev.metaKey || ev.ctrlKey)) return
-  const k = ev.key.toLowerCase()
-  if (k === 'b') {
-    ev.preventDefault()
-    wrap('**')
-  } else if (k === 'i') {
-    ev.preventDefault()
-    wrap('*')
-  }
-}
-
-const empty = computed(() => model.value.trim() === '')
+    { icon: Undo2, label: 'Undo', run: () => chain().undo().run(), disabled: () => !ed?.can().undo() },
+    { icon: Redo2, label: 'Redo', run: () => chain().redo().run(), disabled: () => !ed?.can().redo() },
+  ]
+})
 </script>
 
 <template>
-  <div class="flex flex-col">
-    <div class="hairline-b flex items-center gap-0.5 px-1 py-1">
-      <button
-        v-for="t in tools"
-        :key="t.label"
-        type="button"
-        :title="t.label"
-        :aria-label="t.label"
-        :disabled="tab === 'preview'"
-        class="text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-ring grid size-7 place-items-center transition-colors focus-visible:outline-2 disabled:opacity-40"
-        @click="t.run"
-      >
-        <component :is="t.icon" :size="14" aria-hidden="true" />
-      </button>
-
-      <div class="ml-auto flex items-center gap-0.5 text-[11px]">
+  <div class="flex min-w-0 flex-col">
+    <div class="hairline-b flex flex-wrap items-center gap-0.5 px-1 py-1">
+      <template v-for="t in tools" :key="t.label">
         <button
-          v-for="t in (['write', 'preview'] as const)"
+          type="button"
+          :title="t.label"
+          :aria-label="t.label"
+          :aria-pressed="t.active ? t.active() : undefined"
+          :disabled="tab === 'source' || !editor || (t.disabled ? t.disabled() : false)"
+          :class="[
+            'focus-visible:outline-ring grid size-7 place-items-center transition-colors focus-visible:outline-2 disabled:opacity-40',
+            t.active?.()
+              ? 'bg-primary/[0.14] text-foreground'
+              : 'text-muted-foreground hover:bg-muted hover:text-foreground',
+          ]"
+          @click="t.run"
+        >
+          <component :is="t.icon" :size="14" aria-hidden="true" />
+        </button>
+        <span v-if="t.group" class="bg-border mx-1 h-4 w-px shrink-0" aria-hidden="true" />
+      </template>
+
+      <div class="ml-auto flex items-center gap-2 pl-1 text-[11px]">
+        <span v-if="tab === 'write'" class="text-muted-foreground/70 tabular hidden sm:inline">
+          {{ words }} word{{ words === 1 ? '' : 's' }}
+        </span>
+        <!-- What will actually be sent. The document is Markdown underneath, so
+             this is the same text, not an export of it. -->
+        <button
+          v-for="t in (['write', 'source'] as const)"
           :key="t"
           type="button"
           :class="[
@@ -129,23 +254,47 @@ const empty = computed(() => model.value.trim() === '')
       </div>
     </div>
 
-    <Textarea
+    <EditorContent
       v-show="tab === 'write'"
-      :id="id"
-      ref="area"
-      v-model="model"
-      :rows="rows"
-      class="rounded-none border-0 text-xs focus-visible:ring-0"
-      @keydown="onKeydown"
+      :editor="editor"
+      class="min-w-0 px-3 py-2 text-xs leading-relaxed"
+      :style="{ minHeight }"
     />
 
-    <div
-      v-show="tab === 'preview'"
-      class="md min-h-32 px-3 py-2 text-xs leading-relaxed"
-      :class="empty ? 'text-muted-foreground' : ''"
-    >
-      <template v-if="empty">Nothing to preview yet.</template>
-      <div v-else v-html="renderMarkdown(model)" />
-    </div>
+    <Textarea
+      v-show="tab === 'source'"
+      v-model="model"
+      :rows="rows"
+      class="rounded-none border-0 font-mono text-xs focus-visible:ring-0"
+    />
+
+    <Dialog v-model:open="linking">
+      <DialogContent class="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Link</DialogTitle>
+          <DialogDescription>
+            Leave the address empty to remove the link from the selected text.
+          </DialogDescription>
+        </DialogHeader>
+        <div class="flex flex-col gap-3 px-1">
+          <Input
+            v-if="editor?.state.selection.empty"
+            v-model="linkText"
+            placeholder="Text to show"
+            @keydown.enter.prevent="applyLink"
+          />
+          <Input
+            v-model="linkUrl"
+            placeholder="https://…"
+            autofocus
+            @keydown.enter.prevent="applyLink"
+          />
+        </div>
+        <DialogFooter>
+          <Button variant="outline" @click="linking = false">Cancel</Button>
+          <Button @click="applyLink">Apply</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   </div>
 </template>

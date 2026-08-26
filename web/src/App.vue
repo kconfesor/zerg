@@ -1023,9 +1023,9 @@ watch(current, () => (banner.value = null))
           </div>
           <div class="flex flex-col gap-1.5">
             <Label :for="taskBodyId">What to do</Label>
-            <!-- Markdown, not rich text: this goes to an agent as text, and
-                 Markdown is what it reads. A WYSIWYG would send it tags to
-                 read past. -->
+            <!-- Rich text on screen, Markdown in the database: this goes to
+                 an agent as text, and Markdown is what it reads. The Source tab
+                 is what will actually be sent. -->
             <div class="border">
               <MarkdownEditor :id="taskBodyId" v-model="taskBody" :rows="8" />
             </div>

@@ -743,6 +743,32 @@ happens to be focused, with hardcoded sleeps racing the TUI's paste debounce, an
 that means "keys accepted" and never "the agent read it". Delivery here is a write to a pipe with a
 response event to confirm it landed.
 
+### 10.2.1 The brief editor
+
+A task's brief is the whole of what an agent is told, so the box it is written in matters more than
+its size suggests. **What is stored is Markdown**, and that is the fixed point: it goes to the
+harness as text, Markdown is what these models read natively, and it is already the format agent
+output comes back in. An editor that stored HTML would hand the agent tags to read past.
+
+The editing surface is rich text over that Markdown — TipTap, which is a ProseMirror document with a
+schema, parsed from Markdown on the way in and serialised back on every change.
+
+The surface changed because the plain one was failing at things that are not features. It was a
+textarea whose toolbar spliced literal characters into the value, so: writing to the model directly
+meant the browser's undo stack never saw a toolbar edit and Cmd-Z could not undo a bold; pressing
+**Bold** twice produced `******like this******` rather than turning the mark off; Enter did not
+continue a list and Tab left the field. In a schema those are properties rather than features — a
+mark toggles, history is a real transaction log, a list item is a node.
+
+Two things follow, and both are deliberate:
+
+- **The round trip is lossy for anything the schema does not model.** The **Source** tab is
+  therefore part of the design, not a debug view: it shows exactly what will be sent, and can be
+  edited as text when the editor is in the way.
+- **`html: false` on the serialiser.** Raw HTML in a brief stays literal text instead of becoming
+  nodes, which keeps this consistent with the renderer used for agent output, where escaping before
+  anything else is a security property rather than a formatting one.
+
 ---
 
 ## 11. Token economics
@@ -999,6 +1025,8 @@ discovered.
 | vue-router | 5.2.0 | |
 | @vueuse/core | 14.4.0 | |
 | @lucide/vue | 1.33.0 | icon library |
+| TipTap | 3.30.5 | `@tiptap/vue-3`, `-core`, `-pm`, `-starter-kit`, `-extensions`. The brief editor (§10.2.1) |
+| tiptap-markdown | 0.9.0 | Markdown in and out of that editor. **Unmaintained by choice** — its author stopped at TipTap 3 because TipTap's own Markdown conversion became a paid extension. MIT, and a thin wrapper over `prosemirror-markdown`, which is the fallback if it ever breaks |
 | JetBrains Mono | — | Google Fonts; the preset's face for headings *and* body |
 
 **pnpm, not npm**, at 11.22.0. This is not a preference — pnpm 11 blocks postinstall scripts unless
