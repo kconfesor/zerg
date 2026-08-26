@@ -8,7 +8,8 @@
  */
 import { computed, ref, watch } from 'vue'
 import { joinArgs, splitArgs } from '@/lib/args'
-import { api, type DaemonConfig, type Readiness, type SettingsResponse } from '@/lib/api'
+import { api, type DaemonConfig, type SettingsResponse } from '@/lib/api'
+import { ShieldCheck } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -18,7 +19,6 @@ import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import RoleLibrary from '@/components/RoleLibrary.vue'
-import ReadinessPanel from '@/components/Readiness.vue'
 import {
   Select,
   SelectContent,
@@ -90,31 +90,20 @@ async function saveInstructions() {
  * drifted immediately — the ref said "project" while the component opened on
  * "network", so the state the button read was never the tab on screen.
  */
-const props = defineProps<{
-  /** The last readiness report, if one has been run. */
-  readiness?: Readiness | null
-  /** Which tab to open on. A refused Start sets this to "readiness". */
-  openTab?: string
-  /** Whether a readiness probe is in flight. */
+defineProps<{
+  /** Whether a readiness probe is in flight, so the button can say so. */
   checking?: boolean
 }>()
-const emit = defineEmits<{ recheck: [] }>()
+const emit = defineEmits<{ readiness: [] }>()
 
-const FIRST_TAB = 'readiness'
+const FIRST_TAB = 'network'
 
 /**
- * The open tab. A prop, not just local state, because a refused Start has to
- * be able to put you on Readiness: this is where a person sets a project up,
- * and the report saying which role cannot work belongs in that sequence rather
- * than on a screen of its own.
+ * The open tab, mirrored out of Tabs so the save button can key off it. One
+ * constant feeds both the ref and the component; written separately they
+ * drifted immediately.
  */
-// || not ??: the parent holds "" until a start is refused, and ?? falls back
-// only on null, so the empty string reached Tabs and it opened on nothing.
-const tab = ref(props.openTab || FIRST_TAB)
-watch(
-  () => props.openTab,
-  (t) => t && (tab.value = t),
-)
+const tab = ref(FIRST_TAB)
 
 /**
  * The harness flags worth offering as a switch, with what each one is for.
@@ -290,60 +279,40 @@ const loopback = computed(() => {
          plus a listener keeps reka-ui in charge of the switching and mirrors it
          out for the save button. -->
     <Tabs v-model="tab" @update:model-value="(v) => (tab = String(v))">
-      <TabsList>
-        <TabsTrigger value="readiness">Readiness</TabsTrigger>
-        <TabsTrigger value="network">Network</TabsTrigger>
-        <TabsTrigger value="roles">Roles</TabsTrigger>
-        <TabsTrigger value="disk">Disk</TabsTrigger>
-        <TabsTrigger value="harness">Harness</TabsTrigger>
-        <TabsTrigger value="instructions">Instructions</TabsTrigger>
-      </TabsList>
+      <div class="flex flex-wrap items-center gap-3">
+        <TabsList>
+          <TabsTrigger value="network">Network</TabsTrigger>
+          <TabsTrigger value="roles">Roles</TabsTrigger>
+          <TabsTrigger value="disk">Disk</TabsTrigger>
+          <TabsTrigger value="harness">Harness</TabsTrigger>
+          <TabsTrigger value="instructions">Instructions</TabsTrigger>
+        </TabsList>
+
+        <!-- An action, not a tab. Readiness is a thing you run and read, and it
+             answers about the project's team rather than about any setting on
+             this page — as a tab it sat among five panels of stored values and
+             changed what the page appeared to be for. -->
+        <Button
+          size="sm"
+          variant="outline"
+          class="ml-auto shrink-0"
+          :disabled="checking"
+          @click="emit('readiness')"
+        >
+          <span
+            v-if="checking"
+            class="loading-pulse bg-muted-foreground mr-1.5 size-1.5 shrink-0 rounded-full"
+            aria-hidden="true"
+          />
+          <ShieldCheck v-else :size="14" class="mr-1.5 shrink-0" aria-hidden="true" />
+          {{ checking ? 'Checking…' : 'Check readiness' }}
+        </Button>
+      </div>
 
       <!-- ── Network ──────────────────────────────────────────────────── -->
       <!-- The role library. Here rather than beside the team editor because a
            role is not a team: a team is an ordering of roles for one project,
            and a role is what those entries mean everywhere. -->
-      <!-- First, because it is first in time: a project is added, its team is
-           chosen, and then this says whether that team can actually work.
-           It was a menu item of its own, which put a setup step in the same
-           list as the board and the spend dashboard. -->
-      <TabsContent value="readiness" class="flex flex-col gap-3 pt-4">
-        <div class="flex items-start justify-between gap-3">
-          <p class="text-muted-foreground max-w-[70ch] text-[11px] leading-snug">
-            Every check for every enabled role, with a remedy for each failure. A team that
-            cannot work must not reach a running board, so Start refuses while any enabled role
-            is blocked — and lands you here, with the report.
-          </p>
-          <Button
-            size="sm"
-            variant="outline"
-            class="shrink-0"
-            :disabled="checking"
-            @click="emit('recheck')"
-          >
-            <span
-              v-if="checking"
-              class="loading-pulse bg-muted-foreground mr-1.5 size-1.5 shrink-0 rounded-full"
-              aria-hidden="true"
-            />
-            {{ checking ? 'Checking…' : 'Re-check' }}
-          </Button>
-        </div>
-        <div :class="checking && 'pointer-events-none opacity-50 transition-opacity'">
-          <ReadinessPanel :readiness="readiness ?? null" />
-        </div>
-        <p
-          v-if="checking && !readiness"
-          class="text-muted-foreground py-10 text-center text-xs"
-          role="status"
-        >
-          Probing every enabled role — a version, a config parse, a model catalogue…
-        </p>
-        <p v-else-if="!readiness" class="text-muted-foreground py-10 text-center text-xs">
-          Not checked yet. Press Re-check to probe every enabled role.
-        </p>
-      </TabsContent>
-
       <TabsContent value="roles" class="pt-4">
         <RoleLibrary />
       </TabsContent>
