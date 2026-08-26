@@ -178,12 +178,15 @@ func TestProjectLifecycleAndDefaultTeam(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("team status = %d, want 200: %s", rec.Code, rec.Body)
 	}
-	var team []store.ResolvedRole
+	var team store.ProjectTeam
 	decodeInto(t, rec, &team)
-	if len(team) != 2 || team[0].Name != "coder" || team[1].Name != "reviewer" {
-		t.Fatalf("default team is wrong: %+v", team)
+	if team.PresetID == nil || *team.PresetID != store.DefaultTeamPresetID || team.TopologyOverride {
+		t.Fatalf("new project did not inherit the default preset: %+v", team)
 	}
-	if !team[1].Terminal {
+	if len(team.Roles) != 2 || team.Roles[0].Name != "coder" || team.Roles[1].Name != "reviewer" {
+		t.Fatalf("default team is wrong: %+v", team.Roles)
+	}
+	if !team.Roles[1].Terminal {
 		t.Error("the last enabled role must be terminal")
 	}
 
@@ -213,42 +216,99 @@ func TestSetTeamReordersAndOverrides(t *testing.T) {
 	}
 
 	opus := "opus"
-	rec = do(t, h, "PUT", "/api/projects/"+p.ID+"/team", []store.ProjectRole{
-		{TemplateID: id("planner"), Enabled: true},
-		{TemplateID: id("coder"), Enabled: true, ModelOverride: &opus},
-		{TemplateID: id("reviewer"), Enabled: true},
-		{TemplateID: id("docs"), Enabled: false},
+	rec = do(t, h, "PUT", "/api/projects/"+p.ID+"/team", map[string]any{
+		"presetId": store.DefaultTeamPresetID, "topologyOverride": true,
+		"roles": []store.ProjectRole{
+			{TemplateID: id("planner"), Enabled: true},
+			{TemplateID: id("coder"), Enabled: true, RoleOverrides: store.RoleOverrides{ModelOverride: &opus}},
+			{TemplateID: id("reviewer"), Enabled: true},
+			{TemplateID: id("docs"), Enabled: false},
+		},
 	})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("setTeam status = %d, want 200: %s", rec.Code, rec.Body)
 	}
 
-	var team []store.ResolvedRole
+	var team store.ProjectTeam
 	decodeInto(t, rec, &team)
-	if len(team) != 4 {
-		t.Fatalf("team has %d roles, want 4", len(team))
+	if len(team.Roles) != 4 {
+		t.Fatalf("team has %d roles, want 4", len(team.Roles))
 	}
-	if team[0].Name != "planner" || team[0].Gate != store.GateApproval {
+	if team.Roles[0].Name != "planner" || team.Roles[0].Gate != store.GateApproval {
 		t.Error("planner should lead and carry its approval gate")
 	}
-	if team[1].Model != "opus" || !team[1].Overridden {
+	if team.Roles[1].Model != "opus" || !team.Roles[1].Overridden {
 		t.Errorf("coder override not applied or not flagged: model=%q overridden=%v",
-			team[1].Model, team[1].Overridden)
+			team.Roles[1].Model, team.Roles[1].Overridden)
 	}
 	// A disabled trailing role must not steal terminality.
-	if team[3].Terminal {
+	if team.Roles[3].Terminal {
 		t.Error("a disabled role must never be terminal")
 	}
-	if !team[2].Terminal {
+	if !team.Roles[2].Terminal {
 		t.Error("reviewer is the last enabled role and must be terminal")
 	}
 }
 
 func TestSetTeamOnMissingProjectIs404(t *testing.T) {
 	h, _ := newTestServer(t)
-	rec := do(t, h, "PUT", "/api/projects/NOSUCHID/team", []store.ProjectRole{})
+	rec := do(t, h, "PUT", "/api/projects/NOSUCHID/team", map[string]any{"topologyOverride": true, "roles": []store.ProjectRole{}})
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404: %s", rec.Code, rec.Body)
+	}
+}
+
+func TestTeamPresetCRUDAndProjectSelection(t *testing.T) {
+	h, db := newTestServer(t)
+	coder, err := db.GetTemplateByName(context.Background(), "coder")
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompt := "preset prompt"
+	rec := do(t, h, "POST", "/api/team-presets", store.TeamPreset{
+		Name: "Docs API", Builtin: true,
+		Roles: []store.TeamPresetRole{{TemplateID: coder.ID, Enabled: true, RoleOverrides: store.RoleOverrides{PromptOverride: &prompt}}},
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create preset: %d %s", rec.Code, rec.Body)
+	}
+	var preset store.TeamPreset
+	decodeInto(t, rec, &preset)
+	if preset.Builtin {
+		t.Error("client-created preset claimed builtin")
+	}
+
+	rec = do(t, h, "POST", "/api/projects", map[string]any{"path": t.TempDir()})
+	var p store.Project
+	decodeInto(t, rec, &p)
+	rec = do(t, h, "PUT", "/api/projects/"+p.ID+"/team", map[string]any{
+		"presetId": preset.ID, "topologyOverride": false, "roles": []store.ProjectRole{},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("select preset: %d %s", rec.Code, rec.Body)
+	}
+	var team store.ProjectTeam
+	decodeInto(t, rec, &team)
+	if team.PresetID == nil || *team.PresetID != preset.ID || team.Roles[0].Prompt != prompt {
+		t.Fatalf("selected preset did not resolve: %+v", team)
+	}
+	if rec := do(t, h, "DELETE", "/api/team-presets/"+preset.ID, nil); rec.Code != http.StatusBadRequest {
+		t.Fatalf("in-use preset delete = %d, want 400: %s", rec.Code, rec.Body)
+	}
+}
+
+func TestIntegrationUpdatePersistsDraftPR(t *testing.T) {
+	h, _ := newTestServer(t)
+	rec := do(t, h, "POST", "/api/projects", map[string]any{"path": t.TempDir()})
+	var p store.Project
+	decodeInto(t, rec, &p)
+	rec = do(t, h, "PUT", "/api/projects/"+p.ID+"/integration", map[string]any{"integration": "pr", "prDraft": true})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("integration update: %d %s", rec.Code, rec.Body)
+	}
+	decodeInto(t, rec, &p)
+	if p.Integration != store.IntegratePR || !p.PRDraft {
+		t.Fatalf("draft PR setting not returned: %+v", p)
 	}
 }
 

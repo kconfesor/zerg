@@ -20,23 +20,56 @@ export interface RoleTemplate {
   builtin: boolean
 }
 
-export interface ResolvedRole extends RoleTemplate {
+export interface RoleOverrides {
+  harnessOverride?: string | null
+  modelOverride?: string | null
+  /** null inherits; [] explicitly removes every argument. */
+  argsOverride: string[] | null
+  receiveOverride?: 'task' | 'batch' | null
+  batchMaxItemsOverride?: number | null
+  batchMaxAgeSecOverride?: number | null
+  promptOverride?: string | null
+  gateOverride?: 'none' | 'approval' | null
+}
+
+export interface ResolvedRole extends RoleTemplate, RoleOverrides {
   position: number
   enabled: boolean
   overridden: boolean
-  /** What this project set, as opposed to what it resolved to. Both are needed
-   *  to round-trip a team edit without inventing or erasing an override. */
-  modelOverride?: string | null
-  argsOverride?: string[] | null
   terminal: boolean
 }
 
-export interface ProjectRole {
+export interface ProjectRole extends RoleOverrides {
   templateId: string
   position?: number
   enabled: boolean
-  modelOverride?: string | null
-  argsOverride?: string[] | null
+}
+
+export interface TeamPresetRole extends RoleOverrides {
+  templateId: string
+  position: number
+  enabled: boolean
+}
+
+export interface TeamPreset {
+  id: string
+  name: string
+  builtin: boolean
+  roles: TeamPresetRole[]
+  createdAt: string
+  updatedAt: string
+}
+
+export interface ProjectTeam {
+  presetId: string | null
+  topologyOverride: boolean
+  roles: ResolvedRole[]
+}
+
+export interface ProjectTeamUpdate {
+  presetId: string | null
+  topologyOverride: boolean
+  roles: ProjectRole[]
 }
 
 export type Integration = 'merge' | 'branch' | 'pr'
@@ -48,6 +81,11 @@ export interface Project {
   baseBranch: string
   /** How finished work reaches the base branch. */
   integration: Integration
+  /** Only used when integration is pr. */
+  prDraft: boolean
+  /** The reusable team this project follows, or empty for a standalone team. */
+  teamPresetId?: string
+  teamTopologyOverride?: boolean
   /** What answers questions in Chat. Empty inherits the terminal role. */
   chatHarness?: string
   chatModel?: string
@@ -295,6 +333,13 @@ export const api = {
   models: (harness: string) => call<Model[]>(`/harnesses/${harness}/models`),
 
   roles: () => call<RoleTemplate[]>('/roles'),
+  teamPresets: () => call<TeamPreset[]>('/team-presets'),
+  createTeamPreset: (p: Pick<TeamPreset, 'name' | 'roles'>) =>
+    call<TeamPreset>('/team-presets', { method: 'POST', body: JSON.stringify(p) }),
+  updateTeamPreset: (p: TeamPreset) =>
+    call<TeamPreset>(`/team-presets/${p.id}`, { method: 'PUT', body: JSON.stringify(p) }),
+  deleteTeamPreset: (id: string) =>
+    call<void>(`/team-presets/${id}`, { method: 'DELETE' }),
   createRole: (r: Partial<RoleTemplate>) =>
     call<RoleTemplate>('/roles', { method: 'POST', body: JSON.stringify(r) }),
   updateRole: (r: RoleTemplate) =>
@@ -307,9 +352,9 @@ export const api = {
   openProject: (id: string) => call<Project>(`/projects/${id}/open`, { method: 'POST' }),
   deleteProject: (id: string) => call<void>(`/projects/${id}`, { method: 'DELETE' }),
 
-  team: (id: string) => call<ResolvedRole[]>(`/projects/${id}/team`),
-  setTeam: (id: string, roles: ProjectRole[]) =>
-    call<ResolvedRole[]>(`/projects/${id}/team`, { method: 'PUT', body: JSON.stringify(roles) }),
+  team: (id: string) => call<ProjectTeam>(`/projects/${id}/team`),
+  setTeam: (id: string, team: ProjectTeamUpdate) =>
+    call<ProjectTeam>(`/projects/${id}/team`, { method: 'PUT', body: JSON.stringify(team) }),
 
   readiness: (id: string) => call<Readiness>(`/projects/${id}/readiness`),
   status: (id: string) => call<SwarmStatus>(`/projects/${id}/status`),
@@ -367,10 +412,10 @@ export const api = {
       body: JSON.stringify({ icon }),
     }),
 
-  setIntegration: (id: string, integration: Integration) =>
+  setIntegration: (id: string, integration: Integration, prDraft: boolean) =>
     call<Project>(`/projects/${id}/integration`, {
       method: 'PUT',
-      body: JSON.stringify({ integration }),
+      body: JSON.stringify({ integration, prDraft }),
     }),
 
   settings: () => call<SettingsResponse>('/settings'),

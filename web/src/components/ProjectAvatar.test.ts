@@ -12,6 +12,7 @@ function project(over: Partial<Project> = {}): Project {
     integration: 'merge',
     createdAt: '2026-01-01T00:00:00Z',
     ...over,
+    prDraft: over.prDraft ?? false,
   }
 }
 

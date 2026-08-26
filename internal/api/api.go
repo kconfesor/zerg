@@ -90,6 +90,11 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/roles/{id}", s.getRole)
 	mux.HandleFunc("PUT /api/roles/{id}", s.updateRole)
 	mux.HandleFunc("DELETE /api/roles/{id}", s.deleteRole)
+	mux.HandleFunc("GET /api/team-presets", s.listTeamPresets)
+	mux.HandleFunc("POST /api/team-presets", s.createTeamPreset)
+	mux.HandleFunc("GET /api/team-presets/{id}", s.getTeamPreset)
+	mux.HandleFunc("PUT /api/team-presets/{id}", s.updateTeamPreset)
+	mux.HandleFunc("DELETE /api/team-presets/{id}", s.deleteTeamPreset)
 
 	mux.HandleFunc("GET /api/projects", s.listProjects)
 	mux.HandleFunc("POST /api/projects", s.createProject)
@@ -250,6 +255,73 @@ func (s *Server) deleteRole(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// ── reusable team presets ─────────────────────────────────────────────────
+
+func (s *Server) listTeamPresets(w http.ResponseWriter, r *http.Request) {
+	teams, err := s.db.ListTeamPresets(r.Context())
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, orEmpty(teams))
+}
+
+func (s *Server) createTeamPreset(w http.ResponseWriter, r *http.Request) {
+	var p store.TeamPreset
+	if !decode(w, r, &p) {
+		return
+	}
+	p.Builtin = false
+	created, err := s.db.CreateTeamPreset(r.Context(), &p)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, created)
+}
+
+func (s *Server) getTeamPreset(w http.ResponseWriter, r *http.Request) {
+	p, err := s.db.GetTeamPreset(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, p)
+}
+
+func (s *Server) updateTeamPreset(w http.ResponseWriter, r *http.Request) {
+	existing, err := s.db.GetTeamPreset(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	var p store.TeamPreset
+	if !decode(w, r, &p) {
+		return
+	}
+	p.ID, p.Builtin = existing.ID, existing.Builtin
+	if err := s.db.UpdateTeamPreset(r.Context(), &p); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	s.reconcileRunning(r.Context())
+	updated, err := s.db.GetTeamPreset(r.Context(), p.ID)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, updated)
+}
+
+func (s *Server) deleteTeamPreset(w http.ResponseWriter, r *http.Request) {
+	if err := s.db.DeleteTeamPreset(r.Context(), r.PathValue("id")); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	s.reconcileRunning(r.Context())
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // ── projects ──────────────────────────────────────────────────────────────
 
 func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
@@ -326,24 +398,28 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request) {
 // ── team ──────────────────────────────────────────────────────────────────
 
 func (s *Server) getTeam(w http.ResponseWriter, r *http.Request) {
-	team, err := s.db.ResolveTeam(r.Context(), r.PathValue("id"))
+	team, err := s.db.GetProjectTeam(r.Context(), r.PathValue("id"))
 	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, orEmpty(team))
+	writeJSON(w, http.StatusOK, team)
 }
 
 // setTeam takes the whole desired pipeline rather than a diff: a reorder and a
 // selection change are the same operation, and sending the whole thing means
 // they cannot half-apply.
 func (s *Server) setTeam(w http.ResponseWriter, r *http.Request) {
-	var roles []store.ProjectRole
-	if !decode(w, r, &roles) {
+	var req struct {
+		PresetID         *string             `json:"presetId"`
+		TopologyOverride bool                `json:"topologyOverride"`
+		Roles            []store.ProjectRole `json:"roles"`
+	}
+	if !decode(w, r, &req) {
 		return
 	}
 	id := r.PathValue("id")
-	if err := s.db.SetTeam(r.Context(), id, roles); err != nil {
+	if err := s.db.SetProjectTeam(r.Context(), id, req.PresetID, req.TopologyOverride, req.Roles); err != nil {
 		s.fail(w, r, err)
 		return
 	}
@@ -355,12 +431,12 @@ func (s *Server) setTeam(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	team, err := s.db.ResolveTeam(r.Context(), id)
+	team, err := s.db.GetProjectTeam(r.Context(), id)
 	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, orEmpty(team))
+	writeJSON(w, http.StatusOK, team)
 }
 
 // ── harnesses ─────────────────────────────────────────────────────────────

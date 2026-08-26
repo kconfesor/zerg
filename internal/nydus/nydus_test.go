@@ -17,11 +17,12 @@ import (
 // fakeIntegrator records merges so a test can assert integration happened
 // without needing a repository.
 type fakeIntegrator struct {
-	mu        sync.Mutex
-	merges    []string
-	into      []string
-	published []string
-	err       error
+	mu             sync.Mutex
+	merges         []string
+	into           []string
+	published      []string
+	publishedDraft []bool
+	err            error
 	// landedErr makes the "did this integration finish" question unanswerable,
 	// which must leave an interrupted approval claimed rather than releasing
 	// one whose merge may have happened.
@@ -45,8 +46,9 @@ type fakeIntegrator struct {
 // the real one is the tree it resolves against, which a fake has none of.
 // Publish records the request and returns a plausible URL, so a test can check
 // that PR mode published without needing a remote or a GitHub account.
-func (f *fakeIntegrator) Publish(_ context.Context, _, base, commit, title, body string) (string, error) {
+func (f *fakeIntegrator) Publish(_ context.Context, _, base, commit, title, body string, draft bool) (string, error) {
 	f.published = append(f.published, title+" -> "+base+"@"+commit[:min(8, len(commit))])
+	f.publishedDraft = append(f.publishedDraft, draft)
 	_ = body
 	return "https://example.test/pr/1", nil
 }
@@ -947,18 +949,21 @@ func TestIntegrationModeDecidesWhatCompletionDoes(t *testing.T) {
 	ctx := context.Background()
 
 	for _, tc := range []struct {
+		name       string
 		mode       string
+		draft      bool
 		wantMerges int
 		wantPRs    int
 		wantInBody string
 	}{
-		{store.IntegrateMerge, 1, 0, ""},
-		{store.IntegrateBranch, 0, 0, ""},
-		{store.IntegratePR, 0, 1, "Pull request: https://example.test/pr/1"},
+		{"merge", store.IntegrateMerge, false, 1, 0, ""},
+		{"branch", store.IntegrateBranch, false, 0, 0, ""},
+		{"pr", store.IntegratePR, false, 0, 1, "Pull request: https://example.test/pr/1"},
+		{"draft-pr", store.IntegratePR, true, 0, 1, "Pull request: https://example.test/pr/1"},
 	} {
-		t.Run(tc.mode, func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			f := newFixture(t)
-			if _, err := f.db.SetIntegration(ctx, f.project.ID, tc.mode); err != nil {
+			if _, err := f.db.SetIntegration(ctx, f.project.ID, tc.mode, tc.draft); err != nil {
 				t.Fatalf("SetIntegration: %v", err)
 			}
 			task := f.task(t, "Calculator")
@@ -976,6 +981,9 @@ func TestIntegrationModeDecidesWhatCompletionDoes(t *testing.T) {
 			}
 			if got := len(f.git.published); got != tc.wantPRs {
 				t.Errorf("%s: %d pull requests, want %d", tc.mode, got, tc.wantPRs)
+			}
+			if tc.wantPRs == 1 && f.git.publishedDraft[0] != tc.draft {
+				t.Errorf("%s: published draft=%v, want %v", tc.name, f.git.publishedDraft[0], tc.draft)
 			}
 			if tc.wantInBody != "" && !strings.Contains(msg.Body, tc.wantInBody) {
 				t.Errorf("%s: the completion does not record where the work went: %q", tc.mode, msg.Body)

@@ -178,7 +178,7 @@ const TaskBranchPrefix = "zerg/"
 // Shelling out to gh rather than talking to the API: gh already holds the
 // credentials, already knows which remote is which, and adding an HTTP client
 // and a token store here would duplicate all of it worse.
-func (Git) Publish(ctx context.Context, repoPath, base, commit, title, body string) (string, error) {
+func (Git) Publish(ctx context.Context, repoPath, base, commit, title, body string, draft bool) (string, error) {
 	if _, err := exec.LookPath("gh"); err != nil {
 		return "", fmt.Errorf(
 			"opening a pull request needs the gh CLI, which is not installed (brew install gh)")
@@ -201,9 +201,7 @@ func (Git) Publish(ctx context.Context, repoPath, base, commit, title, body stri
 		return "", fmt.Errorf("pushing %s: %w", branch, err)
 	}
 
-	out, err := exec.CommandContext(ctx, "gh", "pr", "create",
-		"--base", base, "--head", branch, "--title", title, "--body", body,
-	).CombinedOutput()
+	out, err := exec.CommandContext(ctx, "gh", prCreateArgs(base, branch, title, body, draft)...).CombinedOutput()
 	if err != nil {
 		msg := strings.TrimSpace(string(out))
 		// A pull request that already exists is a retry, not a failure.
@@ -215,6 +213,14 @@ func (Git) Publish(ctx context.Context, repoPath, base, commit, title, body stri
 		return "", fmt.Errorf("gh pr create: %v (%s)", err, msg)
 	}
 	return firstURL(string(out)), nil
+}
+
+func prCreateArgs(base, branch, title, body string, draft bool) []string {
+	args := []string{"pr", "create", "--base", base, "--head", branch, "--title", title, "--body", body}
+	if draft {
+		args = append(args, "--draft")
+	}
+	return args
 }
 
 func existingPR(ctx context.Context, repoPath, branch string) (string, error) {

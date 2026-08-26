@@ -2,8 +2,8 @@
 
 A multi-agent coding orchestrator. Go core, Vue 3 cockpit, pluggable agent harnesses.
 
-**Everything is configured in the UI.** There are no config files, no prompt files, no presets to
-copy. You point it at a repo, pick your roles, and start.
+**Everything is configured in the UI.** There are no config files or prompt files to copy. You
+define reusable teams, point zerg at a repo, and override only what that project needs.
 
 Every "why" below traces to a failure that was watched happening, not one that was imagined. Some
 were found running multi-agent orchestrators against real repositories; the rest are zerg's own,
@@ -73,25 +73,28 @@ the agent-facing client (§7).
 
 This is the part everything else depends on: get it wrong and no amount of care downstream helps.
 
-### 4.1 Library, team, runtime
+### 4.1 Library, reusable team, project, runtime
 
-Three layers, and the separation is what makes "configure once" and "every project is different"
-both true at the same time.
+Four layers make "configure once" and "every project is different" true at the same time.
 
 **Role library** — global, in `~/.zerg/zerg.db`. A catalog of role *templates*: what a planner is,
 what a reviewer is, what prompt each carries. Ships with a set of built-ins (§4.5); you edit them and
-add your own. Editing a template is editing the idea of that role everywhere.
+add your own. Editing a template changes the lowest default everywhere.
 
-**Project team** — per project. You pick which roles from the library this project uses, drag them
-into order, and optionally override a field or two for this repo alone. A Rust service and a docs
-site want different teams from the same library.
+**Reusable team** — global and named. It chooses library roles, orders and enables them, and may
+specialize every role field. The built-in Default team is coder → reviewer; users can create as many
+other teams as they need.
+
+**Project team** — per project. A project selects a reusable team and follows later edits to its
+pipeline and settings. Any role field can be overridden for that repository alone. A project can
+also customize the whole pipeline; doing so freezes membership/order while role fields without an
+override continue following their reusable-team defaults. A standalone custom team has no preset.
 
 **Runtime** — per project: tasks, messages, leases, events, cost. On disk a project holds only git
 artifacts, `<repo>/.worktrees/<role>`.
 
-The middle layer is what earlier drafts were missing. Global-only roles meant every project shared
-one pipeline; per-project-only roles meant rewriting the same prompt in every repo. Selection makes
-the override a natural field on the join rather than a patch bolted onto the side.
+Every nullable override has one rule: null means inherit, while a value means local. For arguments,
+`[]` is a value — explicitly run with no role arguments — and remains distinct from null.
 
 ### 4.2 A role template, in full
 
@@ -108,10 +111,11 @@ Everything below is a form field in the UI. There is no other way to set any of 
 | prompt | editor | this role's instructions |
 | gate | select | `none` or `approval` — hold this role's handoffs for a human |
 
-When a template is added to a project, three more fields exist on that project only: **position**
-(drag to order), **enabled**, and **overrides** for model and args. Overriding is explicit and
-visible — a role showing an override is badged in the team list, so a project that quietly drifted
-from the library is legible rather than mysterious.
+A reusable-team role adds **position**, **enabled**, and nullable defaults for every field above.
+A project can override harness, model, args, receive/batch policy, prompt and gate. Pipeline
+membership, order and enablement can be inherited as a unit or made project-local. Overriding is
+explicit and visible — a role showing an override is badged in the team list, so a project that
+quietly drifted from its reusable team is legible rather than mysterious.
 
 Plus one **shared instructions** document, global, applied to every role. That single editable
 document is the whole of it — there is no constitution file, no article fragments, no layering to
@@ -522,8 +526,8 @@ Adapters declare which env var relocates their config.
 
 ## 9. Data model
 
-SQLite, WAL, single writer inside the overmind. Fourteen tables; migrations are numbered files
-applied in one transaction, and `user_version` records how far a database has got.
+SQLite, WAL, single writer inside the overmind. Migrations are numbered files, applied in one
+transaction, and `user_version` records how far a database has got.
 
 ```sql
 -- global library, edited exclusively through the UI
@@ -532,12 +536,23 @@ role_templates (id, name, harness, model, args, receive,
                 builtin, created_at, updated_at)
 settings       (key, value)       -- shared instructions, daemon config, harness flags
 
-projects       (id, path, name, base_branch, created_at, last_opened_at,
-                integration)      -- 'merge' | 'pr' | 'branch'; see §9.2
+team_presets       (id, name, builtin, created_at, updated_at)
+team_preset_roles  (preset_id, template_id, position, enabled,
+                    harness_override, model_override, args_override,
+                    receive_override, batch policy overrides,
+                    prompt_override, gate_override)
 
--- which templates this project uses, in what order, with what overrides
-project_roles  (project_id, template_id, position, enabled,
-                model_override, args_override)
+projects       (id, path, name, base_branch, created_at, last_opened_at,
+                integration, pr_draft, team_preset_id, team_topology_override)
+
+-- present only when a project's membership/order is local
+project_roles  (project_id, template_id, position, enabled)
+
+-- sparse per-field layer over the selected reusable team
+project_role_overrides (project_id, template_id,
+                        harness_override, model_override, args_override,
+                        receive_override, batch policy overrides,
+                        prompt_override, gate_override)
 
 -- per-project runtime
 sessions    (id, project_id, started_at, ended_at, end_reason)
@@ -608,7 +623,7 @@ paragraph.
 | mode | what the terminal approval does |
 |---|---|
 | `merge` | fast-forwards the base branch. Right for a repository you own outright. |
-| `pr` | pushes the branch and opens a PR via `gh`, using the handoff note as the description. |
+| `pr` | pushes the branch and opens a PR via `gh`, using the handoff note as the description; `projects.pr_draft` adds `gh pr create --draft`. |
 | `branch` | nothing. The work sits on its branch; landing it is a later decision. |
 
 Per role would attach the policy to whichever role happened to be last, and disabling that role
@@ -639,13 +654,13 @@ plain `//go:embed dist` silently skips Vite's `.vite/` manifest directory.
 - **Readiness** — the preflight panel (§8.1). One row per enabled role, every check with its status
   and an inline remedy, a **Re-check** button, and a **Start** that stays disabled until the team can
   actually work.
-- **Team** — two columns. Left, the **library**: every template with a checkbox. Right, **this
-  project's pipeline**: the selected roles, drag to reorder, last enabled one wearing a `terminal`
-  badge, any overridden role badged as such. Checking a box adds a role; dragging orders it.
-- **Role editor** — every field in §4.2. Harness select, model combobox populated from the live
-  harness catalog, prompt editor, batch policy, gate. Editing a **template** changes that role
-  everywhere; editing a project's copy sets an **override** and says so. Saving a field on a running
-  role restarts just that cerebrate.
+- **Team** — one three-column master-detail view: **Teams** lists Default and its clones,
+  **Roles** checks library roles into the selected team and opens their settings, and **Pipeline**
+  orders the checked roles. Selecting a team edits it; **Use this Team** separately assigns it to the
+  current project, so browsing never silently changes what runs.
+- **Role editor** — every field in §4.2 for one role inside the selected reusable team. Harness,
+  model, arguments, prompt, batch policy and gate inherit from the role template until changed.
+  When a project needs different settings, clone its team, edit the clone, and assign that team.
 - **Shared instructions** — one editor, applies to all roles.
 
 **Observe**
