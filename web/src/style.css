@@ -23,9 +23,34 @@
     @apply bg-background text-foreground;
     @apply font-sans;
   }
+  /* Scrollbars, in every engine that will listen.
+     color-scheme first, and it is the one that mattered: without it the
+     browser paints its *native* light scrollbars, form controls and canvas
+     over a dark app — on Linux that is a white bar down the side of a black
+     board, and no amount of ::-webkit- rules touches it, because those are
+     WebKit-only and Firefox paints the real thing.
+     Then the standard properties, which Firefox has honoured for years and
+     Chrome does from 121; the -webkit- rules stay for Safari and for older
+     Chrome, where they are the only thing understood.
+     On * rather than :root because scrollbar-width does not inherit — only
+     scrollbar-color does — so on :root alone the page's own bar was thin and
+     every scroll box inside it went back to the browser's default. Utilities
+     still win on specificity, which is what keeps .no-scrollbar working in the
+     command palette. */
+  :root {
+    color-scheme: dark;
+  }
+
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+  }
+
   ::-webkit-scrollbar { width: 10px; height: 10px; }
   ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-corner { background: transparent; }
   ::-webkit-scrollbar-thumb { background: var(--border); }
+  /* Firefox has no hover state for a scrollbar; this is WebKit's alone. */
   ::-webkit-scrollbar-thumb:hover { background: var(--muted-foreground); }
 }
 
@@ -182,11 +207,6 @@
     );
     background-attachment: fixed;
   }
-
-  ::-webkit-scrollbar { width: 9px; height: 9px; }
-  ::-webkit-scrollbar-track { background: transparent; }
-  ::-webkit-scrollbar-thumb { background: var(--hairline); }
-  ::-webkit-scrollbar-thumb:hover { background: var(--muted-foreground); }
 
   /* Numbers in a column must line up or the eye cannot compare them. */
   .tabular { font-variant-numeric: tabular-nums; }
