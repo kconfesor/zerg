@@ -16,6 +16,7 @@ import {
 } from '@/lib/api'
 import Attention from '@/components/Attention.vue'
 import Activity from '@/components/Activity.vue'
+import Spend from '@/components/Spend.vue'
 import Board from '@/components/Board.vue'
 import Chat from '@/components/Chat.vue'
 import MarkdownEditor from '@/components/MarkdownEditor.vue'
@@ -743,6 +744,17 @@ watch(current, () => (banner.value = null))
               subtitle="How the daemon serves the cockpit, and what it keeps on disk."
             />
             <div class="pt-4"><Settings /></div>
+          </template>
+
+          <!-- Spend -->
+          <template v-else-if="view === 'spend'">
+            <PageHeader
+              title="Spend"
+              subtitle="What the run cost, and which of the four token classes it went on."
+            />
+            <div class="pt-4">
+              <Spend :project-id="current?.id ?? null" />
+            </div>
           </template>
 
           <!-- Activity -->

@@ -641,6 +641,7 @@ func (c *Cerebrate) publish(ev adapter.Event) {
 		ID:        store.NewID(),
 		ProjectID: c.cfg.ProjectID,
 		Role:      c.name(),
+		Harness:   c.Harness(),
 		At:        c.cfg.clock(),
 	})
 }

@@ -19,6 +19,7 @@ export const VIEWS = [
   'board',
   'projects',
   'activity',
+  'spend',
   'chat',
   'team',
   'readiness',

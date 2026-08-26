@@ -118,6 +118,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/projects/{id}/tasks", s.newTask)
 	mux.HandleFunc("GET /api/projects/{id}/attention", s.attention)
 	mux.HandleFunc("GET /api/projects/{id}/usage", s.usage)
+	mux.HandleFunc("GET /api/projects/{id}/spend", s.spend)
 	mux.HandleFunc("GET /api/projects/{id}/stream", s.stream)
 	mux.HandleFunc("GET /api/tasks/{id}", s.taskDetail)
 	mux.HandleFunc("GET /api/tasks/{id}/usage", s.taskUsage)
@@ -721,6 +722,81 @@ func orEmpty[T any](s []T) []T {
 // The three groupings answer three different questions and the dashboard shows
 // all of them: which stage of the pipeline costs the most, which provider the
 // money goes to, and whether an expensive model is earning its price.
+// spendResponse is everything the spend view reads, at one grain each.
+//
+// One request rather than four, because the four are answers about the same
+// window and asking separately lets them disagree — a turn recorded between two
+// of the calls appears in the roles and not in the providers, and the columns
+// stop adding up to the total for reasons nobody can see.
+type spendResponse struct {
+	Range string `json:"range"`
+
+	// From is when the window opens; absent means all of recorded history.
+	From *time.Time `json:"from,omitempty"`
+
+	// SessionStarted distinguishes "this session" from "everything" when the
+	// project has never been started, which are the same window and different
+	// statements.
+	SessionStarted bool `json:"sessionStarted"`
+
+	Roles     []store.RoleUsage  `json:"roles"`
+	Providers []store.UsageTotal `json:"providers"`
+	Models    []store.UsageTotal `json:"models"`
+}
+
+// spend serves the whole spend view from one read of usage_turns.
+func (s *Server) spend(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if _, err := s.db.GetProject(r.Context(), id); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+
+	rng := r.URL.Query().Get("range")
+	if rng == "" {
+		rng = store.RangeSession
+	}
+	if !store.ValidSpendRange(rng) {
+		writeError(w, http.StatusBadRequest,
+			fmt.Sprintf("unknown range %q; use session, 24h, 7d, 30d or all", rng))
+		return
+	}
+
+	from, err := s.db.ResolveSpendRange(r.Context(), id, rng)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+
+	roles, err := s.db.UsageByRole(r.Context(), id, from)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	providers, err := s.db.UsageByGroup(r.Context(), id, "provider", from)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	models, err := s.db.UsageByGroup(r.Context(), id, "model", from)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+
+	out := spendResponse{
+		Range:          rng,
+		SessionStarted: rng == store.RangeSession && !from.IsZero(),
+		Roles:          orEmpty(roles),
+		Providers:      orEmpty(providers),
+		Models:         orEmpty(models),
+	}
+	if !from.IsZero() {
+		out.From = &from
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
 func (s *Server) usage(w http.ResponseWriter, r *http.Request) {
 	groupBy := r.URL.Query().Get("by")
 	if groupBy == "" {

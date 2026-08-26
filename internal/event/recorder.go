@@ -339,7 +339,7 @@ func usageOf(ev Event, taskID *string) store.UsageTurn {
 	}
 	return store.UsageTurn{
 		ProjectID: ev.ProjectID, TaskID: taskID, Role: ev.Role, At: ev.At,
-		Provider: ev.Provider, Model: ev.Model,
+		Harness: ev.Harness, Provider: ev.Provider, Model: ev.Model,
 		InputTokens:      ev.TokensIn,
 		CacheWriteTokens: ev.CacheWriteTokens,
 		CacheReadTokens:  ev.CacheReadTokens,

@@ -181,3 +181,183 @@ func mustDir(t *testing.T, name string) string {
 	}
 	return dir
 }
+
+// A role's spend is one row, whatever it ran on.
+//
+// UsageByGroup answers "grouped by one column", which cannot describe a role
+// that changed model mid-window: grouping by role loses the models, grouping by
+// model splits the role in two, and asking twice gives two answers that can
+// disagree about the same turns.
+func TestUsageByRoleFoldsModelsIntoOneRow(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	p, err := db.CreateProject(ctx, repoDir(t, "spend"), "spend", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := db.CreateTask(ctx, p.ID, "First", "", "coder")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := db.CreateTask(ctx, p.ID, "Second", "", "coder")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now().UTC()
+	turns := []UsageTurn{
+		// coder on opus, then moved to sonnet, across two cards.
+		{Role: "coder", Model: "opus", Provider: "anthropic", TaskID: &first.ID,
+			InputTokens: 100, CacheReadTokens: 900, OutputTokens: 50, CostUSD: 1,
+			CostSource: CostFromHarness, Billing: "subscription", At: now.Add(-3 * time.Hour)},
+		{Role: "coder", Model: "opus", Provider: "anthropic", TaskID: &second.ID,
+			InputTokens: 100, CacheReadTokens: 900, OutputTokens: 50, CostUSD: 1,
+			CostSource: CostFromHarness, Billing: "subscription", At: now.Add(-2 * time.Hour)},
+		{Role: "coder", Model: "sonnet", Provider: "anthropic", TaskID: &first.ID,
+			InputTokens: 50, CacheWriteTokens: 20, OutputTokens: 10, CostUSD: 0.5,
+			CostSource: CostUnknown, Billing: "metered", At: now.Add(-time.Hour)},
+		// chat spends without a card, which is ordinary and must not vanish.
+		{Role: "chat", Model: "sonnet", Provider: "anthropic",
+			InputTokens: 10, OutputTokens: 5, CostUSD: 0.25,
+			CostSource: CostFromHarness, Billing: "subscription", At: now.Add(-time.Minute)},
+	}
+	for _, u := range turns {
+		u.ProjectID = p.ID
+		if err := db.RecordUsage(ctx, u); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := db.UsageByRole(ctx, p.ID, time.Time{})
+	if err != nil {
+		t.Fatalf("UsageByRole: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d rows, want one per role", len(got))
+	}
+	// Most expensive first: the question is where the money went.
+	if got[0].Role != "coder" || got[1].Role != "chat" {
+		t.Fatalf("rows are %s, %s; want the costliest first", got[0].Role, got[1].Role)
+	}
+
+	coder := got[0]
+	if coder.Turns != 3 {
+		t.Errorf("coder has %d turns, want 3", coder.Turns)
+	}
+	if coder.CostUSD != 2.5 {
+		t.Errorf("coder cost %v, want 2.5", coder.CostUSD)
+	}
+	if coder.InputTokens != 250 || coder.CacheReadTokens != 1800 ||
+		coder.CacheWriteTokens != 20 || coder.OutputTokens != 110 {
+		t.Errorf("coder token split is %+v", coder)
+	}
+	// Both models, busiest first, on one row.
+	if len(coder.Models) != 2 || coder.Models[0] != "opus" {
+		t.Errorf("coder models are %v, want opus then sonnet", coder.Models)
+	}
+	if len(coder.Providers) != 1 || coder.Providers[0] != "anthropic" {
+		t.Errorf("coder providers are %v", coder.Providers)
+	}
+	// Two distinct cards, not three — one card was worked on both models.
+	if coder.Tasks != 2 {
+		t.Errorf("coder touched %d cards, want 2", coder.Tasks)
+	}
+	if coder.SubscriptionTurns != 2 {
+		t.Errorf("%d subscription turns, want 2", coder.SubscriptionTurns)
+	}
+	if coder.UnpricedTurns != 1 {
+		t.Errorf("%d unpriced turns, want 1", coder.UnpricedTurns)
+	}
+	if coder.LastAt.IsZero() {
+		t.Error("coder has no last turn")
+	}
+
+	if chat := got[1]; chat.Tasks != 0 {
+		t.Errorf("chat is attributed to %d cards; it runs outside the pipeline", chat.Tasks)
+	}
+}
+
+// The window is the whole point of the range chips.
+func TestUsageByRoleRespectsTheWindow(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	p, err := db.CreateProject(ctx, repoDir(t, "window"), "window", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now().UTC()
+	for _, at := range []time.Time{now.Add(-48 * time.Hour), now.Add(-time.Minute)} {
+		if err := db.RecordUsage(ctx, UsageTurn{
+			ProjectID: p.ID, Role: "coder", Model: "opus", Provider: "anthropic",
+			OutputTokens: 10, CostUSD: 1, CostSource: CostFromHarness, At: at,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	all, err := db.UsageByRole(ctx, p.ID, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if all[0].Turns != 2 {
+		t.Errorf("all of history has %d turns, want 2", all[0].Turns)
+	}
+
+	recent, err := db.UsageByRole(ctx, p.ID, now.Add(-24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recent) != 1 || recent[0].Turns != 1 {
+		t.Errorf("the last day has %v, want one role with one turn", recent)
+	}
+}
+
+// "This session" is a real window, and its absence is a different statement
+// from "everything".
+func TestResolveSpendRange(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	p, err := db.CreateProject(ctx, repoDir(t, "ranges"), "ranges", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A project that has never been started has no session, and says so by
+	// returning the zero time rather than inventing one.
+	at, err := db.ResolveSpendRange(ctx, p.ID, RangeSession)
+	if err != nil {
+		t.Fatalf("ResolveSpendRange(session): %v", err)
+	}
+	if !at.IsZero() {
+		t.Errorf("a project that never ran reported a session starting at %v", at)
+	}
+
+	if _, err := db.StartSession(ctx, p.ID); err != nil {
+		t.Fatal(err)
+	}
+	newest, err := db.StartSession(ctx, p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	at, err = db.ResolveSpendRange(ctx, p.ID, RangeSession)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if at.Before(newest.StartedAt.Add(-time.Second)) {
+		t.Errorf("session window opens at %v, want the newest session at %v", at, newest.StartedAt)
+	}
+
+	if _, err := db.ResolveSpendRange(ctx, p.ID, "37 hours"); err == nil {
+		t.Error("an unknown range was accepted")
+	}
+	if all, err := db.ResolveSpendRange(ctx, p.ID, RangeAll); err != nil || !all.IsZero() {
+		t.Errorf("all-time resolved to %v (%v), want the zero time", all, err)
+	}
+	for _, r := range []string{RangeDay, RangeWeek, RangeMonth} {
+		if got, err := db.ResolveSpendRange(ctx, p.ID, r); err != nil || got.IsZero() {
+			t.Errorf("%s resolved to %v (%v)", r, got, err)
+		}
+	}
+}
