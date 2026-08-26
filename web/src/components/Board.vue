@@ -73,15 +73,20 @@ const byLane = computed(() => {
   <!-- Lanes share the width when there are few and scroll sideways when there
        are many. The page itself never scrolls horizontally. -->
   <div class="-mx-[var(--gutter)] overflow-x-auto px-[var(--gutter)] pb-2">
-    <!-- Lanes sit side by side where there is room and stack where there is
-         not. basis-full below sm rather than a width: flex-1 overrides width
-         but respects basis, so without it lanes would silently share a phone
-         row — tolerable at three roles, 45px each at eight. -->
-    <div class="flex flex-wrap items-start gap-3">
+    <!-- Lanes stack on a phone and sit in one row above it. basis-full below
+         sm rather than a width: flex-1 overrides width but respects basis, so
+         without it lanes would silently share a phone row — tolerable at three
+         roles, 45px each at eight.
+         nowrap past sm is what makes the scroll box above do its job. Wrapping
+         there instead meant a team of eight broke into two and three rows of
+         lanes, so the pipeline no longer read left to right and a card's lane
+         had to be found rather than seen. A board scrolls sideways; that is
+         what a board is. -->
+    <div class="flex flex-wrap items-start gap-3 sm:flex-nowrap">
       <section
         v-for="(lane, i) in lanes"
         :key="lane"
-        class="rise flex min-w-0 flex-1 basis-full flex-col sm:min-w-56 sm:max-w-96 sm:basis-60"
+        class="rise flex min-w-0 flex-1 basis-full flex-col sm:min-w-56 sm:max-w-96 sm:basis-60 sm:shrink-0"
         :style="{ animationDelay: `${i * 40}ms` }"
       >
         <!-- A lane header that reads as a column, not floating text. -->
