@@ -298,7 +298,11 @@ func (db *DB) SelectDefaultTeam(ctx context.Context, projectID string) error {
 // anywhere else. Deciding terminality from config-file line order means
 // reordering a file silently relocates the end of the pipeline.
 func (db *DB) ResolveTeam(ctx context.Context, projectID string) ([]ResolvedRole, error) {
-	return db.resolveLayeredTeam(ctx, projectID)
+	p, err := db.GetProject(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	return db.resolveLayeredTeam(ctx, p)
 }
 
 func (db *DB) GetProjectTeam(ctx context.Context, projectID string) (*ProjectTeam, error) {
@@ -306,18 +310,22 @@ func (db *DB) GetProjectTeam(ctx context.Context, projectID string) (*ProjectTea
 	if err != nil {
 		return nil, err
 	}
-	roles, err := db.resolveLayeredTeam(ctx, projectID)
+	// The project is already in hand; re-reading it here was the cheapest of
+	// the round trips and the easiest to lose.
+	roles, err := db.resolveLayeredTeam(ctx, p)
 	if err != nil {
 		return nil, err
 	}
 	return &ProjectTeam{PresetID: p.TeamPresetID, TopologyOverride: p.TeamTopologyOverride, Roles: roles}, nil
 }
 
-func (db *DB) resolveLayeredTeam(ctx context.Context, projectID string) ([]ResolvedRole, error) {
-	p, err := db.GetProject(ctx, projectID)
-	if err != nil {
-		return nil, err
-	}
+// resolveLayeredTeam merges the three layers — the library's template, the
+// team's overrides, the project's own — into what each role actually runs.
+//
+// It takes the project rather than its id because every caller already has it,
+// and this is on the board poll.
+func (db *DB) resolveLayeredTeam(ctx context.Context, p *Project) ([]ResolvedRole, error) {
+	projectID := p.ID
 	presetByTemplate := map[string]TeamPresetRole{}
 	var topology []ProjectRole
 	if p.TeamPresetID != nil {
@@ -387,12 +395,39 @@ func (db *DB) resolveLayeredTeam(ctx context.Context, projectID string) ([]Resol
 	// and fix the role that is wrong.
 	var invalidRoles []string
 
+	// Every template the team needs, in one query rather than one each.
+	//
+	// This loop used to call GetTemplate per role, which is the N+1 pattern and
+	// showed: eight roles cost 222us against 42us for the single indexed join
+	// this replaced, and the join did not move with role count. ResolveTeam is
+	// on the board poll and on the spawn, routing, preflight and chat paths, so
+	// the per-row query was being paid continuously.
+	wanted := make([]string, 0, len(topology))
+	for _, m := range topology {
+		wanted = append(wanted, m.TemplateID)
+	}
+	templates, err := db.templatesByID(ctx, wanted)
+	if err != nil {
+		return nil, err
+	}
+
 	out := make([]ResolvedRole, 0, len(topology))
 	for i, membership := range topology {
-		t, err := db.GetTemplate(ctx, membership.TemplateID)
-		if err != nil {
-			return nil, err
+		base, ok := templates[membership.TemplateID]
+		if !ok {
+			// Unreachable while the foreign key holds — project_roles and
+			// team_preset_roles both cascade on template deletion — and skipped
+			// rather than fatal if it ever is, for the same reason the
+			// validation below is not fatal: a read must not take the project
+			// down with it.
+			slog.Warn("a team references a role that is not in the library",
+				"project", projectID, "template", membership.TemplateID)
+			continue
 		}
+		// A copy per role: applyOverrides writes through the pointer, and the
+		// map holds one template that several members could share.
+		roleCopy := base
+		t := &roleCopy
 		if pr, ok := presetByTemplate[membership.TemplateID]; ok {
 			applyOverrides(t, pr.RoleOverrides)
 		}

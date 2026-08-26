@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -68,6 +69,52 @@ func (db *DB) GetTemplate(ctx context.Context, id string) (*RoleTemplate, error)
 		return nil, fmt.Errorf("role %s: %w", id, ErrNotFound)
 	}
 	return t, err
+}
+
+// templatesByID fetches several library entries in one query, keyed by id.
+//
+// The alternative is a GetTemplate per role, which is one round trip per row —
+// the N+1 pattern — on a path the cockpit polls. Duplicate ids are collapsed,
+// so a caller does not have to deduplicate before asking, and an id with no row
+// is simply absent from the map rather than an error: the caller knows whether
+// that is possible in its case, and this does not.
+func (db *DB) templatesByID(ctx context.Context, ids []string) (map[string]RoleTemplate, error) {
+	out := map[string]RoleTemplate{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+
+	// Placeholders rather than an interpolated list: these are ids from the
+	// database, but a query built by concatenation is a habit worth not having.
+	seen := map[string]bool{}
+	args := make([]any, 0, len(ids))
+	marks := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		args = append(args, id)
+		marks = append(marks, "?")
+	}
+
+	rows, err := db.read.QueryContext(ctx,
+		`SELECT `+templateCols+` FROM role_templates WHERE id IN (`+strings.Join(marks, ",")+`)`,
+		args...)
+	if err != nil {
+		return nil, fmt.Errorf("reading roles: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		t, err := scanTemplate(rows)
+		if err != nil {
+			rows.Close()
+			return nil, err
+		}
+		out[t.ID] = *t
+	}
+	return out, rows.Err()
 }
 
 // GetTemplateByName looks a library entry up by its unique name.
