@@ -72,7 +72,7 @@ const byLane = computed(() => {
 <template>
   <!-- Lanes share the width when there are few and scroll sideways when there
        are many. The page itself never scrolls horizontally. -->
-  <div class="-mx-[var(--gutter)] overflow-x-auto px-[var(--gutter)] pb-2">
+  <div class="-mx-[var(--gutter)] overflow-x-auto px-[var(--gutter)] pb-2 sm:pr-0">
     <!-- Lanes stack on a phone and sit in one row above it. basis-full below
          sm rather than a width: flex-1 overrides width but respects basis, so
          without it lanes would silently share a phone row — tolerable at three
@@ -86,17 +86,7 @@ const byLane = computed(() => {
          lanes, so the pipeline no longer read left to right and a card's lane
          had to be found rather than seen. A board scrolls sideways; that is
          what a board is. -->
-    <!-- min-w-max is what makes the box's own right gutter appear.
-         The row is a block child of the scroll box, so its width was the box's
-         *content* width and the lanes merely overflowed it — past the padding
-         box entirely, which is why at full scroll the last lane ended flush
-         against the window and its cards read as cut off. At max-content the
-         row ends where the lanes end, so the box's padding-right is what sits
-         after it: the same 20px as the left, from the same declaration. Adding
-         padding to the row as well made it 40 against 20. min- rather than a
-         width, so with two lanes they still share the space instead of
-         huddling left. -->
-    <div class="flex flex-wrap items-start gap-3 sm:min-w-max sm:flex-nowrap">
+    <div class="flex flex-wrap items-start gap-3 sm:flex-nowrap">
       <section
         v-for="(lane, i) in lanes"
         :key="lane"
@@ -299,6 +289,22 @@ const byLane = computed(() => {
           </p>
         </div>
       </section>
+      <!-- The right-hand gutter, as a real element.
+           Engines do not agree on what a scroll container's overflow area
+           contains. At full scroll the last lane sat flush against the window,
+           and the reason differs per browser: Chrome counts the box's
+           padding-inline-end, Firefox does not; neither counts a margin on the
+           overflowing lane, and Firefox ignores one made with a negative
+           margin too. An element is the one thing both count, measured in both.
+
+           Sized to the gutter minus the row's gap, because the gap before it
+           is already part of the space you see, and stretched to the row's
+           height: an 8x0 box is counted by neither engine. Its twin below sm is the box's
+           own padding, which is why that is dropped only past sm. -->
+      <span
+        class="hidden shrink-0 basis-[calc(var(--gutter)_-_0.75rem)] self-stretch sm:block"
+        aria-hidden="true"
+      />
     </div>
   </div>
 </template>
