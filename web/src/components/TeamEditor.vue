@@ -287,6 +287,7 @@ function cloneTeam() {
             </Button>
             <Button
               size="xs"
+              class="w-28 shrink-0"
               :variant="projectTeam.presetId === preset.id ? 'secondary' : 'outline'"
               :disabled="running || (projectTeam.presetId === preset.id && !projectHasLocalChanges)"
               @click="useTeam(preset)"
