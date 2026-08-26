@@ -87,6 +87,9 @@ describe('TeamEditor', () => {
     expect(w.text()).toContain('Default')
     expect(w.find('[aria-label="Default is in use"]').exists()).toBe(true)
     expect(w.text()).toContain('terminal')
+    expect(w.findAll('button').find((button) => button.text() === 'Use this Team')?.attributes('style')).toContain(
+      'width: 96px',
+    )
   })
 
   it('selects a team for editing without using it until the explicit button is pressed', async () => {

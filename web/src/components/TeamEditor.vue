@@ -198,6 +198,7 @@ const cloneName = ref('')
 const renaming = ref(false)
 const renameName = ref('')
 const renamingPresetId = ref('')
+const confirmDelete = ref<TeamPreset | null>(null)
 
 function openClone(preset: TeamPreset) {
   selectedPresetId.value = preset.id
@@ -221,6 +222,13 @@ function renameTeam() {
   }
   emit('savePreset', { ...preset, name })
   renaming.value = false
+}
+
+function deleteTeam() {
+  const preset = confirmDelete.value
+  if (!preset) return
+  emit('deletePreset', preset.id)
+  confirmDelete.value = null
 }
 
 function cloneTeam() {
@@ -287,7 +295,8 @@ function cloneTeam() {
             </Button>
             <Button
               size="xs"
-              class="w-28 shrink-0"
+              class="flex-none"
+              style="width: 96px; min-width: 96px; max-width: 96px"
               :variant="projectTeam.presetId === preset.id ? 'secondary' : 'outline'"
               :disabled="running || (projectTeam.presetId === preset.id && !projectHasLocalChanges)"
               @click="useTeam(preset)"
@@ -306,7 +315,7 @@ function cloneTeam() {
           size="sm"
           variant="ghost"
           class="text-muted-foreground hover:text-destructive w-full"
-          @click="emit('deletePreset', activePreset.id)"
+          @click="confirmDelete = activePreset"
         >
           Delete {{ activePreset.name }}
         </Button>
@@ -462,6 +471,22 @@ function cloneTeam() {
       <DialogFooter>
         <Button variant="outline" @click="renaming = false">Cancel</Button>
         <Button :disabled="!renameName.trim()" @click="renameTeam">Rename team</Button>
+      </DialogFooter>
+    </DialogContent>
+  </Dialog>
+
+  <Dialog :open="!!confirmDelete" @update:open="(open) => !open && (confirmDelete = null)">
+    <DialogContent class="sm:max-w-md">
+      <DialogHeader>
+        <DialogTitle>Delete {{ confirmDelete?.name }}?</DialogTitle>
+        <DialogDescription>
+          This permanently removes the reusable team and its role settings. A team currently used
+          by a project must be replaced there before it can be deleted.
+        </DialogDescription>
+      </DialogHeader>
+      <DialogFooter>
+        <Button variant="outline" @click="confirmDelete = null">Cancel</Button>
+        <Button variant="destructive" @click="deleteTeam">Delete team</Button>
       </DialogFooter>
     </DialogContent>
   </Dialog>
