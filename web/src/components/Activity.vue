@@ -27,6 +27,14 @@ const props = defineProps<{
   /** Inside a dialog: no role filter of its own — it is already filtered to one
    *  card — and it sizes to the space rather than to the viewport. */
   embedded?: boolean
+  /** Whether the card is still being worked on. Only used to tell a quiet feed
+   *  from a finished one: an agent thinking for two minutes and a stream that
+   *  died look identical otherwise, and only one is worth acting on. */
+  active?: boolean
+  /** What the card is blocked on, if anything. A feed goes quiet for two very
+   *  different reasons — the agent is thinking, or it has asked you something
+   *  and stopped — and the second one is quiet forever until you act. */
+  blocked?: 'approval' | 'question'
 }>()
 
 const events = ref<ActivityEvent[]>([])
@@ -206,6 +214,41 @@ const roleCounts = computed(() => {
       </div>
     </div>
 
+    <!-- Embedded has no filter bar, and lost with it every sign that this feed
+         is live: the socket is open and replaying, but a dialog that shows a
+         static list and says nothing reads as a snapshot. This is the same two
+         controls, at the size a dialog can afford. -->
+    <div v-if="embedded" class="flex items-center gap-2 text-[11px]">
+      <span
+        :class="[
+          'size-1.5 shrink-0 rounded-full',
+          state === 'live'
+            ? 'bg-[var(--status-good)]'
+            : state === 'error'
+              ? 'bg-destructive'
+              : 'bg-[var(--status-warning)]',
+          state === 'live' && active && 'pulse-dot',
+        ]"
+        aria-hidden="true"
+      />
+      <span class="text-muted-foreground" role="status">
+        <template v-if="state !== 'live'">{{ state }}</template>
+        <template v-else-if="blocked">live · waiting on you</template>
+        <template v-else-if="active">live</template>
+        <template v-else>live · card is not working</template>
+      </span>
+      <span v-if="streamError" class="text-destructive truncate">{{ streamError }}</span>
+      <Button
+        v-if="!follow"
+        variant="outline"
+        size="xs"
+        class="ml-auto"
+        @click="follow = true; scrollToEnd()"
+      >
+        Follow ↓
+      </Button>
+    </div>
+
     <div
       ref="viewport"
       :class="[
@@ -272,6 +315,28 @@ const roleCounts = computed(() => {
           <span v-else-if="e.kind === 'message'" class="md min-w-0 flex-1" v-html="renderMarkdown(e.text ?? '')" />
 
           <span v-else class="text-muted-foreground min-w-0 flex-1">{{ e.kind }}</span>
+        </li>
+
+        <!-- The feed is caught up and the agent has not spoken yet. Without
+             this the last line of a five-minute-old turn is the whole of what
+             the dialog says, and looks like the end of the story. -->
+        <li
+          v-if="(active || blocked) && state === 'live' && events.length"
+          class="flex items-center gap-2 px-2 py-1 md:px-3"
+          :class="blocked ? 'text-[var(--status-warning)]' : 'text-muted-foreground/70'"
+        >
+          <span
+            class="pulse-dot size-1.5 rounded-full"
+            :class="blocked ? 'bg-[var(--status-warning)]' : 'bg-muted-foreground/60'"
+            aria-hidden="true"
+          />
+          <template v-if="blocked === 'approval'">
+            waiting for your approval — nothing downstream moves until it is decided
+          </template>
+          <template v-else-if="blocked === 'question'">
+            waiting for your answer — the role asked something and stopped
+          </template>
+          <template v-else>waiting for the next turn…</template>
         </li>
       </ol>
     </div>

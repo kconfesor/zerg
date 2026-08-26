@@ -954,6 +954,8 @@ watch(current, () => (banner.value = null))
             :project-id="current?.id ?? ''"
             :roles="team.filter((r) => r.enabled).map((r) => r.name)"
             :task="activityTask.id"
+            :active="activityTask.state === 'working' || activityTask.state === 'queued'"
+            :blocked="attentionByTask.get(activityTask.id)"
             embedded
           />
         </div>
