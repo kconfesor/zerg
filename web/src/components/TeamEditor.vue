@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { Copy, Pencil, Star, Trash2 } from '@lucide/vue'
+import { CircleCheck, Copy, Pencil, SlidersHorizontal, Star, Trash2 } from '@lucide/vue'
 import type {
   Model,
   ProjectTeam,
@@ -12,7 +12,6 @@ import type {
 } from '@/lib/api'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Checkbox } from '@/components/ui/checkbox'
 import { Switch } from '@/components/ui/switch'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -466,6 +465,23 @@ function cloneTeam() {
                  label per row, times a list of teams, is what pushed the
                  primary action off its own width. -->
             <div class="flex shrink-0 items-center">
+              <!-- The primary action, and still an icon: a full-width button
+                   under every row made the list read as a stack of buttons with
+                   names above them rather than as a list of teams. The star in
+                   the row already says which one is in use, so this only has to
+                   be the way to change that. -->
+              <Button
+                v-if="useLabel(preset)"
+                size="icon-xs"
+                variant="ghost"
+                class="text-primary hover:text-primary"
+                :title="useLabel(preset)"
+                :aria-label="useLabel(preset)"
+                @click="adopt(preset)"
+              >
+                <CircleCheck :size="14" />
+              </Button>
+              <span v-else class="size-6 shrink-0" aria-hidden="true" />
               <Button
                 size="icon-xs"
                 variant="ghost"
@@ -505,17 +521,7 @@ function cloneTeam() {
             </div>
           </div>
 
-          <div v-if="useLabel(preset)" class="px-3 pt-1.5 pb-2.5 pl-9">
-            <Button
-              size="xs"
-              variant="outline"
-              class="w-full"
-              @click="adopt(preset)"
-            >
-              {{ useLabel(preset) }}
-            </Button>
-          </div>
-          <div v-else class="pb-2.5" />
+          <div class="pb-2.5" />
         </li>
         <li v-if="!presets.length" class="text-muted-foreground px-3 py-6 text-center text-xs">
           No teams yet.
@@ -535,7 +541,10 @@ function cloneTeam() {
 
       <ul v-if="activePreset" class="divide-y">
         <li v-for="template in library" :key="template.id" class="flex items-center gap-3 px-4 py-3">
-          <Checkbox
+          <!-- A switch, like the pipeline's. Both answer "is this role part of
+               the run", and two controls for one kind of question read as two
+               different kinds of question. -->
+          <Switch
             :model-value="selectedRoleIds.has(template.id)"
             :aria-label="`${template.name} in ${activePreset.name}`"
             @update:model-value="toggleRole(template)"
@@ -559,12 +568,19 @@ function cloneTeam() {
             </p>
           </div>
           <Button
-            size="sm"
-            variant="outline"
+            size="icon-xs"
+            variant="ghost"
+            class="shrink-0"
             :disabled="!selectedRoleIds.has(template.id)"
+            :title="
+              selectedRoleIds.has(template.id)
+                ? `Settings for ${template.name} in ${activePreset.name}`
+                : `Add ${template.name} to this team to configure it`
+            "
+            :aria-label="`Settings for ${template.name}`"
             @click="editRoleSettings(template)"
           >
-            Settings
+            <SlidersHorizontal :size="14" />
           </Button>
         </li>
       </ul>

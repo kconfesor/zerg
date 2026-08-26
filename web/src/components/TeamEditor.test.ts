@@ -91,17 +91,17 @@ describe('TeamEditor', () => {
 
   it('offers no adopt button for the team already in use, and one for every other', () => {
     const w = editor({ presetId: defaultTeam.id, topologyOverride: false, roles: resolved })
-    const labels = w.findAll('button').map((b) => b.text())
     // Exactly one, for Docs team. The team in use says so with the star and
-    // the "in use" line instead of a button that cannot be pressed.
-    expect(labels.filter((t) => t === 'Use this team')).toHaveLength(1)
-    expect(labels).not.toContain('In use')
+    // the "in use" line instead of a control that cannot be pressed. The adopt
+    // action is an icon now, so it is found by its label rather than its text.
+    expect(w.findAll('[aria-label="Use this team"]')).toHaveLength(1)
+    expect(w.findAll('button').map((b) => b.text())).not.toContain('In use')
   })
 
   it('offers the team in use a way back when the project overrode its pipeline', () => {
     const w = editor({ presetId: defaultTeam.id, topologyOverride: true, roles: resolved })
     expect(w.text()).toContain('in use, with local changes')
-    expect(w.findAll('button').map((b) => b.text())).toContain('Follow this pipeline again')
+    expect(w.find('[aria-label="Follow this pipeline again"]').exists()).toBe(true)
   })
 
   it('keeps rename and delete on every row, and off the built-in', () => {
@@ -126,7 +126,7 @@ describe('TeamEditor', () => {
       },
       global: { stubs: { RoleOverrideDialog: true } },
     })
-    await w.findAll('button').find((b) => b.text() === 'Use this team')!.trigger('click')
+    await w.get('[aria-label="Use this team"]').trigger('click')
     // Asked, not refused, and nothing sent until the question is answered. The
     // dialog teleports to the body, so it is read there rather than off the
     // wrapper.
@@ -145,7 +145,7 @@ describe('TeamEditor', () => {
     await w.findAll('button').find((button) => button.text().includes('Docs team'))!.trigger('click')
 
     expect(w.emitted('setTeam')).toBeUndefined()
-    await w.findAll('button').find((button) => button.text() === 'Use this team')!.trigger('click')
+    await w.get('[aria-label="Use this team"]').trigger('click')
     expect(w.emitted('setTeam')?.at(-1)?.[0]).toEqual({
       presetId: docsTeam.id,
       topologyOverride: false,
