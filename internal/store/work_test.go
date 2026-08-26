@@ -113,3 +113,77 @@ func TestDeletingACardKeepsWhatWasActuallySpent(t *testing.T) {
 		t.Errorf("project cost is %.2f after deleting a card, want 1.25 — the money was spent", cost)
 	}
 }
+
+// A deleted card takes its questions with it.
+//
+// clarifications.task_id is ON DELETE SET NULL, so the delete used to detach an
+// open question rather than remove it: an item in Attention naming a card that
+// no longer exists, which a person cannot clear because answering is the only
+// thing they can do to one.
+func TestDeletingACardRemovesItsQuestions(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+
+	p, err := db.CreateProject(ctx, t.TempDir(), "calc", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := db.CreateTask(ctx, p.ID, "Graph function", "do it", "coder")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.AskClarification(ctx, p.ID, "coder", "which range?", &task.ID); err != nil {
+		t.Fatal(err)
+	}
+	// One asked about no card at all, which `zerg ask` allows and which must
+	// survive: it is not this card's, so it is not this card's to take.
+	if _, err := db.AskClarification(ctx, p.ID, "coder", "unrelated", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := db.DeleteTask(ctx, p.ID, task.ID); err != nil {
+		t.Fatalf("DeleteTask: %v", err)
+	}
+
+	left, err := db.ListOpenClarifications(ctx, p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(left) != 1 {
+		t.Fatalf("%d open question(s) after deleting the card, want 1", len(left))
+	}
+	if left[0].Question != "unrelated" {
+		t.Errorf("survivor is %q, want the one that was never about this card", left[0].Question)
+	}
+}
+
+// Stopping is the same class of event by a different route: the card is over,
+// so the question the role was waiting on cannot be answered usefully either.
+func TestStoppingACardCancelsItsQuestions(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+
+	p, err := db.CreateProject(ctx, t.TempDir(), "calc", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := db.CreateTask(ctx, p.ID, "Graph function", "do it", "coder")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.AskClarification(ctx, p.ID, "coder", "which range?", &task.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := db.StopTask(ctx, p.ID, task.ID); err != nil {
+		t.Fatalf("StopTask: %v", err)
+	}
+
+	left, err := db.ListOpenClarifications(ctx, p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(left) != 0 {
+		t.Errorf("%d question(s) still open on a stopped card", len(left))
+	}
+}

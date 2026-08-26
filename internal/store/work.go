@@ -814,6 +814,16 @@ func (db *DB) StopTask(ctx context.Context, projectID, taskID string) error {
 		return fmt.Errorf("closing routes: %w", err)
 	}
 
+	// Cancel anything it was still asking. The role that asked has nothing left
+	// to do with the answer, and an open question outlives the card otherwise —
+	// the same ghost a delete used to leave, arriving by a different route.
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE clarifications SET state = 'cancelled'
+		  WHERE task_id = ? AND project_id = ? AND state = 'open'`,
+		taskID, projectID); err != nil {
+		return fmt.Errorf("cancelling its questions: %w", err)
+	}
+
 	// And release any lease covering them, or the holder keeps its claim until
 	// the deadline and the board shows work in flight that has been stopped.
 	now := time.Now().UTC().Format(time.RFC3339Nano)
@@ -849,6 +859,20 @@ func (db *DB) DeleteTask(ctx context.Context, projectID, taskID string) error {
 		`DELETE FROM events WHERE task_id = ? AND project_id = ?`, taskID, projectID); err != nil {
 		return fmt.Errorf("deleting the transcript: %w", err)
 	}
+	// Questions go with the card, like its transcript.
+	//
+	// clarifications.task_id is ON DELETE SET NULL, so without this the delete
+	// detached the question instead of removing it: an item in Attention about
+	// a card that no longer exists, unanswerable and impossible to clear, since
+	// answering is the only thing a person can do to one. Not filtered out on
+	// read, because a null task_id is also a legitimate question asked about no
+	// card at all — `zerg ask` does not require one.
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM clarifications WHERE task_id = ? AND project_id = ?`,
+		taskID, projectID); err != nil {
+		return fmt.Errorf("deleting its questions: %w", err)
+	}
+
 	res, err := tx.ExecContext(ctx,
 		`DELETE FROM tasks WHERE id = ? AND project_id = ?`, taskID, projectID)
 	if err != nil {
