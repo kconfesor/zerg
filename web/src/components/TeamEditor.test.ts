@@ -86,6 +86,7 @@ function editor(team: ProjectTeam) {
 describe('TeamEditor project topology', () => {
   it('materializes the effective pipeline without losing raw field overrides', async () => {
     const w = editor({ presetId: preset.id, topologyOverride: false, roles: resolved })
+    await w.findAll('button').find((b) => b.text().includes('This project'))!.trigger('click')
     await w.findAll('button').find((b) => b.text() === 'Customize pipeline')!.trigger('click')
 
     expect(w.emitted('setTeam')?.at(-1)?.[0]).toEqual({

@@ -14,7 +14,6 @@ import type {
 } from '@/lib/api'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -37,6 +36,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 
 const props = defineProps<{
   library: RoleTemplate[]
@@ -66,6 +66,7 @@ watch(
 )
 
 const activePreset = computed(() => props.presets.find((p) => p.id === selectedPresetId.value) ?? null)
+const projectPreset = computed(() => props.presets.find((p) => p.id === props.projectTeam.presetId) ?? null)
 const libraryById = computed(() => new Map(props.library.map((r) => [r.id, r])))
 const projectSelectedIds = computed(() => new Set(props.projectTeam.roles.map((r) => r.id)))
 const presetSelectedIds = computed(() => new Set(activePreset.value?.roles.map((r) => r.templateId) ?? []))
@@ -81,6 +82,19 @@ function cloneOverrides(source: Partial<RoleOverrides>): RoleOverrides {
     promptOverride: source.promptOverride ?? null,
     gateOverride: source.gateOverride ?? null,
   }
+}
+
+function hasRoleOverrides(o: Partial<RoleOverrides>) {
+  return (
+    o.harnessOverride != null ||
+    o.modelOverride != null ||
+    o.argsOverride != null ||
+    o.receiveOverride != null ||
+    o.batchMaxItemsOverride != null ||
+    o.batchMaxAgeSecOverride != null ||
+    o.promptOverride != null ||
+    o.gateOverride != null
+  )
 }
 
 function apply(base: RoleTemplate, o: Partial<RoleOverrides>): RoleTemplate {
@@ -184,6 +198,11 @@ function saveProjectRole(overrides: RoleOverrides) {
   )
 }
 
+function presetEffective(role: TeamPresetRole): RoleTemplate | null {
+  const template = libraryById.value.get(role.templateId)
+  return template ? apply(template, role) : null
+}
+
 function updatePreset(roles: TeamPresetRole[], name = activePreset.value?.name ?? '') {
   if (!activePreset.value) return
   emit('savePreset', { ...activePreset.value, name, roles })
@@ -285,215 +304,319 @@ function saveLibraryRole() {
 </script>
 
 <template>
-  <div class="flex flex-col gap-4">
-    <Card>
-      <CardHeader>
-        <CardTitle class="text-sm">This project's team</CardTitle>
-        <CardDescription class="text-[11px]">
-          Pick a reusable team, then override only what this repository needs. Unchanged settings
-          keep following the reusable team.
-        </CardDescription>
-      </CardHeader>
-      <CardContent class="flex flex-wrap items-end gap-3">
-        <div class="flex min-w-56 flex-col gap-1.5">
-          <Label for="project-team-source">Team</Label>
-          <Select
-            :model-value="projectTeam.presetId ?? CUSTOM_TEAM"
-            :disabled="running"
-            @update:model-value="selectProjectPreset"
-          >
-            <SelectTrigger id="project-team-source"><SelectValue /></SelectTrigger>
-            <SelectContent>
-              <SelectItem v-for="preset in presets" :key="preset.id" :value="preset.id">
-                {{ preset.name }}
-              </SelectItem>
-              <SelectItem :value="CUSTOM_TEAM">Custom project team</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
-        <Badge v-if="projectTeam.topologyOverride" variant="secondary">custom pipeline</Badge>
-        <Button
-          v-if="projectTeam.presetId && !projectTeam.topologyOverride"
-          size="sm"
-          variant="outline"
-          :disabled="running"
-          @click="customizeTopology"
-        >
-          Customize pipeline
-        </Button>
-        <Button
-          v-if="projectTeam.presetId && projectTeam.topologyOverride"
-          size="sm"
-          variant="outline"
-          :disabled="running"
-          @click="usePresetTopology"
-        >
-          Use preset pipeline
-        </Button>
-      </CardContent>
-    </Card>
+  <Tabs default-value="presets" class="gap-5">
+    <TabsList variant="line" class="w-full justify-start border-b bg-transparent p-0">
+      <TabsTrigger value="presets" class="max-w-44 flex-none px-3 py-2.5">
+        Reusable teams
+      </TabsTrigger>
+      <TabsTrigger value="project" class="max-w-44 flex-none px-3 py-2.5">
+        This project
+        <Badge v-if="projectTeam.topologyOverride" variant="secondary" class="ml-1">custom</Badge>
+      </TabsTrigger>
+    </TabsList>
 
-    <div class="grid gap-4 xl:grid-cols-2">
-      <Card>
-        <CardHeader>
-          <div class="flex flex-wrap items-start justify-between gap-2">
-            <div>
-              <CardTitle class="text-sm">Reusable team defaults</CardTitle>
-              <CardDescription class="text-[11px]">
-                Managed once and shared by every project that selects it.
-              </CardDescription>
-            </div>
-            <Button size="sm" variant="outline" @click="creating = true">Duplicate as new</Button>
+    <!-- The common path: build and maintain the teams projects can select. -->
+    <TabsContent value="presets" class="flex flex-col gap-4">
+      <section class="border bg-card">
+        <div class="flex flex-col gap-3 p-4 lg:flex-row lg:items-end">
+          <div class="flex min-w-64 flex-1 flex-col gap-1.5">
+            <Label for="managed-team">Reusable team</Label>
+            <Select v-model="selectedPresetId">
+              <SelectTrigger id="managed-team"><SelectValue placeholder="Choose a team" /></SelectTrigger>
+              <SelectContent>
+                <SelectItem v-for="preset in presets" :key="preset.id" :value="preset.id">
+                  {{ preset.name }}
+                </SelectItem>
+              </SelectContent>
+            </Select>
           </div>
-        </CardHeader>
-        <CardContent class="flex flex-col gap-3">
-          <Select v-model="selectedPresetId">
-            <SelectTrigger><SelectValue placeholder="Choose a team" /></SelectTrigger>
-            <SelectContent>
-              <SelectItem v-for="preset in presets" :key="preset.id" :value="preset.id">
-                {{ preset.name }}
-              </SelectItem>
-            </SelectContent>
-          </Select>
 
-          <div v-if="activePreset" class="flex gap-2">
-            <Input v-model="presetName" @keyup.enter="renamePreset" @blur="renamePreset" />
+          <div v-if="activePreset" class="flex min-w-64 flex-1 flex-col gap-1.5">
+            <div class="flex items-center gap-2">
+              <Label for="managed-team-name">Name</Label>
+              <Badge v-if="activePreset.builtin" variant="outline">built-in</Badge>
+            </div>
+            <Input
+              id="managed-team-name"
+              v-model="presetName"
+              @keyup.enter="renamePreset"
+              @blur="renamePreset"
+            />
+          </div>
+
+          <div class="flex gap-2">
+            <Button variant="outline" @click="creating = true">Duplicate team</Button>
             <Button
-              v-if="!activePreset.builtin"
+              v-if="activePreset && !activePreset.builtin"
               variant="destructive"
-              size="sm"
               @click="emit('deletePreset', activePreset.id)"
             >
               Delete
             </Button>
           </div>
+        </div>
+      </section>
 
-          <div v-if="activePreset" class="grid gap-3 lg:grid-cols-2">
-            <div class="border">
-              <div class="border-b px-3 py-2 text-xs font-semibold">Role library</div>
-              <ul class="divide-y">
-                <li v-for="tpl in library" :key="tpl.id" class="flex items-center gap-2 px-3 py-2">
-                  <Checkbox
-                    :model-value="presetSelectedIds.has(tpl.id)"
-                    @update:model-value="togglePreset(tpl)"
-                  />
-                  <span class="text-xs font-medium">{{ tpl.name }}</span>
-                  <Button size="xs" variant="ghost" class="ml-auto" @click="editLibraryRole(tpl)">
-                    Library
-                  </Button>
-                </li>
-              </ul>
+      <div v-if="activePreset" class="grid gap-4 lg:grid-cols-[minmax(0,1fr)_20rem]">
+        <section class="min-w-0 border bg-card">
+          <div class="flex items-start justify-between gap-3 border-b px-4 py-3">
+            <div>
+              <h2 class="text-sm font-semibold">Pipeline</h2>
+              <p class="text-muted-foreground mt-0.5 text-[11px]">
+                Work flows from top to bottom. These settings become the live defaults for every
+                project using {{ activePreset.name }}.
+              </p>
             </div>
+            <Badge variant="secondary">
+              {{ activePreset.roles.length }} role{{ activePreset.roles.length === 1 ? '' : 's' }}
+            </Badge>
+          </div>
 
-            <div class="border">
-              <div class="border-b px-3 py-2 text-xs font-semibold">Preset pipeline</div>
-              <ul class="divide-y">
-                <li
-                  v-for="(role, i) in activePreset.roles"
-                  :key="role.templateId"
-                  class="flex items-center gap-2 px-3 py-2"
-                >
-                  <span class="text-muted-foreground w-4 text-xs">{{ i + 1 }}</span>
-                  <Checkbox
-                    :model-value="role.enabled"
-                    @update:model-value="setPresetEnabled(role, !role.enabled)"
-                  />
-                  <span class="text-xs font-medium">
+          <ol class="divide-y">
+            <li
+              v-for="(role, i) in activePreset.roles"
+              :key="role.templateId"
+              class="group flex items-center gap-3 px-4 py-3"
+            >
+              <span class="text-muted-foreground grid size-6 shrink-0 place-items-center border text-[11px]">
+                {{ i + 1 }}
+              </span>
+              <Checkbox
+                :model-value="role.enabled"
+                :aria-label="`${libraryById.get(role.templateId)?.name ?? 'role'} enabled`"
+                @update:model-value="setPresetEnabled(role, !role.enabled)"
+              />
+              <div class="min-w-0 flex-1">
+                <div class="flex flex-wrap items-center gap-1.5">
+                  <span :class="['text-xs font-medium', !role.enabled && 'line-through opacity-50']">
                     {{ libraryById.get(role.templateId)?.name ?? role.templateId }}
                   </span>
-                  <Button size="xs" variant="ghost" class="ml-auto" @click="editPresetRole(role)">
-                    Settings
-                  </Button>
-                  <Button size="icon-xs" variant="ghost" :disabled="i === 0" @click="movePreset(i, -1)">↑</Button>
-                  <Button
-                    size="icon-xs"
-                    variant="ghost"
-                    :disabled="i === activePreset.roles.length - 1"
-                    @click="movePreset(i, 1)"
-                  >↓</Button>
-                </li>
-                <li v-if="!activePreset.roles.length" class="text-muted-foreground px-3 py-3 text-xs">
-                  Pick roles from the library.
-                </li>
-              </ul>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle class="text-sm">Project pipeline</CardTitle>
-          <CardDescription class="text-[11px]">
-            Settings edits stay in this project. Pipeline edits make the role list local.
-          </CardDescription>
-        </CardHeader>
-        <CardContent class="flex flex-col gap-3">
-          <div v-if="projectTeam.topologyOverride" class="border">
-            <div class="border-b px-3 py-2 text-xs font-semibold">Available roles</div>
-            <div class="flex flex-wrap gap-x-4 gap-y-2 p-3">
-              <label v-for="tpl in library" :key="tpl.id" class="flex items-center gap-2 text-xs">
-                <Checkbox
-                  :model-value="projectSelectedIds.has(tpl.id)"
-                  :disabled="running"
-                  @update:model-value="toggleProject(tpl)"
-                />
-                {{ tpl.name }}
-              </label>
-            </div>
-          </div>
-
-          <div class="border">
-            <div class="border-b px-3 py-2 text-xs font-semibold">Work flows top to bottom</div>
-            <ul class="divide-y">
-              <li
-                v-for="(role, i) in projectTeam.roles"
-                :key="role.id"
-                class="flex items-center gap-2 px-3 py-2"
+                  <Badge v-if="hasRoleOverrides(role)" variant="secondary">custom defaults</Badge>
+                  <Badge v-if="presetEffective(role)?.gate === 'approval'" variant="outline">gate</Badge>
+                </div>
+                <p class="text-muted-foreground mt-0.5 truncate text-[11px]">
+                  {{ presetEffective(role)?.harness }} · {{ presetEffective(role)?.model || 'harness default' }}
+                  · {{ presetEffective(role)?.receive }}
+                </p>
+              </div>
+              <Button size="sm" variant="outline" @click="editPresetRole(role)">Settings</Button>
+              <div class="flex">
+                <Button size="icon-sm" variant="ghost" :disabled="i === 0" aria-label="Move up" @click="movePreset(i, -1)">↑</Button>
+                <Button
+                  size="icon-sm"
+                  variant="ghost"
+                  :disabled="i === activePreset.roles.length - 1"
+                  aria-label="Move down"
+                  @click="movePreset(i, 1)"
+                >↓</Button>
+              </div>
+              <Button
+                size="sm"
+                variant="ghost"
+                class="text-muted-foreground hover:text-destructive"
+                @click="togglePreset(libraryById.get(role.templateId)!)"
               >
-                <span class="text-muted-foreground w-4 text-xs">{{ i + 1 }}</span>
-                <Checkbox
-                  :model-value="role.enabled"
-                  :disabled="running"
-                  @update:model-value="setProjectEnabled(role, !role.enabled)"
-                />
-                <span :class="['text-xs font-medium', !role.enabled && 'line-through opacity-50']">
-                  {{ role.name }}
-                </span>
-                <span class="text-muted-foreground text-xs">{{ role.harness }} · {{ role.model || 'default' }}</span>
-                <Badge v-if="role.overridden" variant="secondary">override</Badge>
-                <Badge v-if="role.terminal">terminal</Badge>
-                <Button size="xs" variant="ghost" class="ml-auto" @click="editProjectRole(role)">
-                  Settings
-                </Button>
-                <template v-if="projectTeam.topologyOverride">
-                  <Button size="icon-xs" variant="ghost" :disabled="running || i === 0" @click="moveProject(i, -1)">↑</Button>
+                Remove
+              </Button>
+            </li>
+            <li v-if="!activePreset.roles.length" class="px-6 py-12 text-center">
+              <p class="text-sm font-medium">This team has no roles</p>
+              <p class="text-muted-foreground mt-1 text-xs">Add one from the role library.</p>
+            </li>
+          </ol>
+        </section>
+
+        <aside class="border bg-card lg:self-start">
+          <div class="border-b px-4 py-3">
+            <h2 class="text-sm font-semibold">Role library</h2>
+            <p class="text-muted-foreground mt-0.5 text-[11px]">
+              Add roles to this team. Template edits change the lowest default everywhere.
+            </p>
+          </div>
+          <ul class="divide-y">
+            <li v-for="tpl in library" :key="tpl.id" class="flex items-center gap-2 px-3 py-2.5">
+              <div class="min-w-0 flex-1">
+                <p class="truncate text-xs font-medium">{{ tpl.name }}</p>
+                <p class="text-muted-foreground truncate text-[10px]">
+                  {{ tpl.harness }} · {{ tpl.model || 'default' }}
+                </p>
+              </div>
+              <Button size="xs" variant="ghost" @click="editLibraryRole(tpl)">Template</Button>
+              <Button
+                size="xs"
+                :variant="presetSelectedIds.has(tpl.id) ? 'secondary' : 'outline'"
+                :disabled="presetSelectedIds.has(tpl.id)"
+                @click="togglePreset(tpl)"
+              >
+                {{ presetSelectedIds.has(tpl.id) ? 'Added' : 'Add' }}
+              </Button>
+            </li>
+          </ul>
+        </aside>
+      </div>
+
+      <p v-else class="text-muted-foreground border px-4 py-10 text-center text-xs">
+        Create a reusable team to begin.
+      </p>
+    </TabsContent>
+
+    <!-- Project-specific work is intentionally separate from global defaults. -->
+    <TabsContent value="project" force-mount class="flex flex-col gap-4 data-[state=inactive]:hidden">
+      <section class="border bg-card">
+        <div class="flex flex-col gap-3 p-4 lg:flex-row lg:items-end">
+          <div class="flex min-w-64 flex-1 flex-col gap-1.5">
+            <Label for="project-team-source">Team used by this project</Label>
+            <Select
+              :model-value="projectTeam.presetId ?? CUSTOM_TEAM"
+              :disabled="running"
+              @update:model-value="selectProjectPreset"
+            >
+              <SelectTrigger id="project-team-source"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem v-for="preset in presets" :key="preset.id" :value="preset.id">
+                  {{ preset.name }}
+                </SelectItem>
+                <SelectItem :value="CUSTOM_TEAM">Standalone custom team</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div class="min-w-0 flex-[2]">
+            <p class="text-xs font-medium">
+              <template v-if="projectTeam.presetId && !projectTeam.topologyOverride">
+                Following {{ projectPreset?.name ?? 'the reusable team' }}
+              </template>
+              <template v-else-if="projectTeam.presetId">Custom pipeline based on {{ projectPreset?.name }}</template>
+              <template v-else>Standalone project team</template>
+            </p>
+            <p class="text-muted-foreground mt-1 text-[11px] leading-snug">
+              Role settings can be changed per project without changing the reusable team. A custom
+              pipeline also owns membership, order and enablement.
+            </p>
+          </div>
+
+          <Button
+            v-if="projectTeam.presetId && !projectTeam.topologyOverride"
+            variant="outline"
+            :disabled="running"
+            @click="customizeTopology"
+          >
+            Customize pipeline
+          </Button>
+          <Button
+            v-if="projectTeam.presetId && projectTeam.topologyOverride"
+            variant="outline"
+            :disabled="running"
+            @click="usePresetTopology"
+          >
+            Follow team pipeline again
+          </Button>
+        </div>
+      </section>
+
+      <div class="grid gap-4" :class="projectTeam.topologyOverride && 'lg:grid-cols-[minmax(0,1fr)_20rem]'">
+        <section class="min-w-0 border bg-card">
+          <div class="flex items-start justify-between gap-3 border-b px-4 py-3">
+            <div>
+              <h2 class="text-sm font-semibold">Project pipeline</h2>
+              <p class="text-muted-foreground mt-0.5 text-[11px]">
+                Open Settings on a role to override its harness, model, prompt, arguments or policy.
+              </p>
+            </div>
+            <Badge v-if="projectTeam.topologyOverride" variant="secondary">project-owned order</Badge>
+          </div>
+
+          <ol class="divide-y">
+            <li
+              v-for="(role, i) in projectTeam.roles"
+              :key="role.id"
+              class="flex items-center gap-3 px-4 py-3"
+            >
+              <span class="text-muted-foreground grid size-6 shrink-0 place-items-center border text-[11px]">
+                {{ i + 1 }}
+              </span>
+              <Checkbox
+                :model-value="role.enabled"
+                :disabled="running || !projectTeam.topologyOverride"
+                :aria-label="`${role.name} enabled`"
+                @update:model-value="setProjectEnabled(role, !role.enabled)"
+              />
+              <div class="min-w-0 flex-1">
+                <div class="flex flex-wrap items-center gap-1.5">
+                  <span :class="['text-xs font-medium', !role.enabled && 'line-through opacity-50']">
+                    {{ role.name }}
+                  </span>
+                  <Badge v-if="role.overridden" variant="secondary">project override</Badge>
+                  <Badge v-if="role.terminal">terminal</Badge>
+                </div>
+                <p class="text-muted-foreground mt-0.5 truncate text-[11px]">
+                  {{ role.harness }} · {{ role.model || 'harness default' }} · {{ role.receive }}
+                </p>
+              </div>
+              <Button size="sm" variant="outline" @click="editProjectRole(role)">Settings</Button>
+              <template v-if="projectTeam.topologyOverride">
+                <div class="flex">
+                  <Button size="icon-sm" variant="ghost" :disabled="running || i === 0" aria-label="Move up" @click="moveProject(i, -1)">↑</Button>
                   <Button
-                    size="icon-xs"
+                    size="icon-sm"
                     variant="ghost"
                     :disabled="running || i === projectTeam.roles.length - 1"
+                    aria-label="Move down"
                     @click="moveProject(i, 1)"
                   >↓</Button>
-                </template>
-              </li>
-              <li v-if="!projectTeam.roles.length" class="text-muted-foreground px-3 py-3 text-xs">
-                This team has no roles.
-              </li>
-            </ul>
-          </div>
-          <p v-if="running" class="text-muted-foreground text-[11px]">
-            Stop the swarm to change the pipeline. Role settings apply on the next spawn.
+                </div>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  class="text-muted-foreground hover:text-destructive"
+                  :disabled="running"
+                  @click="toggleProject(libraryById.get(role.id)!)"
+                >
+                  Remove
+                </Button>
+              </template>
+            </li>
+            <li v-if="!projectTeam.roles.length" class="px-6 py-12 text-center">
+              <p class="text-sm font-medium">This project has no roles</p>
+              <p class="text-muted-foreground mt-1 text-xs">Add one before starting the swarm.</p>
+            </li>
+          </ol>
+          <p v-if="running" class="text-muted-foreground border-t px-4 py-2.5 text-[11px]">
+            Stop the swarm to change the pipeline. Settings are picked up on the next spawn.
           </p>
-        </CardContent>
-      </Card>
-    </div>
-  </div>
+        </section>
+
+        <aside v-if="projectTeam.topologyOverride" class="border bg-card lg:self-start">
+          <div class="border-b px-4 py-3">
+            <h2 class="text-sm font-semibold">Add a role</h2>
+            <p class="text-muted-foreground mt-0.5 text-[11px]">Available library roles for this project.</p>
+          </div>
+          <ul class="divide-y">
+            <li v-for="tpl in library" :key="tpl.id" class="flex items-center gap-2 px-3 py-2.5">
+              <div class="min-w-0 flex-1">
+                <p class="truncate text-xs font-medium">{{ tpl.name }}</p>
+                <p class="text-muted-foreground truncate text-[10px]">{{ tpl.harness }} · {{ tpl.model }}</p>
+              </div>
+              <Button
+                size="xs"
+                :variant="projectSelectedIds.has(tpl.id) ? 'secondary' : 'outline'"
+                :disabled="running || projectSelectedIds.has(tpl.id)"
+                @click="toggleProject(tpl)"
+              >
+                {{ projectSelectedIds.has(tpl.id) ? 'Added' : 'Add' }}
+              </Button>
+            </li>
+          </ul>
+        </aside>
+      </div>
+    </TabsContent>
+  </Tabs>
 
   <RoleOverrideDialog
     v-model:open="presetRoleOpen"
     :role="presetRoleEffective"
     :inherited="presetRoleInherited"
-    scope="These defaults belong to the reusable team"
+    scope="Reusable-team defaults"
     :harnesses="harnesses"
     :models="models"
     @save="savePresetRole"
@@ -502,7 +625,7 @@ function saveLibraryRole() {
     v-model:open="projectRoleOpen"
     :role="projectRole"
     :inherited="projectInherited"
-    scope="These overrides belong only to this project"
+    scope="Settings for this project only"
     :harnesses="harnesses"
     :models="models"
     @save="saveProjectRole"
@@ -511,9 +634,9 @@ function saveLibraryRole() {
   <Dialog v-model:open="creating">
     <DialogContent class="sm:max-w-md">
       <DialogHeader>
-        <DialogTitle>New reusable team</DialogTitle>
+        <DialogTitle>Duplicate reusable team</DialogTitle>
         <DialogDescription>
-          Starts as a copy of the selected team. Change its roles and defaults after creating it.
+          Copies the selected pipeline and defaults. The new team can then evolve independently.
         </DialogDescription>
       </DialogHeader>
       <div class="flex flex-col gap-1.5">
@@ -530,9 +653,9 @@ function saveLibraryRole() {
   <Dialog v-model:open="libraryOpen">
     <DialogContent v-if="editingLibrary" class="gap-0 overflow-hidden p-0 sm:max-w-2xl">
       <DialogHeader class="hairline-b shrink-0 px-5 py-4 pr-12">
-        <DialogTitle>{{ editingLibrary.name }}</DialogTitle>
+        <DialogTitle>{{ editingLibrary.name }} template</DialogTitle>
         <DialogDescription>
-          The role library is the lowest default. This can affect every preset and project.
+          This is the lowest default. Reusable teams and projects without an override follow it.
         </DialogDescription>
       </DialogHeader>
       <DialogBody class="grid gap-3 sm:grid-cols-2">
@@ -593,7 +716,7 @@ function saveLibraryRole() {
       </DialogBody>
       <DialogFooter class="hairline-t shrink-0 px-5 py-4">
         <Button variant="outline" @click="libraryOpen = false">Cancel</Button>
-        <Button @click="saveLibraryRole">Save library role</Button>
+        <Button @click="saveLibraryRole">Save template</Button>
       </DialogFooter>
     </DialogContent>
   </Dialog>
