@@ -26,6 +26,7 @@ import MarkdownEditor from '@/components/MarkdownEditor.vue'
 import Projects from '@/components/Projects.vue'
 import TaskDetail from '@/components/TaskDetail.vue'
 import Settings from '@/components/Settings.vue'
+import ReadinessPanel from '@/components/Readiness.vue'
 import TeamEditor from '@/components/TeamEditor.vue'
 import AppSidebar from '@/components/layout/AppSidebar.vue'
 import { useRoute, useRouter } from 'vue-router'
@@ -245,15 +246,17 @@ const attention = ref<AttentionData | null>(null)
 const readiness = ref<Readiness | null>(null)
 
 /**
- * Which Settings tab to open. Set when a start is refused, so the report lands
- * in front of the person who pressed the button rather than behind a tab they
- * have to think to open.
+ * The readiness report, over whatever you were looking at.
+ *
+ * A dialog rather than a screen or a tab: it is something you run and read,
+ * not a place. It also means a refused Start can put the report in front of the
+ * person who pressed the button, wherever they pressed it, instead of
+ * navigating them away from the board mid-thought.
  */
-const settingsTab = ref('')
+const readinessOpen = ref(false)
 
 function showReadiness() {
-  settingsTab.value = 'readiness'
-  go('settings')
+  readinessOpen.value = true
 }
 const status = ref<SwarmStatus>({ running: false, roles: [] })
 const harnesses = ref<string[]>([])
@@ -482,6 +485,9 @@ async function addProject() {
  */
 async function checkReadiness() {
   if (!current.value) return
+  // Open first, run second. Waiting for the probe to answer before showing
+  // anything is the same dead two seconds the button used to have, moved.
+  readinessOpen.value = true
   await busy.run('readiness', async () => {
     try {
       readiness.value = await api.readiness(current.value!.id)
@@ -839,12 +845,7 @@ watch(current, () => (banner.value = null))
               subtitle="Everything a project is set up with: whether its team can work, what each role is, how the daemon serves the cockpit, and what it keeps on disk."
             />
             <div class="pt-4">
-              <Settings
-                :readiness="readiness"
-                :open-tab="settingsTab"
-                :checking="busy.is('readiness')"
-                @recheck="checkReadiness"
-              />
+              <Settings :checking="busy.is('readiness')" @readiness="checkReadiness" />
             </div>
           </template>
 
@@ -1019,6 +1020,41 @@ watch(current, () => (banner.value = null))
             @answer="act.answer"
           />
         </DialogBody>
+      </DialogContent>
+    </Dialog>
+
+    <Dialog v-model:open="readinessOpen">
+      <DialogContent class="min-w-0 gap-0 overflow-hidden p-0 sm:max-w-3xl">
+        <DialogHeader class="hairline-b shrink-0 px-5 py-4 pr-12">
+          <DialogTitle>Readiness</DialogTitle>
+          <DialogDescription>
+            Every check for every enabled role. A team that cannot work must not reach a running
+            board, so Start refuses while any of them is blocked.
+          </DialogDescription>
+        </DialogHeader>
+        <DialogBody>
+          <div :class="busy.is('readiness') && 'pointer-events-none opacity-50 transition-opacity'">
+            <ReadinessPanel :readiness="readiness" />
+          </div>
+          <p
+            v-if="busy.is('readiness') && !readiness"
+            class="text-muted-foreground py-10 text-center text-xs"
+            role="status"
+          >
+            Probing every enabled role — a version, a config parse, a model catalogue…
+          </p>
+          <p v-else-if="!readiness" class="text-muted-foreground py-10 text-center text-xs">
+            Not checked yet.
+          </p>
+        </DialogBody>
+        <DialogFooter class="hairline-t shrink-0 px-5 py-4">
+          <span v-if="readiness" class="text-muted-foreground mr-auto text-[11px]">
+            checked at {{ new Date(readiness.checkedAt).toLocaleTimeString(undefined, { hour12: false }) }}
+          </span>
+          <Button variant="outline" :disabled="busy.is('readiness')" @click="checkReadiness">
+            {{ busy.is('readiness') ? 'Checking…' : 'Re-check' }}
+          </Button>
+        </DialogFooter>
       </DialogContent>
     </Dialog>
 
