@@ -280,7 +280,7 @@ onBeforeUnmount(() => stream?.close())
       class="bg-card h-[58vh] overflow-y-auto border p-3 md:h-[60vh]"
     >
       <p v-if="!lines.length" class="text-muted-foreground text-xs leading-relaxed">
-        Ask about the repository — how something works, where a thing lives, whether an idea is
+        Ask about the repository: how something works, where a thing lives, whether an idea is
         already implemented. This agent reads the project and answers; it does not take work. When
         the answer is "that needs a change", queue it as a task on the Board.
       </p>

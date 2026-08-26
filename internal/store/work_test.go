@@ -57,7 +57,7 @@ func TestStoppingACardClosesItsRoutesAndLease(t *testing.T) {
 		t.Fatal(err)
 	}
 	if n != 0 {
-		t.Errorf("%d route(s) still queued after stopping — an agent will pick it up again", n)
+		t.Errorf("%d route(s) still queued after stopping, so an agent will pick it up again", n)
 	}
 }
 
@@ -110,7 +110,7 @@ func TestDeletingACardKeepsWhatWasActuallySpent(t *testing.T) {
 		cost += r.CostUSD
 	}
 	if cost != 1.25 {
-		t.Errorf("project cost is %.2f after deleting a card, want 1.25 — the money was spent", cost)
+		t.Errorf("project cost is %.2f after deleting a card, want 1.25 because the money was spent", cost)
 	}
 }
 

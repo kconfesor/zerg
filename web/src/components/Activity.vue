@@ -260,10 +260,10 @@ const roleCounts = computed(() => {
       <!-- A feed that failed must not read as a project with nothing in it.
            Those look identical, and only one of them is worth acting on. -->
       <p v-if="streamError && !events.length" class="text-destructive p-4 text-xs">
-        {{ streamError }} — retrying.
+        {{ streamError }}. Retrying.
       </p>
       <p v-else-if="!events.length" class="text-muted-foreground p-4">
-        Nothing recorded yet. Start the agents and give them a task — this fills in as they work.
+        Nothing recorded yet. Start the agents and give them a task, and this fills in as they work.
       </p>
 
       <ol>
@@ -304,7 +304,7 @@ const roleCounts = computed(() => {
               ${{ usageOf(e).cost.toFixed(4) }}
             </span>
             <span v-if="usageOf(e).billing === 'subscription'" class="ml-1.5 opacity-70">
-              (plan — no marginal cost)
+              (plan, no marginal cost)
             </span>
           </span>
 
@@ -331,10 +331,10 @@ const roleCounts = computed(() => {
             aria-hidden="true"
           />
           <template v-if="blocked === 'approval'">
-            waiting for your approval — nothing downstream moves until it is decided
+            waiting for your approval, and nothing downstream moves until it is decided
           </template>
           <template v-else-if="blocked === 'question'">
-            waiting for your answer — the role asked something and stopped
+            waiting for your answer, since the role asked something and stopped
           </template>
           <template v-else>waiting for the next turn…</template>
         </li>

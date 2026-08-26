@@ -348,7 +348,7 @@ function pollerLostContact() {
   banner.value = {
     tone: 'bad',
     transient: true,
-    text: 'Lost contact with the daemon. Retrying — this clears itself when it is back.',
+    text: 'Lost contact with the daemon. Retrying, and this clears itself when it is back.',
   }
 }
 
@@ -747,8 +747,8 @@ watch(current, () => (banner.value = null))
         <div class="w-full max-w-md text-center">
           <h1 class="text-lg font-semibold tracking-tight">No project yet</h1>
           <p class="text-muted-foreground mt-1.5 mb-4 text-xs leading-relaxed">
-            Point zerg at a git repository. It starts with the reusable Default team — coder →
-            reviewer — and can be changed in Team.
+            Point zerg at a git repository. It starts with the reusable Default team, coder then
+            reviewer, and can be changed in Team.
           </p>
           <Button @click="addingProject = true">Add a project</Button>
         </div>
@@ -938,8 +938,8 @@ watch(current, () => (banner.value = null))
         <DialogHeader>
           <DialogTitle>Delete “{{ confirmDeleteTask?.name }}”?</DialogTitle>
           <DialogDescription>
-            The card and everything recorded against it — its messages, its approvals and its
-            whole transcript — are deleted. What it cost stays in the project's usage, because it
+            The card and everything recorded against it, meaning its messages, its approvals and
+            its whole transcript, is deleted. What it cost stays in the project's usage, because it
             was spent. Commits the agents made stay on their branches; nothing touches the
             repository.
           </DialogDescription>
@@ -1041,7 +1041,7 @@ watch(current, () => (banner.value = null))
             class="text-muted-foreground py-10 text-center text-xs"
             role="status"
           >
-            Probing every enabled role — a version, a config parse, a model catalogue…
+            Probing every enabled role: a version, a config parse, a model catalogue…
           </p>
           <p v-else-if="!readiness" class="text-muted-foreground py-10 text-center text-xs">
             Not checked yet.
@@ -1094,7 +1094,7 @@ watch(current, () => (banner.value = null))
             <Label :for="taskNameId">Name</Label>
             <Input :id="taskNameId" v-model="taskName" autofocus />
             <span class="text-muted-foreground text-[11px]">
-              Short and distinct — every role refers to the task by this name.
+              Short and distinct, since every role refers to the task by this name.
             </span>
           </div>
           <div class="flex min-h-0 flex-1 flex-col gap-1.5">
@@ -1106,7 +1106,7 @@ watch(current, () => (banner.value = null))
               <MarkdownEditor :id="taskBodyId" v-model="taskBody" :rows="8" />
             </div>
             <span class="text-muted-foreground text-[11px]">
-              This is the whole brief — the agent has the repository and nothing else. Concrete
+              This is the whole brief. The agent has the repository and nothing else. Concrete
               cases and what must not break are worth more than length.
             </span>
           </div>

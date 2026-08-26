@@ -136,7 +136,7 @@ func printVersion() {
 }
 
 func usage() {
-	fmt.Fprint(os.Stderr, `zerg — multi-agent coding orchestrator
+	fmt.Fprint(os.Stderr, `zerg, a multi-agent coding orchestrator
 
   zerg up [--addr host:port] [--db path] [--verbose]
       Run the overmind and serve the cockpit.

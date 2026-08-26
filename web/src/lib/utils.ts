@@ -54,7 +54,7 @@ export function landing(project: {
         ? { head: 'draft PR', line: `opens a draft pull request into ${project.baseBranch}` }
         : { head: 'pull request', line: `opens a pull request into ${project.baseBranch}` }
     case 'branch':
-      return { head: 'its branch', line: 'stays on its branch — landing it is your call' }
+      return { head: 'its branch', line: 'stays on its branch, landing it is your call' }
     default:
       return { head: project.baseBranch, line: `merges to ${project.baseBranch}` }
   }

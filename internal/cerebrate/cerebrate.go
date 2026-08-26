@@ -830,7 +830,7 @@ func (c *Cerebrate) waitOutThrottle(ctx context.Context, t adapter.Throttle) boo
 		"role", c.name(), "resumes_in", wait.Round(time.Second), "detail", detail)
 	c.publish(adapter.Event{
 		Kind: adapter.EventError,
-		Text: fmt.Sprintf("%s is waiting on a provider limit, resuming in %s — %s",
+		Text: fmt.Sprintf("%s is waiting on a provider limit, resuming in %s: %s",
 			c.name(), wait.Round(time.Minute), detail),
 	})
 

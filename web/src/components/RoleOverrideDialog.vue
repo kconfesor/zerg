@@ -228,8 +228,8 @@ function reset() {
           <Select v-model="form.receive">
             <SelectTrigger :id="receiveId"><SelectValue /></SelectTrigger>
             <SelectContent>
-              <SelectItem value="task">task — one at a time</SelectItem>
-              <SelectItem value="batch">batch — several at once</SelectItem>
+              <SelectItem value="task">task, one at a time</SelectItem>
+              <SelectItem value="batch">batch, several at once</SelectItem>
             </SelectContent>
           </Select>
           <span class="text-muted-foreground text-[11px]">
