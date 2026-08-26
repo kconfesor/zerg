@@ -742,6 +742,12 @@ type spendResponse struct {
 	Roles     []store.RoleUsage  `json:"roles"`
 	Providers []store.UsageTotal `json:"providers"`
 	Models    []store.UsageTotal `json:"models"`
+
+	// Flags are roles whose cache hit rate has fallen against their own past.
+	// The one regression nothing else reports: a changed byte in the composed
+	// system prompt invalidates the cache silently, and the bill is the only
+	// thing that moves.
+	Flags []store.CacheFlag `json:"flags"`
 }
 
 // spend serves the whole spend view from one read of usage_turns.
@@ -784,12 +790,19 @@ func (s *Server) spend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	flags, err := s.db.CacheRegressions(r.Context(), id, from)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+
 	out := spendResponse{
 		Range:          rng,
 		SessionStarted: rng == store.RangeSession && !from.IsZero(),
 		Roles:          orEmpty(roles),
 		Providers:      orEmpty(providers),
 		Models:         orEmpty(models),
+		Flags:          orEmpty(flags),
 	}
 	if !from.IsZero() {
 		out.From = &from

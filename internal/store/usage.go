@@ -408,6 +408,189 @@ func (db *DB) countRoleTasks(ctx context.Context, projectID string, since time.T
 	return rows.Err()
 }
 
+// CacheFlag is a role whose cache hit rate has fallen against its own past.
+//
+// This is the regression nothing else reports. Prompt caching is a prefix match
+// over tools -> system -> messages, so one changed byte in the composed system
+// prompt invalidates everything after it — and the failure is silent. No error,
+// no warning, just cache_read_input_tokens going to zero while the same work
+// costs roughly ten times more on input. §11.4 calls the hit rate a headline
+// metric for exactly this reason: it is the only number that moves.
+type CacheFlag struct {
+	Role string `json:"role"`
+
+	// Recent and Trailing are hit rates, 0..1, over the newest turns and
+	// everything before them in the window.
+	Recent   float64 `json:"recent"`
+	Trailing float64 `json:"trailing"`
+
+	RecentTurns   int `json:"recentTurns"`
+	TrailingTurns int `json:"trailingTurns"`
+
+	// EditedAt is when this role's library entry last changed, and is present
+	// only when that is recent enough to be a plausible cause. Deliberately
+	// "edited" and not "its prompt was edited": the timestamp moves for any
+	// change to the template, and claiming the prompt specifically would be
+	// asserting something this does not know.
+	EditedAt *time.Time `json:"editedAt,omitempty"`
+}
+
+const (
+	// cacheFloor is the trailing rate below which a fall is not news. A role
+	// that has never cached well has nothing to regress from, and flagging it
+	// every window would train the reader to ignore the flag.
+	cacheFloor = 0.4
+
+	// cacheDrop is how far the rate has to fall to be worth saying. Twenty
+	// points is roughly a doubling of the input bill, which is the point at
+	// which someone would want to know.
+	cacheDrop = 0.2
+
+	// cacheMinTurns per side, so one unusual turn is never a regression.
+	cacheMinTurns = 3
+
+	// cacheWindow caps how many of a role's turns are read. A trailing average
+	// over the last two hundred turns is as good as one over ten thousand, and
+	// this runs on a page load.
+	cacheWindow = 200
+
+	// cacheEditRecent is how long after a template edit the edit is still
+	// offered as the likely cause.
+	cacheEditRecent = 6 * time.Hour
+)
+
+// CacheRegressions finds roles whose cache hit rate has fallen against their
+// own trailing average, newest fall first.
+func (db *DB) CacheRegressions(ctx context.Context, projectID string, since time.Time) ([]CacheFlag, error) {
+	args := []any{projectID}
+	where := "project_id = ?"
+	if !since.IsZero() {
+		where += " AND ts >= ?"
+		args = append(args, since.UTC().Format(time.RFC3339Nano))
+	}
+
+	// Ordered newest first and capped, so the split below is "the recent ones
+	// against everything before them" without reading a year of history.
+	rows, err := db.read.QueryContext(ctx,
+		`SELECT role, cache_read_tokens, input_tokens, cache_write_tokens
+		   FROM usage_turns
+		  WHERE `+where+`
+		  ORDER BY ts DESC`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("reading cache rates: %w", err)
+	}
+	defer rows.Close()
+
+	type turn struct{ read, in, write int }
+	byRole := map[string][]turn{}
+	var order []string
+	for rows.Next() {
+		var role string
+		var t turn
+		if err := rows.Scan(&role, &t.read, &t.in, &t.write); err != nil {
+			return nil, err
+		}
+		if _, seen := byRole[role]; !seen {
+			order = append(order, role)
+		}
+		if len(byRole[role]) < cacheWindow {
+			byRole[role] = append(byRole[role], t)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	edits, err := db.roleEdits(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	// A hit rate over a set of turns, summed rather than averaged per turn: a
+	// turn with ten tokens and a turn with a million are not equal evidence.
+	rate := func(ts []turn) (float64, bool) {
+		var read, total int
+		for _, t := range ts {
+			read += t.read
+			total += t.read + t.in + t.write
+		}
+		if total == 0 {
+			return 0, false
+		}
+		return float64(read) / float64(total), true
+	}
+
+	var out []CacheFlag
+	for _, role := range order {
+		ts := byRole[role]
+		if len(ts) < cacheMinTurns*2 {
+			continue
+		}
+		// A third recent, two thirds trailing, with a floor on each side.
+		n := len(ts) / 3
+		if n < cacheMinTurns {
+			n = cacheMinTurns
+		}
+		if len(ts)-n < cacheMinTurns {
+			continue
+		}
+		recent, okR := rate(ts[:n])
+		trailing, okT := rate(ts[n:])
+		if !okR || !okT {
+			continue
+		}
+		if trailing < cacheFloor || recent > trailing-cacheDrop {
+			continue
+		}
+
+		flag := CacheFlag{
+			Role: role, Recent: recent, Trailing: trailing,
+			RecentTurns: n, TrailingTurns: len(ts) - n,
+		}
+		if at, ok := edits[role]; ok && time.Since(at) < cacheEditRecent {
+			edited := at
+			flag.EditedAt = &edited
+		}
+		out = append(out, flag)
+	}
+
+	// Worst fall first: if there is more than one, the biggest is the one to
+	// look at.
+	sort.SliceStable(out, func(i, j int) bool {
+		return out[i].Trailing-out[i].Recent > out[j].Trailing-out[j].Recent
+	})
+	return out, nil
+}
+
+// roleEdits is when each library role was last changed, keyed by the name usage
+// rows are recorded under.
+//
+// Every role in the library, not this project's team. A role taken off the team
+// keeps the spend it already incurred, and that spend is exactly when an edit
+// is worth knowing about — joining through project_roles would drop the
+// explanation for every row it can still be asked about. Names are unique in
+// the library, which is what makes the lookup by name sound.
+func (db *DB) roleEdits(ctx context.Context) (map[string]time.Time, error) {
+	rows, err := db.read.QueryContext(ctx,
+		`SELECT name, updated_at FROM role_templates`)
+	if err != nil {
+		return nil, fmt.Errorf("reading role edits: %w", err)
+	}
+	defer rows.Close()
+
+	out := map[string]time.Time{}
+	for rows.Next() {
+		var name, updated string
+		if err := rows.Scan(&name, &updated); err != nil {
+			return nil, err
+		}
+		if at, err := time.Parse(time.RFC3339Nano, updated); err == nil {
+			out[name] = at
+		}
+	}
+	return out, rows.Err()
+}
+
 // UsageForTask totals one card, across every role that touched it and every
 // lap it made through the pipeline. This is what rework actually costs.
 func (db *DB) UsageForTask(ctx context.Context, taskID string) (UsageTotal, error) {

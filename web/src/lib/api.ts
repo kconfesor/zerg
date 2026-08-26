@@ -85,6 +85,25 @@ export interface RoleUsage {
   lastAt: string
 }
 
+/**
+ * A role whose cache hit rate has fallen against its own past.
+ *
+ * The regression nothing else reports: caching is a prefix match, so one
+ * changed byte in the composed system prompt invalidates everything after it —
+ * silently, with the bill as the only symptom.
+ */
+export interface CacheFlag {
+  role: string
+  /** Hit rates, 0..1, over the newest turns and everything before them. */
+  recent: number
+  trailing: number
+  recentTurns: number
+  trailingTurns: number
+  /** When the role's library entry last changed, if recent enough to be the
+   *  likely cause. Any edit moves it, not the prompt specifically. */
+  editedAt?: string
+}
+
 export type SpendRange = 'session' | '24h' | '7d' | '30d' | 'all'
 
 export interface Spend {
@@ -96,6 +115,7 @@ export interface Spend {
   roles: RoleUsage[]
   providers: UsageTotal[]
   models: UsageTotal[]
+  flags: CacheFlag[]
 }
 
 export interface Task {

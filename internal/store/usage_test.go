@@ -361,3 +361,101 @@ func TestResolveSpendRange(t *testing.T) {
 		}
 	}
 }
+
+// The regression nothing else reports: a prompt edit that stops the cache
+// hitting costs roughly ten times more on input and raises no error anywhere.
+func TestCacheRegressionIsFlaggedAgainstTheRolesOwnPast(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	p, err := db.CreateProject(ctx, repoDir(t, "cache"), "cache", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now().UTC()
+	add := func(role string, read, in int, at time.Time) {
+		t.Helper()
+		if err := db.RecordUsage(ctx, UsageTurn{
+			ProjectID: p.ID, Role: role, Model: "opus", Provider: "anthropic",
+			CacheReadTokens: read, InputTokens: in, OutputTokens: 100,
+			CostUSD: 1, CostSource: CostFromHarness, At: at,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// architect cached well, then stopped: 90% across six turns, then 10%.
+	for i := 0; i < 6; i++ {
+		add("architect", 9000, 1000, now.Add(time.Duration(-20+i)*time.Minute))
+	}
+	for i := 0; i < 3; i++ {
+		add("architect", 1000, 9000, now.Add(time.Duration(-3+i)*time.Minute))
+	}
+	// coder never wavered, and must not be flagged for being steady.
+	for i := 0; i < 9; i++ {
+		add("coder", 9000, 1000, now.Add(time.Duration(-20+i)*time.Minute))
+	}
+	// scribe never cached at all: nothing to regress from, so no flag. A role
+	// that has always been at 5% is not news every time anyone looks.
+	for i := 0; i < 9; i++ {
+		add("scribe", 500, 9500, now.Add(time.Duration(-20+i)*time.Minute))
+	}
+
+	flags, err := db.CacheRegressions(ctx, p.ID, time.Time{})
+	if err != nil {
+		t.Fatalf("CacheRegressions: %v", err)
+	}
+	if len(flags) != 1 {
+		t.Fatalf("flagged %d roles, want only architect: %+v", len(flags), flags)
+	}
+	f := flags[0]
+	if f.Role != "architect" {
+		t.Fatalf("flagged %s", f.Role)
+	}
+	if f.Recent > 0.15 || f.Trailing < 0.85 {
+		t.Errorf("recent %.2f trailing %.2f; want a fall from ~0.9 to ~0.1", f.Recent, f.Trailing)
+	}
+	if f.RecentTurns != 3 || f.TrailingTurns != 6 {
+		t.Errorf("split %d recent / %d trailing, want 3/6", f.RecentTurns, f.TrailingTurns)
+	}
+	// No template in the library for these names, so nothing is blamed.
+	if f.EditedAt != nil {
+		t.Errorf("blamed an edit at %v with no such role in the library", f.EditedAt)
+	}
+}
+
+// Too few turns is not evidence. One unusual turn must never read as a
+// regression, or the flag becomes something people learn to ignore.
+func TestCacheRegressionNeedsEnoughTurns(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	p, err := db.CreateProject(ctx, repoDir(t, "thin"), "thin", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now().UTC()
+	// Five turns: four good, one terrible. Not enough to split three and three.
+	for i := 0; i < 4; i++ {
+		if err := db.RecordUsage(ctx, UsageTurn{
+			ProjectID: p.ID, Role: "coder", CacheReadTokens: 9000, InputTokens: 1000,
+			CostSource: CostFromHarness, At: now.Add(time.Duration(-10+i) * time.Minute),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.RecordUsage(ctx, UsageTurn{
+		ProjectID: p.ID, Role: "coder", CacheReadTokens: 0, InputTokens: 9000,
+		CostSource: CostFromHarness, At: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	flags, err := db.CacheRegressions(ctx, p.ID, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(flags) != 0 {
+		t.Errorf("flagged %+v on five turns", flags)
+	}
+}

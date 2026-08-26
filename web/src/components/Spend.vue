@@ -106,6 +106,33 @@ function hitRate(r: { cacheReadTokens: number; inputTokens: number; cacheWriteTo
   return den ? Math.round((r.cacheReadTokens / den) * 100) : 0
 }
 
+/** Flagged roles, by name, so a row can mark itself. */
+const flagged = computed(() => new Map((data.value?.flags ?? []).map((f) => [f.role, f])))
+
+/**
+ * How much more the same input costs at the fallen rate.
+ *
+ * A cache read is ~0.1x uncached input, not free, so the comparison is between
+ * two blended prices rather than between the uncached fractions. Dividing those
+ * fractions — 93% against 5% — reads as 18x and is simply wrong: it prices a
+ * cache read at zero. At 95% the blend is 0.145, at 7% it is 0.937, which is
+ * the 6x this actually is. An overstated number in a warning is worse than no
+ * number, because the first time someone checks it the whole panel loses them.
+ */
+function inputMultiple(f: { recent: number; trailing: number }): number {
+  const blended = (rate: number) => 1 - rate + rate * 0.1
+  return Math.max(2, Math.round(blended(f.recent) / blended(f.trailing)))
+}
+
+/** "14 minutes ago", "3 hours ago" — the shape the cause is usually stated in. */
+function ago(iso: string): string {
+  const mins = Math.round((Date.now() - new Date(iso).getTime()) / 60000)
+  if (mins < 1) return 'just now'
+  if (mins < 60) return `${mins} minute${mins === 1 ? '' : 's'} ago`
+  const hours = Math.round(mins / 60)
+  return `${hours} hour${hours === 1 ? '' : 's'} ago`
+}
+
 /** The widest role sets the scale, so a row's length reads as volume rather
  *  than every row filling the track. */
 const widest = computed(() => Math.max(1, ...rows.value.map(tokensOf)))
@@ -315,7 +342,12 @@ function showTip(ev: MouseEvent | FocusEvent, r: RoleUsage, c: { label: string; 
           <div
             v-for="r in rows"
             :key="r.role"
-            class="hover:bg-muted/40 grid grid-cols-[7.5rem_minmax(0,1fr)_5rem] items-center gap-3 px-1.5 py-1.5"
+            :class="[
+              'grid grid-cols-[7.5rem_minmax(0,1fr)_5rem] items-center gap-3 px-1.5 py-1.5',
+              flagged.has(r.role)
+                ? 'bg-[var(--status-warning)]/[0.07] border-l-2 border-l-[var(--status-warning)]'
+                : 'hover:bg-muted/40',
+            ]"
           >
             <div class="min-w-0">
               <div class="truncate text-xs font-medium">{{ r.role }}</div>
@@ -359,6 +391,35 @@ function showTip(ev: MouseEvent | FocusEvent, r: RoleUsage, c: { label: string; 
               >
             </div>
           </div>
+        </div>
+        <!-- The regression nothing else reports. Amber and worded, never
+             colour alone: this is not an error, it is a number that moved, and
+             the reader has to be told which number and by how much. -->
+        <div
+          v-for="f in data?.flags ?? []"
+          :key="f.role"
+          class="mt-3 flex gap-2.5 border border-[var(--status-warning)]/40 bg-[var(--status-warning)]/[0.07] p-3"
+        >
+          <span
+            class="text-background mt-px grid size-4 shrink-0 place-items-center rounded-full bg-[var(--status-warning)] text-[10px] font-bold"
+            aria-hidden="true"
+            >!</span
+          >
+          <p class="text-[11px] leading-relaxed">
+            <b class="font-semibold">{{ f.role }}'s cache hit rate fell to {{ Math.round(f.recent * 100) }}%</b>
+            over its last {{ f.recentTurns }} turns, from
+            {{ Math.round(f.trailing * 100) }}% across the {{ f.trailingTurns }} before them.
+            <template v-if="f.editedAt">
+              Its role was edited {{ ago(f.editedAt) }} — caching is a prefix match, so one changed
+              byte in the composed system prompt invalidates everything after it, silently.
+            </template>
+            <template v-else>
+              Caching is a prefix match over the composed system prompt, so one changed byte
+              invalidates everything after it, silently.
+            </template>
+            Cache reads cost about a tenth of uncached input, so the same work now bills roughly
+            {{ inputMultiple(f) }}× more on input.
+          </p>
         </div>
       </section>
 
