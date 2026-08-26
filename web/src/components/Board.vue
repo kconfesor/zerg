@@ -86,18 +86,17 @@ const byLane = computed(() => {
          lanes, so the pipeline no longer read left to right and a card's lane
          had to be found rather than seen. A board scrolls sideways; that is
          what a board is. -->
-    <!-- min-w-max is what lets the row carry its own trailing gutter.
-         The row is a block child of the scroll box, so its width is the box's
-         content width and the lanes simply overflowed it. Nothing placed after
-         the last lane counted — not a spacer, not a margin, not the box's own
-         padding-right, which a scroll container drops from its overflow area —
-         so at full scroll the last lane ended flush against the window and its
-         cards read as cut off. At max-content the row is as wide as the lanes,
-         and its padding is inside its own box. min- rather than a width, so
-         with two lanes they still share the space instead of huddling left. -->
-    <div
-      class="flex flex-wrap items-start gap-3 sm:min-w-max sm:flex-nowrap sm:pr-[var(--gutter)]"
-    >
+    <!-- min-w-max is what makes the box's own right gutter appear.
+         The row is a block child of the scroll box, so its width was the box's
+         *content* width and the lanes merely overflowed it — past the padding
+         box entirely, which is why at full scroll the last lane ended flush
+         against the window and its cards read as cut off. At max-content the
+         row ends where the lanes end, so the box's padding-right is what sits
+         after it: the same 20px as the left, from the same declaration. Adding
+         padding to the row as well made it 40 against 20. min- rather than a
+         width, so with two lanes they still share the space instead of
+         huddling left. -->
+    <div class="flex flex-wrap items-start gap-3 sm:min-w-max sm:flex-nowrap">
       <section
         v-for="(lane, i) in lanes"
         :key="lane"
