@@ -17,7 +17,9 @@ import { renderMarkdown } from '@/lib/markdown'
 import { Textarea } from '@/components/ui/textarea'
 
 const model = defineModel<string>({ required: true })
-withDefaults(defineProps<{ rows?: number }>(), { rows: 8 })
+// id is declared rather than left to fall through: an unclaimed attribute lands
+// on the wrapping div, and a <label for> pointing at a div labels nothing.
+withDefaults(defineProps<{ rows?: number; id?: string }>(), { rows: 8, id: undefined })
 
 const area = ref<InstanceType<typeof Textarea> | null>(null)
 const tab = ref<'write' | 'preview'>('write')
@@ -129,6 +131,7 @@ const empty = computed(() => model.value.trim() === '')
 
     <Textarea
       v-show="tab === 'write'"
+      :id="id"
       ref="area"
       v-model="model"
       :rows="rows"

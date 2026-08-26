@@ -224,9 +224,14 @@ const roleCounts = computed(() => {
       </p>
 
       <ol>
+        <!-- v-memo with no dependencies: an event is immutable once recorded,
+             so a row that has been rendered never has to be patched again. With
+             two thousand of them mounted, every new event otherwise walked the
+             whole list to discover that nothing above had changed. -->
         <li
           v-for="e in events"
           :key="e.id"
+          v-memo="[]"
           class="hover:bg-muted/40 flex flex-col px-2 py-0.5 md:flex-row md:gap-2 md:px-3"
           :class="e.kind === 'error' ? 'bg-destructive/10' : ''"
         >

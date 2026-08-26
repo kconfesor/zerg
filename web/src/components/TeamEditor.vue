@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, useId } from 'vue'
 import type { Model, ProjectRole, ResolvedRole, RoleTemplate } from '@/lib/api'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -7,8 +7,10 @@ import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
+import ModelPicker from '@/components/ModelPicker.vue'
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
   DialogFooter,
@@ -22,6 +24,16 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
+
+// Every field's label points at the control it names. Without the pairing a
+// screen reader reads an unlabelled control, and clicking the word does not
+// focus the field it sits above.
+const nameId = useId()
+const harnessId = useId()
+const receiveId = useId()
+const gateId = useId()
+const batchId = useId()
+const promptId = useId()
 
 const props = defineProps<{
   library: RoleTemplate[]
@@ -38,24 +50,6 @@ const emit = defineEmits<{
 const editing = ref<RoleTemplate | null>(null)
 const open = ref(false)
 const custom = ref(false)
-
-const modelListOpen = ref(false)
-
-/** The catalog narrowed to what has been typed, matched anywhere in the id so
- *  "sol" finds "openai-codex/gpt-5.6-sol". */
-const matchingModels = computed(() => {
-  const all = props.models[editing.value?.harness ?? ''] ?? []
-  const q = (editing.value?.model ?? '').trim().toLowerCase()
-  const hits = q ? all.filter((m) => m.ID.toLowerCase().includes(q)) : all
-  // Capped: a list longer than the popover can show is a list nobody reads to
-  // the end of, and the filter is the way through it.
-  return hits.slice(0, 50)
-})
-
-function chooseModel(id: string) {
-  if (editing.value) editing.value.model = id
-  modelListOpen.value = false
-}
 
 const selectedIds = computed(() => new Set(props.team.map((r) => r.id)))
 
@@ -193,8 +187,8 @@ function save() {
   <!-- Role editor. Editing a template changes that role everywhere, which is
        the point of a library and worth saying out loud. -->
   <Dialog v-model:open="open">
-    <DialogContent v-if="editing" class="sm:max-w-2xl">
-      <DialogHeader>
+    <DialogContent v-if="editing" class="gap-0 overflow-hidden p-0 sm:max-w-2xl">
+      <DialogHeader class="hairline-b shrink-0 px-5 py-4 pr-12">
         <DialogTitle class="flex items-center gap-2">
           {{ editing.name }}
           <Badge v-if="editing.builtin" variant="outline">built-in</Badge>
@@ -204,16 +198,16 @@ function save() {
         </DialogDescription>
       </DialogHeader>
 
-      <div class="grid max-h-[60vh] gap-3 overflow-y-auto sm:grid-cols-2">
+      <DialogBody class="grid gap-3 sm:grid-cols-2">
         <div class="flex flex-col gap-1.5">
-          <Label>Name</Label>
-          <Input v-model="editing.name" />
+          <Label :for="nameId">Name</Label>
+          <Input :id="nameId" v-model="editing.name" />
         </div>
 
         <div class="flex flex-col gap-1.5">
-          <Label>Harness</Label>
+          <Label :for="harnessId">Harness</Label>
           <Select v-model="editing.harness">
-            <SelectTrigger><SelectValue /></SelectTrigger>
+            <SelectTrigger :id="harnessId"><SelectValue /></SelectTrigger>
             <SelectContent>
               <SelectItem v-for="h in harnesses" :key="h" :value="h">{{ h }}</SelectItem>
             </SelectContent>
@@ -221,40 +215,7 @@ function save() {
         </div>
 
         <div class="flex flex-col gap-1.5">
-          <Label for="model">Model</Label>
-          <!-- Typed, not picked from a list. pi reports dozens of models, and
-               scrolling a dropdown to find one is slower than typing three
-               characters of it. What is typed is also what is used, so a model
-               a catalog has not heard of still works — the list narrows, it
-               does not constrain. -->
-          <div class="relative">
-            <Input
-              id="model"
-              v-model="editing.model"
-              autocomplete="off"
-              placeholder="harness default"
-              @focus="modelListOpen = true"
-              @input="modelListOpen = true"
-              @keydown.escape="modelListOpen = false"
-            />
-            <div
-              v-if="modelListOpen && matchingModels.length"
-              class="bg-popover absolute z-50 mt-1 max-h-56 w-full overflow-y-auto border shadow-md"
-            >
-              <button
-                v-for="m in matchingModels"
-                :key="m.ID"
-                type="button"
-                class="hover:bg-muted flex w-full items-center gap-2 px-2 py-1.5 text-left text-xs"
-                @mousedown.prevent="chooseModel(m.ID)"
-              >
-                <span class="min-w-0 flex-1 truncate font-mono">{{ m.ID }}</span>
-                <span v-if="m.Provider" class="text-muted-foreground shrink-0 text-[10px]">
-                  {{ m.Provider }}
-                </span>
-              </button>
-            </div>
-          </div>
+          <ModelPicker v-model="editing.model" :models="models[editing.harness] ?? []" label="Model" />
           <span class="text-muted-foreground text-xs">
             {{ (models[editing.harness] ?? []).length }} listed by {{ editing.harness }}. A working
             model can be absent from a catalog, so anything you type is accepted.
@@ -262,9 +223,9 @@ function save() {
         </div>
 
         <div class="flex flex-col gap-1.5">
-          <Label>Receive</Label>
+          <Label :for="receiveId">Receive</Label>
           <Select v-model="editing.receive">
-            <SelectTrigger><SelectValue /></SelectTrigger>
+            <SelectTrigger :id="receiveId"><SelectValue /></SelectTrigger>
             <SelectContent>
               <SelectItem value="task">task — one at a time</SelectItem>
               <SelectItem value="batch">batch — several at once</SelectItem>
@@ -273,9 +234,9 @@ function save() {
         </div>
 
         <div class="flex flex-col gap-1.5">
-          <Label>Gate</Label>
+          <Label :for="gateId">Gate</Label>
           <Select v-model="editing.gate">
-            <SelectTrigger><SelectValue /></SelectTrigger>
+            <SelectTrigger :id="gateId"><SelectValue /></SelectTrigger>
             <SelectContent>
               <SelectItem value="none">none</SelectItem>
               <SelectItem value="approval">approval</SelectItem>
@@ -287,20 +248,20 @@ function save() {
         </div>
 
         <div v-if="editing.receive === 'batch'" class="flex flex-col gap-1.5">
-          <Label>Batch max items</Label>
-          <Input v-model.number="editing.batchMaxItems" type="number" min="1" />
+          <Label :for="batchId">Batch max items</Label>
+          <Input :id="batchId" v-model.number="editing.batchMaxItems" type="number" min="1" />
         </div>
 
         <div class="flex flex-col gap-1.5 sm:col-span-2">
-          <Label>Prompt</Label>
-          <Textarea v-model="editing.prompt" rows="12" class="leading-relaxed" />
+          <Label :for="promptId">Prompt</Label>
+          <Textarea :id="promptId" v-model="editing.prompt" rows="12" class="leading-relaxed" />
           <span class="text-muted-foreground text-xs">
             Composed with the shared instructions at every spawn.
           </span>
         </div>
-      </div>
+      </DialogBody>
 
-      <DialogFooter>
+      <DialogFooter class="hairline-t shrink-0 px-5 py-4">
         <Button variant="outline" @click="open = false">Cancel</Button>
         <Button @click="save">Save</Button>
       </DialogFooter>

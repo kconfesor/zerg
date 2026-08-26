@@ -9,7 +9,11 @@
  *
  * One strip of labelled figures instead. Every one answers a question you would
  * otherwise open something to ask: how much is queued, how much is put away,
- * what the checkouts cost, what the run has cost.
+ * what the checkouts cost.
+ *
+ * Spend is deliberately not among them any more. It is the one figure that
+ * matters whatever you are looking at, so it moved to the bar that is on every
+ * screen; here it was visible only while already reading the board.
  */
 import { computed } from 'vue'
 import { FolderGit2, GitBranch, HardDrive } from '@lucide/vue'
@@ -97,8 +101,6 @@ function size(bytes: number): string {
         </dd>
         <dt class="text-muted-foreground mt-1 text-[10px] tracking-wide uppercase">worktrees</dt>
       </div>
-
-      <div class="ml-auto"><slot name="usage" /></div>
     </dl>
   </div>
 </template>

@@ -13,7 +13,24 @@ import {
   InputGroupInput,
 } from '@/components/ui/input-group'
 
-const props = defineProps<{ attention: Attention | null; compact?: boolean }>()
+const props = defineProps<{
+  attention: Attention | null
+  compact?: boolean
+  /**
+   * Whether an operation is in flight, asked by key. A decision runs a merge or
+   * opens a pull request, so a second press is not a wasted request — it races
+   * the first through git.
+   */
+  busy?: (key: string) => boolean
+}>()
+
+/** Local shorthands, so the template does not repeat the key format. */
+function deciding(id: string): boolean {
+  return props.busy?.(`decide:${id}`) ?? false
+}
+function answering(id: string): boolean {
+  return props.busy?.(`answer:${id}`) ?? false
+}
 const emit = defineEmits<{
   approve: [id: string]
   reject: [id: string, note: string]
@@ -252,12 +269,18 @@ function empty(a: Attention | null): boolean {
           placeholder="reason, if rejecting"
         />
         <InputGroupAddon align="inline-end">
-          <InputGroupButton variant="default" size="sm" @click="emit('approve', a.id)">
+          <InputGroupButton
+            variant="default"
+            size="sm"
+            :disabled="deciding(a.id)"
+            @click="emit('approve', a.id)"
+          >
             Approve
           </InputGroupButton>
           <InputGroupButton
             variant="destructive"
             size="sm"
+            :disabled="deciding(a.id)"
             @click="emit('reject', a.id, notes[a.id] ?? '')"
           >
             Reject
@@ -289,12 +312,14 @@ function empty(a: Attention | null): boolean {
         <InputGroupInput
           v-model="answers[c.id]"
           placeholder="your answer"
+          :disabled="answering(c.id)"
           @keyup.enter="emit('answer', c.id, answers[c.id] ?? '')"
         />
         <InputGroupAddon align="inline-end">
           <InputGroupButton
             variant="default"
             size="sm"
+            :disabled="answering(c.id)"
             @click="emit('answer', c.id, answers[c.id] ?? '')"
           >
             Answer

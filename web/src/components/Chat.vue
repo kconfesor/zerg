@@ -7,7 +7,7 @@
  * its own: messages persist, survive a reload, and resume after a dropped
  * connection because they are events, and events already do all three.
  */
-import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, useId, watch } from 'vue'
 import {
   api,
   streamActivity,
@@ -17,8 +17,8 @@ import {
   type Project,
 } from '@/lib/api'
 import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import ModelPicker from '@/components/ModelPicker.vue'
 import { Trash2 } from '@lucide/vue'
 import {
   Dialog,
@@ -42,6 +42,11 @@ import {
   InputGroupButton,
   InputGroupTextarea,
 } from '@/components/ui/input-group'
+
+// Every field's label points at the control it names. Without the pairing a
+// screen reader reads an unlabelled control, and clicking the word does not
+// focus the field it sits above.
+const harnessId = useId()
 
 const props = defineProps<{
   project: Project | null
@@ -99,14 +104,37 @@ function accept(e: ActivityEvent) {
     thinking.value = false
     error.value = e.text ?? 'the agent failed'
   }
-  if (lines.value.length > MAX_LINES) {
-    lines.value.splice(0, lines.value.length - MAX_LINES)
-  }
-  scrollToEnd()
+  queueFlush()
+}
+
+/**
+ * Events arrive faster than a screen can usefully change.
+ *
+ * A replay delivers a burst, and pushing each line onto a reactive array
+ * re-rendered the transcript and scheduled a scroll every time — work that
+ * grows with the number of events for a result nobody can see. Trimming and
+ * scrolling happen once per frame instead, which is as often as anything
+ * actually appears.
+ */
+let frame = 0
+
+function queueFlush() {
+  if (frame) return
+  frame = requestAnimationFrame(() => {
+    frame = 0
+    if (lines.value.length > MAX_LINES) {
+      lines.value.splice(0, lines.value.length - MAX_LINES)
+    }
+    scrollToEnd()
+  })
 }
 
 function connect() {
   stream?.close()
+  if (frame) {
+    cancelAnimationFrame(frame)
+    frame = 0
+  }
   lines.value = []
   if (!projectId.value) return
   stream = streamActivity(projectId.value, { onEvent: accept, onCaughtUp: scrollToEnd })
@@ -115,7 +143,14 @@ function connect() {
 /** The effective harness: what is set, or the team's. */
 const harness = ref(props.project?.chatHarness ?? '')
 const model = ref(props.project?.chatModel ?? '')
-const modelListOpen = ref(false)
+/**
+ * The value that means "inherit the team's harness", which is stored as an
+ * empty string. reka reserves "" to mean "nothing selected, show the
+ * placeholder" and refuses it as an item value — this option rendered a console
+ * error and no row at all.
+ */
+const INHERIT = 'inherit:team'
+
 const confirmReset = ref(false)
 
 watch(
@@ -126,25 +161,17 @@ watch(
   },
 )
 
-/** Narrowed to what has been typed, matched anywhere in the id so "sol" finds
- *  "openai-codex/gpt-5.6-sol". Same behaviour as the role editor's. */
-const matchingModels = computed(() => {
-  const all = props.models[harness.value] ?? []
-  const q = model.value.trim().toLowerCase()
-  const hits = q ? all.filter((m) => m.ID.toLowerCase().includes(q)) : all
-  return hits.slice(0, 50)
-})
-
-function chooseModel(id: string) {
-  model.value = id
-  modelListOpen.value = false
-  setAgent(harness.value, id)
-}
+// Changing the agent ends the running session on the daemon, so two changes in
+// flight at once would end two sessions and leave the later answer describing
+// the earlier choice.
+const changingAgent = ref(false)
+const resetting = ref(false)
 
 async function setAgent(h: string, m: string) {
-  if (!projectId.value) return
+  if (!projectId.value || changingAgent.value) return
   if (h === (props.project?.chatHarness ?? '') && m === (props.project?.chatModel ?? '')) return
   harness.value = h
+  changingAgent.value = true
   try {
     // The running session was built from the old choice, so the daemon ends it;
     // the next question starts one that matches.
@@ -152,17 +179,22 @@ async function setAgent(h: string, m: string) {
     lines.value = []
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    changingAgent.value = false
   }
 }
 
 async function resetChat() {
-  if (!projectId.value) return
+  if (!projectId.value || resetting.value) return
+  resetting.value = true
   try {
     await api.resetChat(projectId.value)
     confirmReset.value = false
     lines.value = []
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    resetting.value = false
   }
 }
 
@@ -210,46 +242,26 @@ onBeforeUnmount(() => stream?.close())
          that it should not be somewhere you press by accident. -->
     <div class="flex flex-wrap items-end gap-2">
       <div class="flex flex-col gap-1">
-        <Label class="text-[10px]">Harness</Label>
-        <Select :model-value="harness" @update:model-value="(v) => setAgent(String(v), model)">
-          <SelectTrigger size="sm" class="w-36"><SelectValue /></SelectTrigger>
+        <Label :for="harnessId" class="text-[10px]">Harness</Label>
+        <Select
+          :model-value="harness || INHERIT"
+          @update:model-value="(v) => setAgent(v === INHERIT ? '' : String(v), model)"
+        >
+          <SelectTrigger :id="harnessId" size="sm" class="w-36"><SelectValue /></SelectTrigger>
           <SelectContent>
-            <SelectItem value="">inherit from the team</SelectItem>
+            <SelectItem :value="INHERIT">inherit from the team</SelectItem>
             <SelectItem v-for="h in harnesses" :key="h" :value="h">{{ h }}</SelectItem>
           </SelectContent>
         </Select>
       </div>
 
-      <div class="relative flex flex-col gap-1">
-        <Label class="text-[10px]">Model</Label>
-        <Input
-          v-model="model"
-          class="h-8 w-56 text-xs"
-          autocomplete="off"
-          placeholder="harness default"
-          @focus="modelListOpen = true"
-          @input="modelListOpen = true"
-          @keydown.escape="modelListOpen = false"
-          @blur="setAgent(harness, model)"
-        />
-        <div
-          v-if="modelListOpen && matchingModels.length"
-          class="bg-popover absolute top-full z-50 mt-1 max-h-56 w-full overflow-y-auto border shadow-md"
-        >
-          <button
-            v-for="m in matchingModels"
-            :key="m.ID"
-            type="button"
-            class="hover:bg-muted flex w-full items-center gap-2 px-2 py-1.5 text-left text-xs"
-            @mousedown.prevent="chooseModel(m.ID)"
-          >
-            <span class="min-w-0 flex-1 truncate font-mono">{{ m.ID }}</span>
-            <span v-if="m.Provider" class="text-muted-foreground shrink-0 text-[10px]">
-              {{ m.Provider }}
-            </span>
-          </button>
-        </div>
-      </div>
+      <ModelPicker
+        v-model="model"
+        :models="models[harness] ?? []"
+        label="Model"
+        input-class="h-8 w-56 text-xs"
+        @commit="(m) => setAgent(harness, m)"
+      />
 
       <Button
         variant="outline"
@@ -274,7 +286,9 @@ onBeforeUnmount(() => stream?.close())
       </p>
 
       <div class="flex flex-col gap-3">
-        <div v-for="l in lines" :key="l.id" class="text-xs">
+        <!-- A line never changes once it is in the transcript, so it never
+             needs patching again. -->
+        <div v-for="l in lines" :key="l.id" v-memo="[]" class="text-xs">
           <template v-if="l.tool">
             <p class="text-muted-foreground font-mono text-[11px]">
               <span class="opacity-60">read</span> {{ l.tool }}
@@ -340,7 +354,7 @@ onBeforeUnmount(() => stream?.close())
         </DialogHeader>
         <DialogFooter>
           <Button variant="outline" @click="confirmReset = false">Cancel</Button>
-          <Button variant="destructive" @click="resetChat">End it</Button>
+          <Button variant="destructive" :disabled="resetting" @click="resetChat">End it</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

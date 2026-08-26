@@ -7,6 +7,7 @@
  * next to the fields beats a paragraph nobody reads.
  */
 import { computed, ref, watch } from 'vue'
+import { joinArgs, splitArgs } from '@/lib/args'
 import { api, type DaemonConfig, type SettingsResponse } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -182,33 +183,41 @@ function extraFor(h: string): string {
   return joinArgs(classify(h).extra)
 }
 
+/**
+ * Put the edited free-text flags back, in place.
+ *
+ * In place matters. The obvious version — keep the known flags, then append
+ * whatever the text box holds — moves every switch ahead of every custom flag,
+ * and the last statement wins in each of these CLIs. Someone who wrote
+ * `--permission-mode plan` after the checkbox that sets bypassPermissions had
+ * their intent silently reversed by opening the settings page.
+ *
+ * So the original positions are kept: each slot that held a custom flag takes
+ * the next one from the edited text, and anything left over goes where the
+ * custom flags already were.
+ */
 function setExtra(h: string, text: string) {
   const flags = flagsOf(h)
   const { known } = classify(h)
-  setFlags(h, [...flags.filter((_, i) => known[i]), ...splitArgs(text)])
-}
+  const edited = splitArgs(text)
 
-/**
- * Shell-ish splitting, so an argument can contain a space.
- *
- * Splitting on whitespace made `--flag "two words"` unrepresentable: it came
- * back as two arguments and the harness saw a flag with a truncated value and
- * a stray one after it. Only quoting is honoured — no expansion, no escapes
- * beyond the quotes themselves — because this is a list of arguments, not a
- * shell command, and anything cleverer would invite it to be treated as one.
- */
-function splitArgs(text: string): string[] {
   const out: string[] = []
-  const re = /"([^"]*)"|'([^']*)'|(\S+)/g
-  for (let m = re.exec(text); m; m = re.exec(text)) {
-    out.push(m[1] ?? m[2] ?? m[3])
+  let next = 0
+  let lastExtra = -1
+  for (let i = 0; i < flags.length; i++) {
+    if (known[i]) {
+      out.push(flags[i])
+      continue
+    }
+    if (next < edited.length) {
+      lastExtra = out.length
+      out.push(edited[next++])
+    }
   }
-  return out
-}
-
-/** The inverse: anything containing a space comes back quoted. */
-function joinArgs(args: string[]): string {
-  return args.map((a) => (/\s|"/.test(a) ? JSON.stringify(a) : a)).join(' ')
+  // Anything new goes beside the custom flags rather than at the very end,
+  // which is where they were relative to the switches.
+  out.splice(lastExtra + 1, 0, ...edited.slice(next))
+  setFlags(h, out)
 }
 
 const ts = computed(() => data.value?.tailnet)
@@ -416,7 +425,8 @@ const loopback = computed(() => {
         </div>
         <p class="text-muted-foreground text-[11px] leading-snug">
           Only the transcript. What a task cost, how long it took and how it ended are kept
-          indefinitely.
+          indefinitely. A shortened window takes effect at the next sweep, which runs every six
+          hours and on startup.
         </p>
       </div>
 

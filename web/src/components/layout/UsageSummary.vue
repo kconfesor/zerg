@@ -10,6 +10,7 @@
  */
 import { computed, ref, watch } from 'vue'
 import { api, type UsageTotal } from '@/lib/api'
+import { latest } from '@/lib/latest'
 import { Button } from '@/components/ui/button'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 
@@ -19,7 +20,13 @@ const byModel = ref<UsageTotal[]>([])
 const byRole = ref<UsageTotal[]>([])
 const failed = ref(false)
 
+// Two requests per load, per project, with a switch able to happen between
+// them: without this the previous project's totals can land last and be shown,
+// to four decimal places, under the current project's name.
+const newest = latest()
+
 async function load() {
+  const current = newest()
   if (!props.projectId) {
     byModel.value = []
     byRole.value = []
@@ -30,10 +37,12 @@ async function load() {
       api.usage(props.projectId, 'model'),
       api.usage(props.projectId, 'role'),
     ])
+    if (!current()) return
     byModel.value = m
     byRole.value = r
     failed.value = false
   } catch {
+    if (!current()) return
     failed.value = true
   }
 }
@@ -93,15 +102,29 @@ const tiers = [
 <template>
   <Popover v-if="projectId">
     <PopoverTrigger as-child>
-      <Button variant="ghost" size="sm" class="gap-2 tabular-nums" :disabled="!totals.turns">
-        <span class="text-muted-foreground text-[11px]">usage</span>
-        <span v-if="totals.turns" class="text-[11px] font-semibold">
+      <!-- The figures alone. The word "usage" labelled what the numbers
+           already say — a token count and a dollar amount are not mistakable
+           for anything else — and the asterisk marked a caveat you could only
+           resolve by opening the thing it was attached to. The caveat is still
+           told, in the tooltip and in full inside the panel. -->
+      <Button
+        variant="ghost"
+        size="sm"
+        class="gap-2.5 tabular-nums"
+        :disabled="!totals.turns"
+        :title="
+          allOnPlan
+            ? 'Every turn ran on a plan, so this is what the tokens would have cost metered'
+            : undefined
+        "
+      >
+        <span v-if="totals.turns" class="text-[13px] font-semibold">
           {{ compact(tokens) }} tok
         </span>
-        <span v-if="totals.turns" class="text-[11px] font-semibold">
-          {{ money(totals.cost) }}<span v-if="allOnPlan" class="opacity-60">*</span>
+        <span v-if="totals.turns" class="text-[13px] font-semibold">
+          {{ money(totals.cost) }}
         </span>
-        <span v-else class="text-muted-foreground text-[11px]">none yet</span>
+        <span v-else class="text-muted-foreground text-[11px]">no usage yet</span>
       </Button>
     </PopoverTrigger>
 

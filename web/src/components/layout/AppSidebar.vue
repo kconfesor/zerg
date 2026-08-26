@@ -4,13 +4,21 @@ import {
   Activity as ActivityIcon,
   Columns3,
   FolderGit2,
+  GitBranch,
   MessageSquare,
   Settings as SettingsIcon,
   ShieldCheck,
   Users,
 } from '@lucide/vue'
-import type { RoleStatus, SwarmStatus } from '@/lib/api'
+import type { Project, RoleStatus, SwarmStatus } from '@/lib/api'
 import QuotaBars from '@/components/QuotaBars.vue'
+import ProjectAvatar from '@/components/ProjectAvatar.vue'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+} from '@/components/ui/select'
 
 import type { View } from '@/router'
 
@@ -19,11 +27,26 @@ const props = defineProps<{
   status: SwarmStatus
   taskCount: number
   projectCount: number
+  /** Which project everything on screen is scoped to, and what there is to
+   *  switch between. The switcher lives here rather than in the top bar
+   *  because it is the context every other control in this rail inherits —
+   *  the board, the roles below, the quota. */
+  projects: Project[]
+  current: Project | null
   /** Whether the drawer is showing. Ignored at md and above, where the rail
    *  is always part of the layout. */
   open: boolean
 }>()
-const emit = defineEmits<{ navigate: [view: View]; close: [] }>()
+const emit = defineEmits<{
+  navigate: [view: View]
+  close: []
+  openProject: [project: Project]
+}>()
+
+function pick(id: unknown) {
+  const project = props.projects.find((p) => p.id === id)
+  if (project && project.id !== props.current?.id) emit('openProject', project)
+}
 
 // Icons are picked for what the view does, not for decoration: lanes for the
 // board, a pulse for the live stream, a bell for the one screen that is
@@ -96,14 +119,69 @@ function live(r: RoleStatus): boolean {
         height="36"
         class="size-9 shrink-0"
       />
+      <!-- The mark and the name, and nothing else. This used to carry a
+           pulsing "live" badge, which said the same thing as the run state in
+           the bar and the roles listed below it — three places for one fact,
+           and the one attached to the logo was the one furthest from anything
+           you could do about it. -->
       <span class="text-base font-bold tracking-tight">zerg</span>
-      <span
-        v-if="status.running"
-        class="ml-auto flex items-center gap-1.5 text-[10px] font-semibold tracking-wider text-[var(--status-good)] uppercase"
-      >
-        <span class="pulse-dot size-1.5 rounded-full bg-current" />
-        live
-      </span>
+    </div>
+
+    <!-- Which project. First thing in the rail, above the destinations,
+         because every one of them means something different depending on this
+         answer — and it stays on screen rather than being one more thing in a
+         top bar that is already carrying the run control and the alerts. -->
+    <div v-if="projects.length" class="hairline-b p-2">
+      <Select :model-value="current?.id" @update:model-value="pick">
+        <!-- Three overrides of SelectTrigger's own utilities, each for a
+             reason the default shape cannot accommodate:
+               h-auto  — the variant sets a fixed 32px, and this trigger is two
+                         lines, so the branch overflowed the box it was in.
+               justify-start — the default spreads its children apart, which put
+                         57px of nothing between the mark and the name.
+               border/bg — this sits in a rail, not in a form; a boxed control
+                         here reads as a field waiting to be filled in. -->
+        <SelectTrigger
+          class="hover:bg-muted h-auto w-full justify-start gap-2.5 border-0 bg-transparent px-2 py-2 transition-colors data-[size=default]:h-auto"
+          aria-label="Switch project"
+        >
+          <ProjectAvatar :project="current" />
+          <!-- min-w-0 so a long repository name ellipses instead of pushing the
+               chevron off the rail; flex-1 so the chevron is pushed to the far
+               edge rather than sitting against the text. -->
+          <span class="flex min-w-0 flex-1 flex-col items-start gap-0.5 text-left">
+            <span class="w-full truncate text-xs leading-tight font-semibold">
+              {{ current?.name ?? 'choose a project' }}
+            </span>
+            <!-- The base branch, because it is the answer to "what will this
+                 land on" and it is not visible anywhere else on the board. -->
+            <span
+              v-if="current"
+              class="text-muted-foreground flex w-full min-w-0 items-center gap-1 text-[10px] leading-tight"
+            >
+              <GitBranch :size="9" class="shrink-0" aria-hidden="true" />
+              <span class="truncate">{{ current.baseBranch }}</span>
+            </span>
+          </span>
+        </SelectTrigger>
+        <!-- popper, not the default item-aligned. item-aligned is the native
+             select behaviour — it lays the chosen row over the trigger — and it
+             measures against a one-line control, so against this one it put the
+             whole list at the bottom edge of the window, off screen. -->
+        <SelectContent position="popper" align="start" class="min-w-(--reka-select-trigger-width)">
+          <SelectItem v-for="p in projects" :key="p.id" :value="p.id" class="py-2 pr-8 pl-2">
+            <span class="flex min-w-0 items-center gap-2.5">
+              <ProjectAvatar :project="p" size="sm" />
+              <span class="flex min-w-0 flex-col gap-0.5">
+                <span class="truncate text-xs leading-tight font-medium">{{ p.name }}</span>
+                <span class="text-muted-foreground truncate text-[10px] leading-tight">
+                  {{ p.baseBranch }}
+                </span>
+              </span>
+            </span>
+          </SelectItem>
+        </SelectContent>
+      </Select>
     </div>
 
     <!-- Where to go. Counts sit right-aligned so the column scans vertically. -->

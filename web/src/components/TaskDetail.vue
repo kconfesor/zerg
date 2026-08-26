@@ -9,10 +9,18 @@
  */
 import { ref, watch } from 'vue'
 import { api, type Task, type TaskDetail } from '@/lib/api'
+import { latest } from '@/lib/latest'
 import { renderMarkdown } from '@/lib/markdown'
 import { duration } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import {
+  Dialog,
+  DialogBody,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 
 const props = defineProps<{ task: Task | null }>()
 const emit = defineEmits<{ close: [] }>()
@@ -20,15 +28,24 @@ const emit = defineEmits<{ close: [] }>()
 const detail = ref<TaskDetail | null>(null)
 const failed = ref('')
 
+// Opening one card and then another leaves two requests in flight, and the
+// first can answer last — putting task A's history and spend under task B's
+// name, which reads as a real record of the wrong card.
+const newest = latest()
+
 watch(
   () => props.task,
   async (t) => {
+    const current = newest()
     detail.value = null
     failed.value = ''
     if (!t) return
     try {
-      detail.value = await api.taskDetail(t.id)
+      const d = await api.taskDetail(t.id)
+      if (!current()) return
+      detail.value = d
     } catch (e) {
+      if (!current()) return
       failed.value = e instanceof Error ? e.message : String(e)
     }
   },
@@ -47,9 +64,13 @@ function tokensOf(u: TaskDetail['usage']): number {
 
 <template>
   <Dialog :open="!!task" @update:open="(v) => !v && emit('close')">
-    <DialogContent class="max-h-[85vh] overflow-y-auto sm:max-w-3xl">
-      <DialogHeader>
-        <DialogTitle>{{ task?.name }}</DialogTitle>
+    <!-- gap-0 and p-0 hand every edge to the header and the body below, which
+         is what keeps the padding still while the content moves. pr-12 on the
+         header reserves the corner the close button sits in, so a long task
+         name truncates before it reaches it rather than running underneath. -->
+    <DialogContent class="gap-0 overflow-hidden p-0 sm:max-w-3xl">
+      <DialogHeader class="hairline-b shrink-0 px-5 py-4 pr-12">
+        <DialogTitle class="truncate">{{ task?.name }}</DialogTitle>
         <DialogDescription class="flex flex-wrap items-center gap-2 text-[11px]">
           <Badge variant="outline">{{ task?.state }}</Badge>
           <Badge v-if="(task?.reworkCount ?? 0) > 0" variant="secondary">
@@ -66,26 +87,28 @@ function tokensOf(u: TaskDetail['usage']): number {
         </DialogDescription>
       </DialogHeader>
 
-      <p v-if="failed" class="text-destructive text-xs">{{ failed }}</p>
-      <p v-else-if="!detail" class="text-muted-foreground text-xs">Reading the history…</p>
+      <DialogBody>
+        <p v-if="failed" class="text-destructive text-xs">{{ failed }}</p>
+        <p v-else-if="!detail" class="text-muted-foreground text-xs">Reading the history…</p>
 
-      <!-- One step per handoff, in order. The note each role wrote is the
-           substance; the commit subject says what landed. -->
-      <ol v-else class="flex flex-col gap-3">
-        <li v-for="(h, i) in detail.history" :key="i" class="hairline-b pb-3 last:border-0">
-          <div class="mb-1 flex flex-wrap items-center gap-1.5 text-[11px]">
-            <span class="font-semibold">{{ h.from }}</span>
-            <span class="text-muted-foreground">→</span>
-            <span class="font-semibold">{{ h.final ? 'merged' : h.to || '—' }}</span>
-            <code v-if="h.commit" class="text-muted-foreground">{{ h.commit.slice(0, 8) }}</code>
-            <span v-if="h.subject" class="text-muted-foreground truncate">{{ h.subject }}</span>
-          </div>
-          <div v-if="h.body" class="md text-xs leading-relaxed" v-html="renderMarkdown(h.body)" />
-          <p v-else class="text-muted-foreground text-[11px] italic">
-            No note — this handoff predates notes being required.
-          </p>
-        </li>
-      </ol>
+        <!-- One step per handoff, in order. The note each role wrote is the
+             substance; the commit subject says what landed. -->
+        <ol v-else class="flex flex-col gap-3">
+          <li v-for="(h, i) in detail.history" :key="i" class="hairline-b pb-3 last:border-0">
+            <div class="mb-1 flex flex-wrap items-center gap-1.5 text-[11px]">
+              <span class="font-semibold">{{ h.from }}</span>
+              <span class="text-muted-foreground">→</span>
+              <span class="font-semibold">{{ h.final ? 'merged' : h.to || '—' }}</span>
+              <code v-if="h.commit" class="text-muted-foreground">{{ h.commit.slice(0, 8) }}</code>
+              <span v-if="h.subject" class="text-muted-foreground truncate">{{ h.subject }}</span>
+            </div>
+            <div v-if="h.body" class="md text-xs leading-relaxed" v-html="renderMarkdown(h.body)" />
+            <p v-else class="text-muted-foreground text-[11px] italic">
+              No note — this handoff predates notes being required.
+            </p>
+          </li>
+        </ol>
+      </DialogBody>
     </DialogContent>
   </Dialog>
 </template>

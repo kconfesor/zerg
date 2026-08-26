@@ -51,6 +51,9 @@ export interface Project {
   /** What answers questions in Chat. Empty inherits the terminal role. */
   chatHarness?: string
   chatModel?: string
+  /** A path inside the repository to its own logo or favicon, or empty for the
+   *  mark derived from the project instead. */
+  icon?: string
   createdAt: string
   lastOpenedAt?: string
 }
@@ -190,6 +193,22 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * Where the browser fetches a project's mark from.
+ *
+ * A URL rather than a fetch: this goes in an <img src>, so the browser handles
+ * caching, revalidation and the failure — a mark that has been deleted from the
+ * repository fires an error event and the avatar quietly falls back to
+ * initials, with no request for the view to make or handle itself.
+ *
+ * The stored path is in the query string so that editing which file is used
+ * changes the URL, and the browser does not show the previous project's mark
+ * out of cache while the new one loads.
+ */
+export function projectIconURL(project: { id: string; icon?: string }): string {
+  return `/api/projects/${project.id}/icon?p=${encodeURIComponent(project.icon ?? '')}`
+}
+
 async function call<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`/api${path}`, {
     ...init,
@@ -269,6 +288,22 @@ export const api = {
     call<Task>(`/tasks/${id}/hidden`, { method: 'PUT', body: JSON.stringify({ hidden }) }),
   approvalDiff: (id: string) =>
     call<{ files: ChangedFile[]; range: boolean; base: string }>(`/approvals/${id}/diff`),
+  renameProject: (id: string, name: string) =>
+    call<Project>(`/projects/${id}/name`, {
+      method: 'PUT',
+      body: JSON.stringify({ name }),
+    }),
+
+  /** The images in a project that look like its mark, best guesses first. */
+  projectIcons: (id: string) =>
+    call<{ candidates: { path: string; bytes: number }[] }>(`/projects/${id}/icons`),
+
+  setProjectIcon: (id: string, icon: string) =>
+    call<Project>(`/projects/${id}/icon`, {
+      method: 'PUT',
+      body: JSON.stringify({ icon }),
+    }),
+
   setIntegration: (id: string, integration: Integration) =>
     call<Project>(`/projects/${id}/integration`, {
       method: 'PUT',

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, useId, watch } from 'vue'
 import {
   ApiError,
   api,
@@ -27,16 +27,18 @@ import TeamEditor from '@/components/TeamEditor.vue'
 import AppSidebar from '@/components/layout/AppSidebar.vue'
 import { useRoute, useRouter } from 'vue-router'
 import { viewOf, viewPath, type View } from '@/router'
+import { latest } from '@/lib/latest'
+import { usePending } from '@/lib/pending'
 import ProjectBar from '@/components/layout/ProjectBar.vue'
 import PageHeader from '@/components/layout/PageHeader.vue'
 import BoardHeader from '@/components/BoardHeader.vue'
 import { Switch } from '@/components/ui/switch'
-import UsageSummary from '@/components/layout/UsageSummary.vue'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import {
   Dialog,
+  DialogBody,
   DialogContent,
   DialogDescription,
   DialogFooter,
@@ -44,8 +46,23 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 
+// Every field's label points at the control it names. Without the pairing a
+// screen reader reads an unlabelled text box, and clicking the word does not
+// focus the field it sits above.
+const pathId = useId()
+const taskNameId = useId()
+const taskBodyId = useId()
+
 const projects = ref<Project[]>([])
 const current = ref<Project | null>(null)
+
+/**
+ * What is waiting on the daemon. Every mutation on this screen is a round trip
+ * with no optimistic update, so without this a control looks untouched while it
+ * works and invites the second press that duplicates the card, or races the
+ * start it just asked for.
+ */
+const busy = usePending()
 /**
  * The current view is the route, not a ref. Anything that needs to change it
  * navigates, so the address bar, the back button and a reload all agree.
@@ -88,9 +105,16 @@ watch(showHidden, (v) => localStorage.setItem('zerg.showHidden', String(v)))
  */
 const workspace = ref<Workspace | null>(null)
 
+const newestWorkspace = latest()
+
 async function loadWorkspace() {
   if (!current.value) return
-  workspace.value = await api.workspace(current.value.id).catch(() => null)
+  const isCurrent = newestWorkspace()
+  const w = await api.workspace(current.value.id).catch(() => null)
+  // Walking several checkouts is slow enough that a project switch mid-flight
+  // is ordinary rather than a race worth calling unlikely.
+  if (!isCurrent()) return
+  workspace.value = w
 }
 
 const hiddenCount = computed(() => tasks.value.filter((t) => t.hidden).length)
@@ -113,29 +137,43 @@ function showTaskActivity(task: Task) {
 
 /** Park a card. Nothing picks it up again; its history stays. */
 async function stopTask(task: Task) {
-  try {
-    await api.stopTask(task.id)
-    await refresh()
-  } catch (err) {
-    fail(err)
-  }
+  await busy.run(`task:${task.id}`, async () => {
+    try {
+      await api.stopTask(task.id)
+      await refresh()
+    } catch (err) {
+      fail(err)
+    }
+  })
 }
 
 async function removeTask(task: Task) {
-  try {
-    await api.deleteTask(task.id)
-    confirmDeleteTask.value = null
-    if (activityTask.value?.id === task.id) activityTask.value = null
-    await refresh()
-  } catch (err) {
-    fail(err)
-  }
+  await busy.run(`task:${task.id}`, async () => {
+    try {
+      await api.deleteTask(task.id)
+      confirmDeleteTask.value = null
+      if (activityTask.value?.id === task.id) activityTask.value = null
+      await refresh()
+    } catch (err) {
+      fail(err)
+    }
+  })
 }
 
 async function setHidden(task: Task, hidden: boolean) {
-  const updated = await api.setTaskHidden(task.id, hidden)
-  const i = tasks.value.findIndex((t) => t.id === task.id)
-  if (i !== -1) tasks.value[i] = updated
+  await busy.run(`task:${task.id}`, async () => {
+    try {
+      const updated = await api.setTaskHidden(task.id, hidden)
+      const i = tasks.value.findIndex((t) => t.id === task.id)
+      if (i !== -1) tasks.value[i] = updated
+    } catch (err) {
+      // This had no error handling at all: the switch moved, the request
+      // failed, and the card stayed put with nothing said — so the same card
+      // read as hidden on this device and visible on the next one.
+      fail(err)
+      await refresh()
+    }
+  })
 }
 
 /** Which cards are the ones waiting, so the board can mark them rather than
@@ -282,21 +320,25 @@ async function loadGlobals() {
   }
 }
 
-/** Refreshes everything scoped to the open project. */
 /**
- * Which project the newest refresh was for.
+ * Refreshes everything scoped to the open project.
  *
  * Four requests go out per refresh and each takes its own time. Switch project
  * while they are in flight and the older set can land after the newer one,
  * putting one project's board under another project's name — briefly, and
  * exactly when someone is looking to see whether the switch worked.
+ *
+ * Comparing the project id was the first attempt and is not enough: going A →
+ * B → A leaves two refreshes for A outstanding, the id matches for both, and
+ * the older one is free to land last. A sequence is what actually separates
+ * them.
  */
-let refreshFor = ''
+const newestRefresh = latest()
 
 async function refresh() {
   const project = current.value
   if (!project) return
-  refreshFor = project.id
+  const current_ = newestRefresh()
   try {
     const [t, tk, at, st] = await Promise.all([
       api.team(project.id),
@@ -304,9 +346,8 @@ async function refresh() {
       api.attention(project.id),
       api.status(project.id),
     ])
-    // Someone switched project while these were in flight; this data is for
-    // a project nobody is looking at.
-    if (refreshFor !== project.id) return
+    // A newer refresh has been asked for; this data is already history.
+    if (!current_()) return
 
     team.value = t
     tasks.value = tk
@@ -327,6 +368,7 @@ async function refresh() {
       loadWorkspace()
     }
   } catch {
+    if (!current_()) return
     pollerLostContact()
     pollDelay = Math.min(pollDelay * 2, POLL_MAX)
   }
@@ -399,49 +441,64 @@ async function checkReadiness() {
 }
 
 async function start() {
-  if (!current.value) return
-  banner.value = null
-  try {
-    // No banner. The bar already flips to "n/n agents live", which is the
-    // same news said in the place you look for it and without a dismissal.
-    status.value = await api.start(current.value.id)
-  } catch (err) {
-    // A refused start carries the readiness report, so show which role failed
-    // which check rather than only that something was wrong.
-    if (err instanceof ApiError && err.status === 409) {
-      const body = err.body as { readiness?: Readiness } | undefined
-      if (body?.readiness) {
-        readiness.value = body.readiness
-        go('readiness')
+  const project = current.value
+  if (!project) return
+  // Starting a swarm shells out to preflight and git before it spawns
+  // anything, so the button is unresponsive for seconds. A second press used
+  // to reach the daemon and come back "this project is already starting" — an
+  // error the operator caused by being told nothing was happening.
+  await busy.run('swarm', async () => {
+    banner.value = null
+    try {
+      // No banner. The bar already flips to "n/n agents live", which is the
+      // same news said in the place you look for it and without a dismissal.
+      status.value = await api.start(project.id)
+    } catch (err) {
+      // A refused start carries the readiness report, so show which role failed
+      // which check rather than only that something was wrong.
+      if (err instanceof ApiError && err.status === 409) {
+        const body = err.body as { readiness?: Readiness } | undefined
+        if (body?.readiness) {
+          readiness.value = body.readiness
+          go('readiness')
+        }
       }
+      fail(err)
     }
-    fail(err)
-  }
-  await refresh()
+    await refresh()
+  })
 }
 
 async function stop() {
-  if (!current.value) return
-  try {
-    await api.stop(current.value.id)
-    banner.value = { tone: 'ok', text: 'Swarm stopped.' }
-  } catch (err) {
-    fail(err)
-  }
-  await refresh()
+  const project = current.value
+  if (!project) return
+  await busy.run('swarm', async () => {
+    try {
+      // No banner, for the same reason Start has none: the bar flips to "no
+      // agents running", which is the same news said where you are already
+      // looking and without something to dismiss afterwards.
+      await api.stop(project.id)
+    } catch (err) {
+      fail(err)
+    }
+    await refresh()
+  })
 }
 
 async function createTask() {
-  if (!current.value || !taskName.value.trim()) return
-  try {
-    await api.newTask(current.value.id, taskName.value.trim(), taskBody.value)
-    taskName.value = ''
-    taskBody.value = ''
-    composing.value = false
-    await refresh()
-  } catch (err) {
-    fail(err)
-  }
+  const project = current.value
+  if (!project || !taskName.value.trim()) return
+  await busy.run('newTask', async () => {
+    try {
+      await api.newTask(project.id, taskName.value.trim(), taskBody.value)
+      taskName.value = ''
+      taskBody.value = ''
+      composing.value = false
+      await refresh()
+    } catch (err) {
+      fail(err)
+    }
+  })
 }
 
 async function setTeam(roles: ProjectRole[]) {
@@ -472,31 +529,38 @@ async function saveRole(role: RoleTemplate) {
   }
 }
 
+// Deciding an approval runs a merge or opens a pull request, so a second press
+// is not a wasted request: it races the first through git. Keyed by the
+// approval, so two different cards can still be decided at once.
 const act = {
-  approve: async (id: string) => {
-    try {
-      await api.approve(id)
-    } catch (err) {
-      fail(err)
-    }
-    await refresh()
-  },
-  reject: async (id: string, note: string) => {
-    try {
-      await api.reject(id, note)
-    } catch (err) {
-      fail(err)
-    }
-    await refresh()
-  },
-  answer: async (id: string, answer: string) => {
+  approve: (id: string) =>
+    busy.run(`decide:${id}`, async () => {
+      try {
+        await api.approve(id)
+      } catch (err) {
+        fail(err)
+      }
+      await refresh()
+    }),
+  reject: (id: string, note: string) =>
+    busy.run(`decide:${id}`, async () => {
+      try {
+        await api.reject(id, note)
+      } catch (err) {
+        fail(err)
+      }
+      await refresh()
+    }),
+  answer: (id: string, answer: string) => {
     if (!answer.trim()) return
-    try {
-      await api.answer(id, answer)
-    } catch (err) {
-      fail(err)
-    }
-    await refresh()
+    return busy.run(`answer:${id}`, async () => {
+      try {
+        await api.answer(id, answer)
+      } catch (err) {
+        fail(err)
+      }
+      await refresh()
+    })
   },
 }
 
@@ -553,21 +617,23 @@ watch(current, () => (banner.value = null))
       :attention-count="attentionCount"
       :task-count="tasks.length"
       :project-count="projects.length"
+      :projects="projects"
+      :current="current"
       :open="navOpen"
       @close="navOpen = false"
       @navigate="go"
+      @open-project="open"
     />
 
     <div class="flex min-w-0 flex-1 flex-col overflow-hidden">
       <ProjectBar
-        :projects="projects"
         :current="current"
         :status="status"
-        :usage-key="usageKey"
         :attention-count="attentionCount"
+        :busy="busy.is('swarm')"
+        :usage-key="usageKey"
         @menu="navOpen = true"
         @attention="attentionOpen = true"
-        @open-project="open"
         @start="start"
         @stop="stop"
       />
@@ -619,9 +685,6 @@ watch(current, () => (banner.value = null))
                   </Label>
                 </div>
                 <Button @click="composing = true">New task</Button>
-              </template>
-              <template #usage>
-                <UsageSummary :project-id="current.id" :refresh-key="usageKey" />
               </template>
             </BoardHeader>
             <div class="pt-4"><Board
@@ -746,8 +809,9 @@ watch(current, () => (banner.value = null))
           </DialogDescription>
         </DialogHeader>
         <div class="flex flex-col gap-1.5">
-          <Label>Path</Label>
+          <Label :for="pathId">Path</Label>
           <Input
+            :id="pathId"
             v-model="newPath"
             placeholder="/Users/you/source/your-repo"
             autofocus
@@ -779,21 +843,30 @@ watch(current, () => (banner.value = null))
         </DialogHeader>
         <DialogFooter>
           <Button variant="outline" @click="confirmDeleteTask = null">Cancel</Button>
-          <Button variant="destructive" @click="removeTask(confirmDeleteTask!)">Delete</Button>
+          <Button
+            variant="destructive"
+            :disabled="busy.is(`task:${confirmDeleteTask!.id}`)"
+            @click="removeTask(confirmDeleteTask!)"
+          >
+            Delete
+          </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
 
     <!-- One card's transcript, over the board rather than instead of it. -->
     <Dialog :open="!!activityTask" @update:open="(v) => !v && (activityTask = null)">
-      <DialogContent class="flex max-h-[85vh] min-w-0 flex-col sm:max-w-4xl">
-        <DialogHeader>
+      <DialogContent class="min-w-0 gap-0 overflow-hidden p-0 sm:max-w-4xl">
+        <DialogHeader class="hairline-b shrink-0 px-5 py-4 pr-12">
           <DialogTitle class="truncate">{{ activityTask?.name }}</DialogTitle>
           <DialogDescription>
             Every tool call, message and turn recorded against this card.
           </DialogDescription>
         </DialogHeader>
-        <div v-if="activityTask" class="min-h-0 flex-1">
+        <!-- Activity scrolls its own viewport, so this is a plain flex child
+             rather than a DialogBody: two nested scroll regions is one too
+             many, and the inner one is the one that follows the tail. -->
+        <div v-if="activityTask" class="min-h-0 flex-1 px-5 py-4">
           <Activity
             :project-id="current?.id ?? ''"
             :roles="team.filter((r) => r.enabled).map((r) => r.name)"
@@ -811,27 +884,30 @@ watch(current, () => (banner.value = null))
            min-width:auto — it refuses to shrink below its content and overflows
            the panel instead of scrolling inside it, which is what cut the right
            side off a wide table. -->
-      <DialogContent class="max-h-[85vh] min-w-0 overflow-y-auto sm:max-w-4xl">
-        <DialogHeader>
+      <DialogContent class="min-w-0 gap-0 overflow-hidden p-0 sm:max-w-4xl">
+        <DialogHeader class="hairline-b shrink-0 px-5 py-4 pr-12">
           <DialogTitle>Waiting on you</DialogTitle>
           <DialogDescription>
             Nothing downstream moves until these are decided.
           </DialogDescription>
         </DialogHeader>
-        <Attention
-          :attention="attention"
-          @approve="act.approve"
-          @reject="act.reject"
-          @answer="act.answer"
-        />
+        <DialogBody>
+          <Attention
+            :attention="attention"
+            :busy="busy.is"
+            @approve="act.approve"
+            @reject="act.reject"
+            @answer="act.answer"
+          />
+        </DialogBody>
       </DialogContent>
     </Dialog>
 
     <TaskDetail :task="openTask" @close="openTask = null" />
 
     <Dialog v-model:open="composing">
-      <DialogContent class="sm:max-w-lg">
-        <DialogHeader>
+      <DialogContent class="gap-0 overflow-hidden p-0 sm:max-w-lg">
+        <DialogHeader class="hairline-b shrink-0 px-5 py-4 pr-12">
           <DialogTitle>New task</DialogTitle>
           <DialogDescription>
             Goes to {{ team.find((r) => r.enabled)?.name ?? 'the first role' }} first, then down
@@ -839,32 +915,36 @@ watch(current, () => (banner.value = null))
           </DialogDescription>
         </DialogHeader>
 
-        <div class="flex flex-col gap-3">
+        <DialogBody class="flex flex-col gap-3">
           <div class="flex flex-col gap-1.5">
-            <Label>Name</Label>
-            <Input v-model="taskName" autofocus />
+            <Label :for="taskNameId">Name</Label>
+            <Input :id="taskNameId" v-model="taskName" autofocus />
             <span class="text-muted-foreground text-[11px]">
               Short and distinct — every role refers to the task by this name.
             </span>
           </div>
           <div class="flex flex-col gap-1.5">
-            <Label>What to do</Label>
+            <Label :for="taskBodyId">What to do</Label>
             <!-- Markdown, not rich text: this goes to an agent as text, and
                  Markdown is what it reads. A WYSIWYG would send it tags to
                  read past. -->
             <div class="border">
-              <MarkdownEditor v-model="taskBody" :rows="8" />
+              <MarkdownEditor :id="taskBodyId" v-model="taskBody" :rows="8" />
             </div>
             <span class="text-muted-foreground text-[11px]">
               This is the whole brief — the agent has the repository and nothing else. Concrete
               cases and what must not break are worth more than length.
             </span>
           </div>
-        </div>
+        </DialogBody>
 
-        <DialogFooter>
+        <!-- Outside the body, so Queue it is reachable without scrolling to the
+             end of a brief you are still writing. -->
+        <DialogFooter class="hairline-t shrink-0 px-5 py-4">
           <Button variant="outline" @click="composing = false">Cancel</Button>
-          <Button :disabled="!taskName.trim()" @click="createTask">Queue it</Button>
+          <Button :disabled="!taskName.trim() || busy.is('newTask')" @click="createTask">
+            {{ busy.is('newTask') ? 'Queueing…' : 'Queue it' }}
+          </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
