@@ -26,12 +26,26 @@ git clone https://github.com/kconfesor/zerg.git && cd zerg
 `build.sh` checks your Node version itself and refuses with the one it wanted, because a build that
 silently runs on the wrong version fails much further downstream.
 
-Working on the cockpit alone is faster with Vite's dev server, which proxies the API:
+You do not need it to develop, though. **In a checkout, `zerg up` runs the cockpit's dev server
+itself and serves it on its own port**, so a UI change is hot-reloaded with no build step and no
+second URL:
 
 ```sh
-./zerg up &         # the daemon on 7717
-pnpm --dir web dev  # the cockpit on 5173, hot-reloading
+go build -o zerg ./cmd/zerg && ./zerg up     # about 2s, then hot reload for the UI
 ```
+
+It installs the dependencies once if `web/node_modules` is missing, and the dev server stops when
+the daemon does. `--no-dev-ui` turns it off, for when you have a Vite already running or want the
+daemon alone. A released binary has no `web/` beside it, so none of this happens there: it serves
+the cockpit that was compiled into it.
+
+Which loop to use:
+
+| changing | what to run | cost |
+|---|---|---|
+| the daemon | `go build -o zerg ./cmd/zerg` and restart | ~2s |
+| the cockpit | nothing: save the file | hot reload |
+| shipping a binary | `./build.sh` | ~11s |
 
 ## Before you open a pull request
 

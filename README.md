@@ -335,8 +335,10 @@ touch internal/api/dist/.gitkeep                                # keeps a fresh 
 go build -o zerg ./cmd/zerg
 ```
 
-The cockpit is generated, not committed, so a clone has no UI until you run the build. `go build`
-alone gives you a working daemon whose pages say exactly that.
+The cockpit is generated rather than committed. You do not have to build it to work on it: in a
+checkout, `zerg up` starts its dev server itself and serves it on the daemon's own port, hot
+reloading as you save. `./build.sh` is for producing a binary with the UI compiled in, which is
+what you deploy and what a release ships.
 
 State lives in `~/.zerg/zerg.db` (override with `--db`), which is created on first run along with
 the eight built-in role templates. The directory and the database are `0700`/`0600`, since they hold every

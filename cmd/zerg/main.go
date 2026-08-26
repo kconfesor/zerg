@@ -29,6 +29,7 @@ import (
 	"github.com/kconfesor/zerg/internal/agent"
 	"github.com/kconfesor/zerg/internal/api"
 	"github.com/kconfesor/zerg/internal/chat"
+	"github.com/kconfesor/zerg/internal/devui"
 	"github.com/kconfesor/zerg/internal/event"
 	"github.com/kconfesor/zerg/internal/nydus"
 	"github.com/kconfesor/zerg/internal/overmind"
@@ -159,6 +160,9 @@ func runUp(args []string) error {
 	addr := fs.String("addr", "", "override the stored bind address for this run only")
 	noTLS := fs.Bool("no-tls", false, "serve plain HTTP for this run, ignoring the stored TLS setting")
 	dbPath := fs.String("db", "", "database path (default ~/.zerg/zerg.db)")
+	// An escape hatch for the case where the sources are present and you want
+	// the daemon alone: another Vite already running, or a machine without node.
+	noDev := fs.Bool("no-dev-ui", false, "do not start the cockpit's dev server even if its sources are here")
 	verbose := fs.Bool("verbose", false, "log every request")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -289,10 +293,37 @@ func runUp(args []string) error {
 	// Whatever the last run left behind, before anything new is written.
 	sweepOnStart(ctx, db, cfg, log)
 
+	// A checkout gets a working, hot-reloading cockpit from `zerg up` alone.
+	//
+	// The cockpit is generated rather than committed, so a fresh clone has no
+	// UI compiled in. Telling someone to run ./build.sh is the wrong advice for
+	// the person most likely to hit this, who is about to change the UI and
+	// would pay eleven seconds per keystroke for a bundle they throw away. So
+	// if the sources are here and nothing was embedded, the daemon runs Vite
+	// itself and proxies to it: one command, one origin, hot reload.
+	//
+	// A released binary has no web/ beside it, finds nothing, and serves what
+	// was compiled in. Nothing here runs in that case.
+	var ui http.Handler
+	if !api.Embedded() && !*noDev {
+		if webDir, err := devui.Find(); err == nil {
+			log.Info("no cockpit was compiled in, and its sources are here; starting the dev server", "dir", webDir)
+			dev, err := devui.Start(ctx, log, webDir)
+			if err != nil {
+				log.Error("the cockpit's dev server could not start; serving the built-in page instead", "err", err)
+			} else {
+				defer dev.Stop()
+				ui = dev.Handler
+				log.Info("the cockpit is hot-reloading from source", "vite", dev.URL)
+			}
+		}
+	}
+
 	srv := &http.Server{
 		Handler: api.New(api.Deps{
 			DB: db, Log: log, Registry: registry,
 			Overmind: over, Nydus: nyd, Bus: bus, Recorder: recorder, Applied: cfg.Listener(), Chat: chatMgr,
+			UI: ui,
 		}).Routes(),
 		ReadHeaderTimeout: 10 * time.Second,
 		// A body that arrives a byte at a time holds a connection open

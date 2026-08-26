@@ -24,6 +24,16 @@ import (
 //go:embed all:dist
 var cockpitFS embed.FS
 
+// Embedded reports whether this binary has a cockpit compiled into it, so the
+// daemon can decide whether to run the dev server instead.
+func Embedded() bool {
+	sub, err := fs.Sub(cockpitFS, "dist")
+	if err != nil {
+		return false
+	}
+	return built(sub)
+}
+
 // built reports whether a cockpit was compiled in, rather than the placeholder
 // that only exists to satisfy the embed.
 func built(sub fs.FS) bool {
@@ -45,9 +55,12 @@ const notBuilt = `<!doctype html>
 <title>zerg: cockpit not built</title>
 <body style="font: 14px/1.6 ui-monospace, monospace; background: #16121c; color: #d7cfe0; padding: 2rem">
 <h1 style="font-size: 1rem">The cockpit is not built</h1>
-<p>The daemon is running and its API is up. The UI is generated rather than committed, so build it:</p>
-<pre style="background: #1e1826; padding: 1rem; overflow-x: auto">./build.sh    # then restart zerg up</pre>
-<p>It needs Node and pnpm; see the README for versions.</p>
+<p>The daemon is running and its API is up. The UI is generated rather than committed.</p>
+<p>In a checkout, <code>zerg up</code> starts the dev server for you and serves it here, with hot
+reload. Seeing this page means that did not happen: usually node or pnpm is missing from PATH, or
+this binary was built somewhere other than the repository. The daemon's log says which.</p>
+<pre style="background: #1e1826; padding: 1rem; overflow-x: auto">./build.sh    # or build it once, then restart zerg up</pre>
+<p>Node and pnpm are needed either way; see the README for versions.</p>
 </body>`
 
 // cockpit serves the single-page app.
