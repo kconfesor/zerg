@@ -87,9 +87,57 @@ describe('TeamEditor', () => {
     expect(w.text()).toContain('Default')
     expect(w.find('[aria-label="Default is in use"]').exists()).toBe(true)
     expect(w.text()).toContain('terminal')
-    expect(w.findAll('button').find((button) => button.text() === 'Use this Team')?.attributes('style')).toContain(
-      'width: 96px',
+  })
+
+  it('offers no adopt button for the team already in use, and one for every other', () => {
+    const w = editor({ presetId: defaultTeam.id, topologyOverride: false, roles: resolved })
+    const labels = w.findAll('button').map((b) => b.text())
+    // Exactly one, for Docs team. The team in use says so with the star and
+    // the "in use" line instead of a button that cannot be pressed.
+    expect(labels.filter((t) => t === 'Use this team')).toHaveLength(1)
+    expect(labels).not.toContain('In use')
+  })
+
+  it('offers the team in use a way back when the project overrode its pipeline', () => {
+    const w = editor({ presetId: defaultTeam.id, topologyOverride: true, roles: resolved })
+    expect(w.text()).toContain('in use, with local changes')
+    expect(w.findAll('button').map((b) => b.text())).toContain('Follow this pipeline again')
+  })
+
+  it('keeps rename and delete on every row, and off the built-in', () => {
+    const w = editor({ presetId: defaultTeam.id, topologyOverride: false, roles: resolved })
+    // Always rendered rather than revealed on hover: there is no hover on a
+    // phone, and this column is the only place a team can be removed.
+    expect(w.get('[aria-label="Delete Docs team"]').attributes('disabled')).toBeUndefined()
+    expect(w.get('[aria-label="Delete Default"]').attributes('disabled')).toBeDefined()
+    expect(w.get('[aria-label="Rename Default"]').attributes('disabled')).toBeDefined()
+    expect(w.find('[aria-label="Clone Default"]').exists()).toBe(true)
+  })
+
+  it('asks before moving a project to another team while agents are running', async () => {
+    const w = mount(TeamEditor, {
+      props: {
+        library: [coder, reviewer],
+        presets: [defaultTeam, docsTeam],
+        projectTeam: { presetId: defaultTeam.id, topologyOverride: false, roles: resolved },
+        harnesses: ['claude'],
+        models: {},
+        running: true,
+      },
+      global: { stubs: { RoleOverrideDialog: true } },
+    })
+    await w.findAll('button').find((b) => b.text() === 'Use this team')!.trigger('click')
+    // Asked, not refused, and nothing sent until the question is answered. The
+    // dialog teleports to the body, so it is read there rather than off the
+    // wrapper.
+    expect(w.emitted('setTeam')).toBeUndefined()
+    expect(document.body.textContent).toContain('Put this project on Docs team?')
+    const confirm = [...document.body.querySelectorAll('button')].find(
+      (b) => b.textContent?.trim() === 'Switch team',
     )
+    confirm!.click()
+    await w.vm.$nextTick()
+    expect(w.emitted('setTeam')?.at(-1)?.[0]).toMatchObject({ presetId: docsTeam.id })
   })
 
   it('selects a team for editing without using it until the explicit button is pressed', async () => {
@@ -97,7 +145,7 @@ describe('TeamEditor', () => {
     await w.findAll('button').find((button) => button.text().includes('Docs team'))!.trigger('click')
 
     expect(w.emitted('setTeam')).toBeUndefined()
-    await w.findAll('button').find((button) => button.text() === 'Use this Team')!.trigger('click')
+    await w.findAll('button').find((button) => button.text() === 'Use this team')!.trigger('click')
     expect(w.emitted('setTeam')?.at(-1)?.[0]).toEqual({
       presetId: docsTeam.id,
       topologyOverride: false,

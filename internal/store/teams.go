@@ -137,9 +137,16 @@ func (db *DB) UpdateTeamPreset(ctx context.Context, p *TeamPreset) error {
 	return tx.Commit()
 }
 
+// ListTeamPresets returns the built-in team first, then the rest by name.
+//
+// Ordering by name alone put Default wherever the alphabet happened to place
+// it, so a clone called "Calc pipeline" sat above the team every project starts
+// on. It also decided the editor's fallback selection, which is the team you
+// look at before choosing one — that should be the one a new project runs, not
+// whichever name sorts first.
 func (db *DB) ListTeamPresets(ctx context.Context) ([]TeamPreset, error) {
 	rows, err := db.read.QueryContext(ctx,
-		`SELECT id,name,builtin,created_at,updated_at FROM team_presets ORDER BY name`)
+		`SELECT id,name,builtin,created_at,updated_at FROM team_presets ORDER BY builtin DESC, name`)
 	if err != nil {
 		return nil, err
 	}

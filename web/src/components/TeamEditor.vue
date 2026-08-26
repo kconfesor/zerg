@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { Star } from '@lucide/vue'
+import { Copy, Pencil, Star, Trash2 } from '@lucide/vue'
 import type {
   Model,
   ProjectTeam,
@@ -33,6 +33,9 @@ const props = defineProps<{
   harnesses: string[]
   models: Record<string, Model[]>
   running: boolean
+  /** Why the last team action was refused, if it was. Rendered where it was
+   *  pressed: the page banner behind this dialog is not visible on a phone. */
+  actionError?: string
 }>()
 const emit = defineEmits<{
   setTeam: [team: ProjectTeamUpdate]
@@ -162,14 +165,15 @@ function saveRoles(roles: TeamPresetRole[]) {
  * queue — and a team is shared, so it happens to every project using it, not
  * just the one on screen.
  */
-const pending = ref<{ question: string; run: () => void } | null>(null)
+type Pending = { question: string; detail?: string; confirm?: string; run: () => void }
+const pending = ref<Pending | null>(null)
 
-function guard(question: string, run: () => void) {
+function guard(question: string, run: () => void, extra?: Omit<Pending, 'question' | 'run'>) {
   if (!props.running) {
     run()
     return
   }
-  pending.value = { question, run }
+  pending.value = { question, run, ...extra }
 }
 
 function toggleRole(template: RoleTemplate) {
@@ -259,6 +263,39 @@ function saveRoleSettings(overrides: RoleOverrides) {
   )
 }
 
+/**
+ * What the primary button on a team row says, or nothing at all.
+ *
+ * Three states, and only two of them are an action. A team this project does
+ * not run can be adopted. A team it runs whose pipeline it has *overridden* can
+ * be followed again — that is the one thing pressing this undoes, since field
+ * overrides survive either way. A team it simply runs needs no button: the star
+ * and the "in use" line already say so, and a disabled button reading "In use"
+ * is a control that looks broken rather than a label that reads.
+ */
+function useLabel(preset: TeamPreset): string {
+  if (props.projectTeam.presetId !== preset.id) return 'Use this team'
+  return props.projectTeam.topologyOverride ? 'Follow this pipeline again' : ''
+}
+
+/**
+ * Adopting a team while agents run asks, rather than refusing.
+ *
+ * This button used to disable itself whenever a swarm was up, which is the rule
+ * the rest of this editor stopped following when the daemon learned to
+ * reconcile: setTeam reconciles the running swarm, so the change lands in about
+ * a second. What is left is the surprise — roles the new team does not have are
+ * stopped — so it is a question, and only for this project, because a project's
+ * team assignment is the one edit here that is not shared.
+ */
+function adopt(preset: TeamPreset) {
+  guard(`Put this project on ${preset.name}?`, () => useTeam(preset), {
+    detail:
+      'Agents are running. Roles this team does not have are stopped and their work goes back to the queue; roles it adds start within a second or so. Only this project is affected.',
+    confirm: 'Switch team',
+  })
+}
+
 function useTeam(preset: TeamPreset) {
   selectedPresetId.value = preset.id
   // The project's own overrides come with it.
@@ -315,12 +352,29 @@ function renameTeam() {
   renaming.value = false
 }
 
+/**
+ * Ask, then wait for the team to actually be gone.
+ *
+ * Closing on the emit assumes the delete succeeded, and it need not: the daemon
+ * refuses to delete a team a project still runs. The refusal then landed in the
+ * page banner behind this dialog, which on a phone is nowhere. Closing when the
+ * preset leaves the list instead is both the true signal and race-free — no
+ * flag to reset, and a refusal simply leaves the dialog up with the reason in
+ * it.
+ */
 function deleteTeam() {
   const preset = confirmDelete.value
   if (!preset) return
   emit('deletePreset', preset.id)
-  confirmDelete.value = null
 }
+
+watch(
+  () => props.presets,
+  (presets) => {
+    const going = confirmDelete.value
+    if (going && !presets.some((p) => p.id === going.id)) confirmDelete.value = null
+  },
+)
 
 function cloneTeam() {
   const preset = activePreset.value
@@ -381,62 +435,93 @@ function cloneTeam() {
           :key="preset.id"
           :class="selectedPresetId === preset.id && 'bg-primary/[0.08]'"
         >
-          <button
-            type="button"
-            class="focus-visible:outline-ring flex w-full items-center gap-2 px-3 pt-3 pb-2 text-left focus-visible:outline-2"
-            @click="selectedPresetId = preset.id"
-          >
-            <Star
-              v-if="projectTeam.presetId === preset.id"
-              :size="15"
-              class="text-primary fill-primary shrink-0"
-              :aria-label="`${preset.name} is in use`"
-            />
-            <span v-else class="size-[15px] shrink-0" aria-hidden="true" />
-            <span class="min-w-0 flex-1">
-              <span class="block truncate text-xs font-medium">{{ preset.name }}</span>
-              <span class="text-muted-foreground mt-0.5 block text-[10px]">
-                {{ preset.roles.length }} role{{ preset.roles.length === 1 ? '' : 's' }}
+          <div class="flex items-start gap-1 px-3 pt-2.5">
+            <button
+              type="button"
+              class="focus-visible:outline-ring flex min-w-0 flex-1 items-start gap-2 py-0.5 text-left focus-visible:outline-2"
+              @click="selectedPresetId = preset.id"
+            >
+              <Star
+                v-if="projectTeam.presetId === preset.id"
+                :size="15"
+                class="text-primary fill-primary mt-px shrink-0"
+                :aria-label="`${preset.name} is in use`"
+              />
+              <span v-else class="mt-px size-[15px] shrink-0" aria-hidden="true" />
+              <span class="min-w-0 flex-1">
+                <span class="block truncate text-xs font-medium">{{ preset.name }}</span>
+                <span class="text-muted-foreground mt-0.5 block text-[10px]">
+                  {{ preset.roles.length }} role{{ preset.roles.length === 1 ? '' : 's' }}
+                  <template v-if="projectTeam.presetId === preset.id">
+                    · in use{{ projectHasLocalChanges ? ', with local changes' : '' }}
+                  </template>
+                </span>
               </span>
-            </span>
-          </button>
-          <div class="flex items-center gap-1 px-3 pb-3 pl-9">
-            <Button size="xs" variant="ghost" @click="openClone(preset)">Clone</Button>
+            </button>
+
+            <!-- Always present, never on hover: a control that appears only
+                 when the pointer is over its row is a control that does not
+                 exist on a phone, and this column is the one place a team can
+                 be renamed or removed. Icons because three words of button
+                 label per row, times a list of teams, is what pushed the
+                 primary action off its own width. -->
+            <div class="flex shrink-0 items-center">
+              <Button
+                size="icon-xs"
+                variant="ghost"
+                :title="`Clone ${preset.name}`"
+                :aria-label="`Clone ${preset.name}`"
+                @click="openClone(preset)"
+              >
+                <Copy :size="14" />
+              </Button>
+              <Button
+                size="icon-xs"
+                variant="ghost"
+                :disabled="preset.builtin"
+                :title="preset.builtin ? 'The built-in team cannot be renamed' : `Rename ${preset.name}`"
+                :aria-label="`Rename ${preset.name}`"
+                @click="openRename(preset)"
+              >
+                <Pencil :size="14" />
+              </Button>
+              <Button
+                size="icon-xs"
+                variant="ghost"
+                class="hover:text-destructive"
+                :disabled="preset.builtin || projectTeam.presetId === preset.id"
+                :title="
+                  preset.builtin
+                    ? 'The built-in team cannot be deleted'
+                    : projectTeam.presetId === preset.id
+                      ? 'This project runs this team — put it on another one first'
+                      : `Delete ${preset.name}`
+                "
+                :aria-label="`Delete ${preset.name}`"
+                @click="confirmDelete = preset"
+              >
+                <Trash2 :size="14" />
+              </Button>
+            </div>
+          </div>
+
+          <div v-if="useLabel(preset)" class="px-3 pt-1.5 pb-2.5 pl-9">
             <Button
               size="xs"
-              variant="ghost"
-              :disabled="preset.builtin"
-              @click="openRename(preset)"
+              variant="outline"
+              class="w-full"
+              @click="adopt(preset)"
             >
-              Rename
-            </Button>
-            <Button
-              size="xs"
-              class="flex-none"
-              style="width: 96px; min-width: 96px; max-width: 96px"
-              :variant="projectTeam.presetId === preset.id ? 'secondary' : 'outline'"
-              :disabled="running || (projectTeam.presetId === preset.id && !projectHasLocalChanges)"
-              @click="useTeam(preset)"
-            >
-              {{ projectTeam.presetId === preset.id && !projectHasLocalChanges ? 'In use' : 'Use this Team' }}
+              {{ useLabel(preset) }}
             </Button>
           </div>
+          <div v-else class="pb-2.5" />
         </li>
         <li v-if="!presets.length" class="text-muted-foreground px-3 py-6 text-center text-xs">
           No teams yet.
         </li>
       </ul>
 
-      <div v-if="activePreset && !activePreset.builtin" class="border-t p-3 lg:mt-auto">
-        <Button
-          size="sm"
-          variant="ghost"
-          class="text-muted-foreground hover:text-destructive w-full"
-          @click="confirmDelete = activePreset"
-        >
-          Delete {{ activePreset.name }}
-        </Button>
-      </div>
     </section>
 
     <!-- Column 2: membership and per-team role settings. -->
@@ -568,9 +653,10 @@ function cloneTeam() {
       <DialogHeader>
         <DialogTitle>{{ pending.question }}</DialogTitle>
         <DialogDescription>
-          Agents are running. This stops it within a second or so, and anything it was working on
-          goes back to the queue for whoever picks it up next. Every project using this team is
-          affected, not only this one.
+          {{
+            pending.detail ??
+            'Agents are running. This stops it within a second or so, and anything it was working on goes back to the queue for whoever picks it up next. Every project using this team is affected, not only this one.'
+          }}
         </DialogDescription>
       </DialogHeader>
       <DialogFooter>
@@ -584,7 +670,7 @@ function cloneTeam() {
             }
           "
         >
-          Stop it
+          {{ pending.confirm ?? 'Stop it' }}
         </Button>
       </DialogFooter>
     </DialogContent>
@@ -647,6 +733,13 @@ function cloneTeam() {
           by a project must be replaced there before it can be deleted.
         </DialogDescription>
       </DialogHeader>
+      <p
+        v-if="actionError"
+        class="bg-destructive/10 text-destructive px-3 py-2 text-xs"
+        role="alert"
+      >
+        {{ actionError }}
+      </p>
       <DialogFooter>
         <Button variant="outline" @click="confirmDelete = null">Cancel</Button>
         <Button variant="destructive" @click="deleteTeam">Delete team</Button>

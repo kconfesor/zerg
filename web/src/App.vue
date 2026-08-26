@@ -567,11 +567,16 @@ async function createPreset(name: string, roles: TeamPresetRole[]) {
   }
 }
 
+/** Why the last team action was refused. Read by the dialog that asked. */
+const teamError = ref('')
+
 async function deletePreset(id: string) {
+  teamError.value = ''
   try {
     await api.deleteTeamPreset(id)
     presets.value = presets.value.filter((p) => p.id !== id)
   } catch (err) {
+    teamError.value = err instanceof Error ? err.message : String(err)
     fail(err)
   }
 }
@@ -842,6 +847,7 @@ watch(current, () => (banner.value = null))
                 @set-team="setTeam"
                 @save-preset="savePreset"
                 @create-preset="createPreset"
+                :action-error="teamError"
                 @delete-preset="deletePreset"
               />
             </div>
