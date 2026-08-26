@@ -1359,3 +1359,76 @@ func TestIntegrationFailuresAreReportedToTheOperator(t *testing.T) {
 		t.Errorf("the message does not name the problem: %v", err)
 	}
 }
+
+// A stopped card stays stopped, even when the role holding it was mid-turn.
+//
+// Stopping closes routes and releases the lease, but neither reaches an agent
+// that is already working: it finishes, sends, and the send used to set the
+// card back to queued and walk it to the next role. The operator's stop had
+// stopped nothing.
+func TestStoppedCardRefusesLateHandoffs(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+
+	task := f.task(t, "Graph function")
+	lease, err := f.n.Claim(ctx, f.project.ID, "planner")
+	if err != nil || lease == nil {
+		t.Fatalf("planner Claim: %v (lease %v)", err, lease)
+	}
+
+	// The operator stops it while planner is still running.
+	if err := f.db.StopTask(ctx, f.project.ID, task.ID); err != nil {
+		t.Fatalf("StopTask: %v", err)
+	}
+	if got := f.reload(t, task.ID); got.StoppedAt == nil {
+		t.Fatal("stopped_at is unset — a person parking a card must be distinguishable " +
+			"from a role rejecting it, and both leave state \"rejected\"")
+	}
+
+	// planner finishes its turn and hands off, none the wiser.
+	_, err = f.n.Send(ctx, f.project.ID, "planner", SendRequest{
+		TaskID: task.ID, To: "coder", Commit: "aaaaaaaaaa", Body: "done anyway"})
+	if err == nil {
+		t.Fatal("a handoff for a stopped card was accepted; the stop did nothing")
+	}
+	if !strings.Contains(err.Error(), "stopped") {
+		t.Errorf("error = %v, want it to say the card was stopped", err)
+	}
+
+	got := f.reload(t, task.ID)
+	if got.State != store.TaskRejected || got.StoppedAt == nil {
+		t.Errorf("state = %q stopped_at = %v after a late handoff, want it still stopped",
+			got.State, got.StoppedAt)
+	}
+	if got.Lane != "planner" {
+		t.Errorf("lane = %q; a stopped card must not walk to the next role", got.Lane)
+	}
+}
+
+// The same guard on the terminal path: finishing a stopped card would merge
+// work the operator had already called off.
+func TestStoppedCardRefusesLateCompletion(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+
+	task := f.task(t, "Graph function")
+	if _, err := f.n.Claim(ctx, f.project.ID, "planner"); err != nil {
+		t.Fatalf("planner Claim: %v", err)
+	}
+	if err := f.db.StopTask(ctx, f.project.ID, task.ID); err != nil {
+		t.Fatalf("StopTask: %v", err)
+	}
+
+	// reviewer is the terminal role, so this is the merge path.
+	_, err := f.n.Send(ctx, f.project.ID, "reviewer", SendRequest{
+		TaskID: task.ID, Commit: "bbbbbbbbbb", Body: "shipping it"})
+	if err == nil {
+		t.Fatal("a stopped card was completed and merged")
+	}
+	if !strings.Contains(err.Error(), "stopped") {
+		t.Errorf("error = %v, want it to say the card was stopped", err)
+	}
+	if got := f.reload(t, task.ID); got.State != store.TaskRejected || got.StoppedAt == nil {
+		t.Errorf("state = %q stopped_at = %v, want it still stopped", got.State, got.StoppedAt)
+	}
+}

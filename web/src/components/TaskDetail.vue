@@ -11,7 +11,7 @@ import { ref, watch } from 'vue'
 import { api, type Task, type TaskDetail } from '@/lib/api'
 import { latest } from '@/lib/latest'
 import { renderMarkdown } from '@/lib/markdown'
-import { duration } from '@/lib/utils'
+import { duration, taskState } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import TaskFlow from '@/components/TaskFlow.vue'
 import {
@@ -79,7 +79,12 @@ function tokensOf(u: TaskDetail['usage']): number {
       <DialogHeader class="hairline-b shrink-0 px-5 py-4 pr-12">
         <DialogTitle class="truncate">{{ task?.name }}</DialogTitle>
         <DialogDescription class="flex flex-wrap items-center gap-2 text-[11px]">
-          <Badge variant="outline">{{ task?.state }}</Badge>
+          <Badge :variant="task?.stoppedAt ? 'secondary' : 'outline'">
+            {{ task ? taskState(task) : '' }}
+          </Badge>
+          <span v-if="task?.stoppedAt" class="text-muted-foreground">
+            parked by a person — no role turned this down
+          </span>
           <Badge v-if="(task?.reworkCount ?? 0) > 0" variant="secondary">
             ↩ {{ task?.reworkCount }} rework
           </Badge>

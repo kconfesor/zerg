@@ -399,6 +399,16 @@ func (s *Server) stopTask(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
+	// The role holding it does not read the queue while it is working, so being
+	// told is the only way it finds out. Cooperative on purpose — see
+	// Overmind.Interrupt — and the card is already stopped either way.
+	if s.over != nil && task.Lane != "" && task.Lane != store.LaneDone {
+		s.over.Interrupt(task.ProjectID, task.Lane, fmt.Sprintf(
+			"The operator stopped the card %q. Stop working on it now: do not commit "+
+				"anything further for it, and do not run `zerg send` or `zerg done` for it — "+
+				"both are refused for a stopped card. Run `zerg next` to claim other work.",
+			task.Name))
+	}
 	updated, err := s.db.GetTask(r.Context(), id)
 	if err != nil {
 		s.fail(w, r, err)

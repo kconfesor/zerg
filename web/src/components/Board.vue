@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import type { ResolvedRole, Task } from '@/lib/api'
-import { duration } from '@/lib/utils'
+import { duration, taskState } from '@/lib/utils'
 
 /**
  * "3m ago" rather than a timestamp. On a board the useful question is how long
@@ -140,7 +140,13 @@ const byLane = computed(() => {
                    actually working it. Showing only the lane makes a card read
                    as claimed the instant it is delivered. -->
               <Badge
-                :variant="task.state === 'working' ? 'default' : 'outline'"
+                :variant="
+                  task.state === 'working'
+                    ? 'default'
+                    : task.stoppedAt
+                      ? 'secondary'
+                      : 'outline'
+                "
                 class="gap-1"
               >
                 <!-- The same pulse a live role wears in the rail, so the board
@@ -149,7 +155,7 @@ const byLane = computed(() => {
                      a working one otherwise differ only in fill, which is a
                      colour difference and not something you catch in passing. -->
                 <span v-if="task.state === 'working'" class="pulse-dot size-1.5 rounded-full bg-current" />
-                {{ task.state }}
+                {{ taskState(task) }}
               </Badge>
               <!-- The card that is holding everything up says so on itself.
                    A count in the header tells you something is waiting; this

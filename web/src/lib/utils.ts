@@ -19,3 +19,15 @@ export function duration(ms: number): string {
   if (mins < 60) return `${mins}m`
   return `${Math.floor(mins / 60)}h ${String(mins % 60).padStart(2, '0')}m`
 }
+
+/**
+ * What a card's state should be called.
+ *
+ * `rejected` is stored for two different events — a role turned the work down,
+ * and a person parked it — because widening the stored states would have meant
+ * rebuilding a table whose deletes cascade through every transcript. The
+ * timestamp is what separates them, and this is the one place that knows it.
+ */
+export function taskState(task: { state: string; stoppedAt?: string }): string {
+  return task.state === 'rejected' && task.stoppedAt ? 'stopped' : task.state
+}

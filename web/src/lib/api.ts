@@ -167,6 +167,9 @@ export interface Task {
   /** When a role first picked it up, which is when work actually began. */
   firstClaimedAt?: string
   completedAt?: string
+  /** When a person parked it. `rejected` covers both a role's verdict and a
+   *  person's decision — this is what tells them apart. */
+  stoppedAt?: string
   activeMs: number
   reworkCount: number
   /** Total tokens and cost across every role and every lap. */

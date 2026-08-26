@@ -14,10 +14,16 @@ import (
 // is actually working it. With only the lane, a card reads as "in cleaner's
 // lane" the instant delivery happens, whether or not cleaner has looked at it.
 const (
-	TaskQueued   = "queued"
-	TaskWorking  = "working"
-	TaskDone     = "done"
+	TaskQueued  = "queued"
+	TaskWorking = "working"
+	TaskDone    = "done"
+	// TaskRejected is a role's verdict: the work was looked at and refused.
 	TaskRejected = "rejected"
+	// A card a person parks is also TaskRejected, with StoppedAt set. The
+	// states live in a CHECK constraint and changing one means rebuilding the
+	// table, which for `tasks` means an implicit cascade through every message,
+	// event and usage row — see schema_014.sql. StoppedAt is what tells the two
+	// apart, and it answers "when" as well.
 )
 
 // LaneDone is the well a finished card lands in.
@@ -70,6 +76,10 @@ type Task struct {
 	// Hidden is a card the person has put away. Finished work that is still
 	// finished — the board stops showing it, nothing else changes.
 	Hidden bool `json:"hidden"`
+
+	// StoppedAt is set when a person parked this card, which is a different
+	// event from a role rejecting it even though both leave State "rejected".
+	StoppedAt *time.Time `json:"stoppedAt,omitempty"`
 
 	// Tokens and CostUSD are what this card has cost across every role and
 	// every lap. A board that shows only a lane says nothing about the price
@@ -174,13 +184,14 @@ func (db *DB) CreateTask(ctx context.Context, projectID, name, body, lane string
 }
 
 const taskCols = `id, project_id, session_id, name, body, lane, state,
-	created_at, first_claimed_at, completed_at, active_ms, rework_count, hidden`
+	created_at, first_claimed_at, completed_at, active_ms, rework_count, hidden, stopped_at`
 
 // taskColsT is the same list qualified to the tasks table, for the queries that
 // join. Unqualified names resolve today and would become ambiguous the moment a
 // joined table gained a column of the same name.
 const taskColsT = `t.id, t.project_id, t.session_id, t.name, t.body, t.lane, t.state,
-	t.created_at, t.first_claimed_at, t.completed_at, t.active_ms, t.rework_count, t.hidden`
+	t.created_at, t.first_claimed_at, t.completed_at, t.active_ms, t.rework_count, t.hidden,
+	t.stopped_at`
 
 // GetTaskIn resolves a task that must belong to this project.
 //
@@ -263,13 +274,14 @@ func scanTaskWithSummary(s scanner) (*Task, error) {
 		created     string
 		firstClaim  sql.NullString
 		completedAt sql.NullString
+		stoppedAt   sql.NullString
 	)
 	if err := s.Scan(&t.ID, &t.ProjectID, &sessionID, &t.Name, &t.Body, &t.Lane, &t.State,
-		&created, &firstClaim, &completedAt, &t.ActiveMS, &t.ReworkCount, &t.Hidden,
+		&created, &firstClaim, &completedAt, &t.ActiveMS, &t.ReworkCount, &t.Hidden, &stoppedAt,
 		&t.Tokens, &t.CostUSD, &t.Doing); err != nil {
 		return nil, err
 	}
-	if err := fillTaskTimes(&t, sessionID, created, firstClaim, completedAt); err != nil {
+	if err := fillTaskTimes(&t, sessionID, created, firstClaim, completedAt, stoppedAt); err != nil {
 		return nil, err
 	}
 	return &t, nil
@@ -282,12 +294,14 @@ func scanTask(s scanner) (*Task, error) {
 		created     string
 		firstClaim  sql.NullString
 		completedAt sql.NullString
+		stoppedAt   sql.NullString
 	)
 	if err := s.Scan(&t.ID, &t.ProjectID, &sessionID, &t.Name, &t.Body, &t.Lane, &t.State,
-		&created, &firstClaim, &completedAt, &t.ActiveMS, &t.ReworkCount, &t.Hidden); err != nil {
+		&created, &firstClaim, &completedAt, &t.ActiveMS, &t.ReworkCount, &t.Hidden,
+		&stoppedAt); err != nil {
 		return nil, err
 	}
-	if err := fillTaskTimes(&t, sessionID, created, firstClaim, completedAt); err != nil {
+	if err := fillTaskTimes(&t, sessionID, created, firstClaim, completedAt, stoppedAt); err != nil {
 		return nil, err
 	}
 	return &t, nil
@@ -295,7 +309,7 @@ func scanTask(s scanner) (*Task, error) {
 
 // fillTaskTimes parses the stored timestamps onto a task. Shared by both
 // scanners so the two cannot come to disagree about how a time is read.
-func fillTaskTimes(t *Task, sessionID sql.NullString, created string, firstClaim, completedAt sql.NullString) error {
+func fillTaskTimes(t *Task, sessionID sql.NullString, created string, firstClaim, completedAt, stoppedAt sql.NullString) error {
 	if sessionID.Valid {
 		t.SessionID = &sessionID.String
 	}
@@ -307,6 +321,9 @@ func fillTaskTimes(t *Task, sessionID sql.NullString, created string, firstClaim
 		return err
 	}
 	if t.CompletedAt, err = nullTime(completedAt); err != nil {
+		return err
+	}
+	if t.StoppedAt, err = nullTime(stoppedAt); err != nil {
 		return err
 	}
 	return nil
@@ -774,9 +791,11 @@ func (db *DB) StopTask(ctx context.Context, projectID, taskID string) error {
 	}
 	defer tx.Rollback()
 
+	stoppedAt := time.Now().UTC().Format(time.RFC3339Nano)
 	res, err := tx.ExecContext(ctx,
-		`UPDATE tasks SET state = ? WHERE id = ? AND project_id = ? AND state IN (?, ?)`,
-		TaskRejected, taskID, projectID, TaskQueued, TaskWorking)
+		`UPDATE tasks SET state = ?, stopped_at = ?
+		  WHERE id = ? AND project_id = ? AND state IN (?, ?)`,
+		TaskRejected, stoppedAt, taskID, projectID, TaskQueued, TaskWorking)
 	if err != nil {
 		return fmt.Errorf("stopping task: %w", err)
 	}

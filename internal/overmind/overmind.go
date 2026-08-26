@@ -194,6 +194,38 @@ func (o *Overmind) Running(projectID string) bool {
 	return ok
 }
 
+// Interrupt tells a role, mid-turn, that something changed under it.
+//
+// Stopping a card closed its routes and released its lease, and the agent
+// holding it carried on regardless: nothing in the queue reaches a process that
+// is already working. Observed: a card stopped at 15:41 whose role was still
+// running tool calls at 15:47, spending on work no longer wanted.
+//
+// This is cooperative and says so. The text is queued as the agent's next turn,
+// so it lands when the current one ends rather than killing it — a harness
+// interrupted mid-tool-call leaves the worktree in whatever state that call got
+// to. The guard in nydus is what makes it safe to be cooperative: whatever the
+// agent does after this, its handoff for that card is refused.
+//
+// Reports whether the role was there to be told.
+func (o *Overmind) Interrupt(projectID, role, text string) bool {
+	o.mu.Lock()
+	s, ok := o.running[projectID]
+	o.mu.Unlock()
+	if !ok {
+		return false
+	}
+	p, ok := s.snapshot()[role]
+	if !ok {
+		return false
+	}
+	if err := p.cerebrate.Submit(text); err != nil {
+		o.log.Debug("could not interrupt", "role", role, "err", err)
+		return false
+	}
+	return true
+}
+
 // Status returns each role's live state, or nil when the project is stopped.
 func (o *Overmind) Status(ctx context.Context, projectID string) ([]Status, error) {
 	o.mu.Lock()

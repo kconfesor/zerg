@@ -370,6 +370,15 @@ func (n *Nydus) send(ctx context.Context, req sendReq) (*store.Message, error) {
 	}
 	defer tx.Rollback()
 
+	// Before the message exists, not just before the card moves. A gated role's
+	// handoff writes an approval and leaves the card where it is, so guarding
+	// only the move let a stopped card collect a pending approval that would
+	// have walked it onward the moment anybody pressed the button.
+	if req.TaskID != nil {
+		if err := ensureOpen(ctx, tx, req.ProjectID, *req.TaskID); err != nil {
+			return nil, err
+		}
+	}
 	if err := n.sendIn(ctx, tx, msg, req, now); err != nil {
 		return nil, err
 	}
@@ -539,6 +548,9 @@ func (n *Nydus) complete(ctx context.Context, projectID string, sender store.Res
 		nullable(req.SourceLease), nullable(key)); err != nil {
 		return nil, fmt.Errorf("recording completion: %w", err)
 	}
+	if err := ensureOpen(ctx, tx, projectID, task.ID); err != nil {
+		return nil, err
+	}
 	res, err := tx.ExecContext(ctx,
 		`UPDATE tasks SET lane = ?, state = ?, completed_at = ?
 		  WHERE id = ? AND project_id = ?`,
@@ -699,8 +711,9 @@ func (n *Nydus) Claim(ctx context.Context, projectID, role string) (*store.Lease
 			if _, err := tx.ExecContext(ctx,
 				`UPDATE tasks SET state = ?,
 				   first_claimed_at = COALESCE(first_claimed_at, ?)
-				 WHERE id = ? AND state != ?`,
-				store.TaskWorking, now.Format(time.RFC3339Nano), *m.TaskID, store.TaskDone); err != nil {
+				 WHERE id = ? AND state NOT IN (?, ?)`,
+				store.TaskWorking, now.Format(time.RFC3339Nano), *m.TaskID,
+				store.TaskDone, store.TaskRejected); err != nil {
 				return nil, fmt.Errorf("marking task working: %w", err)
 			}
 		}
@@ -880,6 +893,43 @@ func (n *Nydus) ReclaimLeases(ctx context.Context, projectID string) (int, error
 // pipeline stalls with nothing to notice that it has.
 func (n *Nydus) ExpireLeases(ctx context.Context) (int, error) {
 	return n.expire(ctx, n.now(), "")
+}
+
+// ensureOpen refuses to move a card that is already finished.
+//
+// The two statements that move a card set its state unconditionally, so a
+// handoff arriving after the card was stopped simply set it back to "queued"
+// and routed it onward — the stop had stopped nothing, and the board showed a
+// card walking down a pipeline nobody had asked it to re-enter. Observed:
+// stopping a card while its role was mid-turn, then watching that role finish
+// and hand the work on four minutes later.
+//
+// A role can be mid-turn when a person stops its card, so this is expected
+// rather than exceptional. It is invalid() so the agent is told plainly why its
+// handoff was refused, and by name, rather than reading a 500.
+func ensureOpen(ctx context.Context, tx *sql.Tx, projectID, taskID string) error {
+	var (
+		state   string
+		stopped sql.NullString
+	)
+	err := tx.QueryRowContext(ctx,
+		`SELECT state, stopped_at FROM tasks WHERE id = ? AND project_id = ?`,
+		taskID, projectID).Scan(&state, &stopped)
+	if errors.Is(err, sql.ErrNoRows) {
+		return invalid("task %s is not this project's", taskID)
+	}
+	if err != nil {
+		return fmt.Errorf("reading the card: %w", err)
+	}
+	switch {
+	case state == store.TaskDone:
+		return invalid("that card is already finished; nothing more is routed for it")
+	case state == store.TaskRejected && stopped.Valid:
+		return invalid("that card was stopped; nothing more is routed for it")
+	case state == store.TaskRejected:
+		return invalid("that card was rejected; nothing more is routed for it")
+	}
+	return nil
 }
 
 // expire requeues open leases. A zero deadline means every one of them,
