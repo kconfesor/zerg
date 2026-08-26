@@ -211,7 +211,7 @@ const tools = computed<Tool[]>(() => {
 </script>
 
 <template>
-  <div class="flex min-w-0 flex-col">
+  <div class="flex min-h-0 w-full min-w-0 flex-1 flex-col">
     <div class="hairline-b flex flex-wrap items-center gap-0.5 px-1 py-1">
       <template v-for="t in tools" :key="t.label">
         <button
@@ -254,10 +254,12 @@ const tools = computed<Tool[]>(() => {
       </div>
     </div>
 
+    <!-- Scrolls itself rather than the dialog: the toolbar has to stay put
+         while a long brief moves under it. -->
     <EditorContent
       v-show="tab === 'write'"
       :editor="editor"
-      class="min-w-0 px-3 py-2 text-xs leading-relaxed"
+      class="min-h-0 w-full min-w-0 flex-1 overflow-y-auto px-3 py-2 text-xs leading-relaxed"
       :style="{ minHeight }"
     />
 
@@ -265,7 +267,7 @@ const tools = computed<Tool[]>(() => {
       v-show="tab === 'source'"
       v-model="model"
       :rows="rows"
-      class="rounded-none border-0 font-mono text-xs focus-visible:ring-0"
+      class="min-h-0 flex-1 resize-none rounded-none border-0 font-mono text-xs focus-visible:ring-0"
     />
 
     <Dialog v-model:open="linking">

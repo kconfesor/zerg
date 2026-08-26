@@ -997,7 +997,14 @@ watch(current, () => (banner.value = null))
     <TaskDetail :task="openTask" @close="openTask = null" />
 
     <Dialog v-model:open="composing" @update:open="(v) => v && (dialogError = '')">
-      <DialogContent class="gap-0 overflow-hidden p-0 sm:max-w-lg">
+      <!-- The widest and tallest dialog in the app, on purpose: the brief is
+           the whole of what an agent is told, and a spec-shaped one written in
+           a six-line box reads like a chat message. A fixed height rather than
+           a grown one, so the editor does not resize under the caret as you
+           type. -->
+      <DialogContent
+        class="gap-0 overflow-hidden p-0 sm:h-[min(46rem,88vh)] sm:max-w-2xl lg:max-w-3xl"
+      >
         <DialogHeader class="hairline-b shrink-0 px-5 py-4 pr-12">
           <DialogTitle>New task</DialogTitle>
           <DialogDescription>
@@ -1021,12 +1028,12 @@ watch(current, () => (banner.value = null))
               Short and distinct — every role refers to the task by this name.
             </span>
           </div>
-          <div class="flex flex-col gap-1.5">
+          <div class="flex min-h-0 flex-1 flex-col gap-1.5">
             <Label :for="taskBodyId">What to do</Label>
             <!-- Rich text on screen, Markdown in the database: this goes to
                  an agent as text, and Markdown is what it reads. The Source tab
                  is what will actually be sent. -->
-            <div class="border">
+            <div class="flex min-h-0 flex-1 border">
               <MarkdownEditor :id="taskBodyId" v-model="taskBody" :rows="8" />
             </div>
             <span class="text-muted-foreground text-[11px]">
