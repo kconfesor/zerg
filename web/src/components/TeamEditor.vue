@@ -13,6 +13,7 @@ import type {
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
+import { Switch } from '@/components/ui/switch'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import RoleOverrideDialog from '@/components/RoleOverrideDialog.vue'
@@ -147,12 +148,38 @@ function saveRoles(roles: TeamPresetRole[]) {
   })
 }
 
+/**
+ * A change that would stop a running agent asks first.
+ *
+ * Not a lock. The old editor disabled these controls whenever a swarm was up,
+ * because a team edit then reached nobody until the next respawn — "stop the
+ * swarm to change the pipeline" was the honest instruction. The daemon
+ * reconciles live now: it spawns a role added to the team and stops one taken
+ * off, within the second. Disabling the controls would give that away.
+ *
+ * What is left to protect is the surprise. Taking a role off a team, or turning
+ * it off, kills an agent that may be mid-turn and returns its work to the
+ * queue — and a team is shared, so it happens to every project using it, not
+ * just the one on screen.
+ */
+const pending = ref<{ question: string; run: () => void } | null>(null)
+
+function guard(question: string, run: () => void) {
+  if (!props.running) {
+    run()
+    return
+  }
+  pending.value = { question, run }
+}
+
 function toggleRole(template: RoleTemplate) {
   const preset = activePreset.value
   if (!preset) return
   const roles = preset.roles.map((role) => ({ ...role, ...cloneOverrides(role) }))
   if (selectedRoleIds.value.has(template.id)) {
-    saveRoles(roles.filter((role) => role.templateId !== template.id))
+    guard(`Take ${template.name} off ${preset.name}?`, () =>
+      saveRoles(roles.filter((role) => role.templateId !== template.id)),
+    )
     return
   }
   saveRoles([
@@ -164,6 +191,37 @@ function toggleRole(template: RoleTemplate) {
       ...cloneOverrides({}),
     },
   ])
+}
+
+/**
+ * Park a role without taking it off the team.
+ *
+ * `enabled` has never stopped being read — terminality is the last *enabled*
+ * role, and the overmind only spawns enabled ones — but the control that set it
+ * was dropped, so a role stored disabled could not be turned back on from
+ * anywhere. That includes every project migrated from before teams existed with
+ * a disabled trailing role.
+ *
+ * Distinct from unchecking it in the Roles column, which removes it from the
+ * team and takes its position and overrides with it.
+ */
+function setEnabled(templateId: string, enabled: boolean) {
+  const preset = activePreset.value
+  if (!preset) return
+  const apply = () =>
+    saveRoles(
+      preset.roles.map((role) => ({
+        ...role,
+        ...cloneOverrides(role),
+        enabled: role.templateId === templateId ? enabled : role.enabled,
+      })),
+    )
+  // Turning one off stops a live agent, so it is asked about rather than done.
+  if (!enabled) {
+    guard(`Stop ${libraryById.value.get(templateId)?.name ?? 'this role'}?`, apply)
+    return
+  }
+  apply()
 }
 
 function moveRole(index: number, delta: number) {
@@ -434,14 +492,22 @@ function cloneTeam() {
     <section class="flex min-w-0 flex-col">
       <div class="border-b px-4 py-3">
         <h2 class="text-xs font-semibold uppercase tracking-wide">Pipeline</h2>
-        <p class="text-muted-foreground mt-0.5 text-[10px]">Work flows from top to bottom</p>
+        <p class="text-muted-foreground mt-0.5 text-[10px]">
+          <template v-if="running">
+            Agents are running — changes apply immediately, to every project on this team
+          </template>
+          <template v-else>Work flows from top to bottom</template>
+        </p>
       </div>
 
       <ol v-if="activePreset" class="divide-y">
         <li
           v-for="(role, index) in activePreset.roles"
           :key="role.templateId"
-          class="flex items-center gap-3 px-4 py-3"
+          :class="[
+            'flex items-center gap-3 px-4 py-3',
+            role.enabled ? '' : 'opacity-55',
+          ]"
         >
           <span class="text-muted-foreground grid size-6 shrink-0 place-items-center border text-[11px]">
             {{ index + 1 }}
@@ -452,11 +518,20 @@ function cloneTeam() {
                 {{ libraryById.get(role.templateId)?.name ?? role.templateId }}
               </span>
               <Badge v-if="role.templateId === terminalTemplateId">terminal</Badge>
+              <!-- A parked role keeps its place and its settings; it just does
+                   not run, and work routes past it. -->
+              <Badge v-if="!role.enabled" variant="outline">off</Badge>
             </div>
             <p class="text-muted-foreground mt-0.5 truncate text-[10px]">
               {{ effectiveRole(role)?.harness }} · {{ effectiveRole(role)?.model || 'default model' }}
             </p>
           </div>
+          <Switch
+            :model-value="role.enabled"
+            :aria-label="`${libraryById.get(role.templateId)?.name ?? role.templateId} runs`"
+            :title="role.enabled ? 'Running in this pipeline' : 'Parked — keeps its place, does not run'"
+            @update:model-value="(v: boolean) => setEnabled(role.templateId, v)"
+          />
           <div class="flex">
             <Button
               size="icon-sm"
@@ -485,6 +560,35 @@ function cloneTeam() {
       </ol>
     </section>
   </div>
+
+  <!-- Asked only while agents are up, and only for the changes that stop
+       one. Reordering does not kill anything, so it is not asked about. -->
+  <Dialog :open="!!pending" @update:open="(v) => !v && (pending = null)">
+    <DialogContent v-if="pending" class="sm:max-w-md">
+      <DialogHeader>
+        <DialogTitle>{{ pending.question }}</DialogTitle>
+        <DialogDescription>
+          Agents are running. This stops it within a second or so, and anything it was working on
+          goes back to the queue for whoever picks it up next. Every project using this team is
+          affected, not only this one.
+        </DialogDescription>
+      </DialogHeader>
+      <DialogFooter>
+        <Button variant="outline" @click="pending = null">Cancel</Button>
+        <Button
+          variant="destructive"
+          @click="
+            () => {
+              pending?.run()
+              pending = null
+            }
+          "
+        >
+          Stop it
+        </Button>
+      </DialogFooter>
+    </DialogContent>
+  </Dialog>
 
   <RoleOverrideDialog
     v-model:open="roleSettingsOpen"
