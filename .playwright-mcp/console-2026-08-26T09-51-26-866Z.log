@@ -1,0 +1,16 @@
+[19915788ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:7717/api/projects/01M0VPTPS4TY4MC5MJPH0S4MJ2/team:0
+[19915789ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:7717/api/projects/01M0VPTPS4TY4MC5MJPH0S4MJ2/tasks:0
+[19915789ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:7717/api/projects/01M0VPTPS4TY4MC5MJPH0S4MJ2/attention:0
+[19915789ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:7717/api/projects/01M0VPTPS4TY4MC5MJPH0S4MJ2/status:0
+[19972066ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:7717/api/projects/01M0VPTPS4TY4MC5MJPH0S4MJ2/team:0
+[19972067ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:7717/api/projects/01M0VPTPS4TY4MC5MJPH0S4MJ2/tasks:0
+[19972067ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:7717/api/projects/01M0VPTPS4TY4MC5MJPH0S4MJ2/attention:0
+[19972067ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:7717/api/projects/01M0VPTPS4TY4MC5MJPH0S4MJ2/status:0
+[19976738ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:7717/api/projects/01M0VPTPS4TY4MC5MJPH0S4MJ2/team:0
+[19976738ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:7717/api/projects/01M0VPTPS4TY4MC5MJPH0S4MJ2/tasks:0
+[19976738ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:7717/api/projects/01M0VPTPS4TY4MC5MJPH0S4MJ2/attention:0
+[19976738ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:7717/api/projects/01M0VPTPS4TY4MC5MJPH0S4MJ2/status:0
+[19985385ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:7717/api/projects/01M0VPTPS4TY4MC5MJPH0S4MJ2/team:0
+[19985385ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:7717/api/projects/01M0VPTPS4TY4MC5MJPH0S4MJ2/tasks:0
+[19985385ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:7717/api/projects/01M0VPTPS4TY4MC5MJPH0S4MJ2/attention:0
+[19985385ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_REFUSED @ http://127.0.0.1:7717/api/projects/01M0VPTPS4TY4MC5MJPH0S4MJ2/status:0

@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 import {
   Activity as ActivityIcon,
+  ChevronDown,
   Columns3,
   FolderGit2,
   GitBranch,
@@ -263,7 +264,22 @@ function live(r: RoleStatus): boolean {
         </span>
       </div>
       <ul class="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
-        <li v-for="r in rolesShown" :key="r.role" class="px-1 py-1.5">
+        <li v-for="(r, i) in rolesShown" :key="r.role" class="relative px-1 py-1.5">
+          <!-- The pipeline is an order, and a list does not say so on its own:
+               these three names read as a set of agents rather than as a route
+               work takes. The rail runs from each role's dot to the next one's,
+               which is the direction a handoff actually travels. -->
+          <template v-if="i < rolesShown.length - 1 || current?.baseBranch">
+            <span
+              class="bg-border absolute top-[19px] bottom-[-7px] left-[6.5px] w-px"
+              aria-hidden="true"
+            />
+            <ChevronDown
+              :size="9"
+              class="text-muted-foreground/50 absolute -bottom-[7px] left-[2.5px]"
+              aria-hidden="true"
+            />
+          </template>
           <div class="flex items-center gap-2">
             <span
               v-if="r.live"
@@ -312,6 +328,15 @@ function live(r: RoleStatus): boolean {
           >
             {{ r.live.lastError }}
           </p>
+        </li>
+
+        <!-- Where the last role's work lands, which is the end of the same
+             route and the one step of it that is not a role. -->
+        <li v-if="current?.baseBranch" class="relative px-1 pt-1.5">
+          <div class="text-muted-foreground/60 flex items-center gap-2 text-[10px]">
+            <GitBranch :size="9" class="ml-[-1px] shrink-0" aria-hidden="true" />
+            <span class="truncate">merges to {{ current.baseBranch }}</span>
+          </div>
         </li>
       </ul>
 

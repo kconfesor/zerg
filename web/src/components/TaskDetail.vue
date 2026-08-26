@@ -13,6 +13,7 @@ import { latest } from '@/lib/latest'
 import { renderMarkdown } from '@/lib/markdown'
 import { duration } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
+import TaskFlow from '@/components/TaskFlow.vue'
 import {
   Dialog,
   DialogBody,
@@ -22,7 +23,13 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 
-const props = defineProps<{ task: Task | null }>()
+const props = defineProps<{
+  task: Task | null
+  /** The team's roles in pipeline order, so the diagram can show the columns a
+   *  card has not reached yet as well as the ones it has. */
+  roles?: string[]
+  baseBranch?: string
+}>()
 const emit = defineEmits<{ close: [] }>()
 
 const detail = ref<TaskDetail | null>(null)
@@ -91,23 +98,27 @@ function tokensOf(u: TaskDetail['usage']): number {
         <p v-if="failed" class="text-destructive text-xs">{{ failed }}</p>
         <p v-else-if="!detail" class="text-muted-foreground text-xs">Reading the history…</p>
 
-        <!-- One step per handoff, in order. The note each role wrote is the
-             substance; the commit subject says what landed. -->
-        <ol v-else class="flex flex-col gap-3">
-          <li v-for="(h, i) in detail.history" :key="i" class="hairline-b pb-3 last:border-0">
-            <div class="mb-1 flex flex-wrap items-center gap-1.5 text-[11px]">
-              <span class="font-semibold">{{ h.from }}</span>
-              <span class="text-muted-foreground">→</span>
-              <span class="font-semibold">{{ h.final ? 'merged' : h.to || '—' }}</span>
-              <code v-if="h.commit" class="text-muted-foreground">{{ h.commit.slice(0, 8) }}</code>
-              <span v-if="h.subject" class="text-muted-foreground truncate">{{ h.subject }}</span>
-            </div>
-            <div v-if="h.body" class="md text-xs leading-relaxed" v-html="renderMarkdown(h.body)" />
+        <!-- One step per handoff, drawn in the order they happened. The note
+             each role wrote is the substance; the diagram is what says which
+             way the work went. -->
+        <TaskFlow
+          v-else
+          :steps="detail.history"
+          :roles="roles ?? []"
+          :base-branch="baseBranch"
+          :current="task?.lane"
+        >
+          <template #note="{ step }">
+            <div
+              v-if="step.body"
+              class="md mt-1 text-xs leading-relaxed"
+              v-html="renderMarkdown(step.body)"
+            />
             <p v-else class="text-muted-foreground text-[11px] italic">
               No note — this handoff predates notes being required.
             </p>
-          </li>
-        </ol>
+          </template>
+        </TaskFlow>
       </DialogBody>
     </DialogContent>
   </Dialog>

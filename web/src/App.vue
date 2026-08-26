@@ -996,7 +996,12 @@ watch(current, () => (banner.value = null))
       </DialogContent>
     </Dialog>
 
-    <TaskDetail :task="openTask" @close="openTask = null" />
+    <TaskDetail
+      :task="openTask"
+      :roles="team.filter((r) => r.enabled).map((r) => r.name)"
+      :base-branch="current?.baseBranch"
+      @close="openTask = null"
+    />
 
     <Dialog v-model:open="composing" @update:open="(v) => v && (dialogError = '')">
       <!-- The widest and tallest dialog in the app, on purpose: the brief is
