@@ -41,11 +41,10 @@ go vet ./... && go test ./...
 pnpm --dir web lint
 pnpm --dir web exec vue-tsc --noEmit          # templates, not just script blocks
 pnpm --dir web test
-./build.sh                                    # and commit internal/api/dist if it changed
+./build.sh                                    # if you changed anything under web/
 ```
 
-CI runs all of that. It also rebuilds the cockpit and fails if `internal/api/dist` does not match
-`web/`. See below.
+CI runs all of that, and builds the cockpit itself.
 
 The race detector is not in CI, because it is slow and it kept the workflow red while unrelated
 things were being fixed. It has caught real bugs. Run it by hand whenever you touch anything that
@@ -58,10 +57,15 @@ go test -race ./internal/agent ./internal/event ./internal/cerebrate \
 
 ## Things that will bite you
 
-**The built cockpit is committed.** `//go:embed` needs `internal/api/dist` to exist at compile
-time, so it is in git and `.gitignore` deliberately does not cover it. If you change anything under
-`web/`, run `./build.sh` and commit the result, or you will ship the previous UI while every test
-passes. CI checks this.
+**The built cockpit is generated, not committed.** `//go:embed` needs `internal/api/dist` to exist
+at compile time, which a committed `.gitkeep` provides; everything else in there is ignored. A fresh
+clone builds, vets and tests without Node installed at all, and `zerg up` serves a page saying to
+run `./build.sh` rather than a 404. Run `./build.sh` when you want the UI, and note that the binary
+you build is only as current as the last time you ran it.
+
+It used to be committed, which is worth knowing if you read older history: every asset filename
+carries a content hash, so any two branches that both built the cockpit conflicted on files nobody
+writes by hand.
 
 **Migrations are append-only.** Add `internal/store/schema_0NN.sql` and a line in `store.go`; never
 edit one that has shipped, because a database at `user_version N` has already run the old text.

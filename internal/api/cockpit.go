@@ -2,6 +2,7 @@ package api
 
 import (
 	"embed"
+	"io"
 	"io/fs"
 	"net/http"
 	"strings"
@@ -14,8 +15,40 @@ import (
 // files and directories beginning with `.` or `_`, which silently drops Vite's
 // dist/.vite/ manifest. The build appears to succeed and the page fails to load.
 //
+// The directory holds only a committed .gitkeep in a fresh clone: the built
+// cockpit is generated output and is not in git, because every asset filename
+// carries a content hash, so any two branches that both built it conflicted on
+// files nobody writes by hand. `all:` embeds the .gitkeep, which is what keeps
+// this compiling before anyone has run ./build.sh.
+//
 //go:embed all:dist
 var cockpitFS embed.FS
+
+// built reports whether a cockpit was compiled in, rather than the placeholder
+// that only exists to satisfy the embed.
+func built(sub fs.FS) bool {
+	f, err := sub.Open("index.html")
+	if err != nil {
+		return false
+	}
+	f.Close()
+	return true
+}
+
+// notBuilt answers every page with the one thing worth saying.
+//
+// The alternative is a 404 on the cockpit and a working API, which reads as a
+// broken install rather than an unfinished one. The daemon itself is fine here;
+// only the UI is missing, and one command produces it.
+const notBuilt = `<!doctype html>
+<meta charset="utf-8">
+<title>zerg: cockpit not built</title>
+<body style="font: 14px/1.6 ui-monospace, monospace; background: #16121c; color: #d7cfe0; padding: 2rem">
+<h1 style="font-size: 1rem">The cockpit is not built</h1>
+<p>The daemon is running and its API is up. The UI is generated rather than committed, so build it:</p>
+<pre style="background: #1e1826; padding: 1rem; overflow-x: auto">./build.sh    # then restart zerg up</pre>
+<p>It needs Node and pnpm; see the README for versions.</p>
+</body>`
 
 // cockpit serves the single-page app.
 //
@@ -28,6 +61,7 @@ func cockpit() (http.Handler, error) {
 		return nil, err
 	}
 	files := http.FileServer(http.FS(sub))
+	haveUI := built(sub)
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := strings.TrimPrefix(r.URL.Path, "/")
@@ -42,6 +76,14 @@ func cockpit() (http.Handler, error) {
 		// malformed response for as long as it took someone to check.
 		if path == "api" || strings.HasPrefix(path, "api/") {
 			writeError(w, http.StatusNotFound, "no such endpoint: "+r.URL.Path)
+			return
+		}
+
+		if !haveUI {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.Header().Set("Cache-Control", "no-store")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = io.WriteString(w, notBuilt)
 			return
 		}
 

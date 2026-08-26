@@ -274,8 +274,12 @@ Or by hand, which is what `build.sh` does:
 ```sh
 pnpm --dir web install --frozen-lockfile && pnpm --dir web build
 rm -rf internal/api/dist && cp -R web/dist internal/api/dist   # go:embed cannot reach outside its package
+touch internal/api/dist/.gitkeep                                # keeps a fresh clone compiling
 go build -o zerg ./cmd/zerg
 ```
+
+The cockpit is generated, not committed, so a clone has no UI until you run the build. `go build`
+alone gives you a working daemon whose pages say exactly that.
 
 State lives in `~/.zerg/zerg.db` (override with `--db`), which is created on first run along with
 the eight built-in role templates. The directory and the database are `0700`/`0600`, since they hold every
