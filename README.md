@@ -96,65 +96,182 @@ Vue 3.5 · Vite 8 · shadcn-vue 2.8 (reka-ui) · Tailwind 4 · TypeScript 6 (pin
 `modernc.org/sqlite` and `coder/websocket` are the only non-stdlib Go dependencies. Pinned versions and their gotchas:
 [ARCHITECTURE.md §14](ARCHITECTURE.md#14-stack).
 
-## Prerequisites
+## Setting up on a new machine
 
-- **Go 1.27+**
-- **Node 24.19.0** — pinned in `.nvmrc`; Vite 8 and the shadcn-vue CLI require `^22.18.0 || >=24.12.0`
-- **pnpm 11** — the cockpit's package manager (`pnpm-lock.yaml` is the lockfile)
-- **git**
-- At least one agent harness logged in: `claude` and/or `pi`
+Four steps. The first three are things zerg checks and reports on rather than does for you — it
+never runs a login flow or writes to an auth file.
 
-No tmux, no babashka, no zsh. Agents are child processes of the daemon — see
-[ARCHITECTURE.md §7.4](ARCHITECTURE.md#74-no-tmux).
+### 1. Toolchain
 
-## Running
+| | Version | Why |
+|---|---|---|
+| **Go** | 1.27+ (`go.mod`) | builds the daemon; `CGO_ENABLED=0` works, the SQLite driver is pure Go |
+| **Node** | 24.19.0 (`.nvmrc`) | builds the cockpit. Vite 8 needs `^22.18.0 \|\| >=24.12.0` |
+| **pnpm** | 11 | `pnpm-lock.yaml` is the lockfile; `npm` will not reproduce it |
+| **git** | any recent | worktrees are the isolation mechanism |
 
 ```sh
-pnpm --dir web install && pnpm --dir web build   # cockpit is embedded in the binary
-go build -o zerg ./cmd/zerg
-./zerg up                                        # daemon + cockpit on 127.0.0.1:7717
+go version && node -v && pnpm -v && git --version
 ```
 
-Then point it at a repo, pick a team, run preflight, and start.
+`build.sh` checks Node itself and refuses with the version it wanted, because a build that silently
+runs on the wrong one fails much further downstream.
 
-### From a phone
+Optional: **`gh`**, only if a project integrates by opening a pull request. Merge and branch modes
+never call it.
 
-The cockpit is responsive: below 768px the nav becomes a drawer, board lanes
-stack, and the activity stream puts its timestamps above each line rather than
-beside them.
+That is the whole list. No tmux, no babashka, no zsh — agents are child processes of the daemon
+([§7.4](ARCHITECTURE.md#74-no-tmux)), so there is no session manager to install or attach to.
 
-It binds to loopback by default. To reach it from another device, bind the one
-interface you want — over Tailscale, that is the tailnet address:
+### 2. Log a harness in
 
-Set it in **Settings → Network**, or for one run:
+At least one, and zerg will not do it for you:
+
+```sh
+claude          # then /login, and answer the trust prompt in any repo you will use
+pi              # then /login for the provider whose models you plan to select
+```
+
+zerg reads credential state and reports it; it never runs a login flow or touches an auth file.
+Readiness will tell you exactly which of these is missing per role — see step 4.
+
+### 3. Build and run
+
+```sh
+./build.sh          # cockpit → web/dist → embedded in the binary → ./zerg
+./zerg up           # 127.0.0.1:7717
+```
+
+Or by hand, which is what `build.sh` does:
+
+```sh
+pnpm --dir web install --frozen-lockfile && pnpm --dir web build
+rm -rf internal/api/dist && cp -R web/dist internal/api/dist   # go:embed cannot reach outside its package
+go build -o zerg ./cmd/zerg
+```
+
+State lives in `~/.zerg/zerg.db` (override with `--db`), which is created on first run along with
+the eight built-in role templates. The directory and the database are `0700`/`0600` — they hold every
+prompt, transcript and cost this machine has produced.
+
+```
+zerg up [--addr host:port] [--no-tls] [--db path] [--verbose]
+```
+
+`--addr` and `--no-tls` override the stored settings for one run. `--no-tls` is the way back in if a
+TLS setting turns out not to be satisfiable: without it, saving one can lock you out of the settings
+view that sets it.
+
+### 4. Point it at a repository
+
+In the cockpit: **Projects → Add a project** (an absolute path, checked to exist and be a
+directory), then **Team** to choose roles, then **Readiness**. On the first Start, a directory that
+is not a repository yet gets `git init` and one commit, because a worktree needs history to branch
+from — that is the only commit zerg authors rather than an agent.
+
+Readiness is the step worth not skipping, though you cannot really skip it: **Start refuses while
+any enabled role is blocked**, and the refusal carries the report, so pressing it anyway lands you
+on this screen. A team that cannot work must never reach a running board. It runs every check for
+every enabled role and states a remedy for each failure:
+
+| Check | What it catches |
+|---|---|
+| `binary_present` | the harness is not on PATH |
+| `binary_version` | the CLI does not answer `--version` |
+| `config_parses` | the CLI's own config is corrupt — two agents racing a read-modify-write once left one holding three concatenated copies of itself |
+| `credentials` (pi) | no credential for the selected provider → *run pi and use /login for that provider* |
+| `workspace_trusted` (claude) | the trust prompt was never answered for that directory |
+| `model_available` | the model id is not in the harness's catalog |
+| `extensions_loadable` (pi) | every extension failed to load, usually a Node version mismatch |
+
+## Reaching it from a phone
+
+The cockpit binds to `127.0.0.1:7717` and is responsive: below 768px the nav becomes a drawer, board
+lanes stack, dialogs go full screen, and the top bar names the project beside the agent count.
+
+### Check Tailscale first
+
+```sh
+tailscale status     # logged in, and what this machine is called
+tailscale ip -4      # the address to bind to
+```
+
+zerg asks the same daemon the same questions (`tailscale status --json`), and reports the answer in
+**Settings → Network** — so you can skip this and read it there. On a fresh machine the command is
+faster, and four things can be wrong:
+
+| Symptom | Meaning | Fix |
+|---|---|---|
+| `tailscale: command not found` | not installed | [tailscale.com/download](https://tailscale.com/download) |
+| `Logged out` or a connection error | tailscaled is not running, or this machine is logged out | `tailscale up` |
+| no MagicDNS name in `status` | MagicDNS is off | enable **MagicDNS** under DNS in the admin console |
+| `tailscale cert <name>` fails | HTTPS certificates are off for the tailnet | enable **HTTPS Certificates** under DNS in the admin console |
+
+Only the last one is specific to TLS; the first three are needed to reach the cockpit at all.
+Everything here degrades rather than fails — a machine without Tailscale is the normal case, and
+zerg says "not available" rather than erroring.
+
+### Bind and secure it
+
+In **Settings → Network**, set the address to the tailnet IP and TLS to **Tailscale certificate**.
+For one run instead:
 
 ```sh
 ./zerg up --addr $(tailscale ip -4):7717
 ```
 
-Turn on **TLS → Tailscale certificate** and zerg asks the local tailscaled for a
-real Let's Encrypt certificate for this machine's MagicDNS name, so a phone gets
-no warning. It needs **HTTPS Certificates** enabled for the tailnet, under DNS in
-the admin console; the settings view says so when it is off.
+With TLS set to `tailscale`, zerg asks the local tailscaled for a real Let's Encrypt certificate for
+this machine's MagicDNS name, so a phone gets no warning. `tailscale cert` is idempotent and renews
+in place, so this happens on every start and reuses a valid certificate. Certificates land in
+`~/.zerg/state/certs/`.
 
-`localhost` keeps working alongside it. A second listener serves plain HTTP on
-loopback on the same port — one daemon, two doors — so local work does not need
-the MagicDNS name, and a network setting that breaks the main listener cannot
-lock you out of the view that sets it.
+The alternative is TLS **files**, pointing at a certificate and key you already have.
 
-**The cockpit has no authentication.** Anything that can route to that port can
-start agents, read every transcript, and see which repositories are being worked
-on. On a tailnet that is your own devices, which is the point; `--addr 0.0.0.0`
-also hands it to whatever else shares the local network. The daemon says which
-of the two you have chosen at startup.
+`localhost` keeps working alongside it: a second listener serves plain HTTP on loopback on the same
+port — one daemon, two doors — so local work does not need the MagicDNS name, and a network setting
+that breaks the main listener cannot lock you out of the view that sets it. Turn it off with
+**Local access** if you would rather it did not.
+
+Address and TLS changes apply on restart, and the settings view says so; retention and cleanup apply
+immediately. The daemon prints the URL at startup, and both of them once there are two:
+
+```
+Cockpit: https://your-machine.tailXXXX.ts.net:7717
+Locally: http://127.0.0.1:7717
+note: reachable at 100.x.y.z:7717 beyond this machine, with no authentication.
+      Treat anything that can route to it as trusted.
+```
+
+> **The cockpit has no authentication.** Anything that can route to that port can start agents, read
+> every transcript, and see which repositories are being worked on. On a tailnet that is your own
+> devices, which is the point; `--addr 0.0.0.0` also hands it to whatever else shares the local
+> network. The daemon says which of the two you have chosen at startup.
+
+### Installing it as an app
+
+The cockpit ships a web manifest with `display: standalone`, so **Add to Home Screen** on iOS or
+**Install** on Android gives it its own window with no browser chrome. Dialogs account for the
+notch, spanning the safe-area insets rather than the raw viewport.
+
+## Running it unattended
+
+`zerg up` runs in the foreground and its agents are its children, so closing the terminal stops
+everything. There is no `--detach` yet; use a launchd or systemd unit, or `nohup`.
+
+A restart is a first-class path, not a recovery hack: every open lease is reclaimed immediately
+rather than left to lapse, and an approval interrupted mid-integration is settled against the
+repository — merged means the decision is recorded and the card closed, not merged means it returns
+to you as pending. Swarms do not resume by themselves, which is deliberate while spawning an LLM
+process costs money.
 
 ## Tests
 
 ```sh
-go test ./internal/...
+go test ./internal/...            # coordination, routing, store, adapters
+pnpm --dir web test               # the cockpit's logic: arg round-trips, stale-response guards, combobox keys
 ```
 
-The coordination layer is testable without spending a token, and is tested that way. Tests that
+Neither spends a token. The coordination layer is testable without one, and is tested that way. Tests that
 assert an effect check the system that was supposed to change — git, the database — rather than
 reading back a field the code set. [§6.1](ARCHITECTURE.md#61-what-the-first-real-run-broke) is what
 happens when they don't.
