@@ -17,6 +17,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import RoleLibrary from '@/components/RoleLibrary.vue'
 import {
   Select,
   SelectContent,
@@ -267,12 +268,20 @@ const loopback = computed(() => {
     <Tabs :default-value="FIRST_TAB" @update:model-value="(v) => (tab = String(v))">
       <TabsList>
         <TabsTrigger value="network">Network</TabsTrigger>
+        <TabsTrigger value="roles">Roles</TabsTrigger>
         <TabsTrigger value="disk">Disk</TabsTrigger>
         <TabsTrigger value="harness">Harness</TabsTrigger>
         <TabsTrigger value="instructions">Instructions</TabsTrigger>
       </TabsList>
 
       <!-- ── Network ──────────────────────────────────────────────────── -->
+      <!-- The role library. Here rather than beside the team editor because a
+           role is not a team: a team is an ordering of roles for one project,
+           and a role is what those entries mean everywhere. -->
+      <TabsContent value="roles" class="pt-4">
+        <RoleLibrary />
+      </TabsContent>
+
       <TabsContent value="network" class="pt-4">
         <Card>
           <CardHeader>
@@ -523,9 +532,10 @@ const loopback = computed(() => {
 
 
     <!-- Only for the tabs it saves. Instructions are stored separately and have
-         their own button; a second one that quietly ignored what you just typed
-         would be worse than no button at all. -->
-    <div v-if="tab !== 'instructions'" class="flex items-center gap-3">
+         their own button, and a role saves from its own dialog; a second button
+         that quietly ignored what you just typed would be worse than no button
+         at all. -->
+    <div v-if="tab !== 'instructions' && tab !== 'roles'" class="flex items-center gap-3">
       <Button :disabled="saving" @click="save">{{ saving ? 'Saving…' : 'Save settings' }}</Button>
       <span v-if="data?.restartNeeded" class="text-[11px] text-[var(--status-warning)]">
         Serving {{ data.applied }} until restart.
