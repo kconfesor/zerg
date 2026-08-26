@@ -11,7 +11,7 @@
 it at a repo, pick your roles, start.
 
 Status: **running.** Coordination, harnesses, preflight, board and cockpit are implemented and have
-completed real tasks end to end. See [ARCHITECTURE.md](ARCHITECTURE.md).
+completed real tasks end to end. See [ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Why
 
@@ -37,14 +37,14 @@ So:
 - **your plan's headroom is on screen** — claude reports it on every turn, pi is asked for it; a
   bar per window, coloured only where it is nearly spent
 - **a spent quota is a pause, not a crash** — a role that hits its subscription limit waits for the
-  window and resumes itself, saying when ([§16](ARCHITECTURE.md#16-provider-limits))
+  window and resumes itself, saying when ([§16](docs/ARCHITECTURE.md#16-provider-limits))
 - **one SQLite database**, one writer, real transactions
-- **nothing reports success it did not observe** — see [§6.1](ARCHITECTURE.md#61-what-the-first-real-run-broke),
+- **nothing reports success it did not observe** — see [§6.1](docs/ARCHITECTURE.md#61-what-the-first-real-run-broke),
   which is the record of a task reaching Done over a branch that had never moved
 - **it is a guest in your repository** — prompts are appended, never substituted, so your
   `CLAUDE.md` and `AGENTS.md` still apply; nothing is written into the tree but `.worktrees/`, and
   that ignore rule goes in `.git/info/exclude` rather than your `.gitignore`
-  ([§4.4.1](ARCHITECTURE.md#441-what-zerg-injects-and-what-it-leaves-alone))
+  ([§4.4.1](docs/ARCHITECTURE.md#441-what-zerg-injects-and-what-it-leaves-alone))
 
 Provider setup is out of scope: log into `pi` and `claude` yourself. zerg detects credential state
 and tells you what to fix — it never runs a login flow or touches an auth file.
@@ -94,7 +94,7 @@ Go 1.27 · stdlib `net/http` · modernc.org/sqlite (cgo-free, so `CGO_ENABLED=0`
 Vue 3.5 · Vite 8 · shadcn-vue 2.8 (reka-ui) · Tailwind 4 · TypeScript 6 (pinned) · pnpm
 
 `modernc.org/sqlite` and `coder/websocket` are the only non-stdlib Go dependencies. Pinned versions and their gotchas:
-[ARCHITECTURE.md §14](ARCHITECTURE.md#14-stack).
+[ARCHITECTURE.md §14](docs/ARCHITECTURE.md#14-stack).
 
 ## Setting up on a new machine
 
@@ -121,7 +121,7 @@ Optional: **`gh`**, only if a project integrates by opening a pull request. Merg
 never call it.
 
 That is the whole list. No tmux, no babashka, no zsh — agents are child processes of the daemon
-([§7.4](ARCHITECTURE.md#74-no-tmux)), so there is no session manager to install or attach to.
+([§7.4](docs/ARCHITECTURE.md#74-no-tmux)), so there is no session manager to install or attach to.
 
 ### 2. Log a harness in
 
@@ -273,5 +273,5 @@ pnpm --dir web test               # the cockpit's logic: arg round-trips, stale-
 
 Neither spends a token. The coordination layer is testable without one, and is tested that way. Tests that
 assert an effect check the system that was supposed to change — git, the database — rather than
-reading back a field the code set. [§6.1](ARCHITECTURE.md#61-what-the-first-real-run-broke) is what
+reading back a field the code set. [§6.1](docs/ARCHITECTURE.md#61-what-the-first-real-run-broke) is what
 happens when they don't.
