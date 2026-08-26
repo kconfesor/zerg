@@ -21,6 +21,15 @@ type Event struct {
 	ProjectID string    `json:"projectId"`
 	Role      string    `json:"role"`
 	At        time.Time `json:"at"`
+
+	// Harness is which CLI produced this, and belongs here rather than in the
+	// adapter's payload for the same reason Role does: it is a fact about the
+	// producer, not about the thing produced. The usage table has had a column
+	// for it since it was created and nothing ever wrote one, so every row said
+	// the empty string — and "which harness is this spend on" was answerable
+	// only by joining through the team as it is configured now, which is not
+	// what it was when the turn happened.
+	Harness string `json:"harness,omitempty"`
 }
 
 // Bus fans events out to subscribers.

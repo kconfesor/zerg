@@ -58,6 +58,66 @@ export interface Project {
   lastOpenedAt?: string
 }
 
+/**
+ * One role's spend over a window, with what it ran on.
+ *
+ * The four token classes are separate because they are priced roughly 50x
+ * apart — a single "input" figure misstates the bill by an order of magnitude
+ * and hides the one lever anybody controls.
+ */
+export interface RoleUsage {
+  role: string
+  turns: number
+  inputTokens: number
+  cacheWriteTokens: number
+  cacheReadTokens: number
+  outputTokens: number
+  costUsd: number
+  /** How much of costUsd is an estimate at API rates rather than a bill. */
+  subscriptionTurns: number
+  /** Turns whose harness reported no cost: real tokens, unknown price. */
+  unpricedTurns: number
+  /** Every model this role ran on in the window, busiest first. */
+  models: string[]
+  providers: string[]
+  /** Distinct cards this spend is attributed to; 0 for chat, which has none. */
+  tasks: number
+  lastAt: string
+}
+
+/**
+ * A role whose cache hit rate has fallen against its own past.
+ *
+ * The regression nothing else reports: caching is a prefix match, so one
+ * changed byte in the composed system prompt invalidates everything after it —
+ * silently, with the bill as the only symptom.
+ */
+export interface CacheFlag {
+  role: string
+  /** Hit rates, 0..1, over the newest turns and everything before them. */
+  recent: number
+  trailing: number
+  recentTurns: number
+  trailingTurns: number
+  /** When the role's library entry last changed, if recent enough to be the
+   *  likely cause. Any edit moves it, not the prompt specifically. */
+  editedAt?: string
+}
+
+export type SpendRange = 'session' | '24h' | '7d' | '30d' | 'all'
+
+export interface Spend {
+  range: SpendRange
+  /** When the window opens; absent means all of recorded history. */
+  from?: string
+  /** False when "this session" resolved to nothing because none has run. */
+  sessionStarted: boolean
+  roles: RoleUsage[]
+  providers: UsageTotal[]
+  models: UsageTotal[]
+  flags: CacheFlag[]
+}
+
 export interface Task {
   id: string
   projectId: string
@@ -288,6 +348,9 @@ export const api = {
     call<Task>(`/tasks/${id}/hidden`, { method: 'PUT', body: JSON.stringify({ hidden }) }),
   approvalDiff: (id: string) =>
     call<{ files: ChangedFile[]; range: boolean; base: string }>(`/approvals/${id}/diff`),
+  spend: (id: string, range: SpendRange) =>
+    call<Spend>(`/projects/${id}/spend?range=${range}`),
+
   renameProject: (id: string, name: string) =>
     call<Project>(`/projects/${id}/name`, {
       method: 'PUT',
