@@ -8,7 +8,7 @@ const coder: RoleTemplate = {
   name: 'coder',
   harness: 'claude',
   model: 'sonnet',
-  args: ['--library'],
+  args: [],
   receive: 'task',
   batchMaxItems: 8,
   batchMaxAgeSec: 300,
@@ -26,34 +26,34 @@ const reviewer: RoleTemplate = {
   prompt: 'review',
 }
 
-const preset: TeamPreset = {
+const defaultTeam: TeamPreset = {
   id: 'default',
   name: 'Default',
   builtin: true,
   createdAt: '2026-01-01T00:00:00Z',
   updatedAt: '2026-01-01T00:00:00Z',
   roles: [
-    {
-      templateId: 'coder',
-      position: 0,
-      enabled: true,
-      argsOverride: null,
-      modelOverride: 'preset-model',
-    },
+    { templateId: 'coder', position: 0, enabled: true, argsOverride: null },
     { templateId: 'reviewer', position: 1, enabled: true, argsOverride: null },
   ],
+}
+
+const docsTeam: TeamPreset = {
+  ...defaultTeam,
+  id: 'docs-team',
+  name: 'Docs team',
+  builtin: false,
+  roles: [{ templateId: 'reviewer', position: 0, enabled: true, argsOverride: null }],
 }
 
 const resolved: ResolvedRole[] = [
   {
     ...coder,
-    model: 'project-model',
     position: 0,
     enabled: true,
-    overridden: true,
+    overridden: false,
     terminal: false,
-    modelOverride: 'project-model',
-    argsOverride: [],
+    argsOverride: null,
   },
   {
     ...reviewer,
@@ -69,43 +69,42 @@ function editor(team: ProjectTeam) {
   return mount(TeamEditor, {
     props: {
       library: [coder, reviewer],
-      presets: [preset],
+      presets: [defaultTeam, docsTeam],
       projectTeam: team,
       harnesses: ['claude'],
       models: {},
       running: false,
     },
-    global: {
-      stubs: {
-        RoleOverrideDialog: true,
-      },
-    },
+    global: { stubs: { RoleOverrideDialog: true } },
   })
 }
 
-describe('TeamEditor project topology', () => {
-  it('materializes the effective pipeline without losing raw field overrides', async () => {
-    const w = editor({ presetId: preset.id, topologyOverride: false, roles: resolved })
-    await w.findAll('button').find((b) => b.text().includes('This project'))!.trigger('click')
-    await w.findAll('button').find((b) => b.text() === 'Customize pipeline')!.trigger('click')
+describe('TeamEditor', () => {
+  it('presents the team, roles and pipeline as three columns', () => {
+    const w = editor({ presetId: defaultTeam.id, topologyOverride: false, roles: resolved })
+    const headings = w.findAll('h2').map((heading) => heading.text())
+    expect(headings).toEqual(['Teams', 'Roles', 'Pipeline'])
+    expect(w.text()).toContain('Default')
+    expect(w.text()).toContain('terminal')
+  })
 
+  it('selects a team for editing without using it until the explicit button is pressed', async () => {
+    const w = editor({ presetId: defaultTeam.id, topologyOverride: false, roles: resolved })
+    await w.findAll('button').find((button) => button.text().includes('Docs team'))!.trigger('click')
+
+    expect(w.emitted('setTeam')).toBeUndefined()
+    await w.findAll('button').find((button) => button.text() === 'Use this Team')!.trigger('click')
     expect(w.emitted('setTeam')?.at(-1)?.[0]).toEqual({
-      presetId: preset.id,
-      topologyOverride: true,
-      roles: [
-        expect.objectContaining({
-          templateId: 'coder',
-          enabled: true,
-          modelOverride: 'project-model',
-          argsOverride: [],
-        }),
-        expect.objectContaining({
-          templateId: 'reviewer',
-          enabled: true,
-          modelOverride: null,
-          argsOverride: null,
-        }),
-      ],
+      presetId: docsTeam.id,
+      topologyOverride: false,
+      roles: [],
     })
+  })
+
+  it('reorders the selected team in the pipeline', async () => {
+    const w = editor({ presetId: defaultTeam.id, topologyOverride: false, roles: resolved })
+    await w.get('[aria-label="Move coder down"]').trigger('click')
+    const updated = w.emitted('savePreset')?.at(-1)?.[0] as TeamPreset
+    expect(updated.roles.map((role) => role.templateId)).toEqual(['reviewer', 'coder'])
   })
 })

@@ -8,7 +8,7 @@
 </p>
 
 **Everything is configured in the UI.** No config files or prompt files to copy. Define reusable
-teams once, point zerg at a repo, and override only what that project needs.
+teams once, clone one when a project needs different settings, and choose which team each project uses.
 
 Status: **running.** Coordination, harnesses, preflight, board and cockpit are implemented and have
 completed real tasks end to end. See [ARCHITECTURE.md](docs/ARCHITECTURE.md).
@@ -25,8 +25,8 @@ snapshotted into the worktrees and a later edit reached no one.
 
 So:
 
-- **configure in the UI** — roles, reusable teams, project overrides, harnesses, models and prompts
-  are database rows, not files; prompts are composed fresh at every spawn
+- **configure in the UI** — roles, reusable teams, harnesses, models and prompts are database rows,
+  not files; prompts are composed fresh at every spawn
 - **harnesses are adapters**, not a hardcoded switch — `claude` and `pi` first
 - **model pickers from the harness's own catalog**, so you stop typing model ids that 400
 - **preflight before spawn** — a stale CLI, a corrupt config, an unanswered trust dialog or a broken
@@ -66,8 +66,8 @@ Finished cards can be put away one at a time; the switch to show them again is o
 
 A library of eight role templates ships — planner, coder, reviewer, cleaner, architect, hardener,
 security, docs — plus a reusable **Default** team containing `coder` (sonnet) → `reviewer` (opus).
-Create more named teams for different kinds of work. Projects follow their selected team's live
-settings until a field or the pipeline is explicitly overridden for that repository.
+Create more named teams for different kinds of work. A project uses one team at a time; clone a
+team, change its role settings or pipeline, then choose **Use this Team** for project-specific needs.
 
 ## Layout
 

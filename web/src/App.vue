@@ -549,25 +549,6 @@ async function deletePreset(id: string) {
   }
 }
 
-async function saveRole(role: RoleTemplate) {
-  try {
-    await api.updateRole(role)
-    await loadGlobals()
-    await refresh()
-    // What to do next depends on whether anything is running. There is no
-    // per-role restart — start and stop act on the whole swarm — so naming a
-    // control that does not exist sends people looking for it.
-    banner.value = {
-      tone: 'ok',
-      text: status.value.running
-        ? `Saved ${role.name}. Stop and start the swarm for it to take effect.`
-        : `Saved ${role.name}. It takes effect the next time you start.`,
-    }
-  } catch (err) {
-    fail(err)
-  }
-}
-
 // Deciding an approval runs a merge or opens a pull request, so a second press
 // is not a wasted request: it races the first through git. Keyed by the
 // approval, so two different cards can still be decided at once.
@@ -802,7 +783,7 @@ watch(current, () => (banner.value = null))
           <template v-else-if="view === 'team'">
             <PageHeader
               title="Team"
-              subtitle="The library is shared by every project. The pipeline is this one's."
+              subtitle="Choose a team, configure its roles, order its pipeline, then use it for this project."
             />
             <div class="pt-4">
               <TeamEditor
@@ -816,7 +797,6 @@ watch(current, () => (banner.value = null))
                 @save-preset="savePreset"
                 @create-preset="createPreset"
                 @delete-preset="deletePreset"
-                @save-role="saveRole"
               />
             </div>
           </template>

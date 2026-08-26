@@ -654,13 +654,13 @@ plain `//go:embed dist` silently skips Vite's `.vite/` manifest directory.
 - **Readiness** — the preflight panel (§8.1). One row per enabled role, every check with its status
   and an inline remedy, a **Re-check** button, and a **Start** that stays disabled until the team can
   actually work.
-- **Team** — manage named reusable teams, choose the one this project follows, and inspect the
-  project pipeline beside it. A project can customize membership/order or edit any role setting;
-  local differences are badged and can be reset to their live inherited values.
-- **Role editor** — every field in §4.2. Harness select, model combobox populated from the live
-  harness catalog, arguments, prompt, batch policy and gate. Editing a library template changes the
-  lowest default; editing a reusable-team role changes projects that inherit it; editing a project
-  role writes only that project's sparse override.
+- **Team** — one three-column master-detail view: **Teams** lists Default and its clones,
+  **Roles** checks library roles into the selected team and opens their settings, and **Pipeline**
+  orders the checked roles. Selecting a team edits it; **Use this Team** separately assigns it to the
+  current project, so browsing never silently changes what runs.
+- **Role editor** — every field in §4.2 for one role inside the selected reusable team. Harness,
+  model, arguments, prompt, batch policy and gate inherit from the role template until changed.
+  When a project needs different settings, clone its team, edit the clone, and assign that team.
 - **Shared instructions** — one editor, applies to all roles.
 
 **Observe**
