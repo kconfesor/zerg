@@ -410,7 +410,7 @@ function cloneTeam() {
       You are looking at <b class="font-semibold">{{ activePreset?.name }}</b
       >,
       <template v-if="projectRunsItsOwn">
-        which this project does not use — it runs a pipeline of its own. Changes here apply to every
+        which this project does not use, since it runs a pipeline of its own. Changes here apply to every
         project that has adopted {{ activePreset?.name }}, not to this one.
       </template>
       <template v-else>
@@ -505,7 +505,7 @@ function cloneTeam() {
                   preset.builtin
                     ? 'The built-in team cannot be deleted'
                     : projectTeam.presetId === preset.id
-                      ? 'This project runs this team — put it on another one first'
+                      ? 'This project runs this team, so put it on another one first'
                       : `Delete ${preset.name}`
                 "
                 :aria-label="`Delete ${preset.name}`"
@@ -590,7 +590,7 @@ function cloneTeam() {
         <h2 class="text-xs font-semibold uppercase tracking-wide">Pipeline</h2>
         <p class="text-muted-foreground mt-0.5 text-[10px]">
           <template v-if="running">
-            Agents are running — changes apply immediately, to every project on this team
+            Agents are running, so changes apply immediately, to every project on this team
           </template>
           <template v-else>Work flows from top to bottom</template>
         </p>
@@ -625,7 +625,7 @@ function cloneTeam() {
           <Switch
             :model-value="role.enabled"
             :aria-label="`${libraryById.get(role.templateId)?.name ?? role.templateId} runs`"
-            :title="role.enabled ? 'Running in this pipeline' : 'Parked — keeps its place, does not run'"
+            :title="role.enabled ? 'Running in this pipeline' : 'Parked: keeps its place, does not run'"
             @update:model-value="(v: boolean) => setEnabled(role.templateId, v)"
           />
           <div class="flex">

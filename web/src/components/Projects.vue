@@ -264,7 +264,7 @@ async function sweep() {
     const mb = (r.bytesFreed / 1048576).toFixed(1)
     note.value = {
       tone: 'ok',
-      text: r.bytesFreed ? `Freed ${mb} MB.` : 'Nothing to reclaim — the worktrees are clean.',
+      text: r.bytesFreed ? `Freed ${mb} MB.` : 'Nothing to reclaim, the worktrees are clean.',
     }
   } catch (e) {
     fail(e)
@@ -353,7 +353,7 @@ async function sweep() {
               />
               <p class="text-muted-foreground text-[11px] leading-snug">
                 What the switcher and the board call it. The repository is identified by its path,
-                so renaming changes nothing else — including the derived mark's colour.
+                so renaming changes nothing else, including the derived mark's colour.
               </p>
             </div>
 
@@ -408,7 +408,7 @@ async function sweep() {
                 what the cockpit shows.
               </template>
               <template v-else>
-                Nothing icon-shaped in this repository — zerg looks for favicons, logos and app
+                Nothing icon-shaped in this repository. zerg looks for favicons, logos and app
                 icons. Initials on a colour taken from the project are used instead, which are
                 distinct without being configured and stable across renames.
               </template>

@@ -6,7 +6,7 @@
 ## How it was verified
 
 <!-- Which of these you ran, and anything you measured. For UI work, a number read out of a browser
-     is worth more than "looks right" — several bugs here came from reasoning about CSS instead. -->
+     is worth more than "looks right": several bugs here came from reasoning about CSS instead. -->
 
 - [ ] `go vet ./... && go test ./...`
 - [ ] `pnpm --dir web lint && pnpm --dir web exec vue-tsc --noEmit && pnpm --dir web test`

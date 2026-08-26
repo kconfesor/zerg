@@ -178,7 +178,7 @@ async function remove(tpl: RoleTemplate) {
     </p>
 
     <p class="text-muted-foreground max-w-[70ch] text-[11px] leading-snug">
-      A role is what an entry on a team <em>means</em> — its harness, model, prompt and gate. Teams
+      A role is what an entry on a team <em>means</em>: its harness, model, prompt and gate. Teams
       arrange these; they do not define them. Editing one here changes it for every team and every
       project that uses it, which is what a library is for.
     </p>
@@ -298,8 +298,8 @@ async function remove(tpl: RoleTemplate) {
             <Select v-model="editing.receive">
               <SelectTrigger :id="receiveId"><SelectValue /></SelectTrigger>
               <SelectContent>
-                <SelectItem value="task">task — one at a time</SelectItem>
-                <SelectItem value="batch">batch — several at once</SelectItem>
+                <SelectItem value="task">task, one at a time</SelectItem>
+                <SelectItem value="batch">batch, several at once</SelectItem>
               </SelectContent>
             </Select>
           </div>

@@ -190,7 +190,7 @@ function label(name: string): string {
                 <span class="font-semibold">{{ a.step.from }}</span>
                 <span class="text-muted-foreground mx-1">{{ a.back ? '↩' : '→' }}</span>
                 <span class="font-semibold">
-                  {{ a.step.final ? label(MERGED) : (a.step.to ?? '—') }}
+                  {{ a.step.final ? label(MERGED) : (a.step.to ?? 'nobody') }}
                 </span>
                 <span v-if="a.step.subject" class="text-muted-foreground ml-1.5">
                   {{ a.step.subject }}

@@ -13,7 +13,7 @@ Include what you would want if you were fixing it: the version or commit, what y
 happened, and what you expected instead. A failing request or a short script is worth more than a
 description of one.
 
-There is no bounty, and no fixed response time — this is one person's project. Expect a reply
+There is no bounty, and no fixed response time, since this is one person's project. Expect a reply
 within a week; if a fix is going to take longer than that, the thread will say so rather than going
 quiet.
 
@@ -22,15 +22,15 @@ quiet.
 Read this before deciding where to run it. Several of these are deliberate design choices rather
 than gaps, and treating them as gaps will lead you to the wrong conclusions.
 
-**zerg runs a daemon that executes code you did not write.** Agents are coding harnesses — `claude`,
-`pi` — spawned as child processes with the permissions of the user running the daemon, in git
+**zerg runs a daemon that executes code you did not write.** Agents are coding harnesses, `claude`
+and `pi`, spawned as child processes with the permissions of the user running the daemon, in git
 worktrees inside your repository. They run tests, build tools and whatever else the task needs. The
 threat model is the one you already accept by running those CLIs yourself; zerg runs several of
 them, unattended, on a schedule you set.
 
 **The HTTP API has no authentication.** None, by design: the intended deployment is a loopback bind
 or a [Tailscale](https://tailscale.com) tailnet, where the network is the authentication. The daemon
-says so on startup when it binds to anything other than loopback — "reachable at … with no
+says so on startup when it binds to anything other than loopback: "reachable at … with no
 authentication". Anything that can route to the port can start swarms, read every transcript, and
 change what agents are told to do. **Do not expose it to a LAN you do not control, and never to the
 public internet.**
@@ -52,7 +52,7 @@ never reads a token out of one. It reports what a harness says about its own cre
 tells you what to fix. Provider keys live wherever that CLI keeps them.
 
 **What is on disk.** One SQLite database at `~/.zerg/zerg.db`, created 0600 in a 0700 directory,
-holding every task, message, transcript and usage row — including whatever your agents wrote into
+holding every task, message, transcript and usage row, including whatever your agents wrote into
 their handoff notes. It is not encrypted. Back it up like anything else with your work in it.
 
 ## Supported versions

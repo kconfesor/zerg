@@ -84,7 +84,7 @@ function tokensOf(u: TaskDetail['usage']): number {
             {{ task ? taskState(task) : '' }}
           </Badge>
           <span v-if="task?.stoppedAt" class="text-muted-foreground">
-            parked by a person — no role turned this down
+            parked by a person, not rejected by a role
           </span>
           <Badge v-if="(task?.reworkCount ?? 0) > 0" variant="secondary">
             ↩ {{ task?.reworkCount }} rework
@@ -121,7 +121,7 @@ function tokensOf(u: TaskDetail['usage']): number {
               v-html="renderMarkdown(step.body)"
             />
             <p v-else class="text-muted-foreground text-[11px] italic">
-              No note — this handoff predates notes being required.
+              No note. This handoff predates notes being required.
             </p>
           </template>
         </TaskFlow>

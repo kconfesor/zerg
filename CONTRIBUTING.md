@@ -4,7 +4,7 @@ Thanks for looking. This is a small, opinionated codebase, and most of what foll
 description of how it already works rather than rules invented for newcomers.
 
 Start with [README.md](README.md) to run it, and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for
-why it is shaped the way it is. The architecture document is not a formality — it records the
+why it is shaped the way it is. The architecture document is not a formality. It records the
 failures that produced each decision, and a change that contradicts it usually means one of us is
 about to relearn something the hard way.
 
@@ -12,7 +12,7 @@ about to relearn something the hard way.
 
 | | Version | Why |
 |---|---|---|
-| **Go** | 1.27+ (`go.mod`) | the daemon. `CGO_ENABLED=0` works — the SQLite driver is pure Go |
+| **Go** | 1.27+ (`go.mod`) | the daemon. `CGO_ENABLED=0` works, since the SQLite driver is pure Go |
 | **Node** | 24.19.0 (`.nvmrc`) | the cockpit. Vite 8 needs `^22.18.0 \|\| >=24.12.0` |
 | **pnpm** | 11 | `pnpm-lock.yaml` is the lockfile; `npm install` will not reproduce it |
 | **git** | any recent | worktrees are the isolation mechanism |
@@ -45,7 +45,7 @@ pnpm --dir web test
 ```
 
 CI runs all of that. It also rebuilds the cockpit and fails if `internal/api/dist` does not match
-`web/` — see below.
+`web/`. See below.
 
 The race detector is not in CI, because it is slow and it kept the workflow red while unrelated
 things were being fixed. It has caught real bugs. Run it by hand whenever you touch anything that
@@ -67,7 +67,7 @@ passes. CI checks this.
 edit one that has shipped, because a database at `user_version N` has already run the old text.
 
 **Rebuilding a table is not a refactor.** `tasks`, `messages`, `events`, `usage_turns` and
-`clarifications` are wired together with `ON DELETE CASCADE`. With foreign keys on — they are —
+`clarifications` are wired together with `ON DELETE CASCADE`. With foreign keys on, which they are,
 `DROP TABLE tasks` is an implicit delete that cascades through every transcript in the database.
 When a `CHECK` constraint is in the way, add a column instead; `schema_014.sql` is the worked
 example.
@@ -102,7 +102,7 @@ matters more than usual here, because the history is where the design rationale 
 ## Verifying UI changes
 
 Look at it, and where a claim can be measured, measure it. Several bugs in this repo's history were
-introduced by reasoning about CSS instead of reading a number back out of a browser — a spacer that
+introduced by reasoning about CSS instead of reading a number back out of a browser: a spacer that
 computed to zero width, a `calc()` that was silently invalid, a lane row that wrapped where it was
 supposed to scroll. Screenshots in a pull request are welcome; measurements are better.
 
@@ -116,7 +116,7 @@ Bugs and ideas: [open an issue](https://github.com/kconfesor/zerg/issues). Secur
 through [SECURITY.md](SECURITY.md) instead, privately.
 
 Useful bug reports say what you ran, what happened, and what you expected. For anything involving
-agents, the daemon's log and the card's activity transcript are usually the whole story — but read
+agents, the daemon's log and the card's activity transcript are usually the whole story, but read
 them before pasting: a transcript contains whatever your agents read out of your repository.
 
 ## Licence

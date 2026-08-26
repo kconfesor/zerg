@@ -178,7 +178,7 @@ func (a *Adapter) modelAvailableCheck() adapter.Check {
 			return adapter.Result{
 				Warn:   true,
 				Reason: fmt.Sprintf("%q is not in pi's model table", spec.Model),
-				Remedy: "it may still work — pi accepts custom model ids — but check the spelling",
+				Remedy: "it may still work, since pi accepts custom model ids, but check the spelling",
 			}
 		},
 	}

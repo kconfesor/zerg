@@ -232,7 +232,7 @@ func (db *DB) SetConfig(ctx context.Context, cfg Config) (Config, error) {
 // who has to fix it.
 func (cfg Config) Validate() error {
 	if _, _, err := net.SplitHostPort(cfg.Addr); err != nil {
-		return invalid("address must be host:port, like 127.0.0.1:7717 — %v", err)
+		return invalid("address must be host:port, like 127.0.0.1:7717: %v", err)
 	}
 
 	switch cfg.TLSMode {

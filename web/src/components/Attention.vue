@@ -215,7 +215,7 @@ function empty(a: Attention | null): boolean {
             v-if="diffs[a.id]?.range && diffs[a.id]?.files.length"
             class="text-muted-foreground mb-1.5 text-[11px]"
           >
-            Everything that would land on <code>{{ diffs[a.id]?.base }}</code> —
+            Everything that would land on <code>{{ diffs[a.id]?.base }}</code>,
             {{ diffs[a.id]!.files.length }}
             {{ diffs[a.id]!.files.length === 1 ? 'file' : 'files' }}.
           </p>

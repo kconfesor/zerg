@@ -1381,7 +1381,7 @@ func TestStoppedCardRefusesLateHandoffs(t *testing.T) {
 		t.Fatalf("StopTask: %v", err)
 	}
 	if got := f.reload(t, task.ID); got.StoppedAt == nil {
-		t.Fatal("stopped_at is unset — a person parking a card must be distinguishable " +
+		t.Fatal("stopped_at is unset, and a person parking a card must be distinguishable " +
 			"from a role rejecting it, and both leave state \"rejected\"")
 	}
 

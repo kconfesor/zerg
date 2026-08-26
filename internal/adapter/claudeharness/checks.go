@@ -149,7 +149,7 @@ func (a *Adapter) modelAvailableCheck() adapter.Check {
 			return adapter.Result{
 				Warn:   true,
 				Reason: fmt.Sprintf("%q is not in this CLI's model list", spec.Model),
-				Remedy: "it may still work — the list is not exhaustive — but check the spelling",
+				Remedy: "it may still work, since the list is not exhaustive, but check the spelling",
 			}
 		},
 	}

@@ -217,7 +217,7 @@ const byLane = computed(() => {
                 <button
                   v-if="task.state === 'queued' || task.state === 'working'"
                   type="button"
-                  title="Stop — no agent picks this up again"
+                  title="Stop, and no agent picks this up again"
                   aria-label="Stop this task"
                   class="text-muted-foreground hover:bg-muted hover:text-destructive focus-visible:outline-ring grid size-5 place-items-center transition-colors focus-visible:outline-2"
                   @click.stop="emit('stop', task)"

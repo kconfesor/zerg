@@ -36,7 +36,7 @@ describe('parking a role', () => {
     expect(after.find((r) => r.templateId === 'coder')!.position).toBe(1)
   })
 
-  it('turns one back on — the case that had no control at all', () => {
+  it('turns one back on, the case that had no control at all', () => {
     const parked = setEnabled(team, 'coder', false)
     const back = setEnabled(parked, 'coder', true)
     expect(back.find((r) => r.templateId === 'coder')!.enabled).toBe(true)
