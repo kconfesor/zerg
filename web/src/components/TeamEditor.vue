@@ -224,7 +224,7 @@ function cloneTeam() {
   <div class="grid min-h-[34rem] border bg-card lg:grid-cols-[18rem_minmax(18rem,0.9fr)_minmax(20rem,1.1fr)]">
     <!-- Column 1: choose the reusable team being viewed. -->
     <section class="min-w-0 border-b lg:border-r lg:border-b-0">
-      <div class="border-b px-3 py-3">
+      <div class="min-h-14 border-b px-3 py-3">
         <h2 class="text-xs font-semibold uppercase tracking-wide">Teams</h2>
       </div>
 
@@ -284,7 +284,7 @@ function cloneTeam() {
 
     <!-- Column 2: membership and per-team role settings. -->
     <section class="min-w-0 border-b lg:border-r lg:border-b-0">
-      <div class="border-b px-4 py-3">
+      <div class="min-h-14 border-b px-4 py-3">
         <h2 class="text-xs font-semibold uppercase tracking-wide">Roles</h2>
         <p class="text-muted-foreground mt-0.5 text-[10px]">
           Add roles and configure how they run in {{ activePreset?.name ?? 'this team' }}
@@ -333,7 +333,7 @@ function cloneTeam() {
 
     <!-- Column 3: order and project assignment. -->
     <section class="flex min-w-0 flex-col">
-      <div class="border-b px-4 py-3">
+      <div class="min-h-14 border-b px-4 py-3">
         <h2 class="text-xs font-semibold uppercase tracking-wide">Pipeline</h2>
         <p class="text-muted-foreground mt-0.5 text-[10px]">Work flows from top to bottom</p>
       </div>
