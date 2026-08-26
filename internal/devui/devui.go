@@ -15,8 +15,10 @@ package devui
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -25,6 +27,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -42,11 +45,19 @@ type Server struct {
 	done chan struct{}
 }
 
-// Find returns the cockpit's source directory, or ErrNoSources.
+// Find returns *this project's* cockpit source directory, or ErrNoSources.
 //
 // Checked relative to the working directory rather than to the executable: a
 // developer runs `./zerg up` from the repository root, and `go run ./cmd/zerg`
 // puts the binary in a temporary directory that has no relation to the sources.
+//
+// The identity checks are the point, not decoration. What happens next is
+// `pnpm install` and `vite`, both of which execute code out of the directory
+// they are pointed at: install can run lifecycle scripts, and vite evaluates
+// vite.config.ts. "There is a web/package.json nearby" would mean that running
+// an unembedded zerg up inside somebody else's repository executes that
+// repository. So both files have to say this is zerg: the Go module by name,
+// and the cockpit package by name.
 func Find() (string, error) {
 	dir, err := os.Getwd()
 	if err != nil {
@@ -55,8 +66,7 @@ func Find() (string, error) {
 	// Walk up a couple of levels so this works from cmd/zerg as well as the
 	// root, and stop there: further up is somebody else's repository.
 	for i := 0; i < 3; i++ {
-		web := filepath.Join(dir, "web")
-		if _, err := os.Stat(filepath.Join(web, "package.json")); err == nil {
+		if web, ok := cockpitOf(dir); ok {
 			return web, nil
 		}
 		parent := filepath.Dir(dir)
@@ -66,6 +76,48 @@ func Find() (string, error) {
 		dir = parent
 	}
 	return "", ErrNoSources
+}
+
+// module is this project's import path, and cockpitPkg its cockpit's package
+// name. Both are checked before anything in that tree is run.
+const (
+	module      = "github.com/kconfesor/zerg"
+	cockpitPkg  = "zerg-cockpit"
+	maxManifest = 64 * 1024
+)
+
+// cockpitOf reports whether dir is a zerg checkout, and where its cockpit is.
+func cockpitOf(dir string) (string, bool) {
+	gomod, err := readCapped(filepath.Join(dir, "go.mod"))
+	if err != nil {
+		return "", false
+	}
+	if !strings.Contains(gomod, "module "+module) {
+		return "", false
+	}
+
+	web := filepath.Join(dir, "web")
+	manifest, err := readCapped(filepath.Join(web, "package.json"))
+	if err != nil {
+		return "", false
+	}
+	var pkg struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal([]byte(manifest), &pkg); err != nil || pkg.Name != cockpitPkg {
+		return "", false
+	}
+	return web, true
+}
+
+func readCapped(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, maxManifest))
+	return string(b), err
 }
 
 // Start runs the dev server and waits for it to answer.
@@ -138,14 +190,26 @@ func Start(ctx context.Context, log *slog.Logger, webDir string) (*Server, error
 		return nil, err
 	}
 
+	s.Handler = newProxy(target)
+	return s, nil
+}
+
+// newProxy fronts the dev server.
+//
+// A plain reverse proxy: Vite serves the module graph, the HMR client and the
+// websocket it talks back on, and all of it belongs on the daemon's origin so
+// there is one URL rather than two. ReverseProxy forwards the Upgrade handshake
+// as it does any other request, which is what keeps hot reload working through
+// it.
+func newProxy(target *url.URL) *httputil.ReverseProxy {
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, err error) {
-		// A dev server that has died mid-session must say so rather than
-		// answering with an empty 502 that reads as a daemon fault.
+		// A dev server that died mid-session must say so. The default is an
+		// empty 502, which reads as a fault in the daemon rather than in the
+		// thing it is standing in front of.
 		http.Error(w, "the cockpit's dev server is not responding: "+err.Error(), http.StatusBadGateway)
 	}
-	s.Handler = proxy
-	return s, nil
+	return proxy
 }
 
 // Stop ends the dev server and waits for it to go.

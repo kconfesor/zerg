@@ -580,3 +580,54 @@ func TestUnbuiltCockpitExplainsItself(t *testing.T) {
 		t.Errorf("api status = %d, want 200; only the UI is missing", rec.Code)
 	}
 }
+
+// An unknown API path is answered here, not handed to whatever is serving the
+// cockpit.
+//
+// With the dev server mounted, handing it on was a loop: Vite's config proxies
+// /api back to this daemon, so a wrong URL bounced between the two. The bug is
+// invisible with the embedded cockpit, which is why the test mounts a UI
+// handler that records being reached.
+func TestUnknownApiPathsNeverReachTheCockpit(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if err := store.Seed(ctx, db, "claude"); err != nil {
+		t.Fatal(err)
+	}
+
+	var uiHits []string
+	ui := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		uiHits = append(uiHits, r.URL.Path)
+		w.WriteHeader(http.StatusOK)
+	})
+	h := New(Deps{
+		DB:  db,
+		Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		UI:  ui,
+	}).Routes()
+
+	for _, path := range []string{"/api", "/api/", "/api/nope", "/api/projects/x/not-a-thing"} {
+		rec := do(t, h, "GET", path, nil)
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("GET %s = %d, want 404", path, rec.Code)
+		}
+		if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "json") {
+			t.Errorf("GET %s content-type = %q, want JSON: an HTML answer parses as neither", path, ct)
+		}
+	}
+	if len(uiHits) != 0 {
+		t.Errorf("the cockpit was asked for %v; unknown API paths must not reach it", uiHits)
+	}
+
+	// And the UI still gets everything else, including deep links.
+	if rec := do(t, h, "GET", "/board", nil); rec.Code != http.StatusOK {
+		t.Errorf("GET /board = %d, want the cockpit to answer", rec.Code)
+	}
+	if len(uiHits) != 1 || uiHits[0] != "/board" {
+		t.Errorf("cockpit saw %v, want [/board]", uiHits)
+	}
+}

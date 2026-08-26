@@ -33,11 +33,23 @@ echo "==> cockpit"
 #
 # The assets themselves are generated and not committed; the .gitkeep is, and
 # it is what keeps `go build` working in a clone that has never run this script.
-# Restoring it after the copy matters: without it every build would show the
-# placeholder as deleted.
+#
+# They are also removed again on the way out, which is not tidiness. Left in
+# place, every later `go build` embeds them, the daemon believes it has a
+# cockpit, and `zerg up` stops starting the dev server: hot reload would
+# disappear after one release build, and the only cure would be knowing to
+# delete a directory nobody told you about. A trap, so a failed build cleans up
+# too.
+clean_embedded() {
+  rm -rf internal/api/dist
+  mkdir -p internal/api/dist
+  touch internal/api/dist/.gitkeep
+}
+trap clean_embedded EXIT
+
 echo "==> embedding"
-rm -rf internal/api/dist
-cp -R web/dist internal/api/dist
+clean_embedded
+cp -R web/dist/. internal/api/dist/
 touch internal/api/dist/.gitkeep
 
 echo "==> zerg"
