@@ -88,11 +88,14 @@
   --border: oklch(91.0% 0.010 304);
   --input: oklch(91.0% 0.010 304);
   --ring: oklch(52.0% 0.205 303.5);
-  --chart-1: oklch(0.833 0.145 321.434);
-  --chart-2: oklch(0.667 0.295 322.15);
-  --chart-3: oklch(0.591 0.293 322.896);
-  --chart-4: oklch(0.518 0.253 323.949);
-  --chart-5: oklch(0.452 0.211 324.591);
+  /* chart-1..5 are deliberately not defined here. The preset generated a
+     single-hue magenta ramp — hues 321 to 324, differing only in lightness —
+     which is a *sequential* scale wearing a categorical name: use it for
+     identity and every series is the same colour at a different brightness.
+     theme.css defines them instead, as four hues validated for colour-vision
+     separation against this surface. Defining them in both files put the
+     preset's ramp in front of the validated one, because this block comes
+     after that import. */
   /* Square by design. Kept as a token rather than deleted because shadcn
      components are generated against it: with a radius here, every component
      added by the CLI arrives rounded and has to be corrected by hand, and one
@@ -127,11 +130,14 @@
   --border: oklch(28.4% 0.051 297.9);
   --input: oklch(28.4% 0.051 297.9);
   --ring: oklch(66.6% 0.203 304.0);
-  --chart-1: oklch(0.833 0.145 321.434);
-  --chart-2: oklch(0.667 0.295 322.15);
-  --chart-3: oklch(0.591 0.293 322.896);
-  --chart-4: oklch(0.518 0.253 323.949);
-  --chart-5: oklch(0.452 0.211 324.591);
+  /* chart-1..5 are deliberately not defined here. The preset generated a
+     single-hue magenta ramp — hues 321 to 324, differing only in lightness —
+     which is a *sequential* scale wearing a categorical name: use it for
+     identity and every series is the same colour at a different brightness.
+     theme.css defines them instead, as four hues validated for colour-vision
+     separation against this surface. Defining them in both files put the
+     preset's ramp in front of the validated one, because this block comes
+     after that import. */
   --sidebar: oklch(0.212 0.019 322.12);
   --sidebar-foreground: oklch(0.985 0 0);
   --sidebar-primary: oklch(0.667 0.295 322.15);
