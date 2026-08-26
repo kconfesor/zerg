@@ -245,6 +245,11 @@ const readiness = ref<Readiness | null>(null)
 const status = ref<SwarmStatus>({ running: false, roles: [] })
 const harnesses = ref<string[]>([])
 const models = ref<Record<string, Model[]>>({})
+const currentTeamName = computed(() => {
+  const id = projectTeam.value.presetId
+  if (!id) return projectTeam.value.topologyOverride ? 'Custom team' : ''
+  return presets.value.find((preset) => preset.id === id)?.name ?? ''
+})
 
 /**
  * `transient` marks a message the background poller raised rather than one a
@@ -696,7 +701,12 @@ watch(current, () => (banner.value = null))
         <div class="w-full p-[var(--gutter)]">
           <!-- Board -->
           <template v-if="view === 'board'">
-            <BoardHeader :project="current" :tasks="tasks" :workspace="workspace">
+            <BoardHeader
+              :project="current"
+              :team-name="currentTeamName"
+              :tasks="tasks"
+              :workspace="workspace"
+            >
               <template #actions>
                 <div v-if="hiddenCount" class="flex items-center gap-2">
                   <Switch id="show-hidden" v-model="showHidden" />

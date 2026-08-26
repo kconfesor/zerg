@@ -242,7 +242,7 @@ function cloneTeam() {
 </script>
 
 <template>
-  <div class="grid min-h-[34rem] border bg-card lg:grid-cols-[18rem_minmax(18rem,0.9fr)_minmax(20rem,1.1fr)]">
+  <div class="grid min-h-[34rem] border bg-card lg:grid-cols-[22rem_minmax(18rem,0.9fr)_minmax(20rem,1.1fr)]">
     <!-- Column 1: choose the reusable team being viewed. -->
     <section class="min-w-0 border-b lg:border-r lg:border-b-0">
       <div class="border-b px-3 py-3">
