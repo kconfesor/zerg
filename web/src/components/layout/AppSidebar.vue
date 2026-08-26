@@ -4,6 +4,9 @@ import {
   Activity as ActivityIcon,
   ChevronDown,
   Columns3,
+  GitMerge,
+  GitPullRequest,
+  GitPullRequestDraft,
   FolderGit2,
   GitBranch,
   MessageSquare,
@@ -13,6 +16,7 @@ import {
   Users,
 } from '@lucide/vue'
 import type { Project, ResolvedRole, RoleStatus, SwarmStatus } from '@/lib/api'
+import { landing } from '@/lib/utils'
 import QuotaBars from '@/components/QuotaBars.vue'
 import ProjectAvatar from '@/components/ProjectAvatar.vue'
 import {
@@ -331,11 +335,25 @@ function live(r: RoleStatus): boolean {
         </li>
 
         <!-- Where the last role's work lands, which is the end of the same
-             route and the one step of it that is not a role. -->
+             route and the one step of it that is not a role. Read from the
+             project: two of the three settings do not merge anything. -->
         <li v-if="current?.baseBranch" class="relative px-1 pt-1.5">
           <div class="text-muted-foreground/60 flex items-center gap-2 text-[10px]">
-            <GitBranch :size="9" class="ml-[-1px] shrink-0" aria-hidden="true" />
-            <span class="truncate">merges to {{ current.baseBranch }}</span>
+            <component
+              :is="
+                current.integration === 'pr'
+                  ? current.prDraft
+                    ? GitPullRequestDraft
+                    : GitPullRequest
+                  : current.integration === 'branch'
+                    ? GitBranch
+                    : GitMerge
+              "
+              :size="9"
+              class="ml-[-1px] shrink-0"
+              aria-hidden="true"
+            />
+            <span class="truncate" :title="landing(current).line">{{ landing(current).line }}</span>
           </div>
         </li>
       </ul>

@@ -8,7 +8,7 @@
  * nowhere to be read.
  */
 import { ref, watch } from 'vue'
-import { api, type Task, type TaskDetail } from '@/lib/api'
+import { api, type Project, type Task, type TaskDetail } from '@/lib/api'
 import { latest } from '@/lib/latest'
 import { renderMarkdown } from '@/lib/markdown'
 import { duration, taskState } from '@/lib/utils'
@@ -28,7 +28,8 @@ const props = defineProps<{
   /** The team's roles in pipeline order, so the diagram can show the columns a
    *  card has not reached yet as well as the ones it has. */
   roles?: string[]
-  baseBranch?: string
+  /** Read for where finished work lands; see lib/utils landing(). */
+  project?: Project | null
 }>()
 const emit = defineEmits<{ close: [] }>()
 
@@ -110,7 +111,7 @@ function tokensOf(u: TaskDetail['usage']): number {
           v-else
           :steps="detail.history"
           :roles="roles ?? []"
-          :base-branch="baseBranch"
+          :project="project"
           :current="task?.lane"
         >
           <template #note="{ step }">

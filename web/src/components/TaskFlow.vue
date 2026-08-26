@@ -20,13 +20,15 @@
  */
 import { computed } from 'vue'
 import { ChevronLeft, ChevronRight } from '@lucide/vue'
-import type { TaskStep } from '@/lib/api'
+import type { Project, TaskStep } from '@/lib/api'
+import { landing } from '@/lib/utils'
 
 const props = defineProps<{
   steps: TaskStep[]
   /** The team's roles, in pipeline order. */
   roles: string[]
-  baseBranch?: string
+  /** Read for where finished work lands: merge, pull request, or nowhere. */
+  project?: Project | null
   /** Which role is holding the card now, if any — the lane it sits in. */
   current?: string
 }>()
@@ -50,7 +52,7 @@ const participants = computed<string[]>(() => {
     if (s.from && !out.includes(s.from)) out.push(s.from)
     if (s.to && !out.includes(s.to)) out.push(s.to)
   }
-  if (props.baseBranch || props.steps.some((s) => s.final)) out.push(MERGED)
+  if (props.project || props.steps.some((s) => s.final)) out.push(MERGED)
   return out
 })
 
@@ -90,9 +92,14 @@ function time(at: string): string {
   return new Date(at).toLocaleTimeString(undefined, { hour12: false })
 }
 
-/** A participant's label. The branch is a place, not a role, so it says so. */
+/**
+ * A participant's label. The last one is a destination rather than a role, and
+ * which destination is a project setting: a branch to merge into, a pull
+ * request to open, or nothing at all.
+ */
 function label(name: string): string {
-  return name === MERGED ? (props.baseBranch ?? 'merged') : name
+  if (name !== MERGED) return name
+  return props.project ? landing(props.project).head : 'merged'
 }
 </script>
 
@@ -183,7 +190,7 @@ function label(name: string): string {
                 <span class="font-semibold">{{ a.step.from }}</span>
                 <span class="text-muted-foreground mx-1">{{ a.back ? '↩' : '→' }}</span>
                 <span class="font-semibold">
-                  {{ a.step.final ? (baseBranch ?? 'merged') : (a.step.to ?? '—') }}
+                  {{ a.step.final ? label(MERGED) : (a.step.to ?? '—') }}
                 </span>
                 <span v-if="a.step.subject" class="text-muted-foreground ml-1.5">
                   {{ a.step.subject }}

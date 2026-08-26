@@ -999,7 +999,7 @@ watch(current, () => (banner.value = null))
     <TaskDetail
       :task="openTask"
       :roles="team.filter((r) => r.enabled).map((r) => r.name)"
-      :base-branch="current?.baseBranch"
+      :project="current"
       @close="openTask = null"
     />
 

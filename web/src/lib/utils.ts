@@ -31,3 +31,31 @@ export function duration(ms: number): string {
 export function taskState(task: { state: string; stoppedAt?: string }): string {
   return task.state === 'rejected' && task.stoppedAt ? 'stopped' : task.state
 }
+
+/**
+ * Where a finished card actually lands, in this project.
+ *
+ * Three settings, and only one of them merges anything: a project can open a
+ * pull request, or leave the work on its branch and land nothing at all. The
+ * pipeline used to end with "merges to main" whatever the project said, which
+ * is a claim about someone's repository that was simply false two thirds of the
+ * time.
+ *
+ * `head` names the last column of a diagram; `line` is the sentence for a rail.
+ */
+export function landing(project: {
+  integration: string
+  prDraft?: boolean
+  baseBranch: string
+}): { head: string; line: string } {
+  switch (project.integration) {
+    case 'pr':
+      return project.prDraft
+        ? { head: 'draft PR', line: `opens a draft pull request into ${project.baseBranch}` }
+        : { head: 'pull request', line: `opens a pull request into ${project.baseBranch}` }
+    case 'branch':
+      return { head: 'its branch', line: 'stays on its branch — landing it is your call' }
+    default:
+      return { head: project.baseBranch, line: `merges to ${project.baseBranch}` }
+  }
+}
