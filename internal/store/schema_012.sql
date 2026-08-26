@@ -1,0 +1,18 @@
+-- zerg schema, version 12: a project's own mark.
+--
+-- The project switcher moved into the sidebar, where it is the first thing on
+-- screen and stays there. A row of names in one typeface is a list you read; a
+-- mark is one you recognise, which is what a control you pass over fifty times
+-- a day should be.
+--
+-- The value is a path inside the project, relative to its root — its favicon,
+-- its logo, its app icon. Almost every repository already carries one, drawn
+-- deliberately, and it is already what its people recognise it by; asking
+-- someone to pick a substitute out of a grid is both more work and a worse
+-- answer. The path is stored rather than the bytes so that editing the file in
+-- the repository changes what the cockpit shows.
+--
+-- Empty is the ordinary state and never looks unset — the switcher derives
+-- initials and a colour from the project instead, so a project whose repository
+-- has no mark is still distinguishable from the one below it.
+ALTER TABLE projects ADD COLUMN icon TEXT NOT NULL DEFAULT '';

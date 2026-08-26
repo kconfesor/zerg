@@ -12,9 +12,26 @@ import (
 	"time"
 )
 
-// CreateProject registers a repository. path is stored absolute so the same
-// repo reached by two relative paths is one project, not two.
+// CreateProject registers a repository with no team. path is stored absolute so
+// the same repo reached by two relative paths is one project, not two.
 func (db *DB) CreateProject(ctx context.Context, path, name, baseBranch string) (*Project, error) {
+	return db.createProject(ctx, path, name, baseBranch, false)
+}
+
+// CreateProjectWithDefaultTeam registers a repository and gives it the starting
+// pipeline, in one transaction.
+//
+// The two used to be separate calls from the handler: insert the project, then
+// select the default team. When a built-in role was missing from the library
+// the second failed, the request reported an error, and the project row — with
+// the unique path that goes with it — stayed behind. Adding the same repository
+// again then failed on the uniqueness of a project the operator had never
+// successfully created and could not see anywhere to remove.
+func (db *DB) CreateProjectWithDefaultTeam(ctx context.Context, path, name, baseBranch string) (*Project, error) {
+	return db.createProject(ctx, path, name, baseBranch, true)
+}
+
+func (db *DB) createProject(ctx context.Context, path, name, baseBranch string, withTeam bool) (*Project, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return nil, fmt.Errorf("resolving %s: %w", path, err)
@@ -41,11 +58,31 @@ func (db *DB) CreateProject(ctx context.Context, path, name, baseBranch string) 
 		return nil, invalid("%s is a file; a project is a directory", abs)
 	}
 
+	var roles []ProjectRole
+	if withTeam {
+		var err error
+		if roles, err = db.defaultTeam(ctx); err != nil {
+			return nil, err
+		}
+	}
+
+	tx, err := db.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("creating project %s: %w", abs, err)
+	}
+	defer tx.Rollback()
+
 	id := NewID()
 	created := time.Now().UTC()
-	if _, err := db.sql.ExecContext(ctx,
+	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO projects (id, path, name, base_branch, created_at) VALUES (?,?,?,?,?)`,
 		id, abs, name, baseBranch, created.Format(time.RFC3339Nano)); err != nil {
+		return nil, fmt.Errorf("creating project %s: %w", abs, err)
+	}
+	if err := insertTeam(ctx, tx, id, roles); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("creating project %s: %w", abs, err)
 	}
 
@@ -60,9 +97,9 @@ func (db *DB) CreateProject(ctx context.Context, path, name, baseBranch string) 
 // ListProjects returns projects most-recently-opened first, so the picker
 // surfaces what you were last working on.
 func (db *DB) ListProjects(ctx context.Context) ([]Project, error) {
-	rows, err := db.sql.QueryContext(ctx,
+	rows, err := db.read.QueryContext(ctx,
 		`SELECT id, path, name, base_branch, integration, created_at, last_opened_at,
-		        chat_harness, chat_model
+		        chat_harness, chat_model, icon
 		 FROM projects ORDER BY COALESCE(last_opened_at, created_at) DESC`)
 	if err != nil {
 		return nil, fmt.Errorf("listing projects: %w", err)
@@ -82,9 +119,9 @@ func (db *DB) ListProjects(ctx context.Context) ([]Project, error) {
 
 // GetProject looks a project up by id.
 func (db *DB) GetProject(ctx context.Context, id string) (*Project, error) {
-	row := db.sql.QueryRowContext(ctx,
+	row := db.read.QueryRowContext(ctx,
 		`SELECT id, path, name, base_branch, integration, created_at, last_opened_at,
-		        chat_harness, chat_model FROM projects WHERE id = ?`, id)
+		        chat_harness, chat_model, icon FROM projects WHERE id = ?`, id)
 	p, err := scanProject(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("project %s: %w", id, ErrNotFound)
@@ -142,9 +179,17 @@ func (db *DB) SetTeam(ctx context.Context, projectID string, roles []ProjectRole
 	if _, err := tx.ExecContext(ctx, `DELETE FROM project_roles WHERE project_id = ?`, projectID); err != nil {
 		return fmt.Errorf("clearing team: %w", err)
 	}
+	if err := insertTeam(ctx, tx, projectID, roles); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
 
-	// Positions are normalised to 0..n-1 in the order given, so the caller can
-	// send whatever the drag produced without worrying about gaps or ties.
+// insertTeam writes a pipeline inside a caller's transaction.
+//
+// Positions are normalised to 0..n-1 in the order given, so the caller can send
+// whatever the drag produced without worrying about gaps or ties.
+func insertTeam(ctx context.Context, tx *sql.Tx, projectID string, roles []ProjectRole) error {
 	for i, r := range roles {
 		args, err := marshalOverrideArgs(r.ArgsOverride)
 		if err != nil {
@@ -158,19 +203,29 @@ func (db *DB) SetTeam(ctx context.Context, projectID string, roles []ProjectRole
 			return fmt.Errorf("adding role to team: %w", err)
 		}
 	}
-	return tx.Commit()
+	return nil
 }
 
-// SelectDefaultTeam gives a new project the starting pipeline: coder then
-// reviewer, enough to be useful without a configuration session.
-func (db *DB) SelectDefaultTeam(ctx context.Context, projectID string) error {
+// defaultTeam is the starting pipeline: coder then reviewer, enough to be
+// useful without a configuration session.
+func (db *DB) defaultTeam(ctx context.Context) ([]ProjectRole, error) {
 	var team []ProjectRole
 	for _, name := range DefaultProjectRoles {
 		tpl, err := db.GetTemplateByName(ctx, name)
 		if err != nil {
-			return fmt.Errorf("default role %q is missing from the library: %w", name, err)
+			return nil, fmt.Errorf("default role %q is missing from the library: %w", name, err)
 		}
 		team = append(team, ProjectRole{TemplateID: tpl.ID, Enabled: true})
+	}
+	return team, nil
+}
+
+// SelectDefaultTeam gives an existing project the starting pipeline. New
+// projects get it as part of their own creation.
+func (db *DB) SelectDefaultTeam(ctx context.Context, projectID string) error {
+	team, err := db.defaultTeam(ctx)
+	if err != nil {
+		return err
 	}
 	return db.SetTeam(ctx, projectID, team)
 }
@@ -187,7 +242,7 @@ func (db *DB) ResolveTeam(ctx context.Context, projectID string) ([]ResolvedRole
 		return nil, err
 	}
 
-	rows, err := db.sql.QueryContext(ctx,
+	rows, err := db.read.QueryContext(ctx,
 		`SELECT pr.position, pr.enabled, pr.model_override, pr.args_override, `+
 			prefixed(templateCols, "t")+`
 		 FROM project_roles pr
@@ -278,7 +333,7 @@ func scanProject(s scanner) (*Project, error) {
 		lastOpened sql.NullString
 	)
 	if err := s.Scan(&p.ID, &p.Path, &p.Name, &p.BaseBranch, &p.Integration, &created, &lastOpened,
-		&p.ChatHarness, &p.ChatModel); err != nil {
+		&p.ChatHarness, &p.ChatModel, &p.Icon); err != nil {
 		return nil, err
 	}
 	var err error
@@ -336,6 +391,98 @@ func (db *DB) SetIntegration(ctx context.Context, projectID, mode string) (*Proj
 // and a reasonable one — it just should not be the only option, since the
 // reviewer is usually the most expensive model on the team and asking where a
 // function lives does not need it.
+// SetProjectName renames a project.
+//
+// The name is a label, not an identity: the path is what makes a project one
+// project, and every reference anywhere is by id. So this is free to change,
+// and nothing has to be updated behind it — including the derived mark, whose
+// colour comes from the id precisely so that a rename does not move it.
+func (db *DB) SetProjectName(ctx context.Context, projectID, name string) (*Project, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, invalid("a project needs a name")
+	}
+	if len([]rune(name)) > maxProjectName {
+		return nil, invalid("that name is too long; %d characters at most", maxProjectName)
+	}
+	if strings.ContainsAny(name, "\n\r\t\x00") {
+		return nil, invalid("a project name cannot contain line breaks")
+	}
+	res, err := db.sql.ExecContext(ctx,
+		`UPDATE projects SET name = ? WHERE id = ?`, name, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("renaming project %s: %w", projectID, err)
+	}
+	if err := mustAffect(res, fmt.Sprintf("project %s", projectID)); err != nil {
+		return nil, err
+	}
+	return db.GetProject(ctx, projectID)
+}
+
+// maxProjectName bounds the label. Long enough for a real repository name and
+// finite, because this renders in a fixed-width rail.
+const maxProjectName = 120
+
+// SetProjectIcon sets or clears a project's mark.
+//
+// The value is a path inside the project — its own favicon, logo or app icon —
+// so what the switcher shows is the identity the repository already has rather
+// than something invented for it in a settings form.
+//
+// Checked for shape here and for containment where it is read: a stored path is
+// not a trusted path, because the thing that eventually opens it is a file
+// server on a cockpit with no authentication. Both ends check.
+func (db *DB) SetProjectIcon(ctx context.Context, projectID, icon string) (*Project, error) {
+	icon = strings.TrimSpace(icon)
+	if icon != "" {
+		if err := validIconPath(icon); err != nil {
+			return nil, err
+		}
+	}
+	res, err := db.sql.ExecContext(ctx,
+		`UPDATE projects SET icon = ? WHERE id = ?`, icon, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("setting the project icon: %w", err)
+	}
+	if err := mustAffect(res, fmt.Sprintf("project %s", projectID)); err != nil {
+		return nil, err
+	}
+	return db.GetProject(ctx, projectID)
+}
+
+// iconImageExts are the image types a project mark may be. The API refuses to
+// serve anything else; this refuses to store it, so a path that could never be
+// displayed cannot be saved in the first place.
+var iconImageExts = []string{".ico", ".png", ".svg", ".jpg", ".jpeg", ".webp", ".gif", ".avif"}
+
+// maxIconPath bounds the stored path. Generous for a nested assets directory,
+// finite because this is a free-text field on an unauthenticated surface.
+const maxIconPath = 512
+
+func validIconPath(icon string) error {
+	if len(icon) > maxIconPath {
+		return invalid("that path is too long to be a project icon")
+	}
+	if strings.ContainsAny(icon, "\n\r\t\x00") {
+		return invalid("an icon path cannot contain control characters")
+	}
+	if strings.HasPrefix(icon, "/") || strings.HasPrefix(icon, "~") || filepath.IsAbs(icon) {
+		return invalid("an icon is a path inside the project, not an absolute one")
+	}
+	// Every segment, not just the string: "a/../../etc" contains no leading
+	// "..", and "assets/../.." is neither absolute nor prefixed.
+	for _, part := range strings.Split(filepath.ToSlash(icon), "/") {
+		if part == ".." {
+			return invalid("an icon is a path inside the project")
+		}
+	}
+	ext := strings.ToLower(filepath.Ext(icon))
+	if !slices.Contains(iconImageExts, ext) {
+		return invalid("an icon must be an image: %s", strings.Join(iconImageExts, ", "))
+	}
+	return nil
+}
+
 func (db *DB) SetChatAgent(ctx context.Context, projectID, harness, model string) (*Project, error) {
 	if _, err := db.sql.ExecContext(ctx,
 		`UPDATE projects SET chat_harness = ?, chat_model = ? WHERE id = ?`,

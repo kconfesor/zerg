@@ -262,6 +262,32 @@ func (cfg Config) Retention() time.Duration {
 	return time.Duration(cfg.EventRetentionDays) * 24 * time.Hour
 }
 
+// Listener is the part of the configuration a live listener is built from.
+//
+// Comparing whole Configs would report a restart for a retention or cleanup
+// change, which apply immediately; comparing addresses alone missed everything
+// else the listener is made of — a TLS mode, a certificate path, the loopback
+// door. Both were wrong in the direction that matters: an operator switching
+// TLS on was told nothing had to happen, and the cockpit went on serving plain
+// HTTP on the address they had just secured.
+type Listener struct {
+	Addr        string
+	TLSMode     string
+	CertFile    string
+	KeyFile     string
+	TailnetHost string
+	LocalAccess bool
+}
+
+// Listener extracts what serving depends on.
+func (cfg Config) Listener() Listener {
+	return Listener{
+		Addr: cfg.Addr, TLSMode: cfg.TLSMode,
+		CertFile: cfg.CertFile, KeyFile: cfg.KeyFile,
+		TailnetHost: cfg.TailnetHost, LocalAccess: cfg.LocalAccess,
+	}
+}
+
 // LoopbackOnly reports whether the cockpit is reachable only from this machine.
 func (cfg Config) LoopbackOnly() bool {
 	host, _, err := net.SplitHostPort(cfg.Addr)

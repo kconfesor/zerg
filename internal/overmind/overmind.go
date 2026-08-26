@@ -39,6 +39,12 @@ const (
 	// own stream are not polled at all.
 	quotaEvery = 2 * time.Minute
 
+	// stopGrace is how long a stopping swarm has to let its agents exit before
+	// the wait is abandoned and logged. Long enough for a harness to finish
+	// writing its transcript and close its pipes; short enough that a wedged
+	// process cannot hold the cockpit's Stop button.
+	stopGrace = 10 * time.Second
+
 	// nudge is what an idle agent is told when work is queued for it.
 	//
 	// The alternative is a fixed string of keystrokes fired into whichever
@@ -79,18 +85,58 @@ type Overmind struct {
 
 	mu      sync.Mutex
 	running map[string]*swarm
-	// starting reserves a project between the check and its registration, so
-	// two concurrent Starts cannot both get past the check.
-	starting map[string]bool
+	// gate serialises the lifecycle of one project: start, stop, reconcile and
+	// delete cannot interleave for the same project, and never block another.
+	//
+	// A reservation flag was not enough. Stop removed the swarm from `running`
+	// and then spent up to ten seconds tearing it down, so a Start arriving in
+	// that window saw a stopped project, minted tokens, prepared worktrees and
+	// spawned a second set of agents into the worktrees the first set was still
+	// exiting from — two harnesses in one directory, both committing.
+	gate map[string]*sync.Mutex
 }
 
 // swarm is one project's live state.
+//
+// roles is mutable: a team edit adds, removes and replaces cerebrates while the
+// swarm runs, so every reader takes the lock rather than assuming the map was
+// finished before the swarm was published.
 type swarm struct {
-	session    *store.Session
-	cancel     context.CancelFunc
-	done       chan struct{}
-	cerebrates map[string]*cerebrate.Cerebrate
-	tokens     []string
+	session *store.Session
+
+	// ctx is the swarm's lifetime and cancel ends it. Held here rather than
+	// passed around because a reconcile spawns a new role hours after Start
+	// returned, and that role has to live and die with the same swarm.
+	ctx    context.Context
+	cancel context.CancelFunc
+
+	// live counts every goroutine this swarm owns: one per cerebrate, plus
+	// keepMoving. Stop waits on it, so "stopped" means the processes are gone
+	// rather than that the supervisor loop noticed.
+	live sync.WaitGroup
+
+	mu    sync.Mutex
+	roles map[string]*roleProc
+}
+
+// roleProc is one supervised role, with the handle to stop just that one.
+type roleProc struct {
+	cerebrate *cerebrate.Cerebrate
+	cancel    context.CancelFunc
+	token     string
+	harness   string
+}
+
+// snapshot copies the live roles, so callers iterate without holding the lock
+// across database or subprocess work.
+func (s *swarm) snapshot() map[string]*roleProc {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make(map[string]*roleProc, len(s.roles))
+	for name, p := range s.roles {
+		out[name] = p
+	}
+	return out
 }
 
 type Config struct {
@@ -116,6 +162,7 @@ func New(cfg Config) *Overmind {
 		preflight: cfg.Preflight, bus: cfg.Bus, agents: cfg.Agents,
 		log: cfg.Log, stateDir: cfg.StateDir,
 		running: map[string]*swarm{},
+		gate:    map[string]*sync.Mutex{},
 	}
 }
 
@@ -156,6 +203,7 @@ func (o *Overmind) Status(ctx context.Context, projectID string) ([]Status, erro
 		return nil, nil
 	}
 
+	live := s.snapshot()
 	team, err := o.db.ResolveTeam(ctx, projectID)
 	if err != nil {
 		return nil, err
@@ -169,12 +217,12 @@ func (o *Overmind) Status(ctx context.Context, projectID string) ([]Status, erro
 			Role: role.Name, Harness: role.Harness, Model: role.Model,
 			State: cerebrate.StateIdle, Terminal: role.Terminal,
 		}
-		if c, ok := s.cerebrates[role.Name]; ok {
+		if p, ok := live[role.Name]; ok {
+			c := p.cerebrate
 			st.State, st.LastError, st.Restarts = c.State(), c.LastError(), c.Restarts()
 			if until := c.ThrottledUntil(); !until.IsZero() {
 				st.ThrottledUntil = &until
 			}
-
 		}
 		out = append(out, st)
 	}
@@ -240,7 +288,8 @@ func (o *Overmind) Quotas(projectID string) Quotas {
 
 	seen := map[string]time.Time{}
 	out := Quotas{}
-	for _, c := range s.cerebrates {
+	for _, p := range s.snapshot() {
+		c := p.cerebrate
 		q, at := c.Quota()
 		if q == nil {
 			continue
@@ -268,25 +317,21 @@ func (o *Overmind) Quotas(projectID string) Quotas {
 // up, dashboard green, board drawn — while half the roles sit at a prompt they
 // cannot pass and nothing anywhere says so.
 func (o *Overmind) Start(ctx context.Context, projectID string) error {
-	// Reserve the project before doing anything slow. Preflight, worktrees and
-	// spawning all happen outside the lock — they shell out, and holding a
-	// mutex across a subprocess is its own bug — so without a reservation two
-	// concurrent Starts both pass the check and both bring a swarm up, leaving
-	// two sets of agents on one queue.
+	// One lifecycle at a time for this project. Preflight, worktrees and
+	// spawning all shell out, and holding a lock across a subprocess is its own
+	// bug — but the lock this takes is per project, so a slow start blocks only
+	// further lifecycle changes to the same project. Two concurrent Starts no
+	// longer both pass the check, and a Start can no longer overtake a Stop
+	// that is still tearing agents down.
+	unlock := o.lock(projectID)
+	defer unlock()
+
 	o.mu.Lock()
-	if _, ok := o.running[projectID]; ok {
-		o.mu.Unlock()
+	_, up := o.running[projectID]
+	o.mu.Unlock()
+	if up {
 		return fmt.Errorf("this project is already running")
 	}
-	if o.starting == nil {
-		o.starting = map[string]bool{}
-	}
-	if o.starting[projectID] {
-		o.mu.Unlock()
-		return fmt.Errorf("this project is already starting")
-	}
-	o.starting[projectID] = true
-	o.mu.Unlock()
 
 	// Everything acquired before the swarm is published has to be given back on
 	// any failure, or a half-started project leaks agent tokens, an open
@@ -298,9 +343,6 @@ func (o *Overmind) Start(ctx context.Context, projectID string) error {
 		tokens  []string
 	)
 	defer func() {
-		o.mu.Lock()
-		delete(o.starting, projectID)
-		o.mu.Unlock()
 		if started {
 			return
 		}
@@ -317,11 +359,6 @@ func (o *Overmind) Start(ctx context.Context, projectID string) error {
 		}
 	}()
 
-	project, err := o.db.GetProject(ctx, projectID)
-	if err != nil {
-		return err
-	}
-
 	report, err := o.preflight.Check(ctx, projectID)
 	if err != nil {
 		return err
@@ -330,30 +367,7 @@ func (o *Overmind) Start(ctx context.Context, projectID string) error {
 		return &ErrNotReady{Report: report}
 	}
 
-	team, err := o.db.ResolveTeam(ctx, projectID)
-	if err != nil {
-		return err
-	}
-	shared, err := o.sharedInstructions(ctx)
-	if err != nil {
-		return err
-	}
-
-	// Worktrees before anything spawns: an agent whose directory does not exist
-	// fails in a way that reads as a harness problem.
-	hatch := hatchery.New(project.Path)
-	if err := hatch.EnsureRepo(ctx, project.BaseBranch); err != nil {
-		return err
-	}
-
-	binDir, err := o.ensureAgentBin()
-	if err != nil {
-		return err
-	}
-
-	// Harness defaults, read at spawn like the prompts are, so changing them in
-	// settings takes effect on the next start rather than the next release.
-	cfg, err := o.db.GetConfig(ctx)
+	spawn, err := o.spawnContext(ctx, projectID)
 	if err != nil {
 		return err
 	}
@@ -366,55 +380,18 @@ func (o *Overmind) Start(ctx context.Context, projectID string) error {
 	runCtx, runCancel := context.WithCancel(context.Background())
 	cancel = runCancel
 	s := &swarm{
-		session: session, cancel: runCancel, done: make(chan struct{}),
-		cerebrates: map[string]*cerebrate.Cerebrate{},
+		session: session, ctx: runCtx, cancel: runCancel,
+		roles: map[string]*roleProc{},
 	}
 
-	for _, role := range team {
+	for _, role := range spawn.team {
 		if !role.Enabled {
 			continue
 		}
-		a, err := o.registry.Get(role.Harness)
-		if err != nil {
+		if err := o.spawnRole(runCtx, s, spawn, role); err != nil {
 			return err
 		}
-		worktree, err := hatch.EnsureWorktree(ctx, role.Name, project.BaseBranch)
-		if err != nil {
-			return err
-		}
-
-		token := o.agents.Mint(projectID, role.Name)
-		s.tokens = append(s.tokens, token)
-		tokens = s.tokens
-
-		// A private config directory per role, but only where the harness can
-		// actually run with one. claude keeps credentials in the OS keychain
-		// and a relocated directory leaves it unauthenticated, so isolating it
-		// would trade a rare race for an agent that cannot work at all.
-		configDir := ""
-		if a.Capabilities().PrivateConfigDir {
-			configDir = o.roleDir(projectID, role.Name, "config")
-		}
-
-		c := cerebrate.New(cerebrate.Config{
-			ProjectID:    projectID,
-			Role:         role,
-			Adapter:      a,
-			Worktree:     worktree,
-			ConfigDir:    configDir,
-			Socket:       o.agents.Path(),
-			Token:        token,
-			BinDir:       binDir,
-			HarnessFlags: cfg.FlagsFor(role.Harness),
-			SystemPrompt: composePrompt(shared, role.Prompt),
-			Refresh:      o.refreshRole(projectID, role.Name),
-			Bus:          o.bus,
-			Log:          o.log,
-			Preflight:    o.preflight,
-			StateDir:     o.roleDir(projectID, role.Name, "state"),
-		})
-		s.cerebrates[role.Name] = c
-		go c.Run(runCtx)
+		tokens = append(tokens, s.roles[role.Name].token)
 	}
 
 	o.mu.Lock()
@@ -422,14 +399,242 @@ func (o *Overmind) Start(ctx context.Context, projectID string) error {
 	o.mu.Unlock()
 	started = true
 
-	go o.keepMoving(runCtx, projectID, s)
+	s.live.Add(1)
+	go func() {
+		defer s.live.Done()
+		o.keepMoving(runCtx, projectID, s)
+	}()
 
-	o.log.Info("swarm up", "project", project.Name, "roles", len(s.cerebrates))
+	o.log.Info("swarm up", "project", spawn.project.Name, "roles", len(s.roles))
+	return nil
+}
+
+// lock takes this project's lifecycle lock and returns the release.
+func (o *Overmind) lock(projectID string) func() {
+	o.mu.Lock()
+	m, ok := o.gate[projectID]
+	if !ok {
+		m = &sync.Mutex{}
+		o.gate[projectID] = m
+	}
+	o.mu.Unlock()
+	m.Lock()
+	return m.Unlock
+}
+
+// spawnEnv is everything a spawn needs that is the same for every role: what
+// the database says the team is, where the repository is, and the settings read
+// once for this operation.
+type spawnEnv struct {
+	project *store.Project
+	team    []store.ResolvedRole
+	hatch   *hatchery.Hatchery
+	shared  string
+	binDir  string
+	cfg     store.Config
+}
+
+// spawnContext gathers what a start or a reconcile needs before it can spawn
+// anything, reading each of them once.
+func (o *Overmind) spawnContext(ctx context.Context, projectID string) (*spawnEnv, error) {
+	project, err := o.db.GetProject(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	team, err := o.db.ResolveTeam(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	shared, err := o.sharedInstructions(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	// Worktrees before anything spawns: an agent whose directory does not exist
+	// fails in a way that reads as a harness problem.
+	hatch := hatchery.New(project.Path)
+	if err := hatch.EnsureRepo(ctx, project.BaseBranch); err != nil {
+		return nil, err
+	}
+	binDir, err := o.ensureAgentBin()
+	if err != nil {
+		return nil, err
+	}
+	// Harness defaults, read at spawn like the prompts are, so changing them in
+	// settings takes effect on the next start rather than the next release.
+	cfg, err := o.db.GetConfig(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &spawnEnv{project: project, team: team, hatch: hatch,
+		shared: shared, binDir: binDir, cfg: cfg}, nil
+}
+
+// spawnRole brings one role up and registers it on the swarm.
+func (o *Overmind) spawnRole(runCtx context.Context, s *swarm, env *spawnEnv, role store.ResolvedRole) error {
+	projectID := env.project.ID
+	a, err := o.registry.Get(role.Harness)
+	if err != nil {
+		return err
+	}
+	worktree, err := env.hatch.EnsureWorktree(runCtx, role.Name, env.project.BaseBranch)
+	if err != nil {
+		return err
+	}
+
+	token := o.agents.Mint(projectID, role.Name)
+
+	// A private config directory per role, but only where the harness can
+	// actually run with one. claude keeps credentials in the OS keychain
+	// and a relocated directory leaves it unauthenticated, so isolating it
+	// would trade a rare race for an agent that cannot work at all.
+	configDir := ""
+	if a.Capabilities().PrivateConfigDir {
+		configDir = o.roleDir(projectID, role.Name, "config")
+	}
+
+	// One context per role, derived from the swarm's. Cancelling the swarm
+	// still stops everything; a role that the team no longer has can also be
+	// stopped on its own, which is what makes a live team edit possible
+	// without taking the rest of the pipeline down with it.
+	roleCtx, roleCancel := context.WithCancel(runCtx)
+	c := cerebrate.New(cerebrate.Config{
+		ProjectID:    projectID,
+		Role:         role,
+		Adapter:      a,
+		Worktree:     worktree,
+		ConfigDir:    configDir,
+		Socket:       o.agents.Path(),
+		Token:        token,
+		BinDir:       env.binDir,
+		HarnessFlags: env.cfg.FlagsFor(role.Harness),
+		SystemPrompt: composePrompt(env.shared, role.Prompt),
+		Refresh:      o.refreshRole(projectID, role.Name),
+		Bus:          o.bus,
+		Log:          o.log,
+		Preflight:    o.preflight,
+		StateDir:     o.roleDir(projectID, role.Name, "state"),
+	})
+
+	s.mu.Lock()
+	s.roles[role.Name] = &roleProc{
+		cerebrate: c, cancel: roleCancel, token: token, harness: role.Harness,
+	}
+	s.mu.Unlock()
+
+	s.live.Add(1)
+	go func() {
+		defer s.live.Done()
+		defer roleCancel()
+		_ = c.Run(roleCtx)
+	}()
+	return nil
+}
+
+// stopRole takes one role down and gives its token back.
+//
+// It does not wait: the caller either waits on the whole swarm or is replacing
+// this role, and a replacement gets its own worktree lock from git rather than
+// sharing one with the process it replaces.
+func (o *Overmind) stopRole(s *swarm, name string) {
+	s.mu.Lock()
+	p, ok := s.roles[name]
+	delete(s.roles, name)
+	s.mu.Unlock()
+	if !ok {
+		return
+	}
+	p.cancel()
+	o.agents.Revoke(p.token)
+}
+
+// Reconcile brings a running swarm back in line with the team as configured.
+//
+// A team edit used to reach only the roles that happened to respawn: an added
+// role got no process at all, so work routed to it sat in a queue nothing was
+// reading; a removed role kept working until it next crashed; a renamed one
+// stopped with no replacement; and a role whose harness changed kept its
+// original adapter and config directory while its model and flags came from the
+// new one — running claude with codex's arguments, or the reverse.
+//
+// Doing nothing is correct when the project is stopped: the next Start reads
+// the team as it now is.
+func (o *Overmind) Reconcile(ctx context.Context, projectID string) error {
+	unlock := o.lock(projectID)
+	defer unlock()
+
+	o.mu.Lock()
+	s, up := o.running[projectID]
+	o.mu.Unlock()
+	if !up {
+		return nil
+	}
+
+	env, err := o.spawnContext(ctx, projectID)
+	if err != nil {
+		return err
+	}
+
+	wanted := map[string]store.ResolvedRole{}
+	for _, role := range env.team {
+		if role.Enabled {
+			wanted[role.Name] = role
+		}
+	}
+
+	// Gone first, so a rename frees its worktree before the new name asks for
+	// one, and so a removed role stops taking work it will never finish.
+	for name, p := range s.snapshot() {
+		role, keep := wanted[name]
+		if keep && role.Harness == p.harness {
+			continue
+		}
+		if keep {
+			o.log.Info("role changed harness, replacing it",
+				"project", projectID, "role", name, "from", p.harness, "to", role.Harness)
+		} else {
+			o.log.Info("role left the team, stopping it", "project", projectID, "role", name)
+		}
+		o.stopRole(s, name)
+	}
+
+	var failed []string
+	for name, role := range wanted {
+		s.mu.Lock()
+		_, live := s.roles[name]
+		s.mu.Unlock()
+		if live {
+			continue
+		}
+		if err := o.spawnRole(s.ctx, s, env, role); err != nil {
+			// One role that cannot spawn must not take the rest of the team
+			// down: the others are working, and the operator needs to be told
+			// which one failed rather than finding the swarm gone.
+			o.log.Error("could not bring a role up", "project", projectID, "role", name, "err", err)
+			failed = append(failed, name)
+			continue
+		}
+		o.log.Info("role joined the team, starting it", "project", projectID, "role", name)
+	}
+	if len(failed) > 0 {
+		return fmt.Errorf("these roles could not be started: %s", strings.Join(failed, ", "))
+	}
 	return nil
 }
 
 // Stop takes a project's swarm down.
+//
+// It holds the project's lifecycle lock for the whole teardown, so a Start
+// arriving mid-stop waits rather than spawning a second set of agents into
+// worktrees the first set has not finished leaving.
 func (o *Overmind) Stop(ctx context.Context, projectID, reason string) error {
+	unlock := o.lock(projectID)
+	defer unlock()
+	return o.stop(ctx, projectID, reason)
+}
+
+// stop is the body, for callers that already hold the lifecycle lock.
+func (o *Overmind) stop(ctx context.Context, projectID, reason string) error {
 	o.mu.Lock()
 	s, ok := o.running[projectID]
 	if !ok {
@@ -440,16 +645,30 @@ func (o *Overmind) Stop(ctx context.Context, projectID, reason string) error {
 	o.mu.Unlock()
 
 	s.cancel()
+
+	// Wait for the processes, not for the supervisor loop.
+	//
+	// This used to wait on `done`, which keepMoving closes — a goroutine that
+	// does nothing but tick, so it returns immediately while harnesses are
+	// still shutting down. Stop then reclaimed the leases and returned, and a
+	// Start straight afterwards put a new agent into a worktree the old one was
+	// still writing to. Every cerebrate is counted in `live`, so waiting on it
+	// means what it says.
+	stopped := make(chan struct{})
+	go func() {
+		s.live.Wait()
+		close(stopped)
+	}()
 	select {
-	case <-s.done:
-	case <-time.After(10 * time.Second):
+	case <-stopped:
+	case <-time.After(stopGrace):
 		o.log.Warn("swarm did not stop cleanly in time", "project", projectID)
 	}
 
 	// Tokens die with the swarm: a leftover token is a capability nobody is
 	// watching any more.
-	for _, t := range s.tokens {
-		o.agents.Revoke(t)
+	for _, p := range s.snapshot() {
+		o.agents.Revoke(p.token)
 	}
 	if err := o.db.EndSession(ctx, s.session.ID, reason); err != nil {
 		o.log.Warn("could not close the session record", "err", err)
@@ -467,6 +686,22 @@ func (o *Overmind) Stop(ctx context.Context, projectID, reason string) error {
 
 	o.log.Info("swarm down", "project", projectID, "reason", reason)
 	return nil
+}
+
+// StopFor takes a project's swarm down if it is running, and reports whether
+// there was one. For callers that need the project quiet — deleting it — rather
+// than callers acting on a button.
+func (o *Overmind) StopFor(ctx context.Context, projectID, reason string) (bool, error) {
+	unlock := o.lock(projectID)
+	defer unlock()
+
+	o.mu.Lock()
+	_, up := o.running[projectID]
+	o.mu.Unlock()
+	if !up {
+		return false, nil
+	}
+	return true, o.stop(ctx, projectID, reason)
 }
 
 // StopAll shuts every running project down, for daemon shutdown.
@@ -487,21 +722,33 @@ func (o *Overmind) StopAll(ctx context.Context, reason string) {
 
 // keepMoving runs the two duties that keep a pipeline from stalling.
 func (o *Overmind) keepMoving(ctx context.Context, projectID string, s *swarm) {
-	defer close(s.done)
 	ticker := time.NewTicker(tick)
 	defer ticker.Stop()
 	quota := time.NewTicker(quotaEvery)
 	defer quota.Stop()
 	// Once at start, so the gauge is populated before the first slow tick
 	// rather than blank for two minutes.
-	go o.refreshQuotas(ctx, s)
+	//
+	// Counted on the swarm like every other goroutine it owns: this one shells
+	// out to a harness, and a Stop that returned while it was still running
+	// would report the swarm down with a subprocess of it still alive. Safe to
+	// Add from here because keepMoving is itself counted, so the total is never
+	// zero while this runs.
+	refresh := func() {
+		s.live.Add(1)
+		go func() {
+			defer s.live.Done()
+			o.refreshQuotas(ctx, s)
+		}()
+	}
+	refresh()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-quota.C:
-			go o.refreshQuotas(ctx, s)
+			refresh()
 		case <-ticker.C:
 			// Lapsed leases first: requeued work should be visible to the
 			// nudge that follows in the same tick.
@@ -526,17 +773,20 @@ func (o *Overmind) refreshQuotas(ctx context.Context, s *swarm) {
 	// so three claude roles asking separately is three subprocesses for one
 	// answer. The result is copied to the rest so every role reports it.
 	//
-	// Ranged without a lock, as nudgeIdle does: the map is fully populated
-	// before the swarm is published and never written again.
+	// Over a snapshot: a team edit can add or replace a role while this is out
+	// asking a harness, and the map it walks must not change underneath it.
+	live := s.snapshot()
 	done := map[string]*cerebrate.Cerebrate{}
-	for _, c := range s.cerebrates {
+	for _, p := range live {
+		c := p.cerebrate
 		if _, seen := done[c.Harness()]; seen {
 			continue
 		}
 		done[c.Harness()] = c
 		c.RefreshQuota(ctx)
 	}
-	for _, c := range s.cerebrates {
+	for _, p := range live {
+		c := p.cerebrate
 		if lead, ok := done[c.Harness()]; ok && lead != c {
 			if q, at := lead.Quota(); q != nil {
 				c.AdoptQuota(q, at)
@@ -555,7 +805,8 @@ func (o *Overmind) refreshQuotas(ctx context.Context, s *swarm) {
 // Because the queue is durable, a skipped nudge costs nothing; the next tick
 // finds the same work still waiting.
 func (o *Overmind) nudgeIdle(ctx context.Context, projectID string, s *swarm) {
-	for role, c := range s.cerebrates {
+	for role, p := range s.snapshot() {
+		c := p.cerebrate
 		if !c.Idle() {
 			continue
 		}
@@ -655,8 +906,18 @@ func (o *Overmind) ensureAgentBin() (string, error) {
 	}
 
 	binDir := filepath.Join(o.stateDir, "bin")
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
+	if err := os.MkdirAll(binDir, 0o700); err != nil {
 		return "", fmt.Errorf("creating %s: %w", binDir, err)
+	}
+	// The state directory is the operator's alone, and MkdirAll only sets the
+	// mode on directories it creates — so an upgraded installation keeps
+	// whatever the previous version made until something tightens it. Best
+	// effort: a state directory somewhere this process cannot chmod is a
+	// warning, not a reason to refuse to start a swarm.
+	for _, dir := range []string{o.stateDir, binDir} {
+		if err := os.Chmod(dir, 0o700); err != nil && !os.IsNotExist(err) {
+			o.log.Warn("could not tighten a state directory", "dir", dir, "err", err)
+		}
 	}
 
 	link := filepath.Join(binDir, "zerg")

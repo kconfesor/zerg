@@ -60,7 +60,27 @@ func (db *DB) RecordUsage(ctx context.Context, u UsageTurn) error {
 		// harness stated a figure it never sent.
 		u.CostSource = CostUnknown
 	}
-	_, err := db.sql.ExecContext(ctx,
+	return insertUsage(ctx, db.sql, u)
+}
+
+// execer is whatever the caller has: the pool, or a transaction it is already
+// inside. Usage is written both ways — on its own, and beside the event that
+// carried it.
+type execer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+func insertUsage(ctx context.Context, x execer, u UsageTurn) error {
+	if u.ID == "" {
+		u.ID = NewID()
+	}
+	if u.At.IsZero() {
+		u.At = time.Now().UTC()
+	}
+	if u.CostSource == "" {
+		u.CostSource = CostUnknown
+	}
+	_, err := x.ExecContext(ctx,
 		`INSERT INTO usage_turns
 		   (id, project_id, task_id, role, ts, harness, provider, model,
 		    input_tokens, cache_write_tokens, cache_read_tokens, output_tokens,
@@ -130,7 +150,7 @@ func (db *DB) UsageByGroup(ctx context.Context, projectID, groupBy string, since
 		args = append(args, since.Format(time.RFC3339Nano))
 	}
 
-	rows, err := db.sql.QueryContext(ctx,
+	rows, err := db.read.QueryContext(ctx,
 		`SELECT `+col+` AS k, COUNT(*),
 		        COALESCE(SUM(input_tokens),0), COALESCE(SUM(cache_write_tokens),0),
 		        COALESCE(SUM(cache_read_tokens),0), COALESCE(SUM(output_tokens),0),
@@ -160,7 +180,7 @@ func (db *DB) UsageByGroup(ctx context.Context, projectID, groupBy string, since
 // UsageForTask totals one card, across every role that touched it and every
 // lap it made through the pipeline. This is what rework actually costs.
 func (db *DB) UsageForTask(ctx context.Context, taskID string) (UsageTotal, error) {
-	row := db.sql.QueryRowContext(ctx,
+	row := db.read.QueryRowContext(ctx,
 		`SELECT COUNT(*),
 		        COALESCE(SUM(input_tokens),0), COALESCE(SUM(cache_write_tokens),0),
 		        COALESCE(SUM(cache_read_tokens),0), COALESCE(SUM(output_tokens),0),
@@ -191,14 +211,38 @@ func (db *DB) UsageForTask(ctx context.Context, taskID string) (UsageTotal, erro
 // tokens were spent on that card, and requiring the lease to still be open
 // would drop the most expensive event of every turn on a timing race.
 func (db *DB) CurrentTaskFor(ctx context.Context, projectID, role string) (*string, error) {
+	return db.TaskForAt(ctx, projectID, role, time.Time{})
+}
+
+// TaskForAt is the task a role held at a given moment.
+//
+// "Now" is the wrong question to ask about an event that happened earlier. The
+// recorder writes behind a queue, so an event produced while a role held task A
+// can reach the writer after that role has claimed task B — and asking which
+// lease is newest at write time attributes A's tokens, and A's transcript, to
+// B. Under a burst that silently moves the expensive part of one card's cost
+// onto another card, with nothing anywhere reporting a problem.
+//
+// The event's own timestamp is immutable, so the answer is too: the lease this
+// role held when the event was produced. Zero means now, which is what the
+// live callers want.
+func (db *DB) TaskForAt(ctx context.Context, projectID, role string, at time.Time) (*string, error) {
+	where, args := "", []any{projectID, role}
+	if !at.IsZero() {
+		// granted_at only. A lease that was acked before the event still owns
+		// it: a turn's final usage event routinely lands just after `zerg
+		// done`, and the tokens were spent on that card.
+		where = " AND l.granted_at <= ?"
+		args = append(args, at.UTC().Format(time.RFC3339Nano))
+	}
 	var taskID sql.NullString
-	err := db.sql.QueryRowContext(ctx,
+	err := db.read.QueryRowContext(ctx,
 		`SELECT m.task_id
 		   FROM leases l
 		   JOIN lease_items li ON li.lease_id = l.id
 		   JOIN messages m ON m.id = li.message_id
-		  WHERE l.project_id = ? AND l.role = ? AND m.task_id IS NOT NULL
-		  ORDER BY l.granted_at DESC LIMIT 1`, projectID, role).Scan(&taskID)
+		  WHERE l.project_id = ? AND l.role = ? AND m.task_id IS NOT NULL`+where+`
+		  ORDER BY l.granted_at DESC LIMIT 1`, args...).Scan(&taskID)
 	if errors.Is(err, sql.ErrNoRows) || !taskID.Valid {
 		return nil, nil
 	}

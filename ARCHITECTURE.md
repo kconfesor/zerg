@@ -407,15 +407,20 @@ terminating cleanly on a missing socket file — logging "stopped", removing its
 from a normal shutdown — while agents sat alive and idle and mail piled up in outboxes with no error
 surfaced anywhere.
 
-zerg answers it in two pieces:
+zerg answers it in one piece today, and has one piece still to build:
 
-- **`zerg up --detach`** runs the daemon detached from the invoking shell, with a launchd/systemd
-  unit for machines that want it always-on. Closing a terminal is not an event the system notices.
-- **Restart is a first-class path, not a recovery hack.** If the daemon does die, its children die
-  with it; on restart, leases have expired, so claimed-but-unacked work is already back in the queue.
-  Roles respawn and resume their harness session (`claude --resume`, `pi --session`), so context
-  survives even though the process did not. Nothing has to be reattached, and nothing is silently
-  half-delivered.
+- **Restart is a first-class path, not a recovery hack.** If the daemon dies, its children die with
+  it; on restart every open lease is reclaimed immediately rather than being left to lapse, so
+  claimed-but-unacked work is back in the queue before the first agent asks for any. An approval
+  interrupted mid-integration is settled against the repository — merged means the decision is
+  recorded and the card closed, not merged means it goes back to the operator as pending. Nothing
+  has to be reattached, and nothing is silently half-delivered.
+- **Not yet built: detaching, and harness session resume.** `zerg up` runs in the foreground and
+  closing its terminal stops the daemon; use a launchd/systemd unit, or `nohup`, until there is a
+  `--detach`. Roles respawn with fresh harness sessions rather than resuming the previous one
+  (`claude --resume`, `pi --session`) — the queue survives, the model's own context does not. Both
+  are worth having and neither is implemented; this file used to describe them as though they were,
+  which is worse than not having them.
 
 The prerequisite list shrinks accordingly: Go and a logged-in harness. No tmux, no babashka, no zsh.
 
@@ -1014,10 +1019,11 @@ and §6.1 are almost entirely coordination bugs caught without spending a token.
 11. **Provider-limit handling** (§16) — a spent quota window pauses a role
     instead of failing it.
 
-Still open: pty attach and takeover (§10.1, needs `github.com/creack/pty`), artifacts (§13), and
-authentication (§17). Nothing resumes a swarm after a daemon restart — agents stop and stay
-stopped until Start is pressed, which is deliberate while spawning an LLM process costs money, but
-it is a decision rather than a finished answer.
+Still open: pty attach and takeover (§10.1, needs `github.com/creack/pty`), artifacts (§13),
+authentication (§17), detaching the daemon from its terminal, and harness session resume across a
+respawn (§7.4). Nothing resumes a swarm after a daemon restart — agents stop and stay stopped until
+Start is pressed, which is deliberate while spawning an LLM process costs money, but it is a
+decision rather than a finished answer.
 
 ---
 

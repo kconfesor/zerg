@@ -75,6 +75,12 @@ jobs:
       - name: typecheck
         run: pnpm exec vue-tsc --noEmit
 
+      # Unit tests for the parts that are logic rather than layout: the argument
+      # round trip, the stale-response guard, the pending-operation guard, and
+      # the model combobox's keyboard behaviour.
+      - name: test
+        run: pnpm test
+
       - run: pnpm build
 
   embedded:

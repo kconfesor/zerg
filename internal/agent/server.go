@@ -90,8 +90,20 @@ func (s *Server) identify(r *http.Request) (Identity, bool) {
 // Listen starts the socket. path is removed first: a socket left by a previous
 // run would otherwise make every start fail with "address already in use".
 func (s *Server) Listen(path string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("creating %s: %w", filepath.Dir(path), err)
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("creating %s: %w", dir, err)
+	}
+	// Chmod as well as MkdirAll: the mode argument applies only when the
+	// directory is created, so an installation that predates this kept the
+	// 0755 it was made with — and this directory holds the socket that carries
+	// capability tokens.
+	//
+	// Best effort, because the socket may legitimately live somewhere this
+	// process does not own — /tmp, most obviously — and the socket file's own
+	// 0600 is what actually keeps other users out.
+	if err := os.Chmod(dir, 0o700); err != nil {
+		s.log.Debug("could not tighten the socket directory", "dir", dir, "err", err)
 	}
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("clearing the old socket at %s: %w", path, err)
@@ -293,11 +305,14 @@ func (s *Server) done(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "done needs a leaseId")
 		return
 	}
-	if err := s.nyd.Ack(r.Context(), req.LeaseID); err != nil {
+	// The token's project and role, not just any lease id. A token proves who
+	// is calling and the previous version then discarded that, acknowledging
+	// whatever id it was handed — so any role could close any other role's
+	// lease and return its unfinished work to the queue as done.
+	if err := s.nyd.AckOwned(r.Context(), id.ProjectID, id.Role, req.LeaseID); err != nil {
 		s.fail(w, err)
 		return
 	}
-	_ = id
 	writeJSON(w, http.StatusOK, map[string]string{"status": "acknowledged"})
 }
 
@@ -327,6 +342,7 @@ func (s *Server) send(w http.ResponseWriter, r *http.Request) {
 	// carries, so --task accepts either form. Resolving it here also means a
 	// wrong value reports itself rather than arriving as a foreign-key
 	// violation from inside the router.
+	var lease string
 	if req.TaskID != "" {
 		resolved, err := s.resolveTask(r.Context(), id.ProjectID, req.TaskID)
 		if err != nil {
@@ -335,12 +351,31 @@ func (s *Server) send(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		req.TaskID = resolved
+
+		// And the role has to be holding it. Membership of the project was the
+		// only check: a token for the terminal role could complete any card on
+		// the board, including one another role was working at that moment, and
+		// a token still valid from an earlier spawn could finish work it had
+		// never been handed.
+		//
+		// The lease also scopes the idempotency key, so a send that is retried
+		// after a lost response is absorbed rather than producing a second
+		// hand-off. Found here, from the daemon's own records, rather than
+		// asked of the agent — a value the caller supplies is a value the
+		// caller can get wrong.
+		held, err := s.nyd.LeaseHolding(r.Context(), id.ProjectID, id.Role, req.TaskID)
+		if err != nil {
+			s.fail(w, err)
+			return
+		}
+		lease = held.ID
 	}
 
 	// The sender is the token's role. There is no --from to forge.
 	msg, err := s.nyd.Send(r.Context(), id.ProjectID, id.Role, nydus.SendRequest{
 		To: req.To, TaskID: req.TaskID, Kind: req.Kind,
 		Commit: req.Commit, Body: req.Body, Priority: req.Priority,
+		SourceLease: lease,
 	})
 	if err != nil {
 		s.fail(w, err)

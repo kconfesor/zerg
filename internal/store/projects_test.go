@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -485,5 +486,102 @@ func TestOverridesSurviveAnEditThatIsNotAboutThem(t *testing.T) {
 	}
 	if moved.ModelOverride != nil {
 		t.Errorf("reordering invented a model override: %q", *moved.ModelOverride)
+	}
+}
+
+// "No arguments at all" and "inherit the library's" are different answers, and
+// the JSON has to keep them different.
+//
+// ArgsOverride was omitempty, so an explicit empty override disappeared from
+// the wire, came back as nil, and the next reorder stored it as "inherit" — the
+// role quietly got back the arguments someone had deliberately removed.
+func TestEmptyArgsOverrideSurvivesJSON(t *testing.T) {
+	empty := ProjectRole{TemplateID: "t", Enabled: true, ArgsOverride: []string{}}
+	raw, err := json.Marshal(empty)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"argsOverride":[]`) {
+		t.Errorf("an explicit empty override is missing from %s", raw)
+	}
+
+	var back ProjectRole
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatal(err)
+	}
+	if back.ArgsOverride == nil {
+		t.Error("an explicit empty override came back as inherit")
+	}
+
+	// And nil still means inherit.
+	raw, err = json.Marshal(ProjectRole{TemplateID: "t", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatal(err)
+	}
+	if back.ArgsOverride != nil {
+		t.Errorf("no override became %v", back.ArgsOverride)
+	}
+}
+
+// A project's name is a label. The path is what makes it one project, so
+// renaming has to be free — and has to leave everything keyed by id alone.
+func TestRenamingAProjectChangesOnlyTheLabel(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	p, err := db.CreateProject(ctx, repoDir(t, "before"), "before", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	renamed, err := db.SetProjectName(ctx, p.ID, "  after  ")
+	if err != nil {
+		t.Fatalf("SetProjectName: %v", err)
+	}
+	if renamed.Name != "after" {
+		t.Errorf("name is %q; it should be trimmed to %q", renamed.Name, "after")
+	}
+	if renamed.ID != p.ID || renamed.Path != p.Path || renamed.BaseBranch != p.BaseBranch {
+		t.Error("renaming moved something other than the label")
+	}
+
+	for _, bad := range []string{"", "   ", "two\nlines"} {
+		if _, err := db.SetProjectName(ctx, p.ID, bad); err == nil {
+			t.Errorf("SetProjectName accepted %q", bad)
+		}
+	}
+	if _, err := db.SetProjectName(ctx, "no-such-project", "x"); err == nil {
+		t.Error("renaming a project that does not exist reported success")
+	}
+}
+
+// An icon is a path inside the repository, and the store refuses anything that
+// could not be one before it is ever stored.
+func TestProjectIconPathIsChecked(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	p, err := db.CreateProject(ctx, repoDir(t, "calc"), "calc", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, ok := range []string{"favicon.ico", "assets/logos/monogram.svg", ""} {
+		if _, err := db.SetProjectIcon(ctx, p.ID, ok); err != nil {
+			t.Errorf("SetProjectIcon refused %q: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{
+		"/etc/passwd",
+		"../../secret.png",
+		"assets/../../secret.png", // no leading "..", still leaves the project
+		"~/secrets/logo.png",
+		"README.md",       // not an image
+		"logo.png\nx.png", // control characters
+	} {
+		if _, err := db.SetProjectIcon(ctx, p.ID, bad); err == nil {
+			t.Errorf("SetProjectIcon accepted %q", bad)
+		}
 	}
 }

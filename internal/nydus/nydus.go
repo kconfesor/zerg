@@ -9,7 +9,9 @@ package nydus
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -36,6 +38,12 @@ type Integrator interface {
 	// Publish pushes a branch at commit and opens a pull request, returning its
 	// URL. Used when a project integrates by PR rather than by merging.
 	Publish(ctx context.Context, repoPath, base, commit, title, body string) (string, error)
+
+	// Landed reports whether an integration that may have been interrupted
+	// actually completed: the commit already contained in the base branch, or
+	// the pull request already open. It is what lets a crash mid-integration be
+	// reconciled from the repository rather than guessed at.
+	Landed(ctx context.Context, repoPath, base, commit, title, mode string) (bool, error)
 
 	// Resolve turns a commit-ish into the absolute sha it names in the tree at
 	// path. Every commit that enters the system goes through this.
@@ -174,6 +182,27 @@ type SendRequest struct {
 	// To names the recipient. Leaving it empty means "this task is finished",
 	// which only the terminal role may say.
 	To string
+
+	// SourceLease is the claim this send reports on, set by the authenticated
+	// boundary rather than by the agent. It is what makes a send idempotent: a
+	// reply that never arrived is retried, and the retry has to be absorbed
+	// rather than producing a second hand-off, a second claim and a second turn
+	// of model work on the same result.
+	//
+	// Empty for sends that are not a role reporting on claimed work — an
+	// opening message has no lease behind it.
+	SourceLease string
+}
+
+// opKey identifies one send inside one lease.
+//
+// The operation, not the moment: recipient, kind, commit and note. A genuine
+// second note to the same role still differs in its body and still sends; only
+// a repeat of the identical call is absorbed.
+func opKey(req SendRequest) string {
+	sum := sha256.Sum256([]byte(strings.Join(
+		[]string{req.To, req.Kind, req.Commit, req.Body}, "\x00")))
+	return hex.EncodeToString(sum[:])
 }
 
 // Send routes work from one role onward.
@@ -189,6 +218,18 @@ func (n *Nydus) Send(ctx context.Context, projectID, fromRole string, req SendRe
 	sender, ok := roleNamed(team, fromRole)
 	if !ok {
 		return nil, invalid("role %q is not on this project's team", fromRole)
+	}
+
+	// A repeat of a send that already happened returns what it produced the
+	// first time. Checked before anything else because completion integrates
+	// before it records: without this a lost response followed by a retry runs
+	// the merge or opens the pull request a second time.
+	if req.SourceLease != "" {
+		if prior, err := n.priorSend(ctx, req.SourceLease, opKey(req)); err != nil {
+			return nil, err
+		} else if prior != nil {
+			return prior, nil
+		}
 	}
 
 	kind := req.Kind
@@ -271,16 +312,18 @@ func (n *Nydus) Send(ctx context.Context, projectID, fromRole string, req SendRe
 	}
 
 	return n.send(ctx, sendReq{
-		ProjectID: projectID,
-		TaskID:    taskID,
-		FromRole:  fromRole,
-		ToRoles:   []string{req.To},
-		Kind:      kind,
-		Priority:  priority,
-		Commit:    req.Commit,
-		Body:      req.Body,
-		gate:      sender.Gate,
-		rework:    backward,
+		ProjectID:   projectID,
+		TaskID:      taskID,
+		FromRole:    fromRole,
+		ToRoles:     []string{req.To},
+		Kind:        kind,
+		Priority:    priority,
+		Commit:      req.Commit,
+		Body:        req.Body,
+		gate:        sender.Gate,
+		rework:      backward,
+		sourceLease: req.SourceLease,
+		opKey:       opKey(req),
 	})
 }
 
@@ -296,6 +339,11 @@ type sendReq struct {
 	terminal  bool
 	gate      string
 	rework    bool
+
+	// sourceLease and opKey make one send happen once. Both empty for a
+	// message no role claimed anything to produce.
+	sourceLease string
+	opKey       string
 }
 
 func (n *Nydus) send(ctx context.Context, req sendReq) (*store.Message, error) {
@@ -340,10 +388,11 @@ func (n *Nydus) send(ctx context.Context, req sendReq) (*store.Message, error) {
 func (n *Nydus) sendIn(ctx context.Context, tx *sql.Tx, msg *store.Message, req sendReq, now time.Time) error {
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO messages (id, project_id, task_id, from_role, kind, priority,
-		   commit_sha, body, terminal, created_at)
-		 VALUES (?,?,?,?,?,?,?,?,?,?)`,
+		   commit_sha, body, terminal, created_at, source_lease_id, op_key)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
 		msg.ID, msg.ProjectID, msg.TaskID, msg.FromRole, msg.Kind, msg.Priority,
-		msg.CommitSHA, msg.Body, msg.Terminal, now.Format(time.RFC3339Nano)); err != nil {
+		msg.CommitSHA, msg.Body, msg.Terminal, now.Format(time.RFC3339Nano),
+		nullable(req.sourceLease), nullable(req.opKey)); err != nil {
 		return fmt.Errorf("recording message: %w", err)
 	}
 
@@ -377,10 +426,23 @@ func (n *Nydus) sendIn(ctx context.Context, tx *sql.Tx, msg *store.Message, req 
 		// The rework counter moves with it, in the same transaction: a lap that
 		// was routed but not counted is exactly the invisible loop this exists
 		// to prevent.
-		if _, err := tx.ExecContext(ctx,
-			`UPDATE tasks SET lane = ?, state = ?, rework_count = rework_count + ? WHERE id = ?`,
-			req.ToRoles[0], store.TaskQueued, boolToInt(req.rework), *req.TaskID); err != nil {
+		//
+		// Scoped by project and checked for one affected row. The id reaching
+		// here has already been resolved inside the sender's project, but this
+		// is the statement that moves work between roles, and "it updated
+		// nothing" and "it updated somebody else's card" should both be errors
+		// rather than a silent success the board later disagrees with.
+		res, err := tx.ExecContext(ctx,
+			`UPDATE tasks SET lane = ?, state = ?, rework_count = rework_count + ?
+			  WHERE id = ? AND project_id = ?`,
+			req.ToRoles[0], store.TaskQueued, boolToInt(req.rework), *req.TaskID, req.ProjectID)
+		if err != nil {
 			return fmt.Errorf("moving card: %w", err)
+		}
+		if n, err := res.RowsAffected(); err != nil {
+			return err
+		} else if n != 1 {
+			return invalid("task %s is not this project's", *req.TaskID)
 		}
 	}
 	return nil
@@ -399,6 +461,11 @@ func (n *Nydus) complete(ctx context.Context, projectID string, sender store.Res
 	if req.Commit == "" {
 		return nil, invalid("finishing a task requires the commit to integrate")
 	}
+	// Before the body is rewritten below. The key has to describe the call that
+	// was made, or a retry of the same call would hash differently and be
+	// treated as a new one.
+	key := opKey(req)
+
 	task, err := n.db.GetTask(ctx, req.TaskID)
 	if err != nil {
 		return nil, err
@@ -465,16 +532,24 @@ func (n *Nydus) complete(ctx context.Context, projectID string, sender store.Res
 
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO messages (id, project_id, task_id, from_role, kind, priority,
-		   commit_sha, body, terminal, created_at)
-		 VALUES (?,?,?,?,?,?,?,?,?,?)`,
+		   commit_sha, body, terminal, created_at, source_lease_id, op_key)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
 		msg.ID, msg.ProjectID, msg.TaskID, msg.FromRole, msg.Kind, msg.Priority,
-		msg.CommitSHA, msg.Body, true, now.Format(time.RFC3339Nano)); err != nil {
+		msg.CommitSHA, msg.Body, true, now.Format(time.RFC3339Nano),
+		nullable(req.SourceLease), nullable(key)); err != nil {
 		return nil, fmt.Errorf("recording completion: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE tasks SET lane = ?, state = ?, completed_at = ? WHERE id = ?`,
-		store.LaneDone, store.TaskDone, now.Format(time.RFC3339Nano), task.ID); err != nil {
+	res, err := tx.ExecContext(ctx,
+		`UPDATE tasks SET lane = ?, state = ?, completed_at = ?
+		  WHERE id = ? AND project_id = ?`,
+		store.LaneDone, store.TaskDone, now.Format(time.RFC3339Nano), task.ID, projectID)
+	if err != nil {
 		return nil, fmt.Errorf("closing card: %w", err)
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return nil, err
+	} else if n != 1 {
+		return nil, invalid("task %s is not this project's", task.ID)
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -708,6 +783,9 @@ var errRaced = errors.New("nydus: another claimer took this work")
 // Ack closes a lease. It is idempotent: acknowledging twice is not an error,
 // because an agent that crashed after acking and retried on restart should not
 // be told it did something wrong.
+//
+// It takes the caller's word for the lease id. Anything holding an agent's
+// identity must use AckOwned instead.
 func (n *Nydus) Ack(ctx context.Context, leaseID string) error {
 	tx, err := n.db.SQL().BeginTx(ctx, nil)
 	if err != nil {
@@ -1044,6 +1122,204 @@ func (n *Nydus) decide(ctx context.Context, approvalID, decision, note string) e
 	return tx.Commit()
 }
 
+// ── ownership and idempotency ─────────────────────────────────────────────
+
+// nullable turns an empty string into a SQL NULL.
+//
+// It matters for the idempotency index: NULLs are distinct in SQLite, so every
+// message with no source lease is exempt, while an empty string would collide
+// with every other empty string.
+func nullable(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
+// priorSend returns the message an identical earlier send produced, or nil.
+func (n *Nydus) priorSend(ctx context.Context, leaseID, key string) (*store.Message, error) {
+	rows, err := n.db.Read().QueryContext(ctx,
+		`SELECT `+prefixedMessageCols+`, m.op_key FROM messages m
+		  WHERE m.source_lease_id = ? AND m.op_key = ? LIMIT 1`, leaseID, key)
+	if err != nil {
+		return nil, fmt.Errorf("checking for a repeated send: %w", err)
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		return nil, rows.Err()
+	}
+	var stored sql.NullString
+	return scanMessageRow(rows, &stored)
+}
+
+// LeaseHolding returns the lease under which role holds task, if it holds it.
+//
+// This is what binds an action to a claim. Membership of the project is not
+// enough: a token minted for a terminal role could otherwise acknowledge any
+// lease id and complete any task in the project, including one it had never
+// been handed and one another role was working at that moment.
+//
+// An acknowledged lease still counts — an agent that runs `zerg done` before
+// `zerg send` is doing them in an unusual order, not doing something it may
+// not do. An expired one does not: its work went back to the queue and may
+// already be somebody else's.
+func (n *Nydus) LeaseHolding(ctx context.Context, projectID, role, taskID string) (*store.Lease, error) {
+	var (
+		id      string
+		expired sql.NullString
+	)
+	err := n.db.Read().QueryRowContext(ctx,
+		`SELECT l.id, l.expired_at
+		   FROM leases l
+		   JOIN lease_items li ON li.lease_id = l.id
+		   JOIN messages m ON m.id = li.message_id
+		  WHERE l.project_id = ? AND l.role = ? AND m.task_id = ?
+		  ORDER BY l.granted_at DESC LIMIT 1`, projectID, role, taskID).Scan(&id, &expired)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, invalid("role %q is not holding task %s", role, taskID)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("checking who holds this work: %w", err)
+	}
+	if expired.Valid {
+		return nil, invalid(
+			"role %q held task %s under a lease that expired; its work went back to the queue", role, taskID)
+	}
+	return &store.Lease{ID: id, ProjectID: projectID, Role: role}, nil
+}
+
+// AckOwned closes a lease on behalf of the role that holds it.
+//
+// The unauthenticated Ack below trusts its caller with a lease id. This is the
+// one an authenticated caller uses: a token proves a project and a role, and a
+// lease belongs to exactly one of each, so the three have to agree before
+// anything is acknowledged. Without it a token minted for any role could close
+// any lease in the process, returning another role's work as finished.
+//
+// A lease that is not this role's reports as missing rather than as forbidden.
+// The caller has no business knowing it exists.
+func (n *Nydus) AckOwned(ctx context.Context, projectID, role, leaseID string) error {
+	var owner, ownerRole string
+	err := n.db.Read().QueryRowContext(ctx,
+		`SELECT project_id, role FROM leases WHERE id = ?`, leaseID).Scan(&owner, &ownerRole)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && (owner != projectID || ownerRole != role)) {
+		return fmt.Errorf("lease %s: %w", leaseID, store.ErrNotFound)
+	}
+	if err != nil {
+		return fmt.Errorf("reading lease: %w", err)
+	}
+	return n.Ack(ctx, leaseID)
+}
+
+// ReconcileIntegrating settles approvals a crash left mid-decision, and is
+// called once when the daemon starts.
+//
+// Approving a completion claims the approval, releases the write lock, runs
+// git, and records the outcome in a second transaction. A daemon killed in that
+// window leaves the approval reading "integrating" permanently: Attention
+// excludes it, so nothing tells anyone it is there, and if the merge or the
+// pull request succeeded before the crash the work has landed with a card that
+// still says it is waiting.
+//
+// The repository is the record, so it is what settles it. Landed means finish
+// recording the decision that was already carried out; not landed means hand
+// the approval back to the operator as pending, exactly as a failed merge does.
+func (n *Nydus) ReconcileIntegrating(ctx context.Context) (settled, released int, err error) {
+	rows, err := n.db.Read().QueryContext(ctx,
+		`SELECT a.id, a.project_id, m.task_id, m.commit_sha, m.body
+		   FROM approvals a JOIN messages m ON m.id = a.message_id
+		  WHERE a.state = ?`, store.ApprovalIntegrating)
+	if err != nil {
+		return 0, 0, fmt.Errorf("finding interrupted decisions: %w", err)
+	}
+	type stuck struct {
+		id, projectID, body string
+		taskID, commit      sql.NullString
+	}
+	var pending []stuck
+	for rows.Next() {
+		var s stuck
+		if err := rows.Scan(&s.id, &s.projectID, &s.taskID, &s.commit, &s.body); err != nil {
+			rows.Close()
+			return 0, 0, err
+		}
+		pending = append(pending, s)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, 0, err
+	}
+
+	for _, a := range pending {
+		landed := false
+		if n.integrator != nil && a.taskID.Valid {
+			project, err := n.db.GetProject(ctx, a.projectID)
+			if err != nil {
+				return settled, released, err
+			}
+			task, err := n.db.GetTask(ctx, a.taskID.String)
+			if err != nil {
+				return settled, released, err
+			}
+			landed, err = n.integrator.Landed(ctx, project.Path, project.BaseBranch,
+				a.commit.String, task.Name, project.Integration)
+			if err != nil {
+				// Unanswerable is not the same as no. Leave it claimed rather
+				// than releasing an approval whose merge may have happened, and
+				// let the next start ask again.
+				return settled, released, fmt.Errorf(
+					"cannot tell whether approval %s finished integrating: %w", a.id, err)
+			}
+		}
+
+		if !landed {
+			if _, err := n.db.SQL().ExecContext(ctx,
+				`UPDATE approvals SET state = ? WHERE id = ? AND state = ?`,
+				store.ApprovalPending, a.id, store.ApprovalIntegrating); err != nil {
+				return settled, released, fmt.Errorf("releasing approval %s: %w", a.id, err)
+			}
+			released++
+			continue
+		}
+		if err := n.finishIntegrated(ctx, a.id, a.taskID.String); err != nil {
+			return settled, released, err
+		}
+		settled++
+	}
+	return settled, released, nil
+}
+
+// finishIntegrated records the approval and closes the card for work that is
+// already in the base branch.
+func (n *Nydus) finishIntegrated(ctx context.Context, approvalID, taskID string) error {
+	now := n.now().Format(time.RFC3339Nano)
+	tx, err := n.db.SQL().BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("settling approval %s: %w", approvalID, err)
+	}
+	defer tx.Rollback()
+
+	res, err := tx.ExecContext(ctx,
+		`UPDATE approvals SET state = ?, decided_at = ? WHERE id = ? AND state = ?`,
+		store.ApprovalApproved, now, approvalID, store.ApprovalIntegrating)
+	if err != nil {
+		return fmt.Errorf("settling approval %s: %w", approvalID, err)
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return err
+	} else if n == 0 {
+		return nil // someone else settled it
+	}
+	if taskID != "" {
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE tasks SET lane = ?, state = ?, completed_at = COALESCE(completed_at, ?) WHERE id = ?`,
+			store.LaneDone, store.TaskDone, now, taskID); err != nil {
+			return fmt.Errorf("closing card: %w", err)
+		}
+	}
+	return tx.Commit()
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────
 
 const prefixedMessageCols = `m.id, m.project_id, m.task_id, m.from_role, m.kind,
@@ -1203,10 +1479,11 @@ func (n *Nydus) holdCompletion(ctx context.Context, projectID string, sender sto
 
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO messages (id, project_id, task_id, from_role, kind, priority,
-		   commit_sha, body, terminal, created_at)
-		 VALUES (?,?,?,?,?,?,?,?,?,?)`,
+		   commit_sha, body, terminal, created_at, source_lease_id, op_key)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
 		msg.ID, msg.ProjectID, msg.TaskID, msg.FromRole, msg.Kind, msg.Priority,
-		msg.CommitSHA, msg.Body, true, now.Format(time.RFC3339Nano)); err != nil {
+		msg.CommitSHA, msg.Body, true, now.Format(time.RFC3339Nano),
+		nullable(req.SourceLease), nullable(opKey(req))); err != nil {
 		return nil, fmt.Errorf("recording held completion: %w", err)
 	}
 	// The approval is written in the same transaction as the message, so there

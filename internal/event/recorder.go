@@ -12,14 +12,27 @@ import (
 )
 
 // recorderBuffer is the bus subscription's depth. Kept generous, but it is no
-// longer what protects the records: the reader below drains it into an
-// unbounded queue immediately, so the channel is empty again within
-// microseconds of a burst arriving.
+// longer what protects the records: the reader below drains it into a much
+// larger queue immediately, so the channel is empty again within microseconds
+// of a burst arriving.
 const recorderBuffer = 4096
 
 // queueWarn is the depth at which a backlog stops being a burst and starts
 // being a problem worth saying out loud.
 const queueWarn = 10_000
+
+// queueMax bounds the queue, and shedding is explicit rather than accidental.
+//
+// Unbounded was the wrong end of the trade. A writer that cannot keep up — a
+// locked database, a disk that has stopped answering — grew the queue for the
+// lifetime of the daemon, so an observability problem became an out-of-memory
+// one and took the run with it. At roughly 300 bytes an event this is ~30 MB,
+// far past any burst a real run produces.
+//
+// What gets dropped is deliberate: display events first, usage last. A missing
+// transcript line is a gap in a story; a missing usage row is money spent that
+// nothing anywhere records. Every drop is counted and reported by health.
+const queueMax = 100_000
 
 // Recorder persists the event stream: every event for replay, and usage
 // separately for cost.
@@ -35,10 +48,11 @@ const queueWarn = 10_000
 // usage rows the cost accounting is made of: a burst, or one slow SQLite
 // commit, silently cost real money from the record.
 //
-// So the channel is drained into an unbounded queue by a reader that does
+// So the channel is drained into a large bounded queue by a reader that does
 // nothing else, and the database writes happen behind it. The bus never waits
-// on a disk write, and a backlog costs memory — which is visible and bounded by
-// the run — rather than rows, which are not recoverable.
+// on a disk write, and a backlog costs memory rather than rows. The bound is
+// what keeps that trade honest: past it the queue sheds display events before
+// usage rows, and says how many, instead of growing until the process dies.
 type Recorder struct {
 	mu     sync.Mutex
 	queue  []Event
@@ -79,10 +93,17 @@ func (r *Recorder) push(ev Event) {
 		r.mu.Unlock()
 		return
 	}
+	shed := 0
+	if len(r.queue) >= queueMax {
+		shed = r.shedLocked()
+	}
 	r.queue = append(r.queue, ev)
 	depth := int64(len(r.queue))
 	r.mu.Unlock()
 
+	if shed > 0 {
+		r.dropped.Add(int64(shed))
+	}
 	r.queued.Store(depth)
 	if depth > r.peak.Load() {
 		r.peak.Store(depth)
@@ -91,6 +112,24 @@ func (r *Recorder) push(ev Event) {
 	case r.wake <- struct{}{}:
 	default:
 	}
+}
+
+// shedLocked makes room for one event and reports how many it discarded.
+//
+// The oldest display event goes first, because the newest are what someone
+// watching is reading and the oldest are the ones already scrolled past. A
+// usage event is only discarded when the queue holds nothing else — at which
+// point the run has produced 100,000 unwritten turns and the record is beyond
+// saving either way.
+func (r *Recorder) shedLocked() int {
+	for i, ev := range r.queue {
+		if ev.Kind != adapter.EventUsage {
+			r.queue = append(r.queue[:i], r.queue[i+1:]...)
+			return 1
+		}
+	}
+	r.queue = r.queue[1:]
+	return 1
 }
 
 // take removes up to n events. It returns nil when the queue is empty.
@@ -189,48 +228,61 @@ func Record(ctx context.Context, bus *Bus, db *store.DB, log *slog.Logger) *Reco
 // write persists one batch.
 func (r *Recorder) write(ctx context.Context, db *store.DB, log *slog.Logger, batch []Event) {
 	for _, ev := range batch {
-		func() {
-			// Which card the work belonged to, through the role's lease. A
-			// miss is ordinary — agents emit events before claiming
-			// anything — and never a reason to drop the row.
-			//
-			// This is a three-table join per event. At observed volumes
-			// (~20 events per turn) that is nothing against a local WAL
-			// database; if it ever shows up, the fix is a short-TTL cache
-			// keyed by role, not dropping the attribution.
-			taskID, err := db.CurrentTaskFor(ctx, ev.ProjectID, ev.Role)
-			if err != nil {
-				log.Debug("event: could not attribute to a task",
-					"role", ev.Role, "err", err)
-			}
+		// Which card the work belonged to, through the lease the role held
+		// when the event was produced — not the one it holds now. The queue
+		// means those are different questions: an event emitted under task A
+		// can reach this line after the role has claimed task B, and asking
+		// for the newest lease attributes A's tokens and A's transcript to B.
+		// The event's timestamp does not move, so neither does the answer.
+		//
+		// A miss is ordinary — agents emit events before claiming anything —
+		// and never a reason to drop the row.
+		//
+		// This is a three-table join per event. At observed volumes (~20
+		// events per turn) that is nothing against a local WAL database; if it
+		// ever shows up, the fix is a short-TTL cache keyed by role and lease,
+		// not dropping the attribution.
+		taskID, err := db.TaskForAt(ctx, ev.ProjectID, ev.Role, ev.At)
+		if err != nil {
+			log.Debug("event: could not attribute to a task",
+				"role", ev.Role, "err", err)
+		}
 
-			recordEvent(ctx, db, log, ev, taskID)
-			if ev.Kind == adapter.EventUsage {
-				recordUsage(ctx, db, log, ev, taskID)
-			}
-			r.written.Add(1)
-		}()
-	}
-}
+		e := &store.Event{
+			// The id was assigned at publish and is a monotonic ULID, so the
+			// value the browser holds as Last-Event-ID is the same value stored
+			// here. Reusing it is what makes resume-after-reconnect exact.
+			ID:        ev.ID,
+			ProjectID: ev.ProjectID,
+			TaskID:    taskID,
+			Role:      ev.Role,
+			Kind:      string(ev.Kind),
+			At:        ev.At,
+			Text:      ev.Text,
+			Tool:      ev.Tool,
+			Fatal:     ev.Fatal,
+			Data:      Payload(ev),
+		}
 
-func recordEvent(ctx context.Context, db *store.DB, log *slog.Logger, ev Event, taskID *string) {
-	e := &store.Event{
-		// The id was assigned at publish and is a monotonic ULID, so the value
-		// the browser holds as Last-Event-ID is the same value stored here.
-		// Reusing it is what makes resume-after-reconnect exact.
-		ID:        ev.ID,
-		ProjectID: ev.ProjectID,
-		TaskID:    taskID,
-		Role:      ev.Role,
-		Kind:      string(ev.Kind),
-		At:        ev.At,
-		Text:      ev.Text,
-		Tool:      ev.Tool,
-		Fatal:     ev.Fatal,
-		Data:      Payload(ev),
-	}
-	if err := db.RecordEvent(ctx, e); err != nil {
-		log.Error("event: not recorded", "role", ev.Role, "kind", ev.Kind, "err", err)
+		// The event and the usage it carried go in together. Written
+		// separately, a failure between them left the transcript and the ledger
+		// describing the same turn differently — a turn with no cost, or a cost
+		// with no turn — and a harness reports a turn once, so neither is
+		// recoverable afterwards.
+		var turn *store.UsageTurn
+		if ev.Kind == adapter.EventUsage {
+			u := usageOf(ev, taskID)
+			turn = &u
+		}
+		if err := db.RecordTurn(ctx, e, turn); err != nil {
+			// Counted, not just logged. "Written" used to advance whether or
+			// not the insert worked, so health reported a complete record over
+			// a database that was rejecting every row.
+			r.failed.Add(1)
+			log.Error("event: not recorded", "role", ev.Role, "kind", ev.Kind, "err", err)
+			continue
+		}
+		r.written.Add(1)
 	}
 }
 
@@ -275,7 +327,7 @@ func Payload(ev Event) json.RawMessage {
 	return raw
 }
 
-func recordUsage(ctx context.Context, db *store.DB, log *slog.Logger, ev Event, taskID *string) {
+func usageOf(ev Event, taskID *string) store.UsageTurn {
 	// "computed" is reserved for a cost derived from a price table, and no such
 	// table exists yet (§9's model_prices is unbuilt), so it is never written.
 	// Labelling an unreported cost as computed would claim a calculation that
@@ -285,7 +337,7 @@ func recordUsage(ctx context.Context, db *store.DB, log *slog.Logger, ev Event, 
 	if ev.CostReported {
 		source = store.CostFromHarness
 	}
-	if err := db.RecordUsage(ctx, store.UsageTurn{
+	return store.UsageTurn{
 		ProjectID: ev.ProjectID, TaskID: taskID, Role: ev.Role, At: ev.At,
 		Provider: ev.Provider, Model: ev.Model,
 		InputTokens:      ev.TokensIn,
@@ -295,7 +347,5 @@ func recordUsage(ctx context.Context, db *store.DB, log *slog.Logger, ev Event, 
 		CostUSD:          ev.CostUSD,
 		CostSource:       source,
 		Billing:          string(ev.Billing),
-	}); err != nil {
-		log.Error("usage: not recorded", "role", ev.Role, "err", err)
 	}
 }

@@ -43,7 +43,7 @@ func (db *DB) CreateTemplate(ctx context.Context, t *RoleTemplate) (*RoleTemplat
 
 // ListTemplates returns the library in name order.
 func (db *DB) ListTemplates(ctx context.Context) ([]RoleTemplate, error) {
-	rows, err := db.sql.QueryContext(ctx, `SELECT `+templateCols+` FROM role_templates ORDER BY name`)
+	rows, err := db.read.QueryContext(ctx, `SELECT `+templateCols+` FROM role_templates ORDER BY name`)
 	if err != nil {
 		return nil, fmt.Errorf("listing roles: %w", err)
 	}
@@ -62,7 +62,7 @@ func (db *DB) ListTemplates(ctx context.Context) ([]RoleTemplate, error) {
 
 // GetTemplate looks a library entry up by id.
 func (db *DB) GetTemplate(ctx context.Context, id string) (*RoleTemplate, error) {
-	row := db.sql.QueryRowContext(ctx, `SELECT `+templateCols+` FROM role_templates WHERE id = ?`, id)
+	row := db.read.QueryRowContext(ctx, `SELECT `+templateCols+` FROM role_templates WHERE id = ?`, id)
 	t, err := scanTemplate(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("role %s: %w", id, ErrNotFound)
@@ -72,7 +72,7 @@ func (db *DB) GetTemplate(ctx context.Context, id string) (*RoleTemplate, error)
 
 // GetTemplateByName looks a library entry up by its unique name.
 func (db *DB) GetTemplateByName(ctx context.Context, name string) (*RoleTemplate, error) {
-	row := db.sql.QueryRowContext(ctx, `SELECT `+templateCols+` FROM role_templates WHERE name = ?`, name)
+	row := db.read.QueryRowContext(ctx, `SELECT `+templateCols+` FROM role_templates WHERE name = ?`, name)
 	t, err := scanTemplate(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("role %q: %w", name, ErrNotFound)

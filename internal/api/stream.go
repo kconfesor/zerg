@@ -243,8 +243,23 @@ func liveEvent(ev event.Event) store.Event {
 // What was dropped is logged. A retention policy that trims silently is
 // indistinguishable, to whoever reads the transcript later, from a complete
 // record that happens to start on a Tuesday.
-func PruneEvents(ctx context.Context, db *store.DB, log *slog.Logger, window, every time.Duration) {
+func PruneEvents(ctx context.Context, db *store.DB, log *slog.Logger, every time.Duration) {
 	sweep := func() {
+		// Read the window per sweep, not once at startup. Settings say
+		// retention applies immediately, and it did not: the duration was
+		// captured when the daemon started, so shortening it from days to hours
+		// changed the number on the form and nothing on disk until the next
+		// restart — with no way to tell from the outside which one was in
+		// force.
+		cfg, err := db.GetConfig(ctx)
+		if err != nil {
+			log.Error("events: could not read the retention setting", "err", err)
+			return
+		}
+		window := cfg.Retention()
+		if window <= 0 {
+			return // keep everything
+		}
 		n, err := db.PruneEvents(ctx, time.Now().Add(-window))
 		if err != nil {
 			log.Error("events: retention sweep failed", "err", err)

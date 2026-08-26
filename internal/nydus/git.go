@@ -57,6 +57,41 @@ func (Git) Merge(ctx context.Context, repoPath, baseBranch, commit string) error
 	return nil
 }
 
+// Landed answers whether integration already happened, for a decision that was
+// interrupted between claiming an approval and recording it.
+//
+// The repository is the record. A daemon killed after the merge and before the
+// commit that says so leaves an approval reading "integrating" forever: it is
+// excluded from Attention, so nothing asks anyone about it, and the work has
+// landed on the base branch with a card that never moved to Done.
+func (g Git) Landed(ctx context.Context, repoPath, base, commit, title, mode string) (bool, error) {
+	switch mode {
+	case "branch":
+		// Nothing is integrated in this mode, so nothing can have half
+		// happened. The decision is safe to take again.
+		return false, nil
+
+	case "pr":
+		if _, err := exec.LookPath("gh"); err != nil {
+			return false, err
+		}
+		url, err := existingPR(ctx, repoPath, TaskBranchPrefix+slug(title))
+		if err != nil {
+			// gh exits non-zero when there is no pull request for the branch,
+			// which is the ordinary "not landed" answer rather than a fault.
+			return false, nil
+		}
+		return strings.TrimSpace(url) != "", nil
+
+	default:
+		if err := verifyCommit(ctx, repoPath, commit); err != nil {
+			return false, err
+		}
+		_, err := runGit(ctx, repoPath, "merge-base", "--is-ancestor", commit, base)
+		return err == nil, nil
+	}
+}
+
 func verifyCommit(ctx context.Context, repoPath, commit string) error {
 	typ, err := runGit(ctx, repoPath, "cat-file", "-t", commit)
 	if err != nil {

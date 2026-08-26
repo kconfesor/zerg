@@ -6,6 +6,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -34,9 +35,9 @@ type Server struct {
 	bus      *event.Bus
 	recorder *event.Recorder
 
-	// applied is the address this process actually bound, so the UI can tell a
-	// saved setting from a running one.
-	applied string
+	// applied is the listener configuration this process actually bound, so the
+	// UI can tell a saved setting from a running one.
+	applied store.Listener
 
 	chatMgr *chat.Manager
 }
@@ -57,8 +58,8 @@ type Deps struct {
 	// Recorder is optional; health reports its lag and losses when present.
 	Recorder *event.Recorder
 
-	// Applied is the address the daemon bound at startup.
-	Applied string
+	// Applied is the listener configuration the daemon bound at startup.
+	Applied store.Listener
 
 	// Chat answers questions about a project without touching the pipeline.
 	Chat *chat.Manager
@@ -133,6 +134,10 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/projects/{id}/sweep", s.sweep)
 	mux.HandleFunc("GET /api/projects/{id}/workspace", s.workspace)
 	mux.HandleFunc("PUT /api/projects/{id}/integration", s.setIntegration)
+	mux.HandleFunc("PUT /api/projects/{id}/name", s.renameProject)
+	mux.HandleFunc("PUT /api/projects/{id}/icon", s.setProjectIcon)
+	mux.HandleFunc("GET /api/projects/{id}/icons", s.projectIcons)
+	mux.HandleFunc("GET /api/projects/{id}/icon", s.projectIcon)
 	mux.HandleFunc("POST /api/projects/{id}/chat", s.askChat)
 	mux.HandleFunc("DELETE /api/projects/{id}/chat", s.resetChat)
 	mux.HandleFunc("PUT /api/projects/{id}/chat-agent", s.setChatAgent)
@@ -223,6 +228,12 @@ func (s *Server) updateRole(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
+	// A library edit can change the one thing a running cerebrate cannot
+	// re-read: which harness it is. Model, prompt and arguments are picked up
+	// at the next spawn, but the adapter and the private config directory are
+	// fixed when the process is created, so a harness change left the old
+	// harness running with the new one's model and flags.
+	s.reconcileRunning(r.Context())
 	writeJSON(w, http.StatusOK, &t)
 }
 
@@ -231,6 +242,10 @@ func (s *Server) deleteRole(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
+	// The template's team memberships went with it (ON DELETE CASCADE), so
+	// every running project that used it now has a process for a role that no
+	// longer exists.
+	s.reconcileRunning(r.Context())
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -261,14 +276,12 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	p, err := s.db.CreateProject(r.Context(), req.Path, req.Name, req.BaseBranch)
-	if err != nil {
-		s.fail(w, r, err)
-		return
-	}
 	// A new project arrives with a working pipeline rather than an empty one,
-	// so adding a repo is two clicks and not a configuration session.
-	if err := s.db.SelectDefaultTeam(r.Context(), p.ID); err != nil {
+	// so adding a repo is two clicks and not a configuration session — and the
+	// two are written together, so a library missing a built-in role leaves no
+	// project row behind holding a path nobody can reuse.
+	p, err := s.db.CreateProjectWithDefaultTeam(r.Context(), req.Path, req.Name, req.BaseBranch)
+	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
@@ -284,8 +297,25 @@ func (s *Server) getProject(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, p)
 }
 
+// deleteProject forgets a project, and refuses while its swarm is up.
+//
+// Deleting used to go straight to the database. The rows went — tasks,
+// messages, leases, the session — while the agents kept running, holding
+// worktrees and tokens for a project that no longer existed, writing events
+// with a project id nothing could resolve and failing every claim. Nothing
+// stopped them, because the only thing that could stop them was reached
+// through the project the delete had just removed.
+//
+// Refusing rather than stopping the swarm on the caller's behalf: taking a
+// running pipeline down is a decision, and the Stop button is one click away.
 func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request) {
-	if err := s.db.DeleteProject(r.Context(), r.PathValue("id")); err != nil {
+	id := r.PathValue("id")
+	if s.over != nil && s.over.Running(id) {
+		writeError(w, http.StatusConflict,
+			"this project's swarm is running; stop it before deleting the project")
+		return
+	}
+	if err := s.db.DeleteProject(r.Context(), id); err != nil {
 		s.fail(w, r, err)
 		return
 	}
@@ -313,6 +343,14 @@ func (s *Server) setTeam(w http.ResponseWriter, r *http.Request) {
 	}
 	id := r.PathValue("id")
 	if err := s.db.SetTeam(r.Context(), id, roles); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	// And the running swarm follows the edit. Writing the team and stopping
+	// there meant the change reached only whichever roles happened to respawn:
+	// an added role had no process, so work routed to it queued behind nothing;
+	// a removed one kept working until it next crashed.
+	if err := s.reconcile(r.Context(), id); err != nil {
 		s.fail(w, r, err)
 		return
 	}
@@ -583,6 +621,39 @@ func (s *Server) withLogging(next http.Handler) http.Handler {
 // fail maps a store error onto a status code. Anything that is not a known
 // client mistake is logged and reported as a 500 with a generic message —
 // internal detail belongs in the log, not in a response body.
+// reconcile brings a running swarm in line with what was just written, and
+// does nothing when the project is stopped.
+func (s *Server) reconcile(ctx context.Context, projectID string) error {
+	if s.over == nil {
+		return nil
+	}
+	return s.over.Reconcile(ctx, projectID)
+}
+
+// reconcileRunning brings every running swarm in line with the library, for
+// edits that are not scoped to one project.
+//
+// Failures are logged rather than returned: the edit itself succeeded, and a
+// role that will not spawn is a state the board already shows.
+func (s *Server) reconcileRunning(ctx context.Context) {
+	if s.over == nil {
+		return
+	}
+	projects, err := s.db.ListProjects(ctx)
+	if err != nil {
+		s.log.Warn("could not reconcile running swarms after a library edit", "err", err)
+		return
+	}
+	for _, p := range projects {
+		if !s.over.Running(p.ID) {
+			continue
+		}
+		if err := s.over.Reconcile(ctx, p.ID); err != nil {
+			s.log.Warn("reconciling a running swarm", "project", p.ID, "err", err)
+		}
+	}
+}
+
 func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, store.ErrNotFound):

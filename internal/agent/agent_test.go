@@ -45,6 +45,15 @@ func (r *recordingIntegrator) MergeInto(_ context.Context, _, commit string) err
 	return nil
 }
 
+func (r *recordingIntegrator) Landed(_ context.Context, _, _, commit, _, _ string) (bool, error) {
+	for _, c := range r.commits {
+		if c == commit {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (r *recordingIntegrator) Merge(_ context.Context, _, _, commit string) error {
 	r.commits = append(r.commits, commit)
 	return nil
@@ -415,15 +424,81 @@ func TestAnAgentCannotNameAnotherProjectsTask(t *testing.T) {
 		t.Error("ask accepted a task id from another project")
 	}
 
-	// The agent's own project still works by id and by name.
-	mine, err := f.db.CreateTask(ctx, f.project.ID, "Mine", "yours", "coder")
+	// The agent's own project still works by id and by name, once it is
+	// actually holding the card.
+	mine, err := f.nyd.NewTask(ctx, f.project.ID, "Mine", "yours")
 	if err != nil {
-		t.Fatalf("CreateTask: %v", err)
+		t.Fatalf("NewTask: %v", err)
+	}
+	if _, err := c.Next(ctx, 2*time.Second); err != nil {
+		t.Fatalf("coder Next: %v", err)
 	}
 	if _, err := c.Send(ctx, SendArgs{To: "reviewer", Kind: "note", TaskID: mine.ID, Body: "by id"}); err != nil {
 		t.Errorf("send rejected this project's task by id: %v", err)
 	}
 	if _, err := c.Send(ctx, SendArgs{To: "reviewer", Kind: "note", TaskID: "Mine", Body: "by name"}); err != nil {
 		t.Errorf("send rejected this project's task by name: %v", err)
+	}
+}
+
+// A token proves a role, not a claim. Membership of the project used to be the
+// whole check, so a terminal role could finish a card it had never been handed
+// — including one another role was working on at that moment.
+func TestSendRequiresHoldingTheTask(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+
+	task, err := f.nyd.NewTask(ctx, f.project.ID, "Calculator", "build a calculator")
+	if err != nil {
+		t.Fatalf("NewTask: %v", err)
+	}
+
+	// reviewer is on the team and this card has never reached it.
+	reviewer := f.client(t, "reviewer")
+	if _, err := reviewer.Send(ctx, SendArgs{
+		TaskID: task.ID, Commit: "abc123", Body: "shipped it"}); err == nil {
+		t.Error("the terminal role completed a task it had never claimed")
+	}
+
+	// The role that does hold it may act on it.
+	coder := f.client(t, "coder")
+	if _, err := coder.Next(ctx, 2*time.Second); err != nil {
+		t.Fatalf("coder Next: %v", err)
+	}
+	if _, err := coder.Send(ctx, SendArgs{
+		To: "reviewer", TaskID: task.ID, Commit: "abc123", Body: "have a look"}); err != nil {
+		t.Errorf("the holder was refused: %v", err)
+	}
+}
+
+// A lost response is retried, and the retry must not produce a second hand-off:
+// two routes, two claims, and two turns of model work on one result.
+func TestRepeatedSendIsAbsorbed(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+
+	task, err := f.nyd.NewTask(ctx, f.project.ID, "Calculator", "build a calculator")
+	if err != nil {
+		t.Fatalf("NewTask: %v", err)
+	}
+	coder := f.client(t, "coder")
+	if _, err := coder.Next(ctx, 2*time.Second); err != nil {
+		t.Fatalf("coder Next: %v", err)
+	}
+
+	args := SendArgs{To: "reviewer", TaskID: task.ID, Commit: "abc123", Body: "have a look"}
+	if _, err := coder.Send(ctx, args); err != nil {
+		t.Fatalf("first send: %v", err)
+	}
+	if _, err := coder.Send(ctx, args); err != nil {
+		t.Fatalf("retried send: %v", err)
+	}
+
+	n, err := f.db.QueuedCount(ctx, f.project.ID, "reviewer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Errorf("reviewer has %d queued items after one send retried; want 1", n)
 	}
 }

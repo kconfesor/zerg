@@ -10,7 +10,7 @@ import (
 // GetSetting reads one setting, returning ErrNotFound if it was never written.
 func (db *DB) GetSetting(ctx context.Context, key string) (string, error) {
 	var v string
-	err := db.sql.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = ?`, key).Scan(&v)
+	err := db.read.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = ?`, key).Scan(&v)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", fmt.Errorf("setting %q: %w", key, ErrNotFound)
 	}

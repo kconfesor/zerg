@@ -189,7 +189,7 @@ const taskColsT = `t.id, t.project_id, t.session_id, t.name, t.body, t.lane, t.s
 // An agent names a task from inside one project, so the project is part of the
 // identity, not context to be assumed.
 func (db *DB) GetTaskIn(ctx context.Context, projectID, id string) (*Task, error) {
-	row := db.sql.QueryRowContext(ctx,
+	row := db.read.QueryRowContext(ctx,
 		`SELECT `+taskCols+` FROM tasks WHERE id = ? AND project_id = ?`, id, projectID)
 	t, err := scanTask(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -202,7 +202,7 @@ func (db *DB) GetTaskIn(ctx context.Context, projectID, id string) (*Task, error
 }
 
 func (db *DB) GetTask(ctx context.Context, id string) (*Task, error) {
-	row := db.sql.QueryRowContext(ctx, `SELECT `+taskCols+` FROM tasks WHERE id = ?`, id)
+	row := db.read.QueryRowContext(ctx, `SELECT `+taskCols+` FROM tasks WHERE id = ?`, id)
 	t, err := scanTask(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("task %s: %w", id, ErrNotFound)
@@ -215,7 +215,7 @@ func (db *DB) ListTasks(ctx context.Context, projectID string) ([]Task, error) {
 	// Totals and the latest activity come back with the tasks rather than in a
 	// request per card: a board with twenty cards would otherwise make
 	// twenty-one round trips every two seconds.
-	rows, err := db.sql.QueryContext(ctx,
+	rows, err := db.read.QueryContext(ctx,
 		`SELECT `+taskColsT+`,
 		        COALESCE(u.tokens, 0), COALESCE(u.cost, 0),
 		        COALESCE(e.doing, '')
@@ -347,7 +347,7 @@ func (db *DB) EndSession(ctx context.Context, id, reason string) error {
 }
 
 func (db *DB) ListSessions(ctx context.Context, projectID string) ([]Session, error) {
-	rows, err := db.sql.QueryContext(ctx,
+	rows, err := db.read.QueryContext(ctx,
 		`SELECT id, project_id, started_at, ended_at, end_reason
 		 FROM sessions WHERE project_id = ? ORDER BY started_at DESC`, projectID)
 	if err != nil {
@@ -417,7 +417,7 @@ const messageCols = `id, project_id, task_id, from_role, kind, priority,
 // ListPendingApprovals returns what Attention must show, joined to the task so
 // a human sees which card they are deciding about rather than a message id.
 func (db *DB) ListPendingApprovals(ctx context.Context, projectID string) ([]Approval, error) {
-	rows, err := db.sql.QueryContext(ctx,
+	rows, err := db.read.QueryContext(ctx,
 		`SELECT a.id, a.project_id, a.message_id, a.state, a.note, a.created_at,
 		        COALESCE(t.name, ''), COALESCE(m.task_id, ''), m.from_role,
 		        m.body, COALESCE(m.commit_sha, ''), m.terminal
@@ -514,7 +514,7 @@ func (db *DB) AnswerClarification(ctx context.Context, id, answer string) error 
 
 // GetClarification reads one question and whatever answer it has.
 func (db *DB) GetClarification(ctx context.Context, id string) (*Clarification, error) {
-	row := db.sql.QueryRowContext(ctx,
+	row := db.read.QueryRowContext(ctx,
 		`SELECT id, project_id, task_id, role, question, answer, state, created_at, answered_at
 		 FROM clarifications WHERE id = ?`, id)
 	c, err := scanClarification(row)
@@ -526,7 +526,7 @@ func (db *DB) GetClarification(ctx context.Context, id string) (*Clarification, 
 
 // ListOpenClarifications returns what Attention must show.
 func (db *DB) ListOpenClarifications(ctx context.Context, projectID string) ([]Clarification, error) {
-	rows, err := db.sql.QueryContext(ctx,
+	rows, err := db.read.QueryContext(ctx,
 		`SELECT id, project_id, task_id, role, question, answer, state, created_at, answered_at
 		 FROM clarifications WHERE project_id = ? AND state = ? ORDER BY created_at`,
 		projectID, ClarificationOpen)
@@ -581,7 +581,7 @@ func scanClarification(s scanner) (*Clarification, error) {
 // see yet, and nudging over it would have the agent claim nothing and stop.
 func (db *DB) QueuedCount(ctx context.Context, projectID, role string) (int, error) {
 	var n int
-	err := db.sql.QueryRowContext(ctx,
+	err := db.read.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM routes r JOIN messages m ON m.id = r.message_id
 		 WHERE r.to_role = ? AND r.state = ? AND m.project_id = ?`,
 		role, RouteQueued, projectID).Scan(&n)
@@ -620,7 +620,7 @@ func (db *DB) ReworkThreshold(ctx context.Context) int {
 // Finished cards are excluded: a card that took four laps and then shipped is
 // history worth keeping, not a decision anyone still needs to make.
 func (db *DB) ListReworkedTasks(ctx context.Context, projectID string, threshold int) ([]Task, error) {
-	rows, err := db.sql.QueryContext(ctx,
+	rows, err := db.read.QueryContext(ctx,
 		`SELECT `+taskCols+` FROM tasks
 		 WHERE project_id = ? AND rework_count >= ? AND state NOT IN (?, ?)
 		 ORDER BY rework_count DESC, created_at`,
@@ -645,7 +645,7 @@ func (db *DB) ListReworkedTasks(ctx context.Context, projectID string, threshold
 // pipeline. Agents think in names — the name is what every handoff carries —
 // so the name has to be a usable handle, not just a label.
 func (db *DB) GetTaskByName(ctx context.Context, projectID, name string) (*Task, error) {
-	row := db.sql.QueryRowContext(ctx,
+	row := db.read.QueryRowContext(ctx,
 		`SELECT `+taskCols+` FROM tasks WHERE project_id = ? AND name = ?`, projectID, name)
 	t, err := scanTask(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -671,7 +671,7 @@ type Handoff struct {
 // on — the verdict, the rework list, what was left out — and together they are
 // the account of what happened that a state of "done" cannot give.
 func (db *DB) TaskHistory(ctx context.Context, taskID string) ([]Handoff, error) {
-	rows, err := db.sql.QueryContext(ctx,
+	rows, err := db.read.QueryContext(ctx,
 		`SELECT m.from_role, COALESCE(r.to_role, ''), m.kind,
 		        COALESCE(m.commit_sha, ''), m.body, m.created_at, m.terminal
 		   FROM messages m
@@ -706,7 +706,7 @@ func (db *DB) TaskHistory(ctx context.Context, taskID string) ([]Handoff, error)
 // GetApproval reads one approval, with the message detail the UI needs to show
 // what is being decided about.
 func (db *DB) GetApproval(ctx context.Context, id string) (*Approval, error) {
-	row := db.sql.QueryRowContext(ctx,
+	row := db.read.QueryRowContext(ctx,
 		`SELECT a.id, a.project_id, a.message_id, a.state, a.note, a.created_at,
 		        COALESCE(t.name, ''), COALESCE(m.task_id, ''), m.from_role,
 		        m.body, COALESCE(m.commit_sha, ''), m.terminal

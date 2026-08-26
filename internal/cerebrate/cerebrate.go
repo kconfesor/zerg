@@ -740,11 +740,23 @@ func (c *Cerebrate) writeSystemPrompt() (string, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", fmt.Errorf("creating %s: %w", dir, err)
 	}
+	// And tighten it if it already existed. MkdirAll's mode applies only to
+	// directories it creates, so an installation upgraded from a version that
+	// used 0755 kept 0755. Best effort — the directory can be one this process
+	// does not own, and the file's own mode below is what protects the text.
+	if err := os.Chmod(dir, 0o700); err != nil {
+		c.cfg.Log.Debug("could not tighten the prompt directory", "dir", dir, "err", err)
+	}
 	path := filepath.Join(dir, roleName+".system.md")
 	// 0600: a composed prompt carries the operator's own instructions, and it
 	// sits in a shared temporary directory where anything can read a 0644 file.
 	if err := os.WriteFile(path, []byte(prompt), 0o600); err != nil {
 		return "", fmt.Errorf("writing the composed prompt: %w", err)
+	}
+	// WriteFile applies its mode only on creation too, so a prompt file left by
+	// an earlier version stays 0644 through every rewrite.
+	if err := os.Chmod(path, 0o600); err != nil {
+		return "", fmt.Errorf("securing %s: %w", path, err)
 	}
 	return path, nil
 }

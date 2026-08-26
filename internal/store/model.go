@@ -58,17 +58,29 @@ type Project struct {
 	// Empty means inherit from the terminal role, which is the default.
 	ChatHarness string `json:"chatHarness,omitempty"`
 	ChatModel   string `json:"chatModel,omitempty"`
+
+	// Icon is one emoji, or empty. The switcher derives initials and a colour
+	// when it is empty, so nothing has to be set for a project to be
+	// recognisable — this is for when the derived mark is not the one you want.
+	Icon string `json:"icon"`
 }
 
 // ProjectRole is one template's membership in one project's pipeline. Position
 // and enablement live here, and so do overrides — an override is a property of
 // the pairing, not a patch applied on the side.
 type ProjectRole struct {
-	TemplateID    string   `json:"templateId"`
-	Position      int      `json:"position"`
-	Enabled       bool     `json:"enabled"`
-	ModelOverride *string  `json:"modelOverride,omitempty"`
-	ArgsOverride  []string `json:"argsOverride,omitempty"`
+	TemplateID    string  `json:"templateId"`
+	Position      int     `json:"position"`
+	Enabled       bool    `json:"enabled"`
+	ModelOverride *string `json:"modelOverride,omitempty"`
+
+	// Deliberately not omitempty. The store keeps nil ("inherit the library's
+	// arguments") distinct from an empty slice ("this project runs this role
+	// with no arguments at all"), and omitempty erases exactly that
+	// distinction: an explicit empty override vanished from the JSON, came back
+	// as nil, and the next reorder wrote it to the database as "inherit" — so a
+	// role deliberately stripped of its arguments silently got them back.
+	ArgsOverride []string `json:"argsOverride"`
 }
 
 // ResolvedRole is a template with its project overrides applied — what the
@@ -87,8 +99,11 @@ type ResolvedRole struct {
 	// and it guessed by sending the resolved model as an override and dropping
 	// the argument override entirely — so changing a role's position silently
 	// erased its arguments and pinned a model nobody had pinned.
-	ModelOverride *string  `json:"modelOverride,omitempty"`
-	ArgsOverride  []string `json:"argsOverride,omitempty"`
+	ModelOverride *string `json:"modelOverride,omitempty"`
+	// Not omitempty, for the same reason as ProjectRole.ArgsOverride: this is
+	// what a team edit round-trips, and "no arguments" must not read as
+	// "inherit".
+	ArgsOverride []string `json:"argsOverride"`
 }
 
 // ValidationError marks a caller mistake — something a user can fix by

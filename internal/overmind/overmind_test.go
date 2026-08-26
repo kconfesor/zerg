@@ -560,3 +560,111 @@ func TestStoppingReturnsInFlightWorkToTheQueue(t *testing.T) {
 	}
 	_ = task
 }
+
+// ── live team edits ───────────────────────────────────────────────────────
+
+// A team edit reaches the running swarm.
+//
+// It used to reach only whichever roles happened to respawn: a role added to
+// the pipeline got no process at all, so work routed to it queued behind
+// nothing, and a role taken out kept working until it next crashed.
+func TestReconcileFollowsATeamEdit(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t, &scriptedHarness{script: idleAgent})
+
+	if err := h.over.Start(ctx, h.project.ID); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	waitFor(t, func() bool { return len(h.live(t)) == 2 }, 15*time.Second,
+		"the swarm never came up with both roles")
+
+	// Add a third role and drop the reviewer, in one edit.
+	tpls, err := h.db.ListTemplates(ctx)
+	if err != nil {
+		t.Fatalf("ListTemplates: %v", err)
+	}
+	byName := map[string]string{}
+	for _, tpl := range tpls {
+		byName[tpl.Name] = tpl.ID
+	}
+	if err := h.db.SetTeam(ctx, h.project.ID, []store.ProjectRole{
+		{TemplateID: byName["coder"], Enabled: true},
+		{TemplateID: byName["cleaner"], Enabled: true},
+	}); err != nil {
+		t.Fatalf("SetTeam: %v", err)
+	}
+	if err := h.over.Reconcile(ctx, h.project.ID); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	live := h.live(t)
+	if _, ok := live["cleaner"]; !ok {
+		t.Error("the role added to the team has no process")
+	}
+	if _, ok := live["reviewer"]; ok {
+		t.Error("the role removed from the team is still supervised")
+	}
+	if _, ok := live["coder"]; !ok {
+		t.Error("an untouched role was disturbed by the edit")
+	}
+}
+
+// Reconciling a stopped project is a no-op rather than an error: the next
+// Start reads the team as it now is.
+func TestReconcileOnAStoppedProjectDoesNothing(t *testing.T) {
+	h := newHarness(t, &scriptedHarness{script: idleAgent})
+	if err := h.over.Reconcile(context.Background(), h.project.ID); err != nil {
+		t.Errorf("Reconcile on a stopped project: %v", err)
+	}
+}
+
+// Stop must not return while agents are still exiting.
+//
+// It used to wait on the goroutine that ticks the queue, which returns the
+// instant the context is cancelled — so Stop reported the swarm down, reclaimed
+// its leases and returned while harnesses were still writing, and a Start
+// straight afterwards put a second agent into a worktree the first had not left.
+func TestStopWaitsForAgentsToExit(t *testing.T) {
+	ctx := context.Background()
+	marker := filepath.Join(t.TempDir(), "exited")
+	h := newHarness(t, &scriptedHarness{script: func(adapter.Spec) string {
+		return `trap 'printf x >> ` + marker + `' EXIT TERM
+printf 'ready\n'
+sleep 30`
+	}})
+
+	if err := h.over.Start(ctx, h.project.ID); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	waitFor(t, func() bool { return len(h.live(t)) == 2 }, 15*time.Second,
+		"the swarm never came up")
+
+	if err := h.over.Stop(ctx, h.project.ID, "test"); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+
+	// Read immediately: the point is that Stop has already waited.
+	b, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("no agent recorded its exit before Stop returned: %v", err)
+	}
+	if len(b) != 2 {
+		t.Errorf("%d of 2 agents had exited when Stop returned", len(b))
+	}
+}
+
+// live is the set of roles the swarm is actually supervising right now.
+func (h *harness) live(t *testing.T) map[string]bool {
+	t.Helper()
+	h.over.mu.Lock()
+	s, ok := h.over.running[h.project.ID]
+	h.over.mu.Unlock()
+	if !ok {
+		return nil
+	}
+	out := map[string]bool{}
+	for name := range s.snapshot() {
+		out[name] = true
+	}
+	return out
+}

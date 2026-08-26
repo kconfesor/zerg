@@ -183,8 +183,10 @@ func runUp(args []string) error {
 	}
 
 	// Events are the expensive tier and exist to replay recent work, so they
-	// age out. Costs and outcomes live elsewhere and do not.
-	api.PruneEvents(ctx, db, log, cfg.Retention(), retentionSweep)
+	// age out. Costs and outcomes live elsewhere and do not. The window is read
+	// on each sweep, so changing it in Settings takes effect without a restart —
+	// which is what Settings has always said it does.
+	api.PruneEvents(ctx, db, log, retentionSweep)
 
 	// Agents are children of this process, so any lease still open belongs to a
 	// process that no longer exists. Requeue it now rather than letting the
@@ -193,6 +195,18 @@ func runUp(args []string) error {
 		log.Error("could not reclaim leases from the previous run", "err", err)
 	} else if n > 0 {
 		log.Info("reclaimed work from the previous run", "leases", n)
+	}
+
+	// And any approval the previous run was carrying out when it died. The
+	// decision claims the approval, releases the write lock, runs git, then
+	// records the outcome; killed in between, it stays "integrating" — hidden
+	// from Attention, so nobody is asked about it, over work that may already
+	// have landed on the base branch.
+	if settled, released, err := nyd.ReconcileIntegrating(ctx); err != nil {
+		log.Error("could not settle interrupted approvals from the previous run", "err", err)
+	} else if settled > 0 || released > 0 {
+		log.Info("settled interrupted approvals from the previous run",
+			"completed", settled, "returned_to_pending", released)
 	}
 
 	// Chat runs outside the pipeline: its own process, its own worktree, no
@@ -222,7 +236,7 @@ func runUp(args []string) error {
 	srv := &http.Server{
 		Handler: api.New(api.Deps{
 			DB: db, Log: log, Registry: registry,
-			Overmind: over, Nydus: nyd, Bus: bus, Recorder: recorder, Applied: cfg.Addr, Chat: chatMgr,
+			Overmind: over, Nydus: nyd, Bus: bus, Recorder: recorder, Applied: cfg.Listener(), Chat: chatMgr,
 		}).Routes(),
 		ReadHeaderTimeout: 10 * time.Second,
 		// A body that arrives a byte at a time holds a connection open

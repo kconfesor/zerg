@@ -1,171 +1,200 @@
-# Zerg Code Review
+# Zerg Code Re-review
 
-**Verdict: Request changes before exposing the cockpit beyond a trusted development machine.**
+**Verdict: Request changes.**
 
-The project has a strong architecture and unusually good backend tests, but several concurrency, authorization, and state-consistency issues could cause cross-project corruption, duplicate work, inaccurate accounting, or remote code execution.
+The remediation materially improved the project, and all current checks pass. However, several original issues are only partially resolved, especially authentication, swarm lifecycle, live configuration, and event accounting.
 
-## Critical
+## Remaining blocking issues
 
-### 1. Unauthenticated cockpit can become remote code execution
+### High: Stop/start/delete lifecycle is still unsafe
 
-- All API routes are unauthenticated: `internal/api/api.go:76-139`
-- Request bodies accept any content type and have no size limit: `internal/api/api.go:590-598`
-- Claude defaults to `bypassPermissions`: `internal/adapter/claudeharness/claude.go:137-143`
-- HTTP only configures `ReadHeaderTimeout`: `cmd/zerg/main.go:222-228`
+`internal/overmind/overmind.go:432-466` removes the swarm from `running` before teardown finishes. A new Start can therefore overlap the old Stop.
 
-Anyone who can reach the port can edit prompts, create tasks, start agents, and read repository data. The default loopback listener is also potentially vulnerable to DNS rebinding and cross-site requests because Host, CSRF, and Fetch Metadata are not validated.
+Also, `s.done` tracks `keepMoving`, not the cerebrate processes themselves. Stop can reclaim leases and return while old harnesses are still exiting, allowing old and new agents to use the same worktree.
+
+Project deletion still bypasses Overmind entirely: `internal/api/api.go:287-292`.
+
+**Fix:** Implement a persistent `starting/running/stopping` state, wait for all cerebrates with a `WaitGroup`, and reject or coordinate deletion of active projects.
+
+### High: Live configuration remains inconsistent
+
+Configuration is now refreshed before respawn, but topology and harness changes are not correctly reconciled:
+
+- Team updates write directly to the database: `internal/api/api.go:309-324`.
+- Added roles receive no cerebrate.
+- Removed roles remain until they respawn.
+- Renamed roles stop without a replacement.
+- A harness change updates the role data, but the cerebrate retains its original adapter and config directory: `internal/cerebrate/cerebrate.go:430-481`.
+
+This can run the old harness using the new harness's model and flags, or route work to a role with no process.
+
+**Fix:** Either reject team/harness edits while running or make Overmind atomically add, remove, and replace affected cerebrates.
+
+### High: Agent actions are not bound to lease ownership
+
+`internal/agent/server.go:282-301` authenticates the caller for `done`, but discards its identity and acknowledges any lease ID.
+
+Similarly, `send` verifies project membership but not that the role currently holds the task. A stale terminal-role token can complete a task it never claimed.
+
+The send operation also lacks an idempotency key, so a lost response followed by retry can create duplicate handoffs and model work.
 
 **Fix:**
 
-- Require a random bearer token or authenticated session for API and WebSocket access.
-- Enforce an allowed Host list and validate Origin/`Sec-Fetch-Site`.
-- Require `application/json` for mutations and cap request bodies with `http.MaxBytesReader`.
-- Refuse non-loopback binding unless authentication is configured.
-- Add `ReadTimeout`, `IdleTimeout`, and appropriate endpoint-specific limits.
+- Require `(lease ID, project ID, role)` ownership for acknowledgement.
+- Include the source lease in handoffs.
+- Verify the task belongs to that lease.
+- Guard transitions by expected task lane/state.
+- Add an idempotency constraint keyed by source lease and operation.
 
-## High-priority backend issues
+### High: Recorder accounting can still be wrong while health reports OK
 
-### 2. Agents can reference tasks belonging to another project
+The new queue protects ordinary bursts, but:
 
-`internal/agent/server.go:315-356` checks task IDs using global `GetTask`; only the name fallback is project-scoped. The task ID then passes through routing and task updates without verifying its project.
+- `failed` is never incremented.
+- `written` increments even if event or usage insertion fails.
+- Database errors are only logged.
+- The queue is unbounded for the lifetime of the daemon.
+- Task attribution happens when the writer processes an event, not when it was produced.
 
-A project-A agent could create messages referencing or complete a project-B task.
+If task A's events remain queued until the role claims task B, those events can be attributed to B because `CurrentTaskFor` selects the newest lease.
 
-**Fix:** Resolve every task by `(project_id, task_id)`. Add database-level composite foreign-key integrity between messages and tasks. Apply the same rule to clarification task IDs.
+Relevant code:
 
-### 3. Claude parser state is shared across every agent
+- `internal/event/recorder.go:113-234`
+- `internal/store/usage.go:183-208`
 
-The registry stores one adapter instance:
+**Fix:** Stamp events with immutable task/lease identity when emitted, make event and usage persistence transactional, increment accurate failure counters, and use a bounded durable spool with an explicit overflow policy.
 
-- `cmd/zerg/main.go:132-134`
-- `internal/adapter/registry.go:12-38`
+### High: Approval crash recovery is missing
 
-Claude's adapter stores current model and billing as mutable atomics:
+The approval race itself is fixed with `pending → integrating`, but a crash after that transition can leave the approval permanently `integrating`.
 
-- `internal/adapter/claudeharness/claude.go:32-64`
-- `internal/adapter/claudeharness/claude.go:317-374`
+Such approvals are excluded from Attention, and there is no startup reconciliation. This is especially problematic if the merge or PR succeeded before the crash.
 
-Concurrent Claude roles can overwrite each other's model/billing values. This avoids a Go data race but produces incorrect usage attribution.
+**Fix:** Reconcile `integrating` approvals on startup using Git ancestry or PR lookup and a stable operation key.
 
-**Fix:** Register adapter factories and instantiate a parser per subprocess/session. Keep only immutable capabilities/model discovery on shared objects.
+## Original-finding status
 
-### 4. Swarm startup is race-prone and not failure-atomic
+| Original finding | Status |
+|---|---|
+| Unauthenticated cockpit/RCE | **Partial** |
+| Cross-project task references | **Partial** — protocol boundary scoped, DB integrity still global |
+| Shared Claude parser state | **Fixed** |
+| Swarm startup race and rollback | **Partial** |
+| Fresh configuration on respawn | **Partial** |
+| Approval decision race | **Fixed**, but crash recovery missing |
+| Event durability/accounting | **Partial** |
+| Team override preservation | **Partial** |
+| Router/project synchronization | **Partial** |
+| WebSocket error frames | **Fixed** |
+| Activity/chat performance | **Partial** |
+| Harness flag parsing | **Partial** |
+| Agent environment filtering | **Fixed** |
+| Filesystem permissions | **Partial** for existing installations |
+| Task plus opening-message transaction | **Fixed** |
+| SQLite read concurrency | **Not addressed** |
+| Frontend lint/CI | **Fixed** |
+| Frontend tests/accessibility automation | **Not addressed** |
 
-`internal/overmind/overmind.go:267-378` checks whether a project is running, unlocks, starts a session and processes, then finally registers the swarm.
+## Vue issues still remaining
 
-Consequences:
+### Stale asynchronous responses
 
-- Two concurrent Start requests can both launch a swarm.
-- A failure after the first role starts can leave orphaned processes, tokens, and an open session.
-- Deleting a project does not coordinate with a running swarm: `internal/api/api.go:265-272`.
+- `web/src/components/TaskDetail.vue:23-33`: opening task A then B can render A's late response under B.
+- `web/src/components/layout/UsageSummary.vue:22-40`: previous-project usage can overwrite current-project usage.
+- `web/src/App.vue:91-93`: workspace results are committed without checking the project.
+- The `refreshFor` project-ID guard fails for A → B → A races; use a monotonically increasing request generation or `AbortController`.
 
-**Fix:** Introduce `starting/running/stopping` lifecycle states reserved under the mutex. Roll back tokens, sessions, contexts, and started cerebrates on any startup failure. Reject or coordinate project deletion while active.
+### Empty argument overrides remain lossy
 
-### 5. Live configuration contradicts the architecture
+The backend distinguishes `nil` from an empty slice, but `ArgsOverride` uses `omitempty`. An explicit empty override disappears from JSON and becomes `null` during the next reorder.
 
-The architecture says prompts are read fresh on every spawn, but `Overmind.Start` reads the team, settings, and prompts once and stores them in `cerebrate.Config`:
+Use a pointer or remove `omitempty` so “inherit” and “override with no arguments” remain distinct.
 
-- `internal/overmind/overmind.go:287-364`
-- `internal/cerebrate/cerebrate.go:605-624`
+### Harness flag parsing is still not round-trip safe
 
-A crash respawn therefore reuses stale configuration. Team changes are more dangerous: routing sees the new database team while the running cerebrates remain the old set.
+`joinArgs()` uses JSON escaping, but `splitArgs()` does not understand escaped quotes or backslashes. Known flags are also moved ahead of custom flags, which can change order-sensitive CLI precedence.
 
-The UI acknowledges the mismatch at `web/src/App.vue:379-383`.
+A tag/argv editor would be safer than shell-like text.
 
-**Fix:** Either reject runtime-affecting edits while running or reconcile/restart affected roles through Overmind. Resolve configuration immediately before each spawn. Update `ARCHITECTURE.md` until this is implemented.
+### Pending and error states
 
-### 6. Approval and rejection can race after integration
+Several mutations still allow duplicate actions:
 
-`internal/nydus/nydus.go:827-900`:
+- Start/stop
+- Task creation/deletion
+- Approval/rejection/answer
+- Chat agent changes
 
-1. Reads a pending approval.
-2. Releases the transaction.
-3. Performs Git/PR integration.
-4. Updates the approval without `WHERE state='pending'`.
+`setHidden()` also has no error handling. Add per-operation pending state and disable the corresponding control.
 
-Concurrent approve/reject calls can overwrite each other after an irreversible merge or PR operation.
+### Accessibility and tests
 
-**Fix:** Atomically transition `pending → integrating` using compare-and-swap, perform integration, then finalize with another guarded transition.
+- Custom model pickers still lack combobox/listbox keyboard semantics.
+- Several labels are not associated with controls.
+- There are still no frontend unit or E2E tests.
 
-### 7. Durable event and cost records can silently disappear
+## Other backend improvements still needed
 
-The event bus intentionally drops messages when subscriber buffers fill:
+### Cross-project integrity remains incomplete at the database layer
 
-- `internal/event/bus.go:77-114`
-- Recorder buffer: `internal/event/recorder.go:20-56`
+Agent-provided task IDs are now scoped at the protocol boundary, but tables still independently store `project_id` and globally referenced `task_id` values.
 
-The recorder performs task attribution and one or two database writes per event. A burst or SQLite delay can drop transcripts and billing rows. Drop counts disappear when the subscription ends and health always reports OK.
+Add `UNIQUE(project_id, id)` to tasks and composite foreign keys from messages, clarifications, events, and usage rows. Scope task reads and updates by project and require one affected row.
 
-**Fix:** Give persistence a dedicated durable queue or backpressure path, batch inserts, cache task attribution briefly, and expose recorder lag/drop/write-failure metrics. Usage accounting should not share best-effort browser telemetry semantics.
+### Existing installations may retain permissive file modes
 
-## Vue findings
+New prompt directories and files use `0700` and `0600`, but `MkdirAll` and `WriteFile` do not tighten existing paths. An upgraded installation can retain the previous `0755` directory or `0644` prompt/database files.
 
-### 8. Team edits can erase argument overrides
+Explicitly call `Chmod` on the state directory and sensitive files, including database sidecars where applicable.
 
-`web/src/components/TeamEditor.vue:64-73` reconstructs team entries using only `modelOverride`. It omits `argsOverride` and derives the model override from the generic `overridden` boolean.
+### Project creation is not fully atomic
 
-Reordering or toggling a role can silently clear existing argument overrides.
+`internal/api/api.go:254-275` commits the project before selecting its default team. If a built-in role is missing, project creation returns an error but leaves the project row and unique path behind.
 
-**Fix:** Return explicit `modelOverride` and `argsOverride` values from the backend and round-trip both unchanged.
+Create the project and default `project_roles` in one store transaction.
 
-### 9. URL project and displayed project can diverge
+## Performance notes
 
-`web/src/App.vue:45-58,228-280,422-438` derives the view from Vue Router but only changes `current` through `open()`. Browser back/forward between two project URLs can change the URL without changing the loaded project.
+- `SetMaxOpenConns(1)` still serializes every SQLite read and write. This negates WAL reader concurrency and increases recorder backlog risk.
+- Activity batching is a good improvement, but all 2,000 rows remain mounted and Markdown is regenerated during rendering.
+- Chat is now capped at 500 rows, but still updates reactively and scrolls per event.
+- Bundle size is approximately **421 kB JS / 132 kB gzip**, up slightly from the previous review but still reasonable.
 
-Concurrent polling and project switches can also let an old request overwrite the newly selected project's data.
+## Documentation and CI
 
-**Fix:** Watch `route.params.projectId` as the canonical project selection. Cancel stale requests with `AbortController` or use a load-generation token before committing results.
+- CI now enforces formatting, vet, Go tests, frontend linting, Vue type-checking, builds, and embedded cockpit freshness.
+- The race detector passes locally but is disabled in CI. Restore it or run it as a scheduled job.
+- `ARCHITECTURE.md` still describes `zerg up --detach` and harness session resume even though those paths are not implemented.
+- Settings report retention as immediately applied, but the retention duration is captured at daemon startup.
+- Restart detection considers only the address, not TLS mode, certificate paths, or local-listener settings.
 
-### 10. WebSocket error frames are ignored
+## Strong improvements
 
-The server emits an in-band `error` frame when replay fails, but `web/src/lib/api.ts:379-396` handles only `activity` and `caught-up`.
+- Claude parser state is now session-local.
+- Concurrent Start requests are reserved and failed starts clean up sessions and tokens.
+- Task creation and its opening message are transactional.
+- Approval decisions use a guarded claim.
+- Agent environments use a credential-conscious allowlist.
+- WebSocket errors are surfaced and retried.
+- Activity updates are batched per animation frame.
+- Chat history is bounded.
+- Team overrides are substantially better preserved.
+- CI catches stale embedded frontend assets.
 
-The activity screen can remain stuck on “connecting” indefinitely.
+## Verification
 
-**Fix:** Use a discriminated frame union, handle `error`, expose it to consumers, and close/retry or provide an explicit retry action.
-
-### 11. Frontend performance will degrade on long streams
-
-`web/src/components/Activity.vue:38-65` mutates a reactive array and schedules scrolling for every event while retaining up to 2,000 rendered rows. Markdown is regenerated during rendering. Chat has no cap.
-
-**Fix:** Batch events once per animation frame, precompute rendered Markdown, virtualize the activity list, and cap/page chat history.
-
-### 12. Harness flag parsing can corrupt arguments
-
-`web/src/components/Settings.vue:142-169` classifies arguments using flattened known tokens and splits custom input on whitespace. A custom argument following a known flag may disappear, and quoted argument values cannot be represented correctly.
-
-**Fix:** Match complete known sequences by index and retain all unmatched argv entries. Prefer an array/tag editor over shell-like free text.
-
-## Other improvements
-
-- `AgentEnv` inherits the daemon's complete environment, potentially exposing cloud credentials and tokens to agents: `internal/adapter/adapter.go:109-128`. Use an allowlist.
-- Database/state directories and prompt files are created as `0755`/`0644`: `internal/store/store.go:68-79`, `internal/cerebrate/cerebrate.go:611-625`. Prefer `0700`/`0600`.
-- `NewTask` creates the task separately from its opening message: `internal/nydus/nydus.go:92-115`. Make this one transaction.
-- `SetMaxOpenConns(1)` serializes reads and writes, negating WAL reader concurrency: `internal/store/store.go:73-86`. Consider a single writer plus bounded read pool after benchmarking.
-- There are no frontend tests, linting, accessibility checks, or CI configuration.
-- Some architecture sections describe unimplemented features—`daily_rollup`, history UI, price tables, task pinning—as current behavior.
-
-## Strong patterns
-
-- Good transactional lease and route handling.
-- Commit references are resolved to absolute SHAs in the sender worktree.
-- Tests frequently verify actual Git/filesystem effects rather than derived flags.
-- Parameterized SQL and allowlisted dynamic grouping.
-- Strong process-group cancellation and bounded WebSocket writes.
-- Vue strict type-checking passes.
-- WebSocket cursor replay/backoff is well designed.
-- The custom Markdown renderer escapes input before generating HTML; no current XSS bypass was identified.
-
-## Verification performed
-
-All passed:
+All passed on the clean tree:
 
 ```text
-go test ./...
+go test -count=1 ./...
 go vet ./...
-go test -race ./internal/agent ./internal/event ./internal/cerebrate ./internal/nydus ./internal/overmind
+go test -count=1 -race ./internal/agent ./internal/event \
+  ./internal/cerebrate ./internal/nydus ./internal/overmind
+
+pnpm --dir web lint
 pnpm --dir web build
 git diff --check
 ```
 
-Frontend bundle: approximately **405 kB JS / 128 kB gzip**.
+The embedded cockpit matches `web/dist`.

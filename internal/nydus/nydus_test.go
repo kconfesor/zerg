@@ -22,6 +22,10 @@ type fakeIntegrator struct {
 	into      []string
 	published []string
 	err       error
+	// landedErr makes the "did this integration finish" question unanswerable,
+	// which must leave an interrupted approval claimed rather than releasing
+	// one whose merge may have happened.
+	landedErr error
 
 	// enter is closed as Merge begins and hold blocks it until released.
 	// Integration runs outside the write transaction — a git subprocess must
@@ -56,6 +60,34 @@ func (f *fakeIntegrator) MergeInto(_ context.Context, _, commit string) error {
 	defer f.mu.Unlock()
 	f.into = append(f.into, commit)
 	return nil
+}
+
+// Landed answers from what Merge and Publish recorded, so a test can replay a
+// crash mid-integration without a git repository.
+func (f *fakeIntegrator) Landed(_ context.Context, _, _, commit, title, mode string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.landedErr != nil {
+		return false, f.landedErr
+	}
+	switch mode {
+	case "branch":
+		return false, nil
+	case "pr":
+		for _, p := range f.published {
+			if strings.HasPrefix(p, title+" -> ") {
+				return true, nil
+			}
+		}
+		return false, nil
+	default:
+		for _, c := range f.merges {
+			if c == commit {
+				return true, nil
+			}
+		}
+		return false, nil
+	}
 }
 
 func (f *fakeIntegrator) Merge(_ context.Context, _, _, commit string) error {
@@ -1109,5 +1141,169 @@ func TestOnlyOneDecisionSurvivesARace(t *testing.T) {
 	}
 	if !merged {
 		t.Error("recorded a decision with nothing merged")
+	}
+}
+
+// ── crash recovery ────────────────────────────────────────────────────────
+
+// A daemon killed between claiming an approval and recording it leaves the
+// approval "integrating": Attention excludes it, so nobody is asked about it,
+// and the work may already be on the base branch with a card that never moved.
+func TestInterruptedApprovalIsSettledFromTheRepository(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	if _, err := f.db.SQL().ExecContext(ctx,
+		`UPDATE role_templates SET gate = ? WHERE name = 'reviewer'`, store.GateApproval); err != nil {
+		t.Fatal(err)
+	}
+	task := f.task(t, "Calculator")
+	if _, err := f.n.Send(ctx, f.project.ID, "reviewer", SendRequest{
+		TaskID: task.ID, Commit: "aaaaaaaaaa", Body: "approved by the reviewer",
+	}); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	pending, _ := f.db.ListPendingApprovals(ctx, f.project.ID)
+
+	// The crash: claimed, merged, and killed before the decision was written.
+	f.stick(t, pending[0].ID)
+	f.git.mu.Lock()
+	f.git.merges = append(f.git.merges, "aaaaaaaaaa")
+	f.git.mu.Unlock()
+
+	settled, released, err := f.n.ReconcileIntegrating(ctx)
+	if err != nil {
+		t.Fatalf("ReconcileIntegrating: %v", err)
+	}
+	if settled != 1 || released != 0 {
+		t.Fatalf("settled %d and released %d; the merge had happened, so it should be settled", settled, released)
+	}
+	if got := f.reload(t, task.ID).State; got != store.TaskDone {
+		t.Errorf("task state is %q; the work is on the base branch", got)
+	}
+	a, err := f.db.GetApproval(ctx, pending[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.State != store.ApprovalApproved {
+		t.Errorf("approval state is %q, want approved", a.State)
+	}
+}
+
+// And when the merge had not happened, the approval goes back to the operator
+// rather than staying invisible.
+func TestInterruptedApprovalThatNeverLandedGoesBackToPending(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	if _, err := f.db.SQL().ExecContext(ctx,
+		`UPDATE role_templates SET gate = ? WHERE name = 'reviewer'`, store.GateApproval); err != nil {
+		t.Fatal(err)
+	}
+	task := f.task(t, "Calculator")
+	if _, err := f.n.Send(ctx, f.project.ID, "reviewer", SendRequest{
+		TaskID: task.ID, Commit: "aaaaaaaaaa", Body: "approved by the reviewer",
+	}); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	pending, _ := f.db.ListPendingApprovals(ctx, f.project.ID)
+	f.stick(t, pending[0].ID)
+
+	settled, released, err := f.n.ReconcileIntegrating(ctx)
+	if err != nil {
+		t.Fatalf("ReconcileIntegrating: %v", err)
+	}
+	if settled != 0 || released != 1 {
+		t.Fatalf("settled %d and released %d; nothing had landed", settled, released)
+	}
+	back, err := f.db.ListPendingApprovals(ctx, f.project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(back) != 1 {
+		t.Fatalf("%d approvals waiting for a person, want 1", len(back))
+	}
+}
+
+// An unanswerable repository leaves the claim in place: releasing an approval
+// whose merge may have happened is how the same work lands twice.
+func TestInterruptedApprovalStaysClaimedWhenTheRepositoryCannotSay(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	if _, err := f.db.SQL().ExecContext(ctx,
+		`UPDATE role_templates SET gate = ? WHERE name = 'reviewer'`, store.GateApproval); err != nil {
+		t.Fatal(err)
+	}
+	task := f.task(t, "Calculator")
+	if _, err := f.n.Send(ctx, f.project.ID, "reviewer", SendRequest{
+		TaskID: task.ID, Commit: "aaaaaaaaaa", Body: "approved by the reviewer",
+	}); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	pending, _ := f.db.ListPendingApprovals(ctx, f.project.ID)
+	f.stick(t, pending[0].ID)
+	f.git.mu.Lock()
+	f.git.landedErr = errors.New("git is not answering")
+	f.git.mu.Unlock()
+
+	if _, _, err := f.n.ReconcileIntegrating(ctx); err == nil {
+		t.Fatal("an unanswerable repository was treated as an answer")
+	}
+	if back, _ := f.db.ListPendingApprovals(ctx, f.project.ID); len(back) != 0 {
+		t.Error("the approval was released while it was still unknown whether it had landed")
+	}
+}
+
+// stick puts an approval into the state a crash mid-decision leaves behind.
+func (f *fixture) stick(t *testing.T, approvalID string) {
+	t.Helper()
+	if _, err := f.db.SQL().ExecContext(context.Background(),
+		`UPDATE approvals SET state = ? WHERE id = ?`,
+		store.ApprovalIntegrating, approvalID); err != nil {
+		t.Fatalf("simulating the crash: %v", err)
+	}
+}
+
+// An event's task is the one its role held when the event happened, not the one
+// it holds by the time the recorder gets to it.
+//
+// The recorder writes behind a queue, so those are different questions under
+// load: a burst emitted while coder held task A can reach the writer after
+// coder has claimed task B, and asking for the newest lease moves A's tokens
+// and A's transcript onto B — silently, and worst for the most expensive turns.
+func TestTaskAttributionUsesTheLeaseHeldAtTheTime(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+
+	first := f.task(t, "First")
+	leaseA, err := f.n.Claim(ctx, f.project.ID, "planner")
+	if err != nil || leaseA == nil {
+		t.Fatalf("claiming the first task: %v", err)
+	}
+	duringA := f.clock.now()
+	if err := f.n.Ack(ctx, leaseA.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Time passes, and the same role takes the next card.
+	f.clock.advance(time.Minute)
+	second := f.task(t, "Second")
+	leaseB, err := f.n.Claim(ctx, f.project.ID, "planner")
+	if err != nil || leaseB == nil {
+		t.Fatalf("claiming the second task: %v", err)
+	}
+
+	at, err := f.db.TaskForAt(ctx, f.project.ID, "planner", duringA)
+	if err != nil {
+		t.Fatalf("TaskForAt: %v", err)
+	}
+	if at == nil || *at != first.ID {
+		t.Errorf("an event from the first card was attributed to %v, want %s", at, first.ID)
+	}
+
+	now, err := f.db.CurrentTaskFor(ctx, f.project.ID, "planner")
+	if err != nil {
+		t.Fatalf("CurrentTaskFor: %v", err)
+	}
+	if now == nil || *now != second.ID {
+		t.Errorf("the role's current card is %v, want %s", now, second.ID)
 	}
 }

@@ -25,6 +25,19 @@ type settingsResponse struct {
 	RestartNeeded bool   `json:"restartNeeded"`
 }
 
+// restartNeeded compares the whole listener, not just its address.
+//
+// Saving a TLS mode, a certificate path or the loopback door used to report
+// nothing to do, because only Addr was compared — so the cockpit went on
+// serving plain HTTP on an address the operator had just asked to be encrypted,
+// and said everything was applied.
+func (s *Server) restartNeeded(saved store.Config) bool {
+	if s.applied == (store.Listener{}) {
+		return false // nothing bound this process; nothing to be stale
+	}
+	return s.applied != saved.Listener()
+}
+
 func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 	cfg, err := s.db.GetConfig(r.Context())
 	if err != nil {
@@ -34,8 +47,8 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, settingsResponse{
 		Config:        cfg,
 		Tailnet:       tailnet.Probe(r.Context()),
-		Applied:       s.applied,
-		RestartNeeded: s.applied != "" && s.applied != cfg.Addr,
+		Applied:       s.applied.Addr,
+		RestartNeeded: s.restartNeeded(cfg),
 	})
 }
 
@@ -59,8 +72,8 @@ func (s *Server) setSettings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, settingsResponse{
 		Config:        saved,
 		Tailnet:       tailnet.Probe(r.Context()),
-		Applied:       s.applied,
-		RestartNeeded: s.applied != "" && s.applied != saved.Addr,
+		Applied:       s.applied.Addr,
+		RestartNeeded: s.restartNeeded(saved),
 	})
 }
 
@@ -209,6 +222,40 @@ func (s *Server) taskDetail(w http.ResponseWriter, r *http.Request) {
 
 type integrationRequest struct {
 	Integration string `json:"integration"`
+}
+
+// renameProject changes the label a project is shown under.
+func (s *Server) renameProject(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name string `json:"name"`
+	}
+	if !decode(w, r, &req) {
+		return
+	}
+	project, err := s.db.SetProjectName(r.Context(), r.PathValue("id"), req.Name)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, project)
+}
+
+// setProjectIcon sets or clears the mark the switcher shows for a project.
+//
+// PUT rather than POST: sending the same icon twice leaves the same state.
+func (s *Server) setProjectIcon(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Icon string `json:"icon"`
+	}
+	if !decode(w, r, &req) {
+		return
+	}
+	project, err := s.db.SetProjectIcon(r.Context(), r.PathValue("id"), req.Icon)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, project)
 }
 
 // setIntegration changes how a project's finished work reaches its base branch.

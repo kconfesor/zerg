@@ -47,16 +47,34 @@ var schema009 string
 //go:embed schema_010.sql
 var schema010 string
 
+//go:embed schema_011.sql
+var schema011 string
+
+//go:embed schema_012.sql
+var schema012 string
+
 // migrations are applied in order; a database at user_version N has had the
 // first N of them run. To change the schema, append a file and a line here —
 // never edit one that has shipped.
-var migrations = []string{schema001, schema002, schema003, schema004, schema005, schema006, schema007, schema008, schema009, schema010}
+var migrations = []string{schema001, schema002, schema003, schema004, schema005, schema006, schema007, schema008, schema009, schema010, schema011, schema012}
 
 func schemaVersion() int { return len(migrations) }
 
 // DB is the handle every other package takes.
+//
+// Two pools over one file, not one. SQLite serialises writers, so the write
+// pool is capped at a single connection and the wait happens in Go rather than
+// as SQLITE_BUSY from the driver. Capping *everything* at one connection also
+// serialised every read behind every write, which threw away the one thing WAL
+// is for — readers that do not block on the writer — and made a slow commit
+// stall the board poll, the activity replay and the recorder's own lookups
+// behind it.
+//
+// The read pool is opened query_only, so a read path that reaches for the
+// wrong handle fails loudly instead of quietly becoming a second writer.
 type DB struct {
-	sql *sql.DB
+	sql  *sql.DB
+	read *sql.DB
 }
 
 // DefaultPath is ~/.zerg/zerg.db — the library is global, so the database is
@@ -93,18 +111,80 @@ func Open(ctx context.Context, path string) (*DB, error) {
 	// wait in Go rather than collecting SQLITE_BUSY from the driver.
 	sqlDB.SetMaxOpenConns(1)
 
-	db := &DB{sql: sqlDB}
+	db := &DB{sql: sqlDB, read: sqlDB}
 	if err := db.migrate(ctx); err != nil {
 		sqlDB.Close()
 		return nil, err
 	}
+
+	// A second pool for reads, where there is a file to open twice.
+	//
+	// ":memory:" is deliberately excluded: each connection to it is its own
+	// empty database, so a second handle would be a second, empty store rather
+	// than another view of this one. Tests run single-pool and lose nothing but
+	// the concurrency they were not exercising.
+	if path != ":memory:" {
+		readDB, err := sql.Open("sqlite", dsn+"&_pragma=query_only(1)")
+		if err != nil {
+			sqlDB.Close()
+			return nil, fmt.Errorf("opening %s for reading: %w", path, err)
+		}
+		readDB.SetMaxOpenConns(readers)
+		if err := readDB.PingContext(ctx); err != nil {
+			readDB.Close()
+			sqlDB.Close()
+			return nil, fmt.Errorf("opening %s for reading: %w", path, err)
+		}
+		db.read = readDB
+	}
+
+	if path != ":memory:" {
+		if err := tighten(path); err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
 	return db, nil
 }
 
-func (db *DB) Close() error { return db.sql.Close() }
+// readers is the read pool's size. Small on purpose: the concurrent readers
+// here are a handful of HTTP handlers and the recorder, and every one of them
+// holds a file descriptor and a page cache.
+const readers = 8
 
-// SQL exposes the handle for packages that need their own queries.
+// tighten narrows an existing installation's file modes.
+//
+// MkdirAll and OpenFile apply their mode only when they create something, so a
+// database created before these modes were chosen keeps whatever it was made
+// with — 0755 and 0644 under the usual umask, which is world-readable. This
+// file holds every prompt, transcript and cost on the machine, and the -wal
+// sidecar holds recently written copies of the same rows.
+func tighten(path string) error {
+	dir := filepath.Dir(path)
+	if err := os.Chmod(dir, 0o700); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("securing %s: %w", dir, err)
+	}
+	// The sidecars are created by SQLite, not by us, and carry the same rows.
+	for _, p := range []string{path, path + "-wal", path + "-shm", path + "-journal"} {
+		if err := os.Chmod(p, 0o600); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("securing %s: %w", p, err)
+		}
+	}
+	return nil
+}
+
+func (db *DB) Close() error {
+	if db.read != nil && db.read != db.sql {
+		db.read.Close()
+	}
+	return db.sql.Close()
+}
+
+// SQL exposes the write handle for packages that need their own transactions.
 func (db *DB) SQL() *sql.DB { return db.sql }
+
+// Read exposes the read pool, for queries that take no write lock.
+func (db *DB) Read() *sql.DB { return db.read }
 
 func (db *DB) migrate(ctx context.Context) error {
 	var version int

@@ -33,6 +33,18 @@ type Event struct {
 // a record of something that already happened, and failing to store it must
 // never roll back or block the work it describes.
 func (db *DB) RecordEvent(ctx context.Context, e *Event) error {
+	return db.RecordTurn(ctx, e, nil)
+}
+
+// RecordTurn writes an event and, when the event carried one, its usage row —
+// in one transaction.
+//
+// The two used to be two independent inserts. A usage event is one thing that
+// happened, and writing half of it leaves the record and the ledger disagreeing
+// about the same turn: a transcript entry for a turn with no cost, or a cost
+// with no turn behind it. Neither is recoverable afterwards, because a harness
+// reports a turn once.
+func (db *DB) RecordTurn(ctx context.Context, e *Event, u *UsageTurn) error {
 	if e.ID == "" {
 		e.ID = NewID()
 	}
@@ -43,12 +55,27 @@ func (db *DB) RecordEvent(ctx context.Context, e *Event) error {
 	if len(e.Data) > 0 {
 		data = string(e.Data)
 	}
-	_, err := db.sql.ExecContext(ctx,
+
+	tx, err := db.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("recording event: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO events (id, project_id, task_id, role, kind, ts, text, tool, data, fatal)
 		 VALUES (?,?,?,?,?,?,?,?,?,?)`,
 		e.ID, e.ProjectID, e.TaskID, e.Role, e.Kind, e.At.Format(time.RFC3339Nano),
-		e.Text, e.Tool, data, e.Fatal)
-	if err != nil {
+		e.Text, e.Tool, data, e.Fatal); err != nil {
+		return fmt.Errorf("recording event: %w", err)
+	}
+
+	if u != nil {
+		if err := insertUsage(ctx, tx, *u); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("recording event: %w", err)
 	}
 	return nil
@@ -111,7 +138,7 @@ func (db *DB) ListEvents(ctx context.Context, q EventQuery) ([]Event, error) {
 	}
 	args = append(args, q.Limit)
 
-	rows, err := db.sql.QueryContext(ctx, query, args...)
+	rows, err := db.read.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("reading events: %w", err)
 	}

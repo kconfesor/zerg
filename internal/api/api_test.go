@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -351,5 +352,121 @@ func TestAssetCachingHeaders(t *testing.T) {
 	}
 	if !strings.Contains(asset.Header().Get("Cache-Control"), "immutable") {
 		t.Errorf("asset Cache-Control = %q, want immutable", asset.Header().Get("Cache-Control"))
+	}
+}
+
+// A project's mark is read out of the project, which means this endpoint opens
+// a file in a directory the operator pointed at, over a cockpit with no
+// authentication. What it will not open matters more than what it will.
+func TestProjectIconStaysInsideTheProject(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "secret.png")
+	if err := os.WriteFile(outside, []byte("not yours"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "logo.png"), []byte("mine"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "escape.png")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	// The path that is genuinely inside resolves.
+	if _, err := resolveInside(root, "logo.png"); err != nil {
+		t.Errorf("a file in the project was refused: %v", err)
+	}
+
+	for _, rel := range []string{
+		"../secret.png",
+		"assets/../../secret.png",
+		"/etc/passwd",
+		"escape.png",   // a symlink out of the tree
+		"logo.txt",     // not an image
+		"logo.png.txt", // nor is a name that ends in one
+		"",             // nothing set
+	} {
+		if _, err := resolveInside(root, rel); err == nil {
+			t.Errorf("resolveInside accepted %q", rel)
+		}
+	}
+}
+
+// The scan finds what a repository actually carries, and orders it so the
+// first thing offered is the one most likely wanted.
+func TestFindIconsPrefersALogoOverAGeneratedFavicon(t *testing.T) {
+	root := t.TempDir()
+	for _, p := range []string{
+		"favicon.ico",
+		"public/logo.svg",
+		"public/apple-touch-icon.png",
+		"public/screenshot.png", // not icon-shaped, by name
+		"README.md",             // not an image
+	} {
+		full := filepath.Join(root, filepath.FromSlash(p))
+		if err := os.MkdirAll(filepath.Dir(full), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got := findIcons(root)
+	var paths []string
+	for _, c := range got {
+		paths = append(paths, c.Path)
+	}
+	want := []string{"public/logo.svg", "favicon.ico", "public/apple-touch-icon.png"}
+	if len(paths) != len(want) {
+		t.Fatalf("found %v, want %v", paths, want)
+	}
+	for i := range want {
+		if paths[i] != want[i] {
+			t.Errorf("position %d is %s, want %s (order: %v)", i, paths[i], want[i], paths)
+		}
+	}
+}
+
+// The walk has to reach where marks actually live, and refuse to pay for the
+// directories that make repositories large.
+//
+// The first version was a fixed list of well-known directories and found
+// nothing in either real project it was pointed at: one keeps its marks in
+// assets/logos/, the other in frontend/<app>/public/.
+func TestFindIconsReachesWhereMarksActuallyLive(t *testing.T) {
+	root := t.TempDir()
+	write := func(p string) {
+		full := filepath.Join(root, filepath.FromSlash(p))
+		if err := os.MkdirAll(filepath.Dir(full), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Named nothing like an icon, but in a directory that holds only marks.
+	write("assets/logos/monogram_teal.svg")
+	// Three directories down, which no fixed list would have guessed.
+	write("frontend/admin-portal/public/favicon.svg")
+	// Build output: a copy of a file that also exists in source.
+	write("frontend/admin-portal/dist/favicon.svg")
+	// Expensive and never interesting.
+	write("node_modules/some-pkg/logo.png")
+	// zerg's own worktrees, which would otherwise repeat every mark per role.
+	write(".worktrees/coder/assets/logos/monogram_teal.svg")
+
+	var paths []string
+	for _, c := range findIcons(root) {
+		paths = append(paths, c.Path)
+	}
+
+	want := []string{"assets/logos/monogram_teal.svg", "frontend/admin-portal/public/favicon.svg"}
+	if len(paths) != len(want) {
+		t.Fatalf("found %v, want exactly %v", paths, want)
+	}
+	for i := range want {
+		if paths[i] != want[i] {
+			t.Errorf("position %d is %s, want %s", i, paths[i], want[i])
+		}
 	}
 }
