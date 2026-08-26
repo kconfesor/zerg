@@ -11,7 +11,7 @@ import {
   ShieldCheck,
   Users,
 } from '@lucide/vue'
-import type { Project, RoleStatus, SwarmStatus } from '@/lib/api'
+import type { Project, ResolvedRole, RoleStatus, SwarmStatus } from '@/lib/api'
 import QuotaBars from '@/components/QuotaBars.vue'
 import ProjectAvatar from '@/components/ProjectAvatar.vue'
 import {
@@ -34,10 +34,31 @@ const props = defineProps<{
    *  the board, the roles below, the quota. */
   projects: Project[]
   current: Project | null
+  /** The team this project runs, and the roles it is made of. Named here
+   *  rather than on the board header: the roles are listed right below, and a
+   *  list of roles whose team is named on another screen is a list you have to
+   *  remember the heading for. */
+  teamName?: string
+  team: ResolvedRole[]
   /** Whether the drawer is showing. Ignored at md and above, where the rail
    *  is always part of the layout. */
   open: boolean
 }>()
+
+/**
+ * What to list under the team: the live roles when a swarm is up, the team's
+ * own enabled roles when it is not.
+ *
+ * Without the fallback this panel disappeared the moment the swarm stopped —
+ * `status.roles` is empty then — so the one place that shows what a team is
+ * made of was blank exactly when you were deciding whether to start it.
+ */
+const rolesShown = computed<{ role: string; live: RoleStatus | null }[]>(() => {
+  if (props.status.roles.length) {
+    return props.status.roles.map((r) => ({ role: r.role, live: r }))
+  }
+  return props.team.filter((r) => r.enabled).map((r) => ({ role: r.name, live: null }))
+})
 const emit = defineEmits<{
   navigate: [view: View]
   close: []
@@ -225,36 +246,71 @@ function live(r: RoleStatus): boolean {
       </button>
     </nav>
 
-    <!-- The live readout. This is the panel worth glancing at: which agents
-         exist, and what each is doing right now. -->
-    <div v-if="status.roles.length" class="hairline-t mt-1 flex min-h-0 flex-1 flex-col">
-      <div
-        class="text-muted-foreground px-3 pt-3 pb-1.5 text-[10px] font-bold tracking-[0.14em] uppercase"
-      >
-        Roles
+    <!-- The live readout, under the name of the team it belongs to. This is
+         the panel worth glancing at: which agents exist, and what each is
+         doing right now. -->
+    <div v-if="rolesShown.length" class="hairline-t mt-1 flex min-h-0 flex-1 flex-col">
+      <div class="flex items-center gap-1.5 px-3 pt-3 pb-1.5">
+        <Users :size="11" class="text-muted-foreground shrink-0" aria-hidden="true" />
+        <span
+          class="text-muted-foreground min-w-0 flex-1 truncate text-[10px] font-bold tracking-[0.14em] uppercase"
+          :title="teamName || undefined"
+        >
+          {{ teamName || 'Roles' }}
+        </span>
+        <span class="text-muted-foreground/70 tabular shrink-0 text-[10px]">
+          {{ rolesShown.length }}
+        </span>
       </div>
       <ul class="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
-        <li v-for="r in status.roles" :key="r.role" class="px-1 py-1.5">
+        <li v-for="r in rolesShown" :key="r.role" class="px-1 py-1.5">
           <div class="flex items-center gap-2">
             <span
-              :class="['size-1.5 shrink-0 rounded-full bg-current', tone(r.state), live(r) && 'pulse-dot']"
+              v-if="r.live"
+              :class="[
+                'size-1.5 shrink-0 rounded-full bg-current',
+                tone(r.live.state),
+                live(r.live) && 'pulse-dot',
+              ]"
             />
-            <span class="truncate text-xs font-medium">{{ r.role }}</span>
-            <span :class="['tabular ml-auto text-[10px]', tone(r.state)]">{{ r.state }}</span>
+            <!-- Hollow, because a role that is configured and not running is
+                 not a state the swarm is in. -->
+            <span
+              v-else
+              class="border-muted-foreground/40 size-1.5 shrink-0 rounded-full border"
+            />
+            <span :class="['truncate text-xs font-medium', !r.live && 'text-muted-foreground']">
+              {{ r.role }}
+            </span>
+            <span
+              v-if="r.live"
+              :class="['tabular ml-auto text-[10px]', tone(r.live.state)]"
+            >
+              {{ r.live.state }}
+            </span>
+            <span v-else class="text-muted-foreground/60 tabular ml-auto text-[10px]">
+              not started
+            </span>
           </div>
           <!-- A throttled role says when it comes back, because that is the
                only question it raises. It is not an error and is not styled
                as one. -->
           <p
-            v-if="r.state === 'throttled'"
+            v-if="r.live?.state === 'throttled'"
             class="mt-1 pl-3.5 text-[10px] break-words text-[var(--status-warning)]"
           >
-            provider limit · resumes {{ resumesIn(r.throttledUntil) || 'when the window rolls over' }}
-            <span v-if="r.lastError" class="text-muted-foreground block">{{ r.lastError }}</span>
+            provider limit · resumes
+            {{ resumesIn(r.live.throttledUntil) || 'when the window rolls over' }}
+            <span v-if="r.live.lastError" class="text-muted-foreground block">
+              {{ r.live.lastError }}
+            </span>
           </p>
           <!-- A failed role says why, here, where it is already being looked at. -->
-          <p v-else-if="r.lastError" class="text-destructive mt-1 pl-3.5 text-[10px] break-words">
-            {{ r.lastError }}
+          <p
+            v-else-if="r.live?.lastError"
+            class="text-destructive mt-1 pl-3.5 text-[10px] break-words"
+          >
+            {{ r.live.lastError }}
           </p>
         </li>
       </ul>

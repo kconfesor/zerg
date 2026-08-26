@@ -16,12 +16,11 @@
  * screen; here it was visible only while already reading the board.
  */
 import { computed } from 'vue'
-import { FolderGit2, GitBranch, HardDrive, Users } from '@lucide/vue'
+import { FolderGit2, GitBranch, HardDrive } from '@lucide/vue'
 import type { Project, Task, Workspace } from '@/lib/api'
 
 const props = defineProps<{
   project: Project
-  teamName?: string
   tasks: Task[]
   workspace: Workspace | null
 }>()
@@ -58,10 +57,6 @@ function size(bytes: number): string {
       <span class="text-muted-foreground inline-flex items-center gap-1.5 text-[11px]">
         <GitBranch :size="12" aria-hidden="true" />
         {{ project.baseBranch }}
-      </span>
-      <span v-if="teamName" class="text-muted-foreground inline-flex items-center gap-1.5 text-[11px]">
-        <Users :size="12" aria-hidden="true" />
-        {{ teamName }}
       </span>
       <div class="ml-auto flex items-center gap-2"><slot name="actions" /></div>
     </div>

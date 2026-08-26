@@ -674,6 +674,8 @@ watch(current, () => (banner.value = null))
       :project-count="projects.length"
       :projects="projects"
       :current="current"
+      :team-name="currentTeamName"
+      :team="team"
       :open="navOpen"
       @close="navOpen = false"
       @navigate="go"
@@ -733,7 +735,6 @@ watch(current, () => (banner.value = null))
           <template v-if="view === 'board'">
             <BoardHeader
               :project="current"
-              :team-name="currentTeamName"
               :tasks="tasks"
               :workspace="workspace"
             >
