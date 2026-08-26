@@ -516,7 +516,7 @@ func TestConcurrentStartsBringUpOneSwarm(t *testing.T) {
 		t.Fatalf("Stop: %v", err)
 	}
 	if h.over.Running(h.project.ID) {
-		t.Error("still running after Stop — a second swarm was left behind")
+		t.Error("still running after Stop, so a second swarm was left behind")
 	}
 }
 
@@ -543,7 +543,7 @@ func TestStoppingReturnsInFlightWorkToTheQueue(t *testing.T) {
 		t.Fatalf("Claim: %v (lease %v)", err, lease)
 	}
 	if n, err := h.db.QueuedCount(ctx, h.project.ID, "coder"); err != nil || n != 0 {
-		t.Fatalf("queued before stop = %d (err %v), want 0 — it is claimed", n, err)
+		t.Fatalf("queued before stop = %d (err %v), want 0 because it is claimed", n, err)
 	}
 
 	if err := h.over.Stop(ctx, h.project.ID, "test"); err != nil {
@@ -556,7 +556,7 @@ func TestStoppingReturnsInFlightWorkToTheQueue(t *testing.T) {
 		t.Fatal(err)
 	}
 	if n != 1 {
-		t.Errorf("queued after stop = %d, want 1 — the work is still held by a dead agent", n)
+		t.Errorf("queued after stop = %d, want 1, since the work is still held by a dead agent", n)
 	}
 	_ = task
 }

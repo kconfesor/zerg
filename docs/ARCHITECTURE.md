@@ -1,4 +1,4 @@
-# zerg — Architecture
+# zerg architecture
 
 A multi-agent coding orchestrator. Go core, Vue 3 cockpit, pluggable agent harnesses.
 
@@ -24,8 +24,8 @@ from its first live task (§6.1).
    scraping layer disappears.
 
 3. **Configuration is a database, not a filesystem.** Config spread across a conf file, a
-   constitution, article fragments and per-role prompt files — then *snapshotted* into every
-   worktree — means editing the original after launch changes nothing, silently.
+   constitution, article fragments and per-role prompt files, then *snapshotted* into every
+   worktree, means editing the original after launch changes nothing, silently.
 
    Verified the hard way: an edit setting the project language to Rust never reached a single
    agent, because the worktrees had been cut from a commit made before it. Six agents built the task
@@ -33,7 +33,7 @@ from its first live task (§6.1).
    of truth, composed fresh at every spawn.
 
 4. **Failure must be loud at the boundary.** A corrupted global config, a CLI too old for its
-   model, an unanswered trust dialog, a broken plugin tree — four separate incidents in one day, all
+   model, an unanswered trust dialog, a broken plugin tree. Four separate incidents in one day, all
    presenting identically as an agent that looked alive and did nothing. All four were detectable
    *before* spawning.
 
@@ -49,7 +49,7 @@ zerg **does not** manage provider credentials. It never runs a login flow, store
 edits a harness's auth file. Users log into `pi`, `claude`, etc. themselves, using those tools.
 
 zerg **does** detect credential state and say so plainly. `pi: no credentials for provider 'openai'
-— run /login in pi` is a blocked role with a remedy, not a silent hang. Detection is in scope;
+run /login in pi` is a blocked role with a remedy, not a silent hang. Detection is in scope;
 setup is not.
 
 ---
@@ -64,7 +64,7 @@ setup is not.
 | **hatchery** | a project workspace + its worktrees | `internal/hatchery` |
 | **larva** | a queued, unassigned task | `board.Task{state:larva}` |
 | **role** | one running agent: a worktree, a harness process, a prompt, an inbox | `store.ResolvedRole`, `internal/cerebrate` |
-| **team** | an ordered, enable-able list of roles — the pipeline work passes down | `store.TeamPreset` |
+| **team** | an ordered, enable-able list of roles: the pipeline work passes down | `store.TeamPreset` |
 
 A role is not a label attached to a model. It is the unit that gets a process, a `.worktrees/<name>`
 checkout and a queue, so "add a reviewer" means one more agent, one more worktree and one more
@@ -83,29 +83,29 @@ This is the part everything else depends on: get it wrong and no amount of care 
 
 Four layers make "configure once" and "every project is different" true at the same time.
 
-**Role library** — global, in `~/.zerg/zerg.db`. A catalog of role *templates*: what a planner is,
+**Role library**, global, in `~/.zerg/zerg.db`. A catalog of role *templates*: what a planner is,
 what a reviewer is, what prompt each carries. Ships with a set of built-ins (§4.5); you edit them and
 add your own. Editing a template changes the lowest default everywhere.
 
-**Reusable team** — global and named. It chooses library roles, orders and enables them, and may
+**Reusable team**, global and named. It chooses library roles, orders and enables them, and may
 specialize every role field. The built-in Default team is coder → reviewer; users can create as many
 other teams as they need.
 
-**Project team** — per project. A project selects a reusable team and follows later edits to its
+**Project team**, per project. A project selects a reusable team and follows later edits to its
 pipeline and settings. Any role field can be overridden for that repository alone. A project can
 also customize the whole pipeline; doing so freezes membership/order while role fields without an
 override continue following their reusable-team defaults. A standalone custom team has no preset.
 
-**Runtime** — per project: tasks, messages, leases, events, cost. On disk a project holds only git
+**Runtime**, per project: tasks, messages, leases, events, cost. On disk a project holds only git
 artifacts, `<repo>/.worktrees/<role>`.
 
 Each layer is edited in exactly one place, which is the point of splitting them: the library in
 **Settings → Roles**, the reusable team and its per-team values in **Team**, and the project's own
 values in the same view once that project is on the team. An edit's blast radius is therefore
-readable off the screen you made it on — global, one team, or one repository.
+readable off the screen you made it on: global, one team, or one repository.
 
 Every nullable override has one rule: null means inherit, while a value means local. For arguments,
-`[]` is a value — explicitly run with no role arguments — and remains distinct from null.
+`[]` is a value, meaning explicitly run with no role arguments, and remains distinct from null.
 
 ### 4.2 A role template, in full
 
@@ -114,33 +114,33 @@ Everything below is a form field in the UI. There is no other way to set any of 
 | Field | UI control | Notes |
 |---|---|---|
 | name | text | also names the worktree: `.worktrees/<name>` |
-| harness | select | populated from the adapter registry — `claude`, `pi` |
+| harness | select | populated from the adapter registry: `claude`, `pi` |
 | model | combobox | options fetched live from the harness (§4.3); free text accepted |
 | args | tag input | extra CLI flags, e.g. `--no-extensions` |
 | receive | select | `task` (one at a time) or `batch` |
-| batch policy | number + duration | `max_items`, `max_age` — only when receive is `batch` |
+| batch policy | number + duration | `max_items`, `max_age`, only when receive is `batch` |
 | prompt | editor | this role's instructions |
-| gate | select | `none` or `approval` — hold this role's handoffs for a human |
+| gate | select | `none` or `approval`, to hold this role's handoffs for a human |
 
 A reusable-team role adds **position**, **enabled**, and nullable defaults for every field above.
 A project can override harness, model, args, receive/batch policy, prompt and gate. Pipeline
 membership, order and enablement can be inherited as a unit or made project-local. Overriding is
-explicit and visible — a role showing an override is badged in the team list, so a project that
+explicit and visible: a role showing an override is badged in the team list, so a project that
 quietly drifted from its reusable team is legible rather than mysterious.
 
 Plus one **shared instructions** document, global, applied to every role. That single editable
-document is the whole of it — there is no constitution file, no article fragments, no layering to
+document is the whole of it. There is no constitution file, no article fragments, no layering to
 reason about.
 
 ### 4.3 Model discovery
 
 Typing model ids by hand is how you get `Model metadata for 'gpt-5.6-sol' not found` and
-`The 'gpt-5.6-sol' model requires a newer version of Codex` — twenty minutes of an agent looking
+`The 'gpt-5.6-sol' model requires a newer version of Codex`, which is twenty minutes of an agent looking
 alive while every turn 400s.
 
 So `Adapter.ListModels()` asks the harness what it can actually run (`pi --list-models`, claude's
 alias set) and the UI renders a picker. The field still accepts free text, because a harness catalog
-can lag a working model — `gpt-5.6-sol` is absent from pi's catalog and runs fine. Free text gets a
+can lag a working model: `gpt-5.6-sol` is absent from pi's catalog and runs fine. Free text gets a
 warning, not a block.
 
 ### 4.4 Prompt composition
@@ -154,7 +154,7 @@ fix for the snapshot staleness that silently produced a Clojure calculator when 
 
 "Every spawn" is literal, and for a while it was not. Configuration was resolved once when the swarm
 started, so a role that crashed and respawned came back with the prompt, model and flags it had when
-the swarm went up — silently, and only for the roles that happened to crash. The supervisor now
+the swarm went up, silently, and only for the roles that happened to crash. The supervisor now
 re-reads the role from the database immediately before each spawn, and a role no longer on the team
 stops instead of respawning.
 
@@ -170,7 +170,7 @@ still apply. zerg adds the protocol and the role; it does not take over the agen
 **Nothing is written into the repository.** The composed prompt goes to
 `$TMPDIR/zerg/<project>/<role>/state/<role>.system.md`, outside the tree. The only thing zerg puts
 inside a repository is `.worktrees/`, and its ignore rule goes in `.git/info/exclude` rather than
-`.gitignore` — that file belongs to the project, and writing to it made zerg's first task on a real
+`.gitignore`. That file belongs to the project, and writing to it made zerg's first task on a real
 repository fail on a collision with the project's own.
 
 **A ground rule forbids editing instruction files.** `CLAUDE.md`, `AGENTS.md` and their kin
@@ -185,40 +185,40 @@ created a directory in someone else's tree on the first run.
 
 **Budget.** Shared instructions are ~760 tokens; role prompts are 85–225. Under 1k per agent, and
 byte-frozen per §11.2 so it is a cache hit after the first turn. Nothing instructs an agent to
-narrate its status — structured events carry that natively (§11.1), and a dashboard that greps for
+narrate its status. Structured events carry that natively (§11.1), and a dashboard that greps for
 sentences makes agents spend output tokens on telemetry.
 
 ### 4.5 The built-in library
 
-Eight templates ship, covering every team shape worth presetting — as rows in a picker, rather than
+Eight templates ship, covering every team shape worth presetting, as rows in a picker rather than
 as branches of the orchestrator you have to check out to change your team.
 
 | Template | Model | Receive | Gate | Does |
 |---|---|---|---|---|
 | `planner` | opus | task | **approval** | turns intent into a written spec, then waits for a human |
-| `coder` | sonnet | task | — | implements the spec, writes tests, commits |
-| `reviewer` | opus | batch | — | reviews the change against the spec, runs tests, reports or hands back |
-| `cleaner` | sonnet | batch | — | behavior-preserving cleanup, duplication, dead code |
-| `architect` | opus | batch | — | module boundaries, dependency direction, structural drift |
-| `hardener` | sonnet | batch | — | edge cases, error paths, mutation-style probing |
-| `security` | opus | batch | — | input handling, secrets, dependency and injection review |
-| `docs` | sonnet | batch | — | README, API docs, changelog |
+| `coder` | sonnet | task | none | implements the spec, writes tests, commits |
+| `reviewer` | opus | batch | none | reviews the change against the spec, runs tests, reports or hands back |
+| `cleaner` | sonnet | batch | none | behavior-preserving cleanup, duplication, dead code |
+| `architect` | opus | batch | none | module boundaries, dependency direction, structural drift |
+| `hardener` | sonnet | batch | none | edge cases, error paths, mutation-style probing |
+| `security` | opus | batch | none | input handling, secrets, dependency and injection review |
+| `docs` | sonnet | batch | none | README, API docs, changelog |
 
 Reviewing roles run the stronger model on purpose: catching a wrong change is harder than making a
 plausible one.
 
-**A new project starts with `coder` → `reviewer` selected** — enough to be useful in two clicks.
+**A new project starts with `coder` then `reviewer` selected**, enough to be useful in two clicks.
 Everything else is one checkbox away, and none of it is special-cased: a built-in is an ordinary row
 you can edit, duplicate, or delete.
 
 ### 4.6 The planner and the approval gate
 
 `planner` is the answer to "write the spec, then let me approve it before anything happens", and it
-needs no new machinery — it is a template with `gate: approval`, a field roles already have.
+needs no new machinery: it is a template with `gate: approval`, a field roles already have.
 
 The flow: planner writes the spec and commits it, then queues its handoff downstream. The gate holds
-that handoff. **Attention** shows the task with a link to the spec itself — a `file` artifact
-(§13) rendered inline, not a filename you go hunting for — with **Approve** and **Reject**.
+that handoff. **Attention** shows the task with a link to the spec itself, a `file` artifact
+(§13) rendered inline rather than a filename you go hunting for, with **Approve** and **Reject**.
 Approving delivers the handoff and moves the card; rejecting returns it to the planner with your note
 attached, and nothing downstream ever saw it.
 
@@ -229,19 +229,19 @@ structural changes signed off, or on nothing at all for a repo you are happy to 
 
 ## 5. Foundations
 
-Four ideas the rest of the design is built on. They are load-bearing, and none of them is novel —
+Four ideas the rest of the design is built on. They are load-bearing, and none of them is novel.
 they are here because they were tried and they held.
 
 - **Git worktree isolation per role.** One repo, one object store, N linked worktrees; peer commits
   resolve without a fetch. The single best structural idea available.
 - **Commit-pointer handoffs.** A handoff points at a SHA; the receiver merges. Git already solved
   the hard parts of moving work between trees.
-- **Human gates** — approvals and clarification requests surfaced in the UI.
+- **Human gates**: approvals and clarification requests surfaced in the UI.
 - **A board of cards moving through lanes.** The right mental model for an operator.
 
 One consequence worth stating outright: **every role gets a worktree**, and the repo root is the
 integration branch, not a workspace. Letting one role occupy the repo root makes that role special
-in the config, in routing, and on the board — a special case that has to be handled everywhere it
+in the config, in routing, and on the board: a special case that has to be handled everywhere it
 appears. When the terminal role completes, the *overmind* merges to the base branch. Integration
 belongs to the orchestrator, never to whichever agent happened to be last.
 
@@ -258,7 +258,7 @@ because the reasoning is easy to lose once the code looks obvious.
 | `deliver!` = N file copies + N notifies, then one move | Not transactional. Crash mid-loop re-delivers duplicates and re-moves the board. Nothing keys on message `id` | Outbox pattern in one transaction; idempotent on `(message_id, recipient)` |
 | Wake-up = `tmux send-keys` of a fixed literal into the session's active pane | Lands in whatever is focused; hardcoded 150ms/50ms sleeps race the TUI's paste debounce; tmux exit 0 means "keys accepted", never "agent read it" | Agent **pulls** via `zerg next` (long-poll) over a unix socket |
 | Lost wake-up recovery: none | Agent finishes → peeks empty inbox → prints `NO_TASK` → stops → mail arrives 5ms later → permanent stall, no timer, no retry | Leases with deadlines; unacked work returns to the queue and the role shows degraded |
-| `PAYLOAD:` runs to EOF, unescaped | Any role can spoof protocol tokens at any other role in 80 chars — `message: NO_TASK` yields a payload line reading exactly `NO_TASK` | JSON envelopes end to end |
+| `PAYLOAD:` runs to EOF, unescaped | Any role can spoof protocol tokens at any other role in 80 chars, since `message: NO_TASK` yields a payload line reading exactly `NO_TASK` | JSON envelopes end to end |
 | Check-then-move selection, no lock | Two concurrent claims create two batch dirs and split the queue; every later call errors `AMBIGUOUS_TASK_STATE` with **no recovery path** | Atomic claim: `UPDATE ... WHERE state='queued'` returning claimed rows |
 | Helpers resolve the inbox from process cwd | Run from a subdirectory → creates an empty queue there and reports `NO_TASK`. False negative *with* a side effect | Identity from a spawn-time token in env; no path inference anywhere |
 | Sender identity read from an environment variable, unvalidated | Any agent can export that variable as `architect` and send as the architect | Per-agent capability token minted at spawn |
@@ -266,7 +266,7 @@ because the reasoning is easy to lose once the code looks obvious.
 | Board lane moves at *enqueue* time | A card shows "in cleaner's lane" before cleaner has looked at it | Lane changes on **ack** |
 | Batch = every equal-priority item at an instant | Unbounded and unfair; a priority-00 item arriving 1ms late waits behind a 40-item batch | Batch policy (`max_items`, `max_age`) set per role in the UI; priority preemption at claim time |
 | Notes occupy the work queue | One 80-char informational note blocks a role's queue until an LLM turn consumes it | Two planes: work and control (§7.3) |
-| Daemon reads socket/roles outside its try block | A deleted socket file terminates the transport *cleanly* — logs "stopped", removes its pid, indistinguishable from normal shutdown | Supervised components with health endpoints |
+| Daemon reads socket/roles outside its try block | A deleted socket file terminates the transport *cleanly*, logging "stopped" and removing its pid, indistinguishable from normal shutdown | Supervised components with health endpoints |
 | Nothing checks the harness before launching | 40 minutes lost to a triplicated `~/.codex/config.toml`, a CLI too old for its model, an unanswered trust dialog, a broken extension tree | **Preflight** (§8) |
 
 ### 6.1 What the first real run broke
@@ -276,7 +276,7 @@ from watching an earlier design fail. This section comes from watching *this*
 one fail, on its first live task, and it is kept because the entries share a
 shape the original list does not have.
 
-Those earlier failures were mostly **loud** — a stack trace, a stall, an
+Those earlier failures were mostly **loud**: a stack trace, a stall, an
 unrecoverable state with no way forward. Zerg's first failures were all
 **quiet**: the board went green over work that had not happened. Quiet is
 worse. A stall gets investigated within the hour; a false green ships.
@@ -285,8 +285,8 @@ worse. A stall gets investigated within the hour; a false green ships.
 |---|---|---|
 | `Merged: m.CommitSHA != nil` in the work envelope | Nothing ever merged a hand-off into the recipient's worktree. The flag was inferred from the commit's presence, and the shared instructions said "do not merge it again" on that authority. A reviewer opened an empty tree twice | `Claim` merges into the role's worktree and reports the attempt's result |
 | `--commit HEAD` stored as the literal string | `HEAD` names the tip of whichever tree resolves it. The coder's "my commit" became "main's tip" at the project root, where `merge --ff-only HEAD` is a no-op that returns success. A task reached Done with the base branch untouched | Refs resolved to absolute shas in the *sender's* worktree, at `Send` |
-| `if req.Commit != ""` guarding the completion merge | An absent commit meant "integrate nothing, mark it done" — the same green board over an unmoved branch, by a second route | Completion requires the commit to integrate |
-| `--task` bound straight to a `REFERENCES tasks(id)` column | Agents are given a task *name* and told to keep it. Passing it back produced `FOREIGN KEY constraint failed` from inside the router — the agent read that as "the recipient role is invalid" and asked an operator | `--task` accepts either form; a miss reports itself |
+| `if req.Commit != ""` guarding the completion merge | An absent commit meant "integrate nothing, mark it done": the same green board over an unmoved branch, by a second route | Completion requires the commit to integrate |
+| `--task` bound straight to a `REFERENCES tasks(id)` column | Agents are given a task *name* and told to keep it. Passing it back produced `FOREIGN KEY constraint failed` from inside the router, and the agent read that as "the recipient role is invalid" and asked an operator | `--task` accepts either form; a miss reports itself |
 | Work envelope carried the payload but not the pipeline | An agent had no way to know who receives its output, so it guessed | Envelope carries `next` and `terminal`; the orchestrator resolves the team |
 | Agents inherit the operator's `~/.claude` | claude reads OAuth from the keychain and will not start with a relocated config dir, so agents get the operator's MCP servers, plugins and hooks. A code-review agent held a live handle to a staging database, and an output-style plugin had it writing essays in output tokens | `--strict-mcp-config` removes the servers. Plugins and hooks still leak; `--bare` would stop them but also disables keychain reads |
 
@@ -298,7 +298,7 @@ merge that was skipped. A ref's meaning from the tree that happened to read it.
 Each one is individually obvious in hindsight and none was visible from the
 outside, because the proxy and the fact agree in every case you would think to
 check by hand. They diverge only under a real agent, in a real worktree, doing
-real work — which is why they all surfaced within one task and none had
+real work, which is why they all surfaced within one task and none had
 surfaced before.
 
 **The test lesson is the sharper half.** The hand-off merge had a unit test. It
@@ -350,7 +350,7 @@ fail before being kept.
 └────────────────────────┼──────────────────────────────┼────────────────────────────┘
                          │                              │
           ┌──────────────┴───────────┐      ┌───────────┴─────────────┐
-          │ agent subprocess         │      │ browser — Vue 3 cockpit │
+          │ agent subprocess         │      │ browser: Vue 3 cockpit  │
           │  runs `zerg next|done|   │      │  configure · observe    │
           │  send` (same binary)     │      │                         │
           └──────────────────────────┘      └─────────────────────────┘
@@ -364,7 +364,7 @@ decide routing; nydus does.
 
 ### 7.2 Agent-facing protocol
 
-The agent's whole world is four verbs against a unix socket. Same binary, different subcommand — no
+The agent's whole world is four verbs against a unix socket. Same binary, different subcommand, so no
 PATH-synced script directory, no `.sh`/`.bb` wrapper pairs, no cwd inference.
 
 ```
@@ -395,13 +395,13 @@ role degraded. This is the answer to "lost wake-up ⇒ permanent stall, no timer
 
 ### 7.3 Two planes
 
-- **work** — tasks and handoffs. Leased, priority-ordered, one unit (or one batch) at a time.
-- **control** — notes, operator answers, cancellations. Out-of-band, never occupies a lease, never
+- **work**: tasks and handoffs. Leased, priority-ordered, one unit (or one batch) at a time.
+- **control**: notes, operator answers, cancellations. Out-of-band, never occupies a lease, never
   blocks work.
 
 ### 7.4 No tmux
 
-A tmux-based design — one session per role, `send-keys` for delivery, `capture-pane` for the UI —
+A tmux-based design, one session per role, `send-keys` for delivery and `capture-pane` for the UI,
 is the obvious way to build this, and zerg uses none of it. Agents are ordinary child processes of
 the daemon, supervised with `os/exec`.
 
@@ -409,17 +409,17 @@ Every job tmux was doing has a better owner once agents emit structured events:
 
 | tmux was providing | Now |
 |---|---|
-| process supervision | `os/exec` + cerebrate. Real exit codes and signals, restart with backoff — instead of a session that stays "alive" around a process returning HTTP 400 on every turn |
+| process supervision | `os/exec` + cerebrate. Real exit codes and signals, restart with backoff, instead of a session that stays "alive" around a process returning HTTP 400 on every turn |
 | somewhere for the TUI to live | Nothing to host in structured mode. Takeover allocates a pty directly (`creack/pty`); tmux was never needed for that |
 | the delivery channel (`send-keys`) | Structured input over a pipe (§10.2) |
 | the observation channel (`capture-pane`) | The typed event stream (§10.1) |
 | per-project isolation via a socket path | The daemon owns every child; there is no shared namespace to collide in |
-| **surviving the operator's terminal closing** | See below — the one job that still needs an answer |
+| **surviving the operator's terminal closing** | See below: the one job that still needs an answer |
 
 That last row is the only real loss, and tmux's version of it was weaker than it looked: it keeps a
 *process* alive, which does nothing when the orchestrator has lost its *state*. Observed: a daemon
-terminating cleanly on a missing socket file — logging "stopped", removing its pid, indistinguishable
-from a normal shutdown — while agents sat alive and idle and mail piled up in outboxes with no error
+terminating cleanly on a missing socket file, logging "stopped" and removing its pid, indistinguishable
+from a normal shutdown, while agents sat alive and idle and mail piled up in outboxes with no error
 surfaced anywhere.
 
 zerg answers it in one piece today, and has one piece still to build:
@@ -427,13 +427,13 @@ zerg answers it in one piece today, and has one piece still to build:
 - **Restart is a first-class path, not a recovery hack.** If the daemon dies, its children die with
   it; on restart every open lease is reclaimed immediately rather than being left to lapse, so
   claimed-but-unacked work is back in the queue before the first agent asks for any. An approval
-  interrupted mid-integration is settled against the repository — merged means the decision is
+  interrupted mid-integration is settled against the repository. Merged means the decision is
   recorded and the card closed, not merged means it goes back to the operator as pending. Nothing
   has to be reattached, and nothing is silently half-delivered.
 - **Not yet built: detaching, and harness session resume.** `zerg up` runs in the foreground and
   closing its terminal stops the daemon; use a launchd/systemd unit, or `nohup`, until there is a
   `--detach`. Roles respawn with fresh harness sessions rather than resuming the previous one
-  (`claude --resume`, `pi --session`) — the queue survives, the model's own context does not. Both
+  (`claude --resume`, `pi --session`): the queue survives, the model's own context does not. Both
   are worth having and neither is implemented; this file used to describe them as though they were,
   which is worse than not having them.
 
@@ -442,7 +442,7 @@ The prerequisite list shrinks accordingly: Go and a logged-in harness. No tmux, 
 ### 7.5 Transports
 
 Four channels, each carrying what it is good at. "One WebSocket for everything" is a common instinct
-and a bad one — it reinvents request/response correlation, status codes, caching and range requests,
+and a bad one, since it reinvents request/response correlation, status codes, caching and range requests,
 all of which HTTP already has.
 
 | Channel | Transport | Carries |
@@ -450,39 +450,39 @@ all of which HTTP already has.
 | agent ↔ overmind | **unix socket** | `zerg next/done/send/ask`; never leaves the machine |
 | cockpit → overmind | **HTTP/REST** | commands: create task, edit role, approve, start, stop |
 | overmind → cockpit | **WebSocket** | the live typed event stream, and pty bytes during takeover |
-| artifact bytes | **plain HTTP** | files, images, downloads — see §13 |
+| artifact bytes | **plain HTTP** | files, images, downloads, see §13 |
 
 Commands are request/response with a status code and a body, so they belong on REST: a rejected
 approval is a `409`, not a hand-rolled correlation id and an error frame invented for the occasion.
 
 The WebSocket is multiplexed by frame type, so events and a takeover pty share one connection and one
 auth path. On connect the client sends the last event id it saw and the server replays forward from
-`events` — the same mechanism that makes a browser reload cost a replay rather than a rescrape
+`events`, the same mechanism that makes a browser reload cost a replay rather than a rescrape
 (§10.1).
 
 This was built as SSE first, and then moved, which is worth recording because both directions have a
 real case. SSE carries a one-way stream with materially less machinery: `EventSource` reconnects on
 its own and resends `Last-Event-ID`, and since event ids are monotonic ULIDs that header *is* the
-replay cursor. On a socket both are hand-written — backoff with jitter, an explicit cursor frame, a
-ping cadence — and every one of them is a thing that can be got wrong.
+replay cursor. On a socket both are hand-written, meaning backoff with jitter, an explicit cursor frame and a
+ping cadence, and every one of them is a thing that can be got wrong.
 
 What settled it is that takeover needs keystrokes flowing back at typing latency, which SSE plus a
 POST per keypress serves badly, and carrying two streaming transports until then would mean two
 implementations of replay that drift. One mechanism beats two, and the second one is easier to
 delete before it exists. A smaller reason found on the way: HTTP/1.1 allows about six connections
-per origin, and an SSE stream holds one open per tab for its lifetime — the daemon serves plain TCP,
+per origin, and an SSE stream holds one open per tab for its lifetime. The daemon serves plain TCP,
 so there is no HTTP/2 multiplexing to make that free. WebSockets are not subject to that limit.
 
 ---
 
 ## 8. Preflight
 
-Four hangs in one day of running an earlier build presented identically — an agent that looks alive
-and does nothing — and every one was detectable before spawning. Preflight is that check, promoted
+Four hangs in one day of running an earlier build presented identically, as an agent that looks alive
+and does nothing, and every one was detectable before spawning. Preflight is that check, promoted
 from something you do when puzzled to something that runs first.
 
 Runs before every spawn. Each check yields `ok` or `blocked(reason, remedy)`. A blocked role renders
-in **Attention** with both — never as an idle pane that happens to be doing nothing.
+in **Attention** with both, never as an idle pane that happens to be doing nothing.
 
 | Check | Catches | Source |
 |---|---|---|
@@ -492,28 +492,28 @@ in **Attention** with both — never as an idle pane that happens to be doing no
 | `auth_valid` | *pi: "No API key found for openai"* → "log in with pi" (detect only, §2) | adapter |
 | `workspace_trusted` | *claude's first-run trust dialog blocking four roles* | adapter |
 | `model_available` | model id absent from the harness catalog → warn, don't block | adapter |
-| `plugins_loadable` | *pi's broken extension tree* — smoke run with the real flags | adapter |
+| `plugins_loadable` | *pi's broken extension tree*, smoke run with the real flags | adapter |
 
 ### 8.1 Two moments, one check suite
 
 The same checks run at two points, because the two failures they prevent are different.
 
-**Project setup — the readiness gate.** Adding a project, or pressing Start, runs the full suite
+**Project setup, the readiness gate.** Adding a project, or pressing Start, runs the full suite
 across **every enabled role** first, in parallel, and renders a readiness panel: one row per role,
 each check green, amber or red, with the remedy inline for anything failing. Start is disabled while
 any role is red.
 
-This is the moment that matters. Half our lost day came from a swarm that launched *successfully* —
-six sessions up, dashboard green, board drawn — while four roles sat at a trust dialog and two more
+This is the moment that matters. Half our lost day came from a swarm that launched *successfully*:
+six sessions up, dashboard green, board drawn, while four roles sat at a trust dialog and two more
 were dead on a config parse error. Nothing was wrong with the launch; everything was wrong with the
 agents. A team that cannot work should never reach a running board.
 
 Red is blocking. Amber (an unlisted model, a harness whose version could not be determined) shows a
 warning and allows Start with an explicit acknowledgement, since a catalog can lag a model that
-works. The panel is re-runnable on demand — you fix a login in another terminal, hit **Re-check**,
+works. The panel is re-runnable on demand: you fix a login in another terminal, hit **Re-check**,
 and watch the row go green without restarting anything.
 
-**Spawn — the guard.** The same suite runs again before each individual spawn, because state drifts
+**Spawn, the guard.** The same suite runs again before each individual spawn, because state drifts
 between setup and launch and between one task and the next: a token expires, a `brew upgrade`
 replaces a binary, another tool rewrites a shared config. A role that fails here does not spawn; it
 appears in Attention as blocked with its remedy, and the work it would have claimed stays queued
@@ -527,7 +527,7 @@ so the spawn guard costs milliseconds.
 Observed: two codex agents launched 1.5s apart into fresh directories, both doing a non-atomic
 read-modify-write of the **global** `~/.codex/config.toml` to register trust. The writes raced,
 producing a file containing three concatenated copies of itself, which then failed to parse for every
-codex invocation on the machine — including unrelated projects.
+codex invocation on the machine, including unrelated projects.
 
 Each cerebrate therefore gets a private harness config directory (`CODEX_HOME`,
 `PI_CODING_AGENT_DIR`, …) seeded from the user's real one. Agents never write shared global state.
@@ -602,30 +602,30 @@ usage_turns (id, project_id, task_id, role, ts,
 fills, which is right for a browser and wrong for the writer of the usage rows the cost accounting is
 made of: measured, a 5,000-event burst against the old inline recorder stored 1,025 of them and lost
 the rest without a word. The bus channel is now drained into an unbounded queue by a reader that does
-nothing else, and the database writes happen behind it — so a backlog costs memory, which is visible
+nothing else, and the database writes happen behind it, so a backlog costs memory, which is visible
 and bounded by the run, rather than rows, which are not recoverable. `/api/health` reports the
 queue depth, peak, drops and write failures, and answers `degraded` rather than `ok` when the record
 has gaps.
 
 `events` being append-only gives the cockpit free time travel: the UI is a projection, so a reload
 replays rather than re-scrapes. Ids are monotonic ULIDs, which makes one value serve as primary key,
-sort order and stream resume cursor at once — a client reconnects with `after=<last id seen>`.
+sort order and stream resume cursor at once: a client reconnects with `after=<last id seen>`.
 
 ### 9.1 The two gates
 
 A role's `gate` column decides whether its output stops for a person. Both kinds of stop use the
 same `approvals` table and the same cockpit queue, but they hold different things:
 
-- **A routed handoff** — the sender is not terminal. The route is written `held` rather than
+- **A routed handoff**: the sender is not terminal. The route is written `held` rather than
   `queued`, so the recipient never sees it. Approving flips it to `queued`.
-- **A terminal completion** — the sender is the last enabled role, and approving is what lands the
+- **A terminal completion**: the sender is the last enabled role, and approving is what lands the
   work. Integration runs *before* the decision is recorded, so a merge that fails leaves the
   approval open rather than marking a task done over a branch that never moved. §6.1 is the record
   of getting that backwards.
 
 The distinction reaches the cockpit as `terminal` on the approval, because the two deserve
 different views. A handoff shows what the sender just committed. A terminal completion shows
-`git diff base...sha` — everything that would land, across every role and every lap — since
+`git diff base...sha`, everything that would land across every role and every lap, since
 approving the last commit on the strength of its own diff is approving a merge by its closing
 paragraph.
 
@@ -640,7 +640,7 @@ paragraph.
 | `branch` | nothing. The work sits on its branch; landing it is a later decision. |
 
 Per role would attach the policy to whichever role happened to be last, and disabling that role
-would silently move it to another one — the same failure as taking terminality from config-file
+would silently move it to another one, the same failure as taking terminality from config-file
 line order, which §6 records.
 
 ### 9.3 Hidden cards
@@ -653,33 +653,33 @@ It is a column rather than a browser preference because the same board is read f
 phone over the tailnet, and a card put away on one should be away on the other. Whether hidden
 cards are *shown* is per browser, and lives in `localStorage`.
 
-Hiding changes nothing else — not the lane, not the state. A hidden card is finished work that is
+Hiding changes nothing else: not the lane, not the state. A hidden card is finished work that is
 still finished, and unhiding returns it unchanged.
 
 ## 10. Cockpit
 
-`web/`, built by Vite, embedded with `//go:embed all:dist` — the `all:` prefix is required, since
+`web/`, built by Vite, embedded with `//go:embed all:dist`. The `all:` prefix is required, since
 plain `//go:embed dist` silently skips Vite's `.vite/` manifest directory.
 
 **Configure**
 
-- **Projects** — list, add by absolute path (checked to exist and be a directory), set base branch,
+- **Projects**: list, add by absolute path (checked to exist and be a directory), set base branch,
   name, icon and what an approval does. Two clicks to a running swarm.
-- **Readiness** — the preflight panel (§8.1). One row per enabled role, every check with its status
+- **Readiness**: the preflight panel (§8.1). One row per enabled role, every check with its status
   and an inline remedy, and a **Re-check** button. Start is not disabled while a role is blocked, it
-  **refuses** and returns the report — a disabled button says only that it cannot be pressed,
+  **refuses** and returns the report. A disabled button says only that it cannot be pressed,
   whereas the refusal says which role is blocked and what to do about it.
-- **Team** — one three-column master-detail view over *one layer*, the reusable team: **Teams**
+- **Team**: one three-column master-detail view over *one layer*, the reusable team. **Teams**
   lists Default and its clones, **Roles** adds library roles to the selected team and opens their
   per-team settings, and **Pipeline** orders and enables them. Selecting a team edits it; **Use this
   Team** separately assigns it to the current project, so browsing never silently changes what runs.
   A banner names the mismatch when the team on screen is not the one this project is on, and says
   instead that edits apply immediately when agents are running.
-- **Role editor** — every field in §4.2, for one role within whichever layer opened it: the team
+- **Role editor**: every field in §4.2, for one role within whichever layer opened it: the team
   editor writes team-level values, a project's own team writes project-level ones. Each field states
   what it inherits and offers **Use default** to drop back to it, and the dialog counts how many
   fields are overridden, so the layer you are writing to is never ambiguous.
-- **Settings** — the global layer, in tabs: **Roles** is the library editor (§4.1) — the definition
+- **Settings**: the global layer, in tabs. **Roles** is the library editor (§4.1), the definition
   of what each role *is*, editable in exactly one place because an edit here reaches every team and
   every project, with each entry showing which teams use it and a delete that names them before it
   cascades; **Instructions** is the shared prompt document applied to every role; plus **Network**,
@@ -687,32 +687,32 @@ plain `//go:embed dist` silently skips Vite's `.vite/` manifest directory.
 
 **Observe**
 
-- **Attention** — blocked preflights (with remedies), approvals, clarifications. Anything needing a
+- **Attention**: blocked preflights (with remedies), approvals, clarifications. Anything needing a
   human, first. A dialog rather than a route, deliberately: what is waiting interrupts whatever you
   are reading, and sending you to another page to answer it loses your place both ways. Errors from
   a decision taken in it render inside it, since the page behind is not visible on a phone.
-- **Board** — one lane per enabled role plus Done. Cards move on ack.
-- **Activity** — the event stream for one card, replayed from `events`: every turn, tool call and
+- **Board**: one lane per enabled role plus Done. Cards move on ack.
+- **Activity**: the event stream for one card, replayed from `events`: every turn, tool call and
   handoff in order (§10.1).
-- **Roles** — per-role health, current lease, live/idle, tokens, cost. In the sidebar, not a route.
-- **Spend** — the cost dashboard (§11.4). Tiles carry tokens, dollars and cache rate for the
+- **Roles**: per-role health, current lease, live/idle, tokens, cost. In the sidebar, not a route.
+- **Spend**: the cost dashboard (§11.4). Tiles carry tokens, dollars and cache rate for the
   selected window; a range control (session / day / week / month / all) and, once more than one
-  provider has been used, provider chips that scope the whole page. Breakdowns by **role** — a
+  provider has been used, provider chips that scope the whole page. Breakdowns by **role**, meaning a
   stacked bar of the three-way input split, coloured by unit price rather than by rank, with a table
-  saying the same thing in numbers — and by **provider**, with subscription rows labelled as
+  saying the same thing in numbers, and by **provider**, with subscription rows labelled as
   estimates. A callout names any role whose cache rate has fallen against its own trailing average,
   since that is the failure that costs money silently (§11.2). Per-task and per-turn drill-down is
   not built; the activity view is where a single card's turns are read.
-- **History — planned** (§12.3). The long view, scoped per project: spend over time stacked by role, cost per
+- **History, planned** (§12.3). The long view, scoped per project: spend over time stacked by role, cost per
   task ranked, wall time against active time, cache rate as a line, and a session log. Reads
   `daily_rollup`, so a twelve-month range is as fast as a one-day range.
-- **Chat** — talk to the first role in the pipeline.
+- **Chat**: talk to the first role in the pipeline.
 
 Transport: one WebSocket carrying typed events; REST for commands.
 
 ### 10.1 Watching an agent work
 
-An agent in structured mode is not painting a screen, so there is no TUI to attach to — a pty on
+An agent in structured mode is not painting a screen, so there is no TUI to attach to. A pty on
 that process shows JSON lines scrolling past. Three modes cover what a terminal was being used for,
 and the first is better than the thing it replaces.
 
@@ -725,7 +725,7 @@ reload. A terminal scrape offers none of that; the version of this question it c
 
 **Raw stream**. The JSON lines as received. For debugging an adapter, not for watching work.
 
-**Interactive takeover** *(on demand)*. Sometimes you genuinely want the harness's own TUI — to run
+**Interactive takeover** *(on demand)*. Sometimes you genuinely want the harness's own TUI, to run
 its slash commands, or to drive it by hand. That is a deliberate mode switch, not a second view of
 the same process: the cerebrate stops the headless process and relaunches that one role in its
 native TUI on a pty, which the cockpit renders with xterm.js. Structured events pause for the
@@ -750,14 +750,14 @@ its size suggests. **What is stored is Markdown**, and that is the fixed point: 
 harness as text, Markdown is what these models read natively, and it is already the format agent
 output comes back in. An editor that stored HTML would hand the agent tags to read past.
 
-The editing surface is rich text over that Markdown — TipTap, which is a ProseMirror document with a
+The editing surface is rich text over that Markdown: TipTap, which is a ProseMirror document with a
 schema, parsed from Markdown on the way in and serialised back on every change.
 
 The surface changed because the plain one was failing at things that are not features. It was a
 textarea whose toolbar spliced literal characters into the value, so: writing to the model directly
 meant the browser's undo stack never saw a toolbar edit and Cmd-Z could not undo a bold; pressing
 **Bold** twice produced `******like this******` rather than turning the mark off; Enter did not
-continue a list and Tab left the field. In a schema those are properties rather than features — a
+continue a list and Tab left the field. In a schema those are properties rather than features: a
 mark toggles, history is a real transaction log, a list item is a node.
 
 Two things follow, and both are deliberate:
@@ -774,7 +774,7 @@ Two things follow, and both are deliberate:
 ## 11. Token economics
 
 zerg does not call the Messages API; the harnesses do. What zerg controls is the *bytes it hands
-them* and *how often it restarts them* — and both decide whether prompt caching works.
+them* and *how often it restarts them*, and both decide whether prompt caching works.
 
 ### 11.1 Output format costs nothing
 
@@ -783,8 +783,8 @@ harness prints what it already received; the request and the completion are iden
 mode is not more expensive than a TUI.
 
 It is slightly *cheaper*, for one reason. A dashboard that reads status by grepping a pane has to
-instruct every agent to narrate its status in prose. Those are output tokens — the most expensive
-kind — spent producing telemetry for a scraper.
+instruct every agent to narrate its status in prose. Those are output tokens, the most expensive kind,
+spent producing telemetry for a scraper.
 Structured mode carries tool calls, usage and turn boundaries natively. **No role prompt in zerg
 should ever ask an agent to describe what it is doing for the orchestrator's benefit.**
 
@@ -794,8 +794,8 @@ Caching is a prefix match over `tools` → `system` → `messages`. One changed 
 everything after it.
 
 §4.4 composes the system prompt fresh at every spawn from the database. That is correct for
-staleness and **dangerous for caching**: interpolating anything volatile into it — task name, task
-id, timestamp, worktree path, role position, run counter — changes the prefix on every spawn, so
+staleness and **dangerous for caching**: interpolating anything volatile into it, whether task name, task
+id, timestamp, worktree path, role position or run counter, changes the prefix on every spawn, so
 nothing ever caches and the failure is silent (no error, just `cache_read_input_tokens: 0`).
 
 Rule: the composed system prompt contains **shared instructions + role prompt and nothing else**.
@@ -804,7 +804,7 @@ role needs to know that varies per task travels in the work envelope, never in t
 
 Worth the discipline: cache reads cost ~0.1× input, writes 1.25× (5-minute TTL) or 2× (1-hour), so
 break-even is two requests. A 3K-token composed prompt over a twenty-turn task costs roughly $0.18
-uncached against $0.03 cached on Sonnet 5 — and the same ratio applies to the accumulated
+uncached against $0.03 cached on Sonnet 5, and the same ratio applies to the accumulated
 conversation history, which is far larger. Minimum cacheable prefix is 1024 tokens on Sonnet 5 and
 512 on Opus 5; a composed prompt below that silently will not cache at all.
 
@@ -814,12 +814,12 @@ Respawning a process per task means a cold session every time: the system prompt
 conversation restarts. Keeping one long-lived session per role lets the harness cache both the
 system prefix and the accumulated history.
 
-This is the second argument for the long-lived structured session of §7.2 — the first was
+This is the second argument for the long-lived structured session of §7.2. The first was
 bidirectional input. Restart a cerebrate when its configuration changes or it crashes, not between
 tasks.
 
 Corollary for the role editor: changing a role's **model** invalidates every cache tier, since
-caches are model-scoped. That is unavoidable and correct — the change requires a restart anyway —
+caches are model-scoped. That is unavoidable and correct, since the change requires a restart anyway,
 but the UI should not present model switching as free.
 
 ### 11.4 Accounting rules
@@ -831,26 +831,26 @@ attribute spend to a task, watch a cache rate change after a prompt edit, or fin
 the budget.
 
 **Never report a bare "input tokens" number.** Prompt caching splits input three ways at wildly
-different prices — uncached at 1×, cache writes at 1.25× or 2×, cache reads at ~0.1×. A dashboard
+different prices: uncached at 1×, cache writes at 1.25× or 2×, cache reads at ~0.1×. A dashboard
 that sums them into one figure misstates cost by up to an order of magnitude and hides the single
 biggest lever a user has. Store the three separately and show the split.
 
 **Cache hit rate is a headline metric, not a detail.** It is the one number that reveals a silent
 regression: a prompt edit that introduced a volatile byte drops the rate to zero and multiplies cost
-with no error anywhere. A role whose rate falls below its own trailing average gets flagged — built,
+with no error anywhere. A role whose rate falls below its own trailing average gets flagged. Built,
 and deliberately quiet: the trailing rate has to have been above 0.4, the fall at least 0.2, with at
 least three turns either side of the edit and at most 200 turns read. Under those bars a fall is
 noise, and a flag that fires on noise is one people learn to scroll past. The callout states the
-multiple the role is now paying on input, computed on blended prices — the arithmetic that divides
+multiple the role is now paying on input, computed on blended prices. The arithmetic that divides
 uncached fractions instead prices a cache read at zero and overstates it several-fold.
 
-**Prices carry effective dates.** A hardcoded table goes wrong on a schedule — Claude Sonnet 5 runs
+**Prices carry effective dates.** A hardcoded table goes wrong on a schedule: Claude Sonnet 5 runs
 at introductory $2/$10 per MTok through 2026-08-31 and $3/$15 after, so a table written this week is
 wrong next week. Price rows are ranged and the lookup is by turn timestamp, so historical costs stay
 correct after a price change rather than being retroactively rewritten.
 
 **Distinguish metered from subscription.** This is the trap most likely to produce a wrong number
-that looks right. An agent running under a Claude or ChatGPT subscription is not billed per token —
+that looks right. An agent running under a Claude or ChatGPT subscription is not billed per token.
 `pi` already reports this, printing `$0.067 (sub)` rather than a charge. Showing a subscription-run
 role a confident "$47.32 spent" is simply false. Subscription turns are labelled and their dollar
 figures presented as *estimated at API rates*, useful for comparing roles against each other and
@@ -864,11 +864,11 @@ useless as an invoice. Tokens are always real; dollars sometimes are not.
 
 > **Status: partly built.** `usage_turns` exists and is what the cost panel
 > reads. `daily_rollup`, the price table and task pinning are described below as
-> the design they will follow and are **not implemented** — §9 lists the tables
+> the design they will follow and are **not implemented**. §9 lists the tables
 > that actually exist. The retention arithmetic in §12.1 is the reasoning for the
 > tiering, not a description of a running sweep.
 
-The database makes history nearly free — but only if the three kinds of record are kept on different
+The database makes history nearly free, but only if the three kinds of record are kept on different
 terms. Treating them alike is how a local SQLite file becomes a 14 GB liability.
 
 ### 12.1 Three tiers, three retentions
@@ -880,7 +880,7 @@ terms. Treating them alike is how a local SQLite file becomes a 14 GB liability.
 | `daily_rollup` | ~120 B | ~40 rows | forever |
 
 The arithmetic decides it. Five roles at ~200 turns a day is ~1,000 turns; at 20 events per turn
-that is roughly 40 MB of events daily — about **14 GB a year** — against ~73 MB of usage rows for the
+that is roughly 40 MB of events daily, about **14 GB a year**, against ~73 MB of usage rows for the
 same period. Events are the expensive tier and the least valuable in the long run: they exist to
 replay and debug *recent* work.
 
@@ -895,27 +895,27 @@ thousand tiny rows instead of scanning millions of turns.
 
 Two durations per task, and the gap between them is the interesting number:
 
-- **Wall time** — `completed_at − created_at`. How long the task took in human terms.
-- **Active time** — summed lease durations. How long agents actually worked on it.
+- **Wall time**: `completed_at − created_at`. How long the task took in human terms.
+- **Active time**: summed lease durations. How long agents actually worked on it.
 
-A task showing 6 hours wall and 12 minutes active was not slow; it was **blocked** — waiting on an
+A task showing 6 hours wall and 12 minutes active was not slow; it was **blocked**, waiting on an
 approval gate, a clarification, or a queue behind another card. Without that distinction a stalled
 pipeline and a genuinely hard task look identical. Charting them together turns
 "where does our time go" from a guess into a reading.
 
-### 12.3 What the history view answers — planned
+### 12.3 What the history view answers, planned
 
 Every panel below is a query against `daily_rollup` joined to `tasks`, scoped by project:
 
-- **Spend over time** — daily cost, stacked by role, with sessions marked on the axis. Answers
+- **Spend over time**: daily cost, stacked by role, with sessions marked on the axis. Answers
   "what did this project cost last month" directly.
-- **Cost per task** — ranked. The long tail is usually fine; the top three are where the money went.
-- **Wall vs active per task** — paired bars. Long wall with short active means the pipeline stalls,
+- **Cost per task**, ranked. The long tail is usually fine; the top three are where the money went.
+- **Wall vs active per task**: paired bars. Long wall with short active means the pipeline stalls,
   not the agents.
-- **Cache rate over time** — a line, per role. This is the regression detector: the architect case in
+- **Cache rate over time**: a line, per role. This is the regression detector: the architect case in
   §11.4 shows up here as a cliff on the day its prompt changed, weeks before anyone would notice it
   in a bill.
-- **Sessions** — a table: when, how long, roles active, tasks completed, cost.
+- **Sessions**: a table of when, how long, roles active, tasks completed, cost.
 
 ### 12.4 Cross-project comparison
 
@@ -923,13 +923,13 @@ Because roles are global (§4.1) and rollups carry `project_id`, the same querie
 projects: cost per project, which project a role earns its keep in, whether a prompt change helped
 everywhere or only in one repo. That falls out of the schema rather than needing a second one.
 
-## 13. Artifacts — planned
+## 13. Artifacts, planned
 
 *Not in the first build. Recorded now because it constrains the transport and storage decisions
 above, and those are cheaper to get right than to retrofit.*
 
 An artifact is anything an agent produces that a human wants to look at: a generated file, a
-screenshot, a chart, a report, a diff — or a **running service**, a dev server the agent started that
+screenshot, a chart, a report, a diff, or a **running service**: a dev server the agent started that
 you want to click and see.
 
 ### 13.1 Why not the WebSocket
@@ -938,8 +938,8 @@ The event stream is the wrong pipe for bytes. A 4 MB screenshot over WebSocket m
 (+33% and a CPU cost at both ends), hand-rolled chunking, no browser caching, no range requests, and
 it head-of-line blocks the live events behind it. Every one of those is solved by an HTTP GET.
 
-So artifacts are ordinary HTTP resources. The event stream carries only the *announcement* — a small
-`artifact` event with an id, kind and label — and the cockpit fetches bytes when the user asks for
+So artifacts are ordinary HTTP resources. The event stream carries only the *announcement*, a small
+`artifact` event with an id, kind and label, and the cockpit fetches bytes when the user asks for
 them.
 
 ### 13.2 Producing one
@@ -960,10 +960,10 @@ artifacts (id, project_id, task_id, role, kind,      -- file | image | service |
 
 ### 13.3 Serving
 
-- `GET /artifacts/{id}` — bytes, correct `Content-Type`, `ETag` = sha256, immutable caching, range
+- `GET /artifacts/{id}`: bytes, correct `Content-Type`, `ETag` = sha256, immutable caching, range
   requests. The browser does what browsers already do well.
-- `GET /artifacts/{id}/preview` — inline render for the kinds that have one: images, text, diffs.
-- `GET /proxy/{id}/*` — reverse-proxies a `service` artifact, so an app bound to `127.0.0.1:5173`
+- `GET /artifacts/{id}/preview`: inline render for the kinds that have one: images, text, diffs.
+- `GET /proxy/{id}/*`: reverse-proxies a `service` artifact, so an app bound to `127.0.0.1:5173`
   is reachable from the cockpit without CORS, without exposing the port, and without the user
   hunting for which port an agent happened to pick.
 
@@ -971,7 +971,7 @@ artifacts (id, project_id, task_id, role, kind,      -- file | image | service |
 
 A `service` artifact is **agent-generated code running in a browser**. Reverse-proxying it onto the
 cockpit's own origin would give it same-origin access to cockpit state, session storage and the
-command API — an agent bug, or a prompt injection in a file it read, could drive the orchestrator.
+command API. An agent bug, or a prompt injection in a file it read, could drive the orchestrator.
 
 So proxied services are served from a **separate origin** (a distinct loopback port), embedded in a
 sandboxed iframe, and never share the cockpit's origin or credentials. This is the reason `/proxy`
@@ -988,7 +988,7 @@ transcript is gone.
 ## 14. Stack
 
 Versions below are what the repository actually builds with, read from `go.mod`, `package.json` and
-`components.json` on 2026-08-25 — not a plan.
+`components.json` on 2026-08-25, not a plan.
 
 ### Go
 
@@ -997,13 +997,13 @@ stdlib equivalent.
 
 | Component | Version | Path | Note |
 |---|---|---|---|
-| toolchain | **1.27.0** | — | `go.mod` names it directly; needs macOS 13+ |
+| toolchain | **1.27.0** | (none) | `go.mod` names it directly; needs macOS 13+ |
 | router | stdlib | `net/http` | Go 1.22+ method+wildcard patterns are enough; no third-party router |
-| sqlite | v1.57.0 | `modernc.org/sqlite` | pure Go — keeps `CGO_ENABLED=0` and a static binary |
+| sqlite | v1.57.0 | `modernc.org/sqlite` | pure Go, so `CGO_ENABLED=0` and a static binary |
 | websocket | v1.8.15 | `github.com/coder/websocket` | the cockpit's live stream (§7.5); successor to `nhooyr.io/websocket`, gorilla is maintenance-only |
-| embed | stdlib | `embed` | **must** be `//go:embed all:dist` — a plain directive skips Vite's `dist/.vite/` and the page fails to load with a successful build |
+| embed | stdlib | `embed` | **must** be `//go:embed all:dist`, since a plain directive skips Vite's `dist/.vite/` and the page fails to load with a successful build |
 
-Everything else — process supervision, the event bus, the unix socket, the agent client — is
+Everything else, meaning process supervision, the event bus, the unix socket and the agent client, is
 stdlib. `os/exec`, `net`, `encoding/json`, `log/slog`.
 
 **Planned, not yet present.** `github.com/creack/pty` is named in §10.1 and is not in `go.mod`,
@@ -1014,22 +1014,22 @@ discovered.
 
 | Component | Version | Note |
 |---|---|---|
-| Vue | 3.5.41 | 3.6 (Vapor) is RC — do not let `@next` in |
+| Vue | 3.5.41 | 3.6 (Vapor) is RC, so do not let `@next` in |
 | Vite | 8.2.2 | Rolldown is default, ESM-only, Node 20.19+/22.12+ |
 | shadcn-vue | 2.8.2 | CLI; `v3.shadcn-vue.com` is an **archived docs site**, not a package line |
 | reka-ui | 2.10.3 | the primitive layer; `radix-vue` was renamed to this and is frozen at 1.9.17 |
 | Tailwind | 4.3.3 | CSS-first: no `tailwind.config.js`; `@tailwindcss/vite` + `@theme {}` |
-| TypeScript | **6.0.3 — pinned** | TS 7 is the Go-native rewrite, shipping without a stable programmatic compiler API; `vue-tsc` is pinned to TS 6 until ~7.1. Its peer range says `>=5.0.0`, which is misleading. Verify before unpinning |
+| TypeScript | **6.0.3, pinned** | TS 7 is the Go-native rewrite, shipping without a stable programmatic compiler API; `vue-tsc` is pinned to TS 6 until ~7.1. Its peer range says `>=5.0.0`, which is misleading. Verify before unpinning |
 | vue-tsc | 3.3.11 | runs in `pnpm build` as `--noEmit`; `build:fast` skips it |
 | Pinia | 4.0.3 | |
 | vue-router | 5.2.0 | |
 | @vueuse/core | 14.4.0 | |
 | @lucide/vue | 1.33.0 | icon library |
 | TipTap | 3.30.5 | `@tiptap/vue-3`, `-core`, `-pm`, `-starter-kit`, `-extensions`. The brief editor (§10.2.1) |
-| tiptap-markdown | 0.9.0 | Markdown in and out of that editor. **Unmaintained by choice** — its author stopped at TipTap 3 because TipTap's own Markdown conversion became a paid extension. MIT, and a thin wrapper over `prosemirror-markdown`, which is the fallback if it ever breaks |
-| JetBrains Mono | — | Google Fonts; the preset's face for headings *and* body |
+| tiptap-markdown | 0.9.0 | Markdown in and out of that editor. **Unmaintained by choice**: its author stopped at TipTap 3 because TipTap's own Markdown conversion became a paid extension. MIT, and a thin wrapper over `prosemirror-markdown`, which is the fallback if it ever breaks |
+| JetBrains Mono | (none) | Google Fonts; the preset's face for headings *and* body |
 
-**pnpm, not npm**, at 11.22.0. This is not a preference — pnpm 11 blocks postinstall scripts unless
+**pnpm, not npm**, at 11.22.0. This is not a preference: pnpm 11 blocks postinstall scripts unless
 a package is allowlisted, and `vue-demi` (which pinia and reka-ui both rely on) needs one. Without
 the allowlist the install exits non-zero, and that non-zero exit is what makes `shadcn-vue init`
 report a failed dependency step even though every package installed correctly. The allowlist lives
@@ -1047,7 +1047,7 @@ pnpm dlx shadcn-vue@latest init --preset awGASPI --template vite
 ```
 
 That resolves to style *reka-lyra*, JetBrains Mono, base color *mauve*, **radius 0**, Menu
-Default/Subtle, and **lucide** icons — recorded in `web/components.json`, which is the file to read
+Default/Subtle, and **lucide** icons, recorded in `web/components.json`, which is the file to read
 rather than this paragraph if the two disagree.
 
 Two rules about it:
@@ -1057,47 +1057,47 @@ Two rules about it:
   silently miss the token wiring that makes theming work at all.
 - **Chart and tier colors are not decorative and must not be re-picked by eye.** `--chart-1..4`
   (role identity) and `--tier-1..4` (the cost ramp of §11.4) live in
-  [`web/theme.css`](web/theme.css) and were validated against the dark surface — worst adjacent CVD
+  [`web/theme.css`](web/theme.css) and were validated against the dark surface, worst adjacent CVD
   ΔE 9.4. All four chart hues sit at L≈62%, which is *why* they pass. Changing one means re-running
   the validator, not nudging a hex.
 
-One standing cost to watch: **mono for body text** is the preset's call. It suits dense tool UI —
-tables, logs, the activity view — and it is why the terminal skin and the cockpit chrome feel
+One standing cost to watch: **mono for body text** is the preset's call. It suits dense tool UI,
+meaning tables, logs and the activity view, and it is why the terminal skin and the cockpit chrome feel
 continuous. It is less comfortable for long prose, so watch the one screen that has any, the prompt
 editor. If it reads tiring at length, that editor is the place to make an exception, not the app.
 
 > **Node floor:** the shadcn-vue CLI and Vite 8 require Node `^22.18.0 || >=24.12.0`. This machine's
 > bare shell resolves to v22.12.0 while nvm's default alias is v24.19.0, so tooling must run under
-> 24.19.0. `.nvmrc` pins it rather than trusting ambient shell state — the same version-skew class
+> 24.19.0. `.nvmrc` pins it rather than trusting ambient shell state, the same version-skew class
 > broke `pi` locally.
 
 ---
 
-## 15. Build order — as built
+## 15. Build order, as built
 
 The order below is what was actually followed, and milestones 1–2 being LLM-free is the reason §6
 and §6.1 are almost entirely coordination bugs caught without spending a token.
 
-1. **store + role library + project team API** — templates as rows with the eight built-ins seeded.
-2. **nydus + board** against an in-memory harness stub — leases, claims, acks and terminal merge
+1. **store + role library + project team API**: templates as rows with the eight built-ins seeded.
+2. **nydus + board** against an in-memory harness stub: leases, claims, acks and terminal merge
    proven with zero LLM calls.
-3. **adapter interface + claude adapter + preflight** — a team that cannot work never reaches a
+3. **adapter interface + claude adapter + preflight**: a team that cannot work never reaches a
    running board.
 4. **cerebrate** supervision, lease expiry, crash/backoff.
-5. **Cockpit v1** — projects, team, role editor, attention, board.
-6. **pi adapter** — the second adapter is what turned the interface from a description of claude
+5. **Cockpit v1**: projects, team, role editor, attention, board.
+6. **pi adapter**: the second adapter is what turned the interface from a description of claude
    into a contract; three fields the design required were unexercised until then.
-7. **Cost accounting and event replay** — usage per turn, not per run.
+7. **Cost accounting and event replay**: usage per turn, not per run.
 8. **WebSocket transport** (§7.5), replacing the SSE stream it started as.
-9. **Approval gates, integration modes and the gate diff** (§9.1, §9.2) — the run that produced
+9. **Approval gates, integration modes and the gate diff** (§9.1, §9.2): the run that produced
    §6.1 is what motivated showing `base...sha` at the gate that performs the merge.
 10. **Tailnet and TLS** (§17), because a board you cannot read from a phone gets read less.
-11. **Provider-limit handling** (§16) — a spent quota window pauses a role
+11. **Provider-limit handling** (§16): a spent quota window pauses a role
     instead of failing it.
 
 Still open: pty attach and takeover (§10.1, needs `github.com/creack/pty`), artifacts (§13),
 authentication (§17), detaching the daemon from its terminal, and harness session resume across a
-respawn (§7.4). Nothing resumes a swarm after a daemon restart — agents stop and stay stopped until
+respawn (§7.4). Nothing resumes a swarm after a daemon restart. Agents stop and stay stopped until
 Start is pressed, which is deliberate while spawning an LLM process costs money, but it is a
 decision rather than a finished answer.
 
@@ -1110,7 +1110,7 @@ when it runs out. §16.1 is the first; §16.2 onward is the second.
 
 A spent window looks exactly like a fatal error and is not
 one. Nothing is wrong with the agent, the code or the task, and the correct
-response is to wait — so treating it as a crash costs an operator the twenty
+response is to wait, so treating it as a crash costs an operator the twenty
 minutes it takes to discover that the thing to do was nothing.
 
 ### 16.1 Where the numbers come from
@@ -1119,22 +1119,22 @@ Two different mechanisms, because the harnesses differ:
 
 | | how the gauge is obtained | cost |
 |---|---|---|
-| `claude` | a `rate_limit_event` on **every turn** of `--output-format stream-json`, which zerg already reads | free — nothing to poll |
+| `claude` | a `rate_limit_event` on **every turn** of `--output-format stream-json`, which zerg already reads | free, nothing to poll |
 | `pi` | `GET https://chatgpt.com/backend-api/wham/usage`, with the OAuth token pi stores, polled every two minutes | one request per two minutes |
 
 claude's event carries `unifiedWindows` keyed `five_hour` and `seven_day`, each
 with a `utilization` (0..1) and a `resetsAt`. It exists only in the streaming
 format: `--output-format json` collapses to the final result and drops it, which
 is why a first pass through the CLI concluded, wrongly, that nothing was
-available. `claude -p "/usage"` also works non-interactively and costs nothing —
-zero turns, zero tokens — but it is a second path to the same numbers, so it is
+available. `claude -p "/usage"` also works non-interactively and costs nothing,
+zero turns and zero tokens, but it is a second path to the same numbers, so it is
 not used.
 
 pi has no such signal: its own `/usage` reports session tokens, not plan
 headroom. The endpoint above is what the ChatGPT app's own meter uses, and the
 request shape was read from the `pi-chatgpt-limit` extension
 (github.com/patlux/pi-chatgpt-limit), which does the same thing inside pi. It is
-undocumented, so every failure is soft — a gauge that cannot be read must never
+undocumented, so every failure is soft: a gauge that cannot be read must never
 stop a role from running, and the last good reading is kept with its timestamp
 rather than blanked.
 
@@ -1150,7 +1150,7 @@ in your eye.
 
 **Windows are identified by length, not name.** claude names them; the ChatGPT
 endpoint returns a `primary_window` and a `secondary_window` with only a
-`limit_window_seconds` each — and on a live account the *primary* was the 7-day
+`limit_window_seconds` each, and on a live account the *primary* was the 7-day
 one. Position and name are both unreliable; a duration means the same thing to
 both.
 
@@ -1161,12 +1161,12 @@ work, and two coloured bars would say the same thing twice.
 
 `StateThrottled` is distinct from `StateFailed` because it needs nobody to do
 anything: it ends by itself. The supervisor holds the role until the window
-rolls over — a minute past the stated time, since resuming exactly on it races
+rolls over, a minute past the stated time, since resuming exactly on it races
 the provider's clock and losing that race spends another attempt to learn
-nothing — then respawns and resets the backoff. The worktree and configuration
+nothing, then respawns and resets the backoff. The worktree and configuration
 are untouched, so this is a pause rather than a teardown.
 
-When the harness says the window is spent but not when it lifts — common — the
+When the harness says the window is spent but not when it lifts, which is common, the
 role rechecks every five minutes rather than guessing an end. A role that
 announces it resumes at a time it will not is worse than one that says it does
 not know.
@@ -1184,7 +1184,7 @@ should not be forced to pretend, and the assertion keeps every existing
 implementation and test double compiling.
 
 The matching is deliberately narrow. claude's binary carries *"Lower-priority
-mode is offered again after your weekly limit resets"*, which is informational —
+mode is offered again after your weekly limit resets"*, which is informational,
 matching a bare `limit resets` would pause a working agent, which is a far worse
 failure than missing a throttle. The blocking phrase is matched in full, and a
 test asserts the informational one does not trigger.
@@ -1197,7 +1197,7 @@ limit · resumes in 47m*. Red would send someone looking for a problem to fix.
 ## 17. Network exposure
 
 The daemon binds `127.0.0.1:7717` by default. `--addr`, or **Settings → Network**, binds one other
-interface — over Tailscale, that is the tailnet address.
+interface. Over Tailscale, that is the tailnet address.
 
 **TLS has three modes.** `off`; `tailscale`, which asks the local `tailscaled` for a Let's Encrypt
 certificate for this machine's MagicDNS name; and `files`, for a certificate you supply. The
@@ -1209,17 +1209,17 @@ about 30 MB into a project whose entire dependency set is otherwise two modules 
 daemon shells out to a `tailscaled` that is already running for other reasons.
 
 **Loopback keeps working alongside it.** A second listener serves plain HTTP on `127.0.0.1` on the
-same port — one daemon, two doors. Local work does not need the MagicDNS name, and a network
+same port: one daemon, two doors. Local work does not need the MagicDNS name, and a network
 setting that breaks the main listener cannot lock you out of the view that would fix it.
 
 **Cross-origin writes are refused.** A page you visit can resolve its own
-hostname to `127.0.0.1` and then post to this API from your browser — DNS
-rebinding — and the tailnet cannot help, because the request originates inside
+hostname to `127.0.0.1` and then post to this API from your browser, which is DNS
+rebinding, and the tailnet cannot help, because the request originates inside
 it. That matters more here than in most apps: agents run with permission
 prompts disabled, in worktrees of repositories you chose, so *create a task* is
 arbitrary code execution on this machine. Mutating requests must carry a
 `Sec-Fetch-Site` of `same-origin`/`none`, or an `Origin` matching the `Host`.
-Reads are untouched, and a client that sends neither header — curl, a script —
+Reads are untouched, and a client that sends neither header, such as curl or a script,
 is allowed, because it is not what this defends against. The WebSocket has
 always enforced the same-origin check its library provides.
 

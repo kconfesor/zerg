@@ -197,7 +197,7 @@ func (db *DB) migrate(ctx context.Context) error {
 
 	target := schemaVersion()
 	if version > target {
-		return fmt.Errorf("database schema is version %d, this build understands %d — upgrade zerg",
+		return fmt.Errorf("database schema is version %d, this build understands %d, so upgrade zerg",
 			version, target)
 	}
 	if version == target {

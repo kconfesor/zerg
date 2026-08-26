@@ -196,7 +196,7 @@ const tiers = [
         <!-- Two things that would make the figure above a lie if left unsaid. -->
         <p v-if="allOnPlan" class="text-muted-foreground mt-3 text-[11px] leading-snug">
           <span class="font-semibold">*</span> Every turn ran on a plan, so this is what the tokens
-          would have cost metered — the marginal cost was zero.
+          would have cost metered. The marginal cost was zero.
         </p>
         <p v-if="totals.unpriced" class="text-muted-foreground mt-1.5 text-[11px] leading-snug">
           {{ totals.unpriced }} of {{ totals.turns }} turns reported no cost. Their tokens are

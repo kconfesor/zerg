@@ -129,7 +129,7 @@ const HARNESS_OPTIONS: Record<string, { flag: string[]; label: string; why: stri
     {
       flag: ['--no-extensions'],
       label: 'Disable extensions',
-      why: 'Off by default — extensions are most of what makes pi useful. Worth turning on only to isolate a fault. If they fail to load it is usually a Node version mismatch, which Readiness reports with the version to switch to.',
+      why: 'Off by default, since extensions are most of what makes pi useful. Worth turning on only to isolate a fault. If they fail to load it is usually a Node version mismatch, which Readiness reports with the version to switch to.',
     },
     {
       flag: ['--no-context-files'],
@@ -351,7 +351,7 @@ const loopback = computed(() => {
             transcript.
           </template>
           <template v-else>
-            Reachable beyond this machine, and <strong>there is no authentication</strong> — treat
+            Reachable beyond this machine, and <strong>there is no authentication</strong>, so treat
             anything that can route to it as trusted. A tailnet address means your own devices;
             <code>0.0.0.0</code> also means whatever else is on the local network.
           </template>
@@ -363,7 +363,7 @@ const loopback = computed(() => {
         <Select id="tls" v-model="form.tlsMode">
           <SelectTrigger size="sm" class="max-w-64"><SelectValue /></SelectTrigger>
           <SelectContent>
-            <SelectItem value="off">Off — plain HTTP</SelectItem>
+            <SelectItem value="off">Off, plain HTTP</SelectItem>
             <SelectItem value="tailscale">Tailscale certificate</SelectItem>
             <SelectItem value="files">Certificate and key files</SelectItem>
           </SelectContent>
@@ -379,7 +379,7 @@ const loopback = computed(() => {
             console, then restart.
           </p>
           <p v-else class="text-muted-foreground text-[11px]">
-            A real certificate for <code>{{ ts.dnsName }}</code> — no browser warning on your phone.
+            A real certificate for <code>{{ ts.dnsName }}</code>, so no browser warning on your phone.
           </p>
         </template>
 
@@ -400,7 +400,7 @@ const loopback = computed(() => {
           <span class="text-muted-foreground block text-[11px] leading-snug">
             Plain HTTP, because a certificate issued for a tailnet name does not match
             <code>localhost</code>. Loopback is already the same trust boundary as the shell that
-            started the daemon — and it is the way back in if a setting here breaks the other
+            started the daemon, and it is the way back in if a setting here breaks the other
             listener.
           </span>
         </span>
@@ -431,7 +431,7 @@ const loopback = computed(() => {
       <p class="text-muted-foreground text-[11px] leading-snug">
         Each role gets its own worktree, and build output dominates them: a Rust calculator is 256 KB
         of source against 45 MB of <code>target/</code>, per role. Sweeping removes only files the
-        project's own <code>.gitignore</code> already calls disposable — never untracked work.
+        project's own <code>.gitignore</code> already calls disposable, never untracked work.
       </p>
 
       <div class="flex flex-col gap-1.5">
@@ -529,7 +529,7 @@ const loopback = computed(() => {
         </Card>
 
         <p class="text-muted-foreground text-[11px] leading-snug">
-          These are global — every project, every role on that harness. What they cannot reach is
+          These are global: every project, every role on that harness. What they cannot reach is
           the harness's own global config: claude reads OAuth from the keychain and will not start
           with a relocated config directory, so its plugins and hooks apply to agents whatever is
           set here. <code>--strict-mcp-config</code> is the one part of that zerg can shut off.
@@ -551,7 +551,7 @@ const loopback = computed(() => {
           <CardContent class="flex flex-col gap-3">
       <p class="text-muted-foreground text-[11px] leading-snug">
         Given to every role on top of its own prompt. Role prompts cover the job; this covers the
-        protocol — claiming work, handing it on, asking a question — so the two cannot drift apart
+        protocol, meaning claiming work, handing it on and asking a question, so the two cannot drift apart
         and a protocol change is one edit.
       </p>
       <Textarea v-model="instructions" rows="14" class="font-mono text-[11px]" />

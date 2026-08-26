@@ -405,7 +405,7 @@ func (s *Server) stopTask(w http.ResponseWriter, r *http.Request) {
 	if s.over != nil && task.Lane != "" && task.Lane != store.LaneDone {
 		s.over.Interrupt(task.ProjectID, task.Lane, fmt.Sprintf(
 			"The operator stopped the card %q. Stop working on it now: do not commit "+
-				"anything further for it, and do not run `zerg send` or `zerg done` for it — "+
+				"anything further for it, and do not run `zerg send` or `zerg done` for it, since "+
 				"both are refused for a stopped card. Run `zerg next` to claim other work.",
 			task.Name))
 	}

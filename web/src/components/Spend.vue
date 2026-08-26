@@ -357,7 +357,7 @@ function showTip(ev: MouseEvent | FocusEvent, r: RoleUsage, c: { label: string; 
                   class="size-1.5 shrink-0 rounded-full"
                   :style="{ backgroundColor: providerHue.get(r.providers[0]) }"
                 />
-                <span class="truncate">{{ r.models.join(', ') || '—' }}</span>
+                <span class="truncate">{{ r.models.join(', ') || 'none' }}</span>
               </div>
             </div>
 
@@ -410,7 +410,7 @@ function showTip(ev: MouseEvent | FocusEvent, r: RoleUsage, c: { label: string; 
             over its last {{ f.recentTurns }} turns, from
             {{ Math.round(f.trailing * 100) }}% across the {{ f.trailingTurns }} before them.
             <template v-if="f.editedAt">
-              Its role was edited {{ ago(f.editedAt) }} — caching is a prefix match, so one changed
+              Its role was edited {{ ago(f.editedAt) }}, and caching is a prefix match, so one changed
               byte in the composed system prompt invalidates everything after it, silently.
             </template>
             <template v-else>
@@ -494,7 +494,7 @@ function showTip(ev: MouseEvent | FocusEvent, r: RoleUsage, c: { label: string; 
               <tr v-for="r in rows" :key="r.role" class="hover:bg-muted/40 hairline-b">
                 <td class="py-1.5 pr-3 font-medium">{{ r.role }}</td>
                 <td class="text-muted-foreground max-w-[12rem] truncate py-1.5 pr-3">
-                  {{ r.models.join(', ') || '—' }}
+                  {{ r.models.join(', ') || 'none' }}
                 </td>
                 <td class="py-1.5 pr-3 text-right">{{ fmtTokens(r.cacheReadTokens) }}</td>
                 <td class="py-1.5 pr-3 text-right">{{ fmtTokens(r.inputTokens) }}</td>
@@ -536,7 +536,7 @@ function showTip(ev: MouseEvent | FocusEvent, r: RoleUsage, c: { label: string; 
 
       <p class="text-muted-foreground max-w-[70ch] text-[11px] leading-snug">
         Tokens are always real; dollars sometimes are not. A role on a subscription is billed by
-        plan, not per token, so its figure is what those tokens would have cost at API rates —
+        plan, not per token, so its figure is what those tokens would have cost at API rates:
         useful for comparing roles against each other, useless as an invoice.
         <template v-if="totals.unpriced">
           {{ totals.unpriced }} of {{ totals.turns }} turns reported no cost at all; their tokens are
