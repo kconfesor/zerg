@@ -252,6 +252,44 @@ every enabled role and states a remedy for each failure:
 The cockpit binds to `127.0.0.1:7717` and is responsive: below 768px the nav becomes a drawer, board
 lanes stack, dialogs go full screen, and the top bar names the project beside the agent count.
 
+### Why Tailscale, specifically
+
+Because agents wait for people. A gated handoff holds until someone approves it, a role that hits a
+requirement it cannot guess asks and blocks, and both happen on their schedule rather than yours —
+twenty minutes after you left the desk, as often as not. A board you cannot reach from where you
+are is a pipeline that is stopped until you get back to the room the machine is in. That is the
+whole reason there is a phone-shaped cockpit at all.
+
+Which leaves the question of how the phone reaches the daemon, and **zerg has no authentication** —
+[deliberately](SECURITY.md), because the alternatives are worse than they look:
+
+| | What it costs |
+|---|---|
+| **A password on the app** | An auth system I would have to build, store, rotate and get right, protecting a service whose entire job is running arbitrary code on my machine. The blast radius of getting it subtly wrong is the machine. |
+| **Port-forward the router** | The daemon reachable from the internet, defended by whatever I just built. Not a thing to do with a process that spawns shells. |
+| **A tunnel service** | A public URL and someone else's edge in the middle of my repositories and my agents' output. |
+| **A VPN into the home LAN** | Correct, and heavier: it grants the phone the whole network to reach one port, and stops working the moment I am on a network that blocks it. |
+
+A tailnet is the smallest thing that answers it. Devices authenticate to each other with WireGuard
+keys rather than to zerg with a password; the daemon is reachable from *my* devices and from nothing
+else, on hotel wifi and on LTE exactly as at home; and the trust boundary is a list of machines I
+can see and revoke in an admin console, rather than a login screen I wrote.
+
+Two details that turn out to matter more than they sound:
+
+- **MagicDNS gives the machine a stable name**, so the cockpit is a bookmark rather than an address
+  that changes with the network.
+- **`tailscale cert` issues a real Let's Encrypt certificate** for that name. Not for secrecy — the
+  tailnet already encrypts everything on it — but so the phone gets no warning, and so the cockpit
+  runs in a secure context, which is what a browser wants before it will treat a page as an
+  installable app rather than a bookmark. No self-signed certificate to trust on the phone, and
+  nothing to renew by hand.
+
+None of it is required. Without Tailscale the daemon stays on loopback and everything works from the
+machine it runs on; zerg reports what is available in **Settings → Network** and says "not
+available" rather than erroring. But the phone is the case this was designed around, and a tailnet
+is what makes it safe to have.
+
 ### Check Tailscale first
 
 ```sh
