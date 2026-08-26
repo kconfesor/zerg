@@ -63,6 +63,12 @@ setup is not.
 | **nydus** | message transport between roles | `internal/nydus` |
 | **hatchery** | a project workspace + its worktrees | `internal/hatchery` |
 | **larva** | a queued, unassigned task | `board.Task{state:larva}` |
+| **role** | one running agent: a worktree, a harness process, a prompt, an inbox | `store.ResolvedRole`, `internal/cerebrate` |
+| **team** | an ordered, enable-able list of roles — the pipeline work passes down | `store.TeamPreset` |
+
+A role is not a label attached to a model. It is the unit that gets a process, a `.worktrees/<name>`
+checkout and a queue, so "add a reviewer" means one more agent, one more worktree and one more
+handoff, not a sentence in a prompt.
 
 One binary, `zerg`. `zerg up` runs the daemon and opens the cockpit; `zerg next|done|send|ask` is
 the agent-facing client (§7).
@@ -92,6 +98,11 @@ override continue following their reusable-team defaults. A standalone custom te
 
 **Runtime** — per project: tasks, messages, leases, events, cost. On disk a project holds only git
 artifacts, `<repo>/.worktrees/<role>`.
+
+Each layer is edited in exactly one place, which is the point of splitting them: the library in
+**Settings → Roles**, the reusable team and its per-team values in **Team**, and the project's own
+values in the same view once that project is on the team. An edit's blast radius is therefore
+readable off the screen you made it on — global, one team, or one repository.
 
 Every nullable override has one rule: null means inherit, while a value means local. For arguments,
 `[]` is a value — explicitly run with no role arguments — and remains distinct from null.
@@ -543,7 +554,9 @@ team_preset_roles  (preset_id, template_id, position, enabled,
                     prompt_override, gate_override)
 
 projects       (id, path, name, base_branch, created_at, last_opened_at,
-                integration, pr_draft, team_preset_id, team_topology_override)
+                integration, pr_draft, team_preset_id, team_topology_override,
+                icon,                       -- a file inside the repo, resolved and served (§10)
+                chat_harness, chat_model)
 
 -- present only when a project's membership/order is local
 project_roles  (project_id, template_id, position, enabled)
@@ -650,32 +663,47 @@ plain `//go:embed dist` silently skips Vite's `.vite/` manifest directory.
 
 **Configure**
 
-- **Projects** — list, add by directory picker, set base branch, open. Two clicks to a running swarm.
+- **Projects** — list, add by absolute path (checked to exist and be a directory), set base branch,
+  name, icon and what an approval does. Two clicks to a running swarm.
 - **Readiness** — the preflight panel (§8.1). One row per enabled role, every check with its status
-  and an inline remedy, a **Re-check** button, and a **Start** that stays disabled until the team can
-  actually work.
-- **Team** — one three-column master-detail view: **Teams** lists Default and its clones,
-  **Roles** checks library roles into the selected team and opens their settings, and **Pipeline**
-  orders the checked roles. Selecting a team edits it; **Use this Team** separately assigns it to the
-  current project, so browsing never silently changes what runs.
-- **Role editor** — every field in §4.2 for one role inside the selected reusable team. Harness,
-  model, arguments, prompt, batch policy and gate inherit from the role template until changed.
-  When a project needs different settings, clone its team, edit the clone, and assign that team.
-- **Shared instructions** — one editor, applies to all roles.
+  and an inline remedy, and a **Re-check** button. Start is not disabled while a role is blocked, it
+  **refuses** and returns the report — a disabled button says only that it cannot be pressed,
+  whereas the refusal says which role is blocked and what to do about it.
+- **Team** — one three-column master-detail view over *one layer*, the reusable team: **Teams**
+  lists Default and its clones, **Roles** adds library roles to the selected team and opens their
+  per-team settings, and **Pipeline** orders and enables them. Selecting a team edits it; **Use this
+  Team** separately assigns it to the current project, so browsing never silently changes what runs.
+  A banner names the mismatch when the team on screen is not the one this project is on, and says
+  instead that edits apply immediately when agents are running.
+- **Role editor** — every field in §4.2, for one role within whichever layer opened it: the team
+  editor writes team-level values, a project's own team writes project-level ones. Each field states
+  what it inherits and offers **Use default** to drop back to it, and the dialog counts how many
+  fields are overridden, so the layer you are writing to is never ambiguous.
+- **Settings** — the global layer, in tabs: **Roles** is the library editor (§4.1) — the definition
+  of what each role *is*, editable in exactly one place because an edit here reaches every team and
+  every project, with each entry showing which teams use it and a delete that names them before it
+  cascades; **Instructions** is the shared prompt document applied to every role; plus **Network**,
+  **Disk** and **Harness**.
 
 **Observe**
 
 - **Attention** — blocked preflights (with remedies), approvals, clarifications. Anything needing a
-  human, first.
+  human, first. A dialog rather than a route, deliberately: what is waiting interrupts whatever you
+  are reading, and sending you to another page to answer it loses your place both ways. Errors from
+  a decision taken in it render inside it, since the page behind is not visible on a phone.
 - **Board** — one lane per enabled role plus Done. Cards move on ack.
-- **Roles** — per-role health, current lease, live/idle, tokens, cost.
-- **Spend** — the cost dashboard (§11.4). A summary strip carries session tokens, dollars and cache
-  rate; every figure on it is a filter. Click a provider chip to scope the page to Anthropic or
-  OpenAI; click a role to scope to that stage. Breakdowns by **provider**, by **role/stage**, and by
-  **task**, each showing the three-way input split rather than one input number, with subscription
-  rows labelled as estimates. Drill-down runs summary → provider → role → task → turn, ending at the
-  individual turn that the activity view already shows.
-- **History** — the long view (§12), scoped per project: spend over time stacked by role, cost per
+- **Activity** — the event stream for one card, replayed from `events`: every turn, tool call and
+  handoff in order (§10.1).
+- **Roles** — per-role health, current lease, live/idle, tokens, cost. In the sidebar, not a route.
+- **Spend** — the cost dashboard (§11.4). Tiles carry tokens, dollars and cache rate for the
+  selected window; a range control (session / day / week / month / all) and, once more than one
+  provider has been used, provider chips that scope the whole page. Breakdowns by **role** — a
+  stacked bar of the three-way input split, coloured by unit price rather than by rank, with a table
+  saying the same thing in numbers — and by **provider**, with subscription rows labelled as
+  estimates. A callout names any role whose cache rate has fallen against its own trailing average,
+  since that is the failure that costs money silently (§11.2). Per-task and per-turn drill-down is
+  not built; the activity view is where a single card's turns are read.
+- **History — planned** (§12.3). The long view, scoped per project: spend over time stacked by role, cost per
   task ranked, wall time against active time, cache rate as a line, and a session log. Reads
   `daily_rollup`, so a twelve-month range is as fast as a one-day range.
 - **Chat** — talk to the first role in the pipeline.
@@ -783,7 +811,12 @@ biggest lever a user has. Store the three separately and show the split.
 
 **Cache hit rate is a headline metric, not a detail.** It is the one number that reveals a silent
 regression: a prompt edit that introduced a volatile byte drops the rate to zero and multiplies cost
-with no error anywhere. A role whose rate falls below its own trailing average gets flagged.
+with no error anywhere. A role whose rate falls below its own trailing average gets flagged — built,
+and deliberately quiet: the trailing rate has to have been above 0.4, the fall at least 0.2, with at
+least three turns either side of the edit and at most 200 turns read. Under those bars a fall is
+noise, and a flag that fires on noise is one people learn to scroll past. The callout states the
+multiple the role is now paying on input, computed on blended prices — the arithmetic that divides
+uncached fractions instead prices a cache read at zero and overstates it several-fold.
 
 **Prices carry effective dates.** A hardcoded table goes wrong on a schedule — Claude Sonnet 5 runs
 at introductory $2/$10 per MTok through 2026-08-31 and $3/$15 after, so a table written this week is

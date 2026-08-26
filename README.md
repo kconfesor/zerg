@@ -62,12 +62,54 @@ role that is changes when you change the team.
 
 Finished cards can be put away one at a time; the switch to show them again is off by default.
 
-## Defaults
+## Roles and teams
 
-A library of eight role templates ships — planner, coder, reviewer, cleaner, architect, hardener,
-security, docs — plus a reusable **Default** team containing `coder` (sonnet) → `reviewer` (opus).
-Create more named teams for different kinds of work. A project uses one team at a time; clone a
-team, change its role settings or pipeline, then choose **Use this Team** for project-specific needs.
+**A role is a worker.** Not a job title — an actual agent process, with its own git worktree, its
+own harness (`claude`, `pi`), its own model, its own prompt, and its own inbox. `reviewer` means "an
+agent running opus in `.worktrees/reviewer`, carrying the reviewer prompt, that holds its handoffs
+for approval". Nothing about a role is a hint to the model; every field is what the daemon actually
+executes.
+
+**A team is an ordered pipeline of roles.** It picks roles out of the library, orders them, and
+enables or disables each one. Work enters at the first enabled role and is handed down: each role
+commits in its worktree and passes the SHA to the next, so the role below always starts from
+committed code rather than a description of it. The last enabled role is the one that integrates
+(see above) — which role that is changes when you reorder or disable, and the board's Done lane is
+what comes after it.
+
+A library of eight roles ships — planner, coder, reviewer, cleaner, architect, hardener, security,
+docs — plus a **Default** team of `coder` (sonnet) → `reviewer` (opus).
+
+### Four layers, and where each one is edited
+
+Settings apply in this order, and each layer only has to say what differs from the one above it:
+
+| Layer | Where | What it decides |
+|---|---|---|
+| **Role library** | Settings → Roles | What a role *is* — its harness, model, prompt, gate. Global. Editing one here changes the default for every team that uses it. |
+| **Team** | Team → *select a team* | Which roles are on it, in what order, enabled or not — and any field it wants to specialize for this team's purposes. |
+| **Project** | Team → *the project's team* | The same fields again, for one repository only. Optionally the pipeline itself, which then stops following the team's. |
+| **Runtime** | — | Tasks, leases, messages, cost. Never configuration. |
+
+Null means inherit, a value means local, at every layer. A role that differs from what it inherited
+is badged in the team list, so a project that drifted from its team is visible rather than a
+surprise. Empty arguments are a value, not a blank: it means *run with no arguments*, which is
+different from *inherit the arguments*.
+
+Which is why the library and the team editor are separate screens. Renaming a prompt in the library
+is a decision about every project on this machine; checking a role onto a team is a decision about
+one pipeline. Doing both in one place is how a fix to one project quietly changes another.
+
+### Working with them
+
+Teams are shared, so editing one edits it everywhere it is used. Selecting a team in the list only
+opens it for editing — **Use this Team** is the separate button that assigns it — so browsing never
+changes what runs, and the view warns you when the team on screen is not the one this project is on.
+It warns harder while agents are running, because a pipeline change applies immediately. When a
+project needs something different, **Clone** the team, change the clone, then assign it.
+
+Deleting a role from the library takes it off every team that had it, so the confirmation names
+them first.
 
 ## Layout
 
