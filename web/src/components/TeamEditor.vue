@@ -185,7 +185,7 @@ function saveRoleSettings(overrides: RoleOverrides) {
 }
 
 function useTeam(preset: TeamPreset) {
-  if (!preset) return
+  selectedPresetId.value = preset.id
   emit('setTeam', {
     presetId: preset.id,
     topologyOverride: false,
@@ -195,11 +195,32 @@ function useTeam(preset: TeamPreset) {
 
 const cloning = ref(false)
 const cloneName = ref('')
+const renaming = ref(false)
+const renameName = ref('')
+const renamingPresetId = ref('')
 
 function openClone(preset: TeamPreset) {
   selectedPresetId.value = preset.id
   cloneName.value = `${preset.name} copy`
   cloning.value = true
+}
+
+function openRename(preset: TeamPreset) {
+  selectedPresetId.value = preset.id
+  renamingPresetId.value = preset.id
+  renameName.value = preset.name
+  renaming.value = true
+}
+
+function renameTeam() {
+  const preset = props.presets.find((item) => item.id === renamingPresetId.value)
+  const name = renameName.value.trim()
+  if (!preset || preset.builtin || !name || name === preset.name) {
+    renaming.value = false
+    return
+  }
+  emit('savePreset', { ...preset, name })
+  renaming.value = false
 }
 
 function cloneTeam() {
@@ -224,8 +245,9 @@ function cloneTeam() {
   <div class="grid min-h-[34rem] border bg-card lg:grid-cols-[18rem_minmax(18rem,0.9fr)_minmax(20rem,1.1fr)]">
     <!-- Column 1: choose the reusable team being viewed. -->
     <section class="min-w-0 border-b lg:border-r lg:border-b-0">
-      <div class="min-h-14 border-b px-3 py-3">
+      <div class="border-b px-3 py-3">
         <h2 class="text-xs font-semibold uppercase tracking-wide">Teams</h2>
+        <p class="text-muted-foreground mt-0.5 text-[10px]">Team setup</p>
       </div>
 
       <ul class="divide-y">
@@ -253,8 +275,16 @@ function cloneTeam() {
               </span>
             </span>
           </button>
-          <div class="flex gap-1 px-3 pb-3 pl-9">
+          <div class="flex items-center gap-1 px-3 pb-3 pl-9">
             <Button size="xs" variant="ghost" @click="openClone(preset)">Clone</Button>
+            <Button
+              size="xs"
+              variant="ghost"
+              :disabled="preset.builtin"
+              @click="openRename(preset)"
+            >
+              Rename
+            </Button>
             <Button
               size="xs"
               :variant="projectTeam.presetId === preset.id ? 'secondary' : 'outline'"
@@ -284,7 +314,7 @@ function cloneTeam() {
 
     <!-- Column 2: membership and per-team role settings. -->
     <section class="min-w-0 border-b lg:border-r lg:border-b-0">
-      <div class="min-h-14 border-b px-4 py-3">
+      <div class="border-b px-4 py-3">
         <h2 class="text-xs font-semibold uppercase tracking-wide">Roles</h2>
         <p class="text-muted-foreground mt-0.5 text-[10px]">
           Add roles and configure how they run in {{ activePreset?.name ?? 'this team' }}
@@ -333,7 +363,7 @@ function cloneTeam() {
 
     <!-- Column 3: order and project assignment. -->
     <section class="flex min-w-0 flex-col">
-      <div class="min-h-14 border-b px-4 py-3">
+      <div class="border-b px-4 py-3">
         <h2 class="text-xs font-semibold uppercase tracking-wide">Pipeline</h2>
         <p class="text-muted-foreground mt-0.5 text-[10px]">Work flows from top to bottom</p>
       </div>
@@ -412,6 +442,25 @@ function cloneTeam() {
       <DialogFooter>
         <Button variant="outline" @click="cloning = false">Cancel</Button>
         <Button :disabled="!cloneName.trim()" @click="cloneTeam">Clone team</Button>
+      </DialogFooter>
+    </DialogContent>
+  </Dialog>
+
+  <Dialog v-model:open="renaming">
+    <DialogContent class="sm:max-w-md">
+      <DialogHeader>
+        <DialogTitle>Rename team</DialogTitle>
+        <DialogDescription>
+          Projects using this team keep using it. Only its display name changes.
+        </DialogDescription>
+      </DialogHeader>
+      <div class="flex flex-col gap-1.5">
+        <Label for="rename-team-name">Team name</Label>
+        <Input id="rename-team-name" v-model="renameName" autofocus @keyup.enter="renameTeam" />
+      </div>
+      <DialogFooter>
+        <Button variant="outline" @click="renaming = false">Cancel</Button>
+        <Button :disabled="!renameName.trim()" @click="renameTeam">Rename team</Button>
       </DialogFooter>
     </DialogContent>
   </Dialog>
