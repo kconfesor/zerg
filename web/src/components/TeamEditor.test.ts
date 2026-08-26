@@ -85,6 +85,7 @@ describe('TeamEditor', () => {
     const headings = w.findAll('h2').map((heading) => heading.text())
     expect(headings).toEqual(['Teams', 'Roles', 'Pipeline'])
     expect(w.text()).toContain('Default')
+    expect(w.find('[aria-label="Default is in use"]').exists()).toBe(true)
     expect(w.text()).toContain('terminal')
   })
 

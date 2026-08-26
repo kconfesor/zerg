@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
+import { Star } from '@lucide/vue'
 import type {
   Model,
   ProjectTeam,
@@ -64,7 +65,6 @@ const libraryById = computed(() => new Map(props.library.map((role) => [role.id,
 const selectedRoleIds = computed(
   () => new Set(activePreset.value?.roles.map((role) => role.templateId) ?? []),
 )
-const teamInUse = computed(() => props.projectTeam.presetId === activePreset.value?.id)
 const projectHasLocalChanges = computed(
   () => props.projectTeam.topologyOverride || props.projectTeam.roles.some((role) => role.overridden),
 )
@@ -184,8 +184,7 @@ function saveRoleSettings(overrides: RoleOverrides) {
   )
 }
 
-function useTeam() {
-  const preset = activePreset.value
+function useTeam(preset: TeamPreset) {
   if (!preset) return
   emit('setTeam', {
     presetId: preset.id,
@@ -197,9 +196,9 @@ function useTeam() {
 const cloning = ref(false)
 const cloneName = ref('')
 
-function openClone() {
-  if (!activePreset.value) return
-  cloneName.value = `${activePreset.value.name} copy`
+function openClone(preset: TeamPreset) {
+  selectedPresetId.value = preset.id
+  cloneName.value = `${preset.name} copy`
   cloning.value = true
 }
 
@@ -222,37 +221,49 @@ function cloneTeam() {
 </script>
 
 <template>
-  <div class="grid min-h-[34rem] border bg-card lg:grid-cols-[14rem_minmax(18rem,0.9fr)_minmax(20rem,1.1fr)]">
+  <div class="grid min-h-[34rem] border bg-card lg:grid-cols-[18rem_minmax(18rem,0.9fr)_minmax(20rem,1.1fr)]">
     <!-- Column 1: choose the reusable team being viewed. -->
     <section class="min-w-0 border-b lg:border-r lg:border-b-0">
-      <div class="flex items-center justify-between gap-2 border-b px-3 py-3">
-        <div>
-          <h2 class="text-xs font-semibold uppercase tracking-wide">Teams</h2>
-          <p class="text-muted-foreground mt-0.5 text-[10px]">Choose one to configure</p>
-        </div>
-        <Button size="xs" variant="outline" :disabled="!activePreset" @click="openClone">
-          Clone
-        </Button>
+      <div class="border-b px-3 py-3">
+        <h2 class="text-xs font-semibold uppercase tracking-wide">Teams</h2>
       </div>
 
       <ul class="divide-y">
-        <li v-for="preset in presets" :key="preset.id">
+        <li
+          v-for="preset in presets"
+          :key="preset.id"
+          :class="selectedPresetId === preset.id && 'bg-primary/[0.08]'"
+        >
           <button
             type="button"
-            :class="[
-              'focus-visible:outline-ring flex w-full items-center gap-2 px-3 py-3 text-left focus-visible:outline-2',
-              selectedPresetId === preset.id ? 'bg-primary/[0.08] text-foreground' : 'hover:bg-muted',
-            ]"
+            class="focus-visible:outline-ring flex w-full items-center gap-2 px-3 pt-3 pb-2 text-left focus-visible:outline-2"
             @click="selectedPresetId = preset.id"
           >
+            <Star
+              v-if="projectTeam.presetId === preset.id"
+              :size="15"
+              class="text-primary fill-primary shrink-0"
+              :aria-label="`${preset.name} is in use`"
+            />
+            <span v-else class="size-[15px] shrink-0" aria-hidden="true" />
             <span class="min-w-0 flex-1">
               <span class="block truncate text-xs font-medium">{{ preset.name }}</span>
               <span class="text-muted-foreground mt-0.5 block text-[10px]">
                 {{ preset.roles.length }} role{{ preset.roles.length === 1 ? '' : 's' }}
               </span>
             </span>
-            <Badge v-if="projectTeam.presetId === preset.id" variant="secondary">in use</Badge>
           </button>
+          <div class="flex gap-1 px-3 pb-3 pl-9">
+            <Button size="xs" variant="ghost" @click="openClone(preset)">Clone</Button>
+            <Button
+              size="xs"
+              :variant="projectTeam.presetId === preset.id ? 'secondary' : 'outline'"
+              :disabled="running || (projectTeam.presetId === preset.id && !projectHasLocalChanges)"
+              @click="useTeam(preset)"
+            >
+              {{ projectTeam.presetId === preset.id && !projectHasLocalChanges ? 'In use' : 'Use this Team' }}
+            </Button>
+          </div>
         </li>
         <li v-if="!presets.length" class="text-muted-foreground px-3 py-6 text-center text-xs">
           No teams yet.
@@ -322,12 +333,9 @@ function cloneTeam() {
 
     <!-- Column 3: order and project assignment. -->
     <section class="flex min-w-0 flex-col">
-      <div class="flex items-start justify-between gap-3 border-b px-4 py-3">
-        <div>
-          <h2 class="text-xs font-semibold uppercase tracking-wide">Pipeline</h2>
-          <p class="text-muted-foreground mt-0.5 text-[10px]">Work flows from top to bottom</p>
-        </div>
-        <Badge v-if="teamInUse" variant="secondary">used by this project</Badge>
+      <div class="border-b px-4 py-3">
+        <h2 class="text-xs font-semibold uppercase tracking-wide">Pipeline</h2>
+        <p class="text-muted-foreground mt-0.5 text-[10px]">Work flows from top to bottom</p>
       </div>
 
       <ol v-if="activePreset" class="divide-y">
@@ -376,23 +384,6 @@ function cloneTeam() {
           <p class="text-muted-foreground mt-1 text-xs">Check roles in the middle column.</p>
         </li>
       </ol>
-
-      <div class="mt-auto border-t p-4">
-        <Button
-          class="w-full"
-          :variant="teamInUse && !projectHasLocalChanges ? 'secondary' : 'default'"
-          :disabled="!activePreset || running || (teamInUse && !projectHasLocalChanges)"
-          @click="useTeam"
-        >
-          <template v-if="teamInUse && !projectHasLocalChanges">This team is in use</template>
-          <template v-else-if="teamInUse">Use exact team settings</template>
-          <template v-else>Use this Team</template>
-        </Button>
-        <p class="text-muted-foreground mt-2 text-center text-[10px] leading-snug">
-          <template v-if="running">Stop the swarm before switching teams.</template>
-          <template v-else>Only one team is used by this project at a time.</template>
-        </p>
-      </div>
     </section>
   </div>
 
