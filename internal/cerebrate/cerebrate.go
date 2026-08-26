@@ -503,10 +503,27 @@ func (c *Cerebrate) runOnce(ctx context.Context) (fatal bool, ranFor time.Durati
 		return true, 0, err // a command that cannot be built will not build next time either
 	}
 
-	stdout, err := cmd.StdoutPipe()
+	// Our own pipe rather than cmd.StdoutPipe().
+	//
+	// Wait closes a StdoutPipe as soon as the process exits, and the standard
+	// library says so: it is incorrect to call Wait before every read from that
+	// pipe has completed. This supervisor reads on a goroutine and calls Wait
+	// concurrently, which it must, so with a fast-exiting agent the close won
+	// the race and the buffered output was discarded unread.
+	//
+	// What that cost is exactly the thing this file exists to prevent. An agent
+	// that prints `fatal: model requires a newer version` and exits could have
+	// its fatal line thrown away, leaving a plain non-zero exit, which is a
+	// restartable failure. The supervisor then respawned into the same wall.
+	// Reproducible at GOMAXPROCS=1, and CI is where it showed.
+	//
+	// A pipe we own is closed when we say, so the reader drains it after the
+	// process is gone.
+	stdout, stdoutW, err := os.Pipe()
 	if err != nil {
 		return false, 0, fmt.Errorf("attaching stdout: %w", err)
 	}
+	cmd.Stdout = stdoutW
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return false, 0, fmt.Errorf("attaching stdin: %w", err)
@@ -544,8 +561,25 @@ func (c *Cerebrate) runOnce(ctx context.Context) (fatal bool, ranFor time.Durati
 	readDone := make(chan error, 1)
 	go func() { readDone <- c.readStream(stdout) }()
 
+	// The parent's copy of the write end, so the reader sees EOF once the
+	// process and anything it spawned have let go of theirs.
+	stdoutW.Close()
+
 	waitErr := cmd.Wait()
-	sawFatal := <-readDone
+
+	// Drain what the process wrote before deciding anything about it. Bounded,
+	// because a descendant can still be holding the write end open: this is the
+	// case WaitDelay covers for a StdoutPipe, and with a pipe we own it is ours
+	// to bound. Closing the read end unblocks the reader.
+	var sawFatal error
+	select {
+	case sawFatal = <-readDone:
+	case <-time.After(shutdownGrace):
+		c.cfg.Log.Warn("agent output was still open after it exited", "role", c.name())
+		stdout.Close()
+		sawFatal = <-readDone
+	}
+	stdout.Close()
 	ranFor = c.cfg.clock().Sub(started)
 
 	c.mu.Lock()
