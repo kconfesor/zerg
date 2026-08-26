@@ -30,7 +30,7 @@ type recordingIntegrator struct{ commits, into, published []string }
 // the real one is the tree it resolves against, which a fake has none of.
 // Publish records the request and returns a plausible URL, so a test can check
 // that PR mode published without needing a remote or a GitHub account.
-func (r *recordingIntegrator) Publish(_ context.Context, _, base, commit, title, body string) (string, error) {
+func (r *recordingIntegrator) Publish(_ context.Context, _, base, commit, title, body string, draft bool) (string, error) {
 	r.published = append(r.published, title+" -> "+base+"@"+commit[:min(8, len(commit))])
 	_ = body
 	return "https://example.test/pr/1", nil

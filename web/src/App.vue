@@ -6,10 +6,13 @@ import {
   type Attention as AttentionData,
   type Model,
   type Project,
-  type ProjectRole,
+  type ProjectTeam,
+  type ProjectTeamUpdate,
   type Readiness,
   type ResolvedRole,
   type RoleTemplate,
+  type TeamPreset,
+  type TeamPresetRole,
   type SwarmStatus,
   type Task,
   type Workspace,
@@ -233,6 +236,8 @@ const usageKey = ref(0)
 let usageTicks = 0
 
 const library = ref<RoleTemplate[]>([])
+const presets = ref<TeamPreset[]>([])
+const projectTeam = ref<ProjectTeam>({ presetId: null, topologyOverride: true, roles: [] })
 const team = ref<ResolvedRole[]>([])
 const tasks = ref<Task[]>([])
 const attention = ref<AttentionData | null>(null)
@@ -309,9 +314,10 @@ function pollerLostContact() {
 
 async function loadGlobals() {
   try {
-    ;[projects.value, library.value, harnesses.value] = await Promise.all([
+    ;[projects.value, library.value, presets.value, harnesses.value] = await Promise.all([
       api.projects(),
       api.roles(),
+      api.teamPresets(),
       api.harnesses(),
     ])
     for (const h of harnesses.value) models.value[h] = await api.models(h).catch(() => [])
@@ -349,7 +355,8 @@ async function refresh() {
     // A newer refresh has been asked for; this data is already history.
     if (!current_()) return
 
-    team.value = t
+    projectTeam.value = t
+    team.value = t.roles
     tasks.value = tk
     attention.value = at
     status.value = st
@@ -501,10 +508,42 @@ async function createTask() {
   })
 }
 
-async function setTeam(roles: ProjectRole[]) {
+async function setTeam(update: ProjectTeamUpdate) {
   if (!current.value) return
   try {
-    team.value = await api.setTeam(current.value.id, roles)
+    projectTeam.value = await api.setTeam(current.value.id, update)
+    team.value = projectTeam.value.roles
+    const refreshed = await api.projects()
+    projects.value = refreshed
+    current.value = refreshed.find((p) => p.id === current.value?.id) ?? current.value
+  } catch (err) {
+    fail(err)
+  }
+}
+
+async function savePreset(preset: TeamPreset) {
+  try {
+    const updated = await api.updateTeamPreset(preset)
+    presets.value = presets.value.map((p) => (p.id === updated.id ? updated : p))
+    await refresh()
+  } catch (err) {
+    fail(err)
+  }
+}
+
+async function createPreset(name: string, roles: TeamPresetRole[]) {
+  try {
+    const created = await api.createTeamPreset({ name, roles })
+    presets.value = [...presets.value, created].sort((a, b) => a.name.localeCompare(b.name))
+  } catch (err) {
+    fail(err)
+  }
+}
+
+async function deletePreset(id: string) {
+  try {
+    await api.deleteTeamPreset(id)
+    presets.value = presets.value.filter((p) => p.id !== id)
   } catch (err) {
     fail(err)
   }
@@ -665,8 +704,8 @@ watch(current, () => (banner.value = null))
         <div class="w-full max-w-md text-center">
           <h1 class="text-lg font-semibold tracking-tight">No project yet</h1>
           <p class="text-muted-foreground mt-1.5 mb-4 text-xs leading-relaxed">
-            Point zerg at a git repository. It starts with coder → reviewer selected; everything
-            else is a checkbox in Team.
+            Point zerg at a git repository. It starts with the reusable Default team — coder →
+            reviewer — and can be changed in Team.
           </p>
           <Button @click="addingProject = true">Add a project</Button>
         </div>
@@ -768,11 +807,15 @@ watch(current, () => (banner.value = null))
             <div class="pt-4">
               <TeamEditor
                 :library="library"
-                :team="team"
+                :presets="presets"
+                :project-team="projectTeam"
                 :harnesses="harnesses"
                 :models="models"
                 :running="status.running"
                 @set-team="setTeam"
+                @save-preset="savePreset"
+                @create-preset="createPreset"
+                @delete-preset="deletePreset"
                 @save-role="saveRole"
               />
             </div>

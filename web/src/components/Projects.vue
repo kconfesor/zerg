@@ -17,6 +17,7 @@ import { Plus, Trash2 } from '@lucide/vue'
 import { api, type Integration, type Project } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
@@ -43,6 +44,7 @@ const pathId = useId()
 const branchId = useId()
 const nameId = useId()
 const iconId = useId()
+const draftId = useId()
 
 const props = defineProps<{ projects: Project[]; current: Project | null }>()
 const emit = defineEmits<{
@@ -215,18 +217,28 @@ function previewURL(path: string): string {
   return `/api/projects/${props.current?.id}/icon?p=${encodeURIComponent(path)}&preview=${encodeURIComponent(path)}`
 }
 
-async function setIntegration(mode: Integration) {
-  if (!props.current || props.current.integration === mode) return
+async function saveIntegration(mode: Integration, prDraft: boolean) {
+  if (!props.current) return
   busy.value = true
   note.value = null
   try {
-    emit('updated', await api.setIntegration(props.current.id, mode))
+    emit('updated', await api.setIntegration(props.current.id, mode, prDraft))
     note.value = { tone: 'ok', text: 'Saved. It applies to the next task that finishes.' }
   } catch (e) {
     fail(e)
   } finally {
     busy.value = false
   }
+}
+
+function setIntegration(mode: Integration) {
+  if (!props.current || props.current.integration === mode) return
+  return saveIntegration(mode, props.current.prDraft)
+}
+
+function setDraft(prDraft: boolean) {
+  if (!props.current || props.current.prDraft === prDraft) return
+  return saveIntegration(props.current.integration, prDraft)
 }
 
 async function remove(p: Project) {
@@ -429,6 +441,26 @@ async function sweep() {
                 </Label>
               </div>
             </RadioGroup>
+
+            <div
+              v-if="current.integration === 'pr'"
+              class="bg-muted/40 mt-4 flex items-start gap-2 border px-3 py-2.5"
+            >
+              <Checkbox
+                :id="draftId"
+                :model-value="current.prDraft"
+                :disabled="busy"
+                class="mt-0.5"
+                @update:model-value="setDraft(Boolean($event))"
+              />
+              <Label :for="draftId" class="cursor-pointer text-xs font-normal">
+                Create pull requests as drafts
+                <span class="text-muted-foreground block text-[11px] leading-snug">
+                  Drafts stay out of the review queue until someone marks them ready. Existing pull
+                  requests are never changed by this setting.
+                </span>
+              </Label>
+            </div>
           </CardContent>
         </Card>
 
@@ -471,8 +503,8 @@ async function sweep() {
         <DialogHeader>
           <DialogTitle>Add a project</DialogTitle>
           <DialogDescription>
-            Point zerg at a git repository. It starts with the default team; everything else is a
-            checkbox in Team.
+            Point zerg at a git repository. It starts with the reusable Default team; choose or
+            customize another one in Team.
           </DialogDescription>
         </DialogHeader>
         <div class="flex flex-col gap-3">

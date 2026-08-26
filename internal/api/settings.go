@@ -222,6 +222,7 @@ func (s *Server) taskDetail(w http.ResponseWriter, r *http.Request) {
 
 type integrationRequest struct {
 	Integration string `json:"integration"`
+	PRDraft     bool   `json:"prDraft"`
 }
 
 // renameProject changes the label a project is shown under.
@@ -264,7 +265,7 @@ func (s *Server) setIntegration(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	project, err := s.db.SetIntegration(r.Context(), r.PathValue("id"), req.Integration)
+	project, err := s.db.SetIntegration(r.Context(), r.PathValue("id"), req.Integration, req.PRDraft)
 	if err != nil {
 		s.fail(w, r, err)
 		return

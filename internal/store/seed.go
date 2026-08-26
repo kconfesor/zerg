@@ -255,6 +255,9 @@ func Seed(ctx context.Context, db *DB, harness string) error {
 	} else if err != nil {
 		return err
 	}
+	if err := db.EnsureDefaultTeamPreset(ctx); err != nil {
+		return fmt.Errorf("seeding default team preset: %w", err)
+	}
 	return nil
 }
 

@@ -58,12 +58,12 @@ func (db *DB) createProject(ctx context.Context, path, name, baseBranch string, 
 		return nil, invalid("%s is a file; a project is a directory", abs)
 	}
 
-	var roles []ProjectRole
+	var presetID any
 	if withTeam {
-		var err error
-		if roles, err = db.defaultTeam(ctx); err != nil {
-			return nil, err
+		if _, err := db.GetTeamPreset(ctx, DefaultTeamPresetID); err != nil {
+			return nil, fmt.Errorf("default team preset is missing: %w", err)
 		}
+		presetID = DefaultTeamPresetID
 	}
 
 	tx, err := db.sql.BeginTx(ctx, nil)
@@ -75,12 +75,9 @@ func (db *DB) createProject(ctx context.Context, path, name, baseBranch string, 
 	id := NewID()
 	created := time.Now().UTC()
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO projects (id, path, name, base_branch, created_at) VALUES (?,?,?,?,?)`,
-		id, abs, name, baseBranch, created.Format(time.RFC3339Nano)); err != nil {
+		`INSERT INTO projects (id, path, name, base_branch, created_at, team_preset_id) VALUES (?,?,?,?,?,?)`,
+		id, abs, name, baseBranch, created.Format(time.RFC3339Nano), presetID); err != nil {
 		return nil, fmt.Errorf("creating project %s: %w", abs, err)
-	}
-	if err := insertTeam(ctx, tx, id, roles); err != nil {
-		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("creating project %s: %w", abs, err)
@@ -98,8 +95,8 @@ func (db *DB) createProject(ctx context.Context, path, name, baseBranch string, 
 // surfaces what you were last working on.
 func (db *DB) ListProjects(ctx context.Context) ([]Project, error) {
 	rows, err := db.read.QueryContext(ctx,
-		`SELECT id, path, name, base_branch, integration, created_at, last_opened_at,
-		        chat_harness, chat_model, icon
+		`SELECT id, path, name, base_branch, integration, pr_draft, created_at, last_opened_at,
+		        chat_harness, chat_model, icon, team_preset_id, team_topology_override
 		 FROM projects ORDER BY COALESCE(last_opened_at, created_at) DESC`)
 	if err != nil {
 		return nil, fmt.Errorf("listing projects: %w", err)
@@ -120,8 +117,8 @@ func (db *DB) ListProjects(ctx context.Context) ([]Project, error) {
 // GetProject looks a project up by id.
 func (db *DB) GetProject(ctx context.Context, id string) (*Project, error) {
 	row := db.read.QueryRowContext(ctx,
-		`SELECT id, path, name, base_branch, integration, created_at, last_opened_at,
-		        chat_harness, chat_model, icon FROM projects WHERE id = ?`, id)
+		`SELECT id, path, name, base_branch, integration, pr_draft, created_at, last_opened_at,
+		        chat_harness, chat_model, icon, team_preset_id, team_topology_override FROM projects WHERE id = ?`, id)
 	p, err := scanProject(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("project %s: %w", id, ErrNotFound)
@@ -155,31 +152,87 @@ func (db *DB) DeleteProject(ctx context.Context, id string) error {
 // whole desired team rather than diffing it, so a reorder and a selection
 // change are the same operation and cannot half-apply.
 func (db *DB) SetTeam(ctx context.Context, projectID string, roles []ProjectRole) error {
+	p, err := db.GetProject(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	return db.SetProjectTeam(ctx, projectID, p.TeamPresetID, true, roles)
+}
+
+// SetProjectTeam selects a reusable preset and atomically replaces the
+// project's optional topology and field-override layers. When topologyOverride
+// is false, roles carries only field overrides for roles in the selected preset.
+func (db *DB) SetProjectTeam(ctx context.Context, projectID string, presetID *string, topologyOverride bool, roles []ProjectRole) error {
 	if _, err := db.GetProject(ctx, projectID); err != nil {
 		return err
 	}
-
+	var preset *TeamPreset
+	var err error
+	if presetID != nil {
+		preset, err = db.GetTeamPreset(ctx, *presetID)
+		if err != nil {
+			return err
+		}
+	}
+	if !topologyOverride && preset == nil {
+		return invalid("a project without a preset needs its own topology")
+	}
+	allowed := map[string]bool{}
+	if preset != nil {
+		for _, r := range preset.Roles {
+			allowed[r.TemplateID] = true
+		}
+	}
 	seen := map[string]bool{}
 	for _, r := range roles {
 		if seen[r.TemplateID] {
 			return invalid("role %s appears twice in the team; each role joins a pipeline once", r.TemplateID)
 		}
 		seen[r.TemplateID] = true
-		if _, err := db.GetTemplate(ctx, r.TemplateID); err != nil {
+		if !topologyOverride && !allowed[r.TemplateID] {
+			return invalid("role %s is not in the selected preset", r.TemplateID)
+		}
+		t, err := db.GetTemplate(ctx, r.TemplateID)
+		if err != nil {
+			return err
+		}
+		if preset != nil {
+			for _, pr := range preset.Roles {
+				if pr.TemplateID == r.TemplateID {
+					applyOverrides(t, pr.RoleOverrides)
+					break
+				}
+			}
+		}
+		applyOverrides(t, r.RoleOverrides)
+		if err := t.Validate(); err != nil {
 			return err
 		}
 	}
-
 	tx, err := db.sql.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("beginning team update: %w", err)
 	}
 	defer tx.Rollback()
-
-	if _, err := tx.ExecContext(ctx, `DELETE FROM project_roles WHERE project_id = ?`, projectID); err != nil {
-		return fmt.Errorf("clearing team: %w", err)
+	var presetValue any
+	if presetID != nil {
+		presetValue = *presetID
 	}
-	if err := insertTeam(ctx, tx, projectID, roles); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE projects SET team_preset_id=?, team_topology_override=? WHERE id=?`, presetValue, topologyOverride, projectID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM project_roles WHERE project_id=?`, projectID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM project_role_overrides WHERE project_id=?`, projectID); err != nil {
+		return err
+	}
+	if topologyOverride {
+		if err := insertTeam(ctx, tx, projectID, roles); err != nil {
+			return err
+		}
+	}
+	if err := insertProjectOverrides(ctx, tx, projectID, roles); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -196,9 +249,7 @@ func insertTeam(ctx context.Context, tx *sql.Tx, projectID string, roles []Proje
 			return err
 		}
 		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO project_roles
-			   (project_id, template_id, position, enabled, model_override, args_override)
-			 VALUES (?,?,?,?,?,?)`,
+			`INSERT INTO project_roles (project_id,template_id,position,enabled,model_override,args_override) VALUES (?,?,?,?,?,?)`,
 			projectID, r.TemplateID, i, r.Enabled, r.ModelOverride, args); err != nil {
 			return fmt.Errorf("adding role to team: %w", err)
 		}
@@ -206,28 +257,36 @@ func insertTeam(ctx context.Context, tx *sql.Tx, projectID string, roles []Proje
 	return nil
 }
 
-// defaultTeam is the starting pipeline: coder then reviewer, enough to be
-// useful without a configuration session.
-func (db *DB) defaultTeam(ctx context.Context) ([]ProjectRole, error) {
-	var team []ProjectRole
-	for _, name := range DefaultProjectRoles {
-		tpl, err := db.GetTemplateByName(ctx, name)
-		if err != nil {
-			return nil, fmt.Errorf("default role %q is missing from the library: %w", name, err)
+func insertProjectOverrides(ctx context.Context, tx *sql.Tx, projectID string, roles []ProjectRole) error {
+	for _, r := range roles {
+		if !hasOverrides(r.RoleOverrides) {
+			continue
 		}
-		team = append(team, ProjectRole{TemplateID: tpl.ID, Enabled: true})
+		args, err := marshalOverrideArgs(r.ArgsOverride)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO project_role_overrides
+			(project_id,template_id,`+roleOverrideCols+`) VALUES (?,?,?,?,?,?,?,?,?,?)`,
+			projectID, r.TemplateID, r.HarnessOverride, r.ModelOverride, args, r.ReceiveOverride,
+			r.BatchMaxItemsOverride, r.BatchMaxAgeSecOverride, r.PromptOverride, r.GateOverride); err != nil {
+			return fmt.Errorf("adding project role override: %w", err)
+		}
 	}
-	return team, nil
+	return nil
+}
+
+func hasOverrides(o RoleOverrides) bool {
+	return o.HarnessOverride != nil || o.ModelOverride != nil || o.ArgsOverride != nil ||
+		o.ReceiveOverride != nil || o.BatchMaxItemsOverride != nil || o.BatchMaxAgeSecOverride != nil ||
+		o.PromptOverride != nil || o.GateOverride != nil
 }
 
 // SelectDefaultTeam gives an existing project the starting pipeline. New
 // projects get it as part of their own creation.
 func (db *DB) SelectDefaultTeam(ctx context.Context, projectID string) error {
-	team, err := db.defaultTeam(ctx)
-	if err != nil {
-		return err
-	}
-	return db.SetTeam(ctx, projectID, team)
+	id := DefaultTeamPresetID
+	return db.SetProjectTeam(ctx, projectID, &id, false, nil)
 }
 
 // ResolveTeam returns the project's pipeline in order with overrides applied —
@@ -238,83 +297,106 @@ func (db *DB) SelectDefaultTeam(ctx context.Context, projectID string) error {
 // anywhere else. Deciding terminality from config-file line order means
 // reordering a file silently relocates the end of the pipeline.
 func (db *DB) ResolveTeam(ctx context.Context, projectID string) ([]ResolvedRole, error) {
-	if _, err := db.GetProject(ctx, projectID); err != nil {
+	return db.resolveLayeredTeam(ctx, projectID)
+}
+
+func (db *DB) GetProjectTeam(ctx context.Context, projectID string) (*ProjectTeam, error) {
+	p, err := db.GetProject(ctx, projectID)
+	if err != nil {
 		return nil, err
 	}
-
-	rows, err := db.read.QueryContext(ctx,
-		`SELECT pr.position, pr.enabled, pr.model_override, pr.args_override, `+
-			prefixed(templateCols, "t")+`
-		 FROM project_roles pr
-		 JOIN role_templates t ON t.id = pr.template_id
-		 WHERE pr.project_id = ?
-		 ORDER BY pr.position`, projectID)
+	roles, err := db.resolveLayeredTeam(ctx, projectID)
 	if err != nil {
-		return nil, fmt.Errorf("resolving team: %w", err)
+		return nil, err
 	}
-	defer rows.Close()
+	return &ProjectTeam{PresetID: p.TeamPresetID, TopologyOverride: p.TeamTopologyOverride, Roles: roles}, nil
+}
 
-	var out []ResolvedRole
-	for rows.Next() {
-		var (
-			position      int
-			enabledInt    int
-			modelOverride sql.NullString
-			argsOverride  sql.NullString
-			tplArgs       string
-			created       string
-			updated       string
-			builtinInt    int
-			r             ResolvedRole
-		)
-		if err := rows.Scan(&position, &enabledInt, &modelOverride, &argsOverride,
-			&r.ID, &r.Name, &r.Harness, &r.Model, &tplArgs, &r.Receive,
-			&r.BatchMaxItems, &r.BatchMaxAgeSec, &r.Prompt, &r.Gate, &builtinInt,
-			&created, &updated); err != nil {
-			return nil, fmt.Errorf("scanning team row: %w", err)
-		}
-
-		r.Position = position
-		r.Enabled = enabledInt != 0
-		r.Builtin = builtinInt != 0
-		if r.Args, err = unmarshalArgs(tplArgs); err != nil {
+func (db *DB) resolveLayeredTeam(ctx context.Context, projectID string) ([]ResolvedRole, error) {
+	p, err := db.GetProject(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	presetByTemplate := map[string]TeamPresetRole{}
+	var topology []ProjectRole
+	if p.TeamPresetID != nil {
+		preset, err := db.GetTeamPreset(ctx, *p.TeamPresetID)
+		if err != nil {
 			return nil, err
 		}
-		if r.CreatedAt, err = time.Parse(time.RFC3339Nano, created); err != nil {
-			return nil, fmt.Errorf("role %s has an unreadable created_at: %w", r.ID, err)
-		}
-		if r.UpdatedAt, err = time.Parse(time.RFC3339Nano, updated); err != nil {
-			return nil, fmt.Errorf("role %s has an unreadable updated_at: %w", r.ID, err)
-		}
-
-		// The stored override is kept whether or not it differs from the
-		// template, because it is what this project chose. Overridden stays a
-		// question about divergence, which is what the badge asks.
-		if modelOverride.Valid {
-			v := modelOverride.String
-			r.ModelOverride = &v
-			if v != r.Model {
-				r.Model = v
-				r.Overridden = true
+		for _, r := range preset.Roles {
+			presetByTemplate[r.TemplateID] = r
+			if !p.TeamTopologyOverride {
+				topology = append(topology, ProjectRole{TemplateID: r.TemplateID, Position: r.Position, Enabled: r.Enabled})
 			}
 		}
-		if argsOverride.Valid {
-			args, err := unmarshalArgs(argsOverride.String)
-			if err != nil {
+	}
+	if p.TeamTopologyOverride || p.TeamPresetID == nil {
+		rows, err := db.read.QueryContext(ctx, `SELECT template_id,position,enabled FROM project_roles WHERE project_id=? ORDER BY position`, projectID)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var r ProjectRole
+			var enabled int
+			if err := rows.Scan(&r.TemplateID, &r.Position, &enabled); err != nil {
 				return nil, err
 			}
-			r.ArgsOverride = args
-			if !slices.Equal(args, r.Args) {
-				r.Args = args
-				r.Overridden = true
-			}
+			r.Enabled = enabled != 0
+			topology = append(topology, r)
 		}
-		out = append(out, r)
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
 	}
-	if err := rows.Err(); err != nil {
+	projectOverrides := map[string]RoleOverrides{}
+	rows, err := db.read.QueryContext(ctx, `SELECT template_id,`+roleOverrideCols+` FROM project_role_overrides WHERE project_id=?`, projectID)
+	if err != nil {
 		return nil, err
 	}
-
+	for rows.Next() {
+		var id string
+		var o RoleOverrides
+		var h, m, a, recv, prompt, gate sql.NullString
+		var items, age sql.NullInt64
+		if err := rows.Scan(&id, &h, &m, &a, &recv, &items, &age, &prompt, &gate); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		if err := decodeOverrides(&o, h, m, a, recv, items, age, prompt, gate); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		projectOverrides[id] = o
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	out := make([]ResolvedRole, 0, len(topology))
+	for i, membership := range topology {
+		t, err := db.GetTemplate(ctx, membership.TemplateID)
+		if err != nil {
+			return nil, err
+		}
+		if pr, ok := presetByTemplate[membership.TemplateID]; ok {
+			applyOverrides(t, pr.RoleOverrides)
+		}
+		baseline := *t
+		o := projectOverrides[membership.TemplateID]
+		applyOverrides(t, o)
+		if err := t.Validate(); err != nil {
+			return nil, err
+		}
+		r := ResolvedRole{RoleTemplate: *t, Position: i, Enabled: membership.Enabled, RoleOverrides: o}
+		r.Overridden = t.Harness != baseline.Harness || t.Model != baseline.Model || !slices.Equal(t.Args, baseline.Args) ||
+			t.Receive != baseline.Receive || t.BatchMaxItems != baseline.BatchMaxItems || t.BatchMaxAgeSec != baseline.BatchMaxAgeSec ||
+			t.Prompt != baseline.Prompt || t.Gate != baseline.Gate
+		out = append(out, r)
+	}
 	for i := len(out) - 1; i >= 0; i-- {
 		if out[i].Enabled {
 			out[i].Terminal = true
@@ -332,9 +414,17 @@ func scanProject(s scanner) (*Project, error) {
 		created    string
 		lastOpened sql.NullString
 	)
-	if err := s.Scan(&p.ID, &p.Path, &p.Name, &p.BaseBranch, &p.Integration, &created, &lastOpened,
-		&p.ChatHarness, &p.ChatModel, &p.Icon); err != nil {
+	var presetID sql.NullString
+	var draft, topology int
+	if err := s.Scan(&p.ID, &p.Path, &p.Name, &p.BaseBranch, &p.Integration, &draft, &created, &lastOpened,
+		&p.ChatHarness, &p.ChatModel, &p.Icon, &presetID, &topology); err != nil {
 		return nil, err
+	}
+	p.PRDraft = draft != 0
+	p.TeamTopologyOverride = topology != 0
+	if presetID.Valid {
+		v := presetID.String
+		p.TeamPresetID = &v
 	}
 	var err error
 	if p.CreatedAt, err = time.Parse(time.RFC3339Nano, created); err != nil {
@@ -363,24 +453,18 @@ func marshalOverrideArgs(args []string) (any, error) {
 	return s, nil
 }
 
-// prefixed qualifies a column list with a table alias, so templateCols can be
-// reused in a join without spelling every column out a second time.
-func prefixed(cols, alias string) string {
-	parts := strings.Split(cols, ",")
-	for i, c := range parts {
-		parts[i] = alias + "." + strings.TrimSpace(c)
-	}
-	return strings.Join(parts, ", ")
-}
-
 // SetIntegration changes how a project's finished work reaches its base branch.
-func (db *DB) SetIntegration(ctx context.Context, projectID, mode string) (*Project, error) {
+func (db *DB) SetIntegration(ctx context.Context, projectID, mode string, prDraft bool) (*Project, error) {
 	if !ValidIntegration(mode) {
 		return nil, invalid("unknown integration mode %q; use merge, branch or pr", mode)
 	}
-	if _, err := db.sql.ExecContext(ctx,
-		`UPDATE projects SET integration = ? WHERE id = ?`, mode, projectID); err != nil {
+	res, err := db.sql.ExecContext(ctx,
+		`UPDATE projects SET integration=?, pr_draft=? WHERE id=?`, mode, prDraft, projectID)
+	if err != nil {
 		return nil, fmt.Errorf("setting integration mode: %w", err)
+	}
+	if err := mustAffect(res, fmt.Sprintf("project %s", projectID)); err != nil {
+		return nil, err
 	}
 	return db.GetProject(ctx, projectID)
 }

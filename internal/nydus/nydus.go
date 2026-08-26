@@ -37,7 +37,7 @@ type Integrator interface {
 
 	// Publish pushes a branch at commit and opens a pull request, returning its
 	// URL. Used when a project integrates by PR rather than by merging.
-	Publish(ctx context.Context, repoPath, base, commit, title, body string) (string, error)
+	Publish(ctx context.Context, repoPath, base, commit, title, body string, draft bool) (string, error)
 
 	// Landed reports whether an integration that may have been interrupted
 	// actually completed: the commit already contained in the base branch, or
@@ -494,7 +494,7 @@ func (n *Nydus) complete(ctx context.Context, projectID string, sender store.Res
 			// account of what was done and what was checked, written for
 			// whoever reads next.
 			url, err := n.integrator.Publish(ctx, project.Path, project.BaseBranch,
-				req.Commit, task.Name, req.Body)
+				req.Commit, task.Name, req.Body, project.PRDraft)
 			if err != nil {
 				return nil, fmt.Errorf("opening a pull request for %s: %w", task.Name, err)
 			}
@@ -1526,7 +1526,7 @@ func (n *Nydus) landApproved(ctx context.Context, projectID, taskID, commit, bod
 	case store.IntegrateBranch:
 		return "", nil
 	case store.IntegratePR:
-		return n.integrator.Publish(ctx, project.Path, project.BaseBranch, commit, task.Name, body)
+		return n.integrator.Publish(ctx, project.Path, project.BaseBranch, commit, task.Name, body, project.PRDraft)
 	default:
 		if err := n.integrator.Merge(ctx, project.Path, project.BaseBranch, commit); err != nil {
 			return "", fmt.Errorf("merging %s into %s: %w", commit, project.BaseBranch, err)

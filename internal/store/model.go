@@ -51,8 +51,14 @@ type Project struct {
 	// or pr. See the constants in config.go for what each means and why this
 	// is a property of the project rather than of a role.
 	Integration  string     `json:"integration"`
+	PRDraft      bool       `json:"prDraft"`
 	CreatedAt    time.Time  `json:"createdAt"`
 	LastOpenedAt *time.Time `json:"lastOpenedAt,omitempty"`
+
+	// TeamPresetID is nil for a standalone project team. When set, unchanged
+	// topology and role fields continue to follow that reusable preset.
+	TeamPresetID         *string `json:"teamPresetId,omitempty"`
+	TeamTopologyOverride bool    `json:"teamTopologyOverride"`
 
 	// ChatHarness and ChatModel override what answers questions in Chat.
 	// Empty means inherit from the terminal role, which is the default.
@@ -65,22 +71,54 @@ type Project struct {
 	Icon string `json:"icon"`
 }
 
-// ProjectRole is one template's membership in one project's pipeline. Position
-// and enablement live here, and so do overrides — an override is a property of
-// the pairing, not a patch applied on the side.
-type ProjectRole struct {
-	TemplateID    string  `json:"templateId"`
-	Position      int     `json:"position"`
-	Enabled       bool    `json:"enabled"`
-	ModelOverride *string `json:"modelOverride,omitempty"`
+// RoleOverrides is the nullable layer shared by reusable-team roles and a
+// project's local role settings. Nil means inherit. Args deliberately keeps
+// nil distinct from an explicit empty slice.
+type RoleOverrides struct {
+	HarnessOverride        *string  `json:"harnessOverride,omitempty"`
+	ModelOverride          *string  `json:"modelOverride,omitempty"`
+	ArgsOverride           []string `json:"argsOverride"`
+	ReceiveOverride        *string  `json:"receiveOverride,omitempty"`
+	BatchMaxItemsOverride  *int     `json:"batchMaxItemsOverride,omitempty"`
+	BatchMaxAgeSecOverride *int     `json:"batchMaxAgeSecOverride,omitempty"`
+	PromptOverride         *string  `json:"promptOverride,omitempty"`
+	GateOverride           *string  `json:"gateOverride,omitempty"`
+}
 
-	// Deliberately not omitempty. The store keeps nil ("inherit the library's
-	// arguments") distinct from an empty slice ("this project runs this role
-	// with no arguments at all"), and omitempty erases exactly that
-	// distinction: an explicit empty override vanished from the JSON, came back
-	// as nil, and the next reorder wrote it to the database as "inherit" — so a
-	// role deliberately stripped of its arguments silently got them back.
-	ArgsOverride []string `json:"argsOverride"`
+// ProjectRole is one template in an optional project-local topology plus that
+// project's field overrides. Field overrides are stored separately from the
+// topology so changing a prompt does not freeze a preset's membership.
+type ProjectRole struct {
+	TemplateID string `json:"templateId"`
+	Position   int    `json:"position"`
+	Enabled    bool   `json:"enabled"`
+	RoleOverrides
+}
+
+// TeamPreset is a named, reusable pipeline. Its role settings are themselves
+// overrides over the role library, keeping the library as the common baseline.
+type TeamPreset struct {
+	ID        string           `json:"id"`
+	Name      string           `json:"name"`
+	Builtin   bool             `json:"builtin"`
+	Roles     []TeamPresetRole `json:"roles"`
+	CreatedAt time.Time        `json:"createdAt"`
+	UpdatedAt time.Time        `json:"updatedAt"`
+}
+
+type TeamPresetRole struct {
+	TemplateID string `json:"templateId"`
+	Position   int    `json:"position"`
+	Enabled    bool   `json:"enabled"`
+	RoleOverrides
+}
+
+// ProjectTeam is the resolved team plus enough source information for a client
+// to reset either topology or fields back to live preset defaults.
+type ProjectTeam struct {
+	PresetID         *string        `json:"presetId"`
+	TopologyOverride bool           `json:"topologyOverride"`
+	Roles            []ResolvedRole `json:"roles"`
 }
 
 // ResolvedRole is a template with its project overrides applied — what the
@@ -99,11 +137,7 @@ type ResolvedRole struct {
 	// and it guessed by sending the resolved model as an override and dropping
 	// the argument override entirely — so changing a role's position silently
 	// erased its arguments and pinned a model nobody had pinned.
-	ModelOverride *string `json:"modelOverride,omitempty"`
-	// Not omitempty, for the same reason as ProjectRole.ArgsOverride: this is
-	// what a team edit round-trips, and "no arguments" must not read as
-	// "inherit".
-	ArgsOverride []string `json:"argsOverride"`
+	RoleOverrides
 }
 
 // ValidationError marks a caller mistake — something a user can fix by

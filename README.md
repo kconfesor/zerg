@@ -7,8 +7,8 @@
   A Go daemon supervises a team of agent harnesses working in isolated git worktrees, routes work between them, and serves a Vue 3 cockpit.
 </p>
 
-**Everything is configured in the UI.** No config files, no prompt files, no presets to copy. Point
-it at a repo, pick your roles, start.
+**Everything is configured in the UI.** No config files or prompt files to copy. Define reusable
+teams once, point zerg at a repo, and override only what that project needs.
 
 Status: **running.** Coordination, harnesses, preflight, board and cockpit are implemented and have
 completed real tasks end to end. See [ARCHITECTURE.md](docs/ARCHITECTURE.md).
@@ -25,8 +25,8 @@ snapshotted into the worktrees and a later edit reached no one.
 
 So:
 
-- **configure in the UI** — roles, harness, model, prompts are database rows, not files; prompts are
-  composed fresh at every spawn, so an edit is live on restart
+- **configure in the UI** — roles, reusable teams, project overrides, harnesses, models and prompts
+  are database rows, not files; prompts are composed fresh at every spawn
 - **harnesses are adapters**, not a hardcoded switch — `claude` and `pi` first
 - **model pickers from the harness's own catalog**, so you stop typing model ids that 400
 - **preflight before spawn** — a stale CLI, a corrupt config, an unanswered trust dialog or a broken
@@ -56,16 +56,18 @@ the approval that performs the merge, and it shows `git diff base...sha` — eve
 land, across every role and every lap, not just the final commit.
 
 Per project you choose what that approval does: fast-forward the base branch, open a pull request
-with `gh`, or leave the work on its branch. It is a project setting rather than a role setting
-because only the last role integrates, and which role that is changes when you change the team.
+with `gh`, or leave the work on its branch. Pull requests can be opened ready for review or as drafts.
+It is a project setting rather than a role setting because only the last role integrates, and which
+role that is changes when you change the team.
 
 Finished cards can be put away one at a time; the switch to show them again is off by default.
 
 ## Defaults
 
 A library of eight role templates ships — planner, coder, reviewer, cleaner, architect, hardener,
-security, docs. A new project selects `coder` (sonnet) → `reviewer` (opus) and runs. They are
-ordinary rows: rename them, replace them, add four more. Nothing is special-cased.
+security, docs — plus a reusable **Default** team containing `coder` (sonnet) → `reviewer` (opus).
+Create more named teams for different kinds of work. Projects follow their selected team's live
+settings until a field or the pipeline is explicitly overridden for that repository.
 
 ## Layout
 
@@ -165,8 +167,8 @@ view that sets it.
 ### 4. Point it at a repository
 
 In the cockpit: **Projects → Add a project** (an absolute path, checked to exist and be a
-directory), then **Team** to choose roles, then **Readiness**. On the first Start, a directory that
-is not a repository yet gets `git init` and one commit, because a worktree needs history to branch
+directory), then **Team** to select or customize a reusable team, then **Readiness**. On the first
+Start, a directory that is not a repository yet gets `git init` and one commit, because a worktree needs history to branch
 from — that is the only commit zerg authors rather than an agent.
 
 Readiness is the step worth not skipping, though you cannot really skip it: **Start refuses while
