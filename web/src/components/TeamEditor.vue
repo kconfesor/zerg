@@ -68,6 +68,23 @@ const selectedRoleIds = computed(
 const projectHasLocalChanges = computed(
   () => props.projectTeam.topologyOverride || props.projectTeam.roles.some((role) => role.overridden),
 )
+
+/**
+ * Whether the team on screen is the one this project actually runs.
+ *
+ * The two middle columns render the *selected* preset, and the selection falls
+ * back to the first team alphabetically when a project has none — which is
+ * every project migrated from before teams existed. Editing there changes a
+ * shared team used by every other project that adopted it, while the board in
+ * front of you keeps running something else. Saying so is the difference
+ * between a list and a trap.
+ */
+const editingSomethingElse = computed(
+  () => !!activePreset.value && props.projectTeam.presetId !== activePreset.value.id,
+)
+const projectRunsItsOwn = computed(
+  () => !props.projectTeam.presetId && props.projectTeam.roles.length > 0,
+)
 const terminalTemplateId = computed(() => {
   const roles = activePreset.value?.roles ?? []
   for (let i = roles.length - 1; i >= 0; i--) {
@@ -186,10 +203,26 @@ function saveRoleSettings(overrides: RoleOverrides) {
 
 function useTeam(preset: TeamPreset) {
   selectedPresetId.value = preset.id
+  // The project's own overrides come with it.
+  //
+  // SetProjectTeam replaces the override layer wholesale — it deletes every
+  // project_role_overrides row and re-inserts from what it is sent — so an
+  // empty array here does not mean "leave them alone", it means "delete them".
+  // Pressing this on the team already in use is exactly when a project has
+  // overrides worth keeping, including every one migration 013 carried across
+  // from the old project_roles columns.
+  //
+  // Filtered to the preset's own roles: SetProjectTeam refuses an override for
+  // a role the preset does not contain, and adopting a team that drops a role
+  // legitimately drops that role's overrides with it.
+  const inPreset = new Set(preset.roles.map((r) => r.templateId))
+  const keep = props.projectTeam.roles
+    .filter((role) => inPreset.has(role.id) && hasRoleOverrides(role))
+    .map((role) => ({ templateId: role.id, enabled: role.enabled, ...cloneOverrides(role) }))
   emit('setTeam', {
     presetId: preset.id,
     topologyOverride: false,
-    roles: [],
+    roles: keep,
   })
 }
 
@@ -250,6 +283,32 @@ function cloneTeam() {
 </script>
 
 <template>
+  <!-- Which team the columns below are showing, when it is not the one this
+       project runs. Amber and worded: nothing is broken, but an edit here lands
+       somewhere other than where the reader is looking. -->
+  <p
+    v-if="editingSomethingElse"
+    class="mb-3 flex items-start gap-2.5 border border-[var(--status-warning)]/40 bg-[var(--status-warning)]/[0.07] px-3 py-2.5 text-[11px] leading-relaxed"
+  >
+    <span
+      class="text-background mt-px grid size-4 shrink-0 place-items-center rounded-full bg-[var(--status-warning)] text-[10px] font-bold"
+      aria-hidden="true"
+      >!</span
+    >
+    <span>
+      You are looking at <b class="font-semibold">{{ activePreset?.name }}</b
+      >,
+      <template v-if="projectRunsItsOwn">
+        which this project does not use — it runs a pipeline of its own. Changes here apply to every
+        project that has adopted {{ activePreset?.name }}, not to this one.
+      </template>
+      <template v-else>
+        which this project has not adopted. Changes here apply to every project that has.
+      </template>
+      Press <b class="font-semibold">Use this Team</b> to put this project on it.
+    </span>
+  </p>
+
   <div class="grid min-h-[34rem] border bg-card lg:grid-cols-[22rem_minmax(18rem,0.9fr)_minmax(20rem,1.1fr)]">
     <!-- Column 1: choose the reusable team being viewed. -->
     <section class="min-w-0 border-b lg:border-r lg:border-b-0">

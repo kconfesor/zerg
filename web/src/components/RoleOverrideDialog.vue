@@ -109,6 +109,19 @@ const overrideCount = computed(
       .filter(differs).length,
 )
 
+/**
+ * A number field that has been cleared is not an override, it is a blank.
+ *
+ * `v-model.number` returns the original string when the field is empty, because
+ * parseFloat('') is NaN — so clearing "Batch max items" put `''` where the
+ * daemon expects an int, and the PUT came back as an unreadable 400 naming
+ * neither the field nor the value. An empty field means "inherit", which is
+ * what the underlying value already is.
+ */
+function asCount(v: unknown, inherited: number): number {
+  return typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : inherited
+}
+
 function save() {
   const base = props.inherited
   const role = props.role
@@ -119,8 +132,8 @@ function save() {
     model: form.model,
     args: splitArgs(form.args),
     receive: form.receive,
-    batchMaxItems: form.batchMaxItems,
-    batchMaxAgeSec: form.batchMaxAgeSec,
+    batchMaxItems: asCount(form.batchMaxItems, base.batchMaxItems),
+    batchMaxAgeSec: asCount(form.batchMaxAgeSec, base.batchMaxAgeSec),
     prompt: form.prompt,
     gate: form.gate,
   }, base))

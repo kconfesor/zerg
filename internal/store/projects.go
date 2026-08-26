@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
@@ -340,6 +341,11 @@ func (db *DB) resolveLayeredTeam(ctx context.Context, projectID string) ([]Resol
 			var r ProjectRole
 			var enabled int
 			if err := rows.Scan(&r.TemplateID, &r.Position, &enabled); err != nil {
+				// Closed on the way out, as the two loops below already do.
+				// database/sql never reclaims a Rows that was neither drained
+				// nor closed, so eight of these exhaust the read pool and every
+				// later read in the daemon blocks for good.
+				rows.Close()
 				return nil, err
 			}
 			r.Enabled = enabled != 0
@@ -376,6 +382,11 @@ func (db *DB) resolveLayeredTeam(ctx context.Context, projectID string) ([]Resol
 	if err := rows.Close(); err != nil {
 		return nil, err
 	}
+	// Roles whose merged settings do not validate. Collected rather than
+	// returned as an error, so the team still resolves and the operator can see
+	// and fix the role that is wrong.
+	var invalidRoles []string
+
 	out := make([]ResolvedRole, 0, len(topology))
 	for i, membership := range topology {
 		t, err := db.GetTemplate(ctx, membership.TemplateID)
@@ -388,8 +399,22 @@ func (db *DB) resolveLayeredTeam(ctx context.Context, projectID string) ([]Resol
 		baseline := *t
 		o := projectOverrides[membership.TemplateID]
 		applyOverrides(t, o)
+
+		// Deliberately not validated here. Resolving is a read, and a read that
+		// can fail on data already stored takes the whole project down with it:
+		// ResolveTeam is on the board poll, preflight, overmind's spawn, nydus
+		// routing and chat, so one invalid combination made a project impossible
+		// to open *or* to repair. The combinations are checked where they are
+		// written — SetProjectTeam, and the preset and template editors — which
+		// is where a person can still do something about the answer.
+		//
+		// The cross product is the gap: a template edit that passes its own
+		// validation can still invalidate a role once a preset's overrides are
+		// layered on it, because neither write path sees both. Reported rather
+		// than papered over; the role arrives as stored and preflight is what
+		// refuses to spawn it.
 		if err := t.Validate(); err != nil {
-			return nil, err
+			invalidRoles = append(invalidRoles, fmt.Sprintf("%s: %v", t.Name, err))
 		}
 		r := ResolvedRole{RoleTemplate: *t, Position: i, Enabled: membership.Enabled, RoleOverrides: o}
 		r.Overridden = t.Harness != baseline.Harness || t.Model != baseline.Model || !slices.Equal(t.Args, baseline.Args) ||
@@ -402,6 +427,13 @@ func (db *DB) resolveLayeredTeam(ctx context.Context, projectID string) ([]Resol
 			out[i].Terminal = true
 			break
 		}
+	}
+	if len(invalidRoles) > 0 {
+		// Logged where it can be seen, not returned: the team resolves, and
+		// preflight is the gate that refuses to spawn a role configured like
+		// this. A read that fails leaves nothing to look at and nothing to fix.
+		slog.Warn("a role's merged settings do not validate",
+			"project", projectID, "roles", strings.Join(invalidRoles, "; "))
 	}
 	return out, nil
 }

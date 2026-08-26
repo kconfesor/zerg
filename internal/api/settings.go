@@ -222,7 +222,13 @@ func (s *Server) taskDetail(w http.ResponseWriter, r *http.Request) {
 
 type integrationRequest struct {
 	Integration string `json:"integration"`
-	PRDraft     bool   `json:"prDraft"`
+
+	// A pointer, so "not mentioned" and "set to false" stay different answers.
+	// As a plain bool, {"integration":"pr"} — the exact body this endpoint took
+	// before draft PRs existed, and what any script or cached bundle still
+	// sends — decoded as false and turned a project's draft setting off as a
+	// side effect of confirming its integration mode.
+	PRDraft *bool `json:"prDraft"`
 }
 
 // renameProject changes the label a project is shown under.
@@ -265,7 +271,19 @@ func (s *Server) setIntegration(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	project, err := s.db.SetIntegration(r.Context(), r.PathValue("id"), req.Integration, req.PRDraft)
+	// Absent leaves the stored value alone.
+	draft := false
+	if req.PRDraft != nil {
+		draft = *req.PRDraft
+	} else {
+		current, err := s.db.GetProject(r.Context(), r.PathValue("id"))
+		if err != nil {
+			s.fail(w, r, err)
+			return
+		}
+		draft = current.PRDraft
+	}
+	project, err := s.db.SetIntegration(r.Context(), r.PathValue("id"), req.Integration, draft)
 	if err != nil {
 		s.fail(w, r, err)
 		return

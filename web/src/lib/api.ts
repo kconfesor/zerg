@@ -307,6 +307,20 @@ export function projectIconURL(project: { id: string; icon?: string }): string {
   return `/api/projects/${project.id}/icon?p=${encodeURIComponent(project.icon ?? '')}`
 }
 
+/**
+ * A preset always arrives with a roles array.
+ *
+ * A team with no roles is an ordinary state — unchecking the last role produces
+ * it — and a Go nil slice marshals as `"roles": null`. The view dereferences
+ * roles in a dozen places, so one such preset anywhere in the list threw a
+ * TypeError and took the whole Team page down, for every project. The daemon no
+ * longer emits null; this is the second half of that, for a cached bundle
+ * talking to an older daemon or the reverse.
+ */
+function withRoles(p: TeamPreset): TeamPreset {
+  return { ...p, roles: p.roles ?? [] }
+}
+
 async function call<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`/api${path}`, {
     ...init,
@@ -333,11 +347,11 @@ export const api = {
   models: (harness: string) => call<Model[]>(`/harnesses/${harness}/models`),
 
   roles: () => call<RoleTemplate[]>('/roles'),
-  teamPresets: () => call<TeamPreset[]>('/team-presets'),
+  teamPresets: async () => (await call<TeamPreset[]>('/team-presets')).map(withRoles),
   createTeamPreset: (p: Pick<TeamPreset, 'name' | 'roles'>) =>
-    call<TeamPreset>('/team-presets', { method: 'POST', body: JSON.stringify(p) }),
+    call<TeamPreset>('/team-presets', { method: 'POST', body: JSON.stringify(p) }).then(withRoles),
   updateTeamPreset: (p: TeamPreset) =>
-    call<TeamPreset>(`/team-presets/${p.id}`, { method: 'PUT', body: JSON.stringify(p) }),
+    call<TeamPreset>(`/team-presets/${p.id}`, { method: 'PUT', body: JSON.stringify(p) }).then(withRoles),
   deleteTeamPreset: (id: string) =>
     call<void>(`/team-presets/${id}`, { method: 'DELETE' }),
   createRole: (r: Partial<RoleTemplate>) =>

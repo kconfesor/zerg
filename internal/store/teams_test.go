@@ -3,7 +3,9 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	_ "modernc.org/sqlite"
@@ -222,5 +224,133 @@ func TestMigrationFromV12PreservesEffectiveProjectTeam(t *testing.T) {
 	p, _ := db.GetProject(ctx, "p")
 	if !p.TeamTopologyOverride || p.TeamPresetID != nil {
 		t.Fatalf("legacy project source changed: %+v", p)
+	}
+}
+
+// A team with no roles is an ordinary state, and must not serialise as null.
+//
+// Unchecking the last role produces one. A nil slice marshals as
+// `"roles": null`, which the cockpit dereferenced in a dozen places — so one
+// empty team anywhere in the list threw and took the Team page down for every
+// project, with no way back except deleting the row by hand.
+func TestEmptyPresetRolesAreAnArrayNotNull(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	if err := Seed(ctx, db, "claude"); err != nil {
+		t.Fatal(err)
+	}
+
+	p, err := db.CreateTeamPreset(ctx, &TeamPreset{Name: "Empty"})
+	if err != nil {
+		t.Fatalf("CreateTeamPreset: %v", err)
+	}
+	got, err := db.GetTeamPreset(ctx, p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Roles == nil {
+		t.Fatal("an empty team came back with nil roles; it marshals as null")
+	}
+	raw, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"roles":[]`) {
+		t.Errorf("empty team serialised as %s", raw)
+	}
+}
+
+// Seeding must not reinstate a team the operator deliberately emptied.
+//
+// cmd/zerg/main.go states the invariant: seeding "never clobbers an edited
+// role ... configuration lives in the database precisely so that a restart does
+// not overwrite what the user changed." Keying the check on emptiness rather
+// than on having-been-seeded broke it for the built-in team.
+func TestSeedDoesNotRefillAnEmptiedDefaultTeam(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	if err := Seed(ctx, db, "claude"); err != nil {
+		t.Fatal(err)
+	}
+
+	def, err := db.GetTeamPreset(ctx, DefaultTeamPresetID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(def.Roles) == 0 {
+		t.Fatal("the built-in team seeded empty")
+	}
+
+	// The operator clears it.
+	def.Roles = nil
+	if err := db.UpdateTeamPreset(ctx, def); err != nil {
+		t.Fatalf("UpdateTeamPreset: %v", err)
+	}
+
+	// A restart.
+	if err := Seed(ctx, db, "claude"); err != nil {
+		t.Fatal(err)
+	}
+	after, err := db.GetTeamPreset(ctx, DefaultTeamPresetID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after.Roles) != 0 {
+		t.Errorf("restarting put %d roles back into a team that was emptied on purpose", len(after.Roles))
+	}
+}
+
+// Resolving a team is a read, and a read must not fail on data already stored.
+//
+// A template edit that passes its own validation can still invalidate a role
+// once a preset's overrides are layered on it — neither write path sees both
+// sides. Returning that as an error from ResolveTeam took out the board,
+// preflight, the spawn path, routing and chat at once, leaving the project
+// impossible to open or to repair.
+func TestResolveTeamSurvivesAnInvalidMergedRole(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	if err := Seed(ctx, db, "claude"); err != nil {
+		t.Fatal(err)
+	}
+	p, err := db.CreateProjectWithDefaultTeam(ctx, repoDir(t, "resolve"), "resolve", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	coder, err := db.GetTemplateByName(ctx, "coder")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A preset that batches, on a template that does not — so the batch bounds
+	// are never checked when the template itself is validated.
+	batch := ReceiveBatch
+	def, err := db.GetTeamPreset(ctx, DefaultTeamPresetID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range def.Roles {
+		if def.Roles[i].TemplateID == coder.ID {
+			def.Roles[i].ReceiveOverride = &batch
+		}
+	}
+	if err := db.UpdateTeamPreset(ctx, def); err != nil {
+		t.Fatal(err)
+	}
+
+	// The template edit that makes the merge invalid, and which its own
+	// validation accepts because the template receives one task at a time.
+	coder.Receive = ReceiveTask
+	coder.BatchMaxItems = 0
+	if err := db.UpdateTemplate(ctx, coder); err != nil {
+		t.Fatalf("the template edit was refused, so the case cannot arise: %v", err)
+	}
+
+	team, err := db.ResolveTeam(ctx, p.ID)
+	if err != nil {
+		t.Fatalf("ResolveTeam failed on stored data, taking the project with it: %v", err)
+	}
+	if len(team) == 0 {
+		t.Error("the team resolved to nothing")
 	}
 }
