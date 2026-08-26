@@ -27,10 +27,12 @@ short version of what is and is not defended.
 | | |
 |---|---|
 | [Set it up](#setting-up-on-a-new-machine) | toolchain, harness login, first project |
+| [Which harness, and which model where](#which-harness-and-which-model-where) | pi and claude, and why the reviewer should not be the coder |
 | [Reach it from a phone](#reaching-it-from-a-phone) | Tailscale, TLS, installing it as an app |
 | [ARCHITECTURE.md](docs/ARCHITECTURE.md) | how it works, and the failures behind each decision |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | building, testing, and the traps in this codebase |
 | [SECURITY.md](SECURITY.md) | threat model, and reporting a vulnerability |
+| [Roadmap](#roadmap) | what is next, what is later, what is undecided |
 
 ## Why this exists
 
@@ -149,6 +151,48 @@ project needs something different, **Clone** the team, change the clone, then as
 
 Deleting a role from the library takes it off every team that had it, so the confirmation names
 them first.
+
+## Which harness, and which model where
+
+Both harnesses are first-class and the adapter interface exists so neither is special. They are not
+the same tool, though, and the choice is worth making deliberately.
+
+**pi** is excellent: efficient, plain, and quick to get out of your way. It is the one I reach for
+by default, and it lets you run **OpenAI models on a subscription** rather than metered per token,
+which changes what a long pipeline costs to run.
+
+**claude** is the popular one and the original of this generation of coding agents. It is
+well-understood, well-behaved in a worktree, and the harness most people already have logged in.
+
+### Do not review your own work
+
+**Put a different model, and ideally a different provider, on the reviewer than on the coder.**
+This is the single setting that most changes what comes out of a pipeline.
+
+A model reviewing its own output agrees with itself. It made those choices twenty minutes ago for
+reasons it still finds persuasive, and the things it did not think to check are exactly the things
+it will not think to check again. A different model has different blind spots, so it reads the diff
+as a stranger would and asks the questions the author never asked. In practice a second opinion
+from another family finds real problems: an unhandled boundary, a test that asserts the
+implementation rather than the behaviour, an error path nobody ran.
+
+The point is not that the reviewer is smarter. It is that the work reaches you in better shape,
+because it has already survived somebody who was not trying to be right about it.
+
+The **Default** team is set up this way, with `coder` on sonnet and `reviewer` on opus. Mixing
+providers goes further: `coder` on claude and `reviewer` on pi with an OpenAI model, or the reverse.
+Set it per role in **Team**, and per project if one repository wants something the others do not.
+
+### Read the review
+
+Gate the last role and read what it says before approving. The gated approval shows
+`git diff base...sha`, which is everything the task would land across every role and every lap, not
+just the final commit. That is the moment to catch a change that is technically correct and not what
+you wanted, and it costs a minute.
+
+Reviewing is also the cheapest place to notice that a brief was wrong. A rejection sends the work
+back to the role that produced it with your note attached, which is a much shorter loop than
+discovering it a week later in the base branch.
 
 ## Layout
 
@@ -409,6 +453,40 @@ Neither spends a token. The coordination layer is testable without one, and is t
 assert an effect check the system that was supposed to change, meaning git or the database, rather than
 reading back a field the code set. [§6.1](docs/ARCHITECTURE.md#61-what-the-first-real-run-broke) is what
 happens when they don't.
+
+## Roadmap
+
+Rough order, and none of it is promised. Anything already designed has a section in
+[ARCHITECTURE.md](docs/ARCHITECTURE.md) saying what it will do and why.
+
+**Next**
+
+- **Move a card by hand.** Send a stuck or misrouted card to any role on the team, which is the
+  missing operator control when a role dies holding work or a pipeline routes it somewhere silly.
+- **Run unattended.** `zerg up` is foreground-only, so closing the terminal stops everything. A
+  proper detach, plus launchd and systemd units worth copying.
+- **History** ([§12.3](docs/ARCHITECTURE.md#123-what-the-history-view-answers-planned)). Spend over
+  time stacked by role, cost per task ranked, wall time against active time, cache rate as a line.
+  The per-turn rows already exist; the view and the rollups do not.
+
+**Later**
+
+- **Artifacts** ([§13](docs/ARCHITECTURE.md#13-artifacts-planned)). A screenshot, a chart, a report
+  or a running dev server produced by an agent, announced on the event stream and fetched over
+  plain HTTP rather than stuffed through the socket.
+- **Terminal takeover** ([§10.1](docs/ARCHITECTURE.md#101-watching-an-agent-work)). Attach to a
+  role's own TUI for the cases where you want to drive it yourself. Needs a pty and is not started.
+- **More harnesses.** The adapter interface has two implementations, which is the minimum number
+  that proves it is an interface. A third would test that claim properly.
+
+**Being considered**
+
+- **Authentication**, so the daemon can be exposed somewhere other than a tailnet. Deliberately
+  absent today ([SECURITY.md](SECURITY.md)), and adding it badly is worse than not having it.
+- **Multiple machines.** One daemon per machine today. Whether a second machine is a second cockpit
+  or one cockpit over two daemons is an open question.
+
+If you want something here, or something not here, [say so](https://github.com/kconfesor/zerg/issues).
 
 ## Scope
 
