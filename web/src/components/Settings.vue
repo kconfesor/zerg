@@ -95,6 +95,8 @@ const props = defineProps<{
   readiness?: Readiness | null
   /** Which tab to open on. A refused Start sets this to "readiness". */
   openTab?: string
+  /** Whether a readiness probe is in flight. */
+  checking?: boolean
 }>()
 const emit = defineEmits<{ recheck: [] }>()
 
@@ -312,12 +314,32 @@ const loopback = computed(() => {
             cannot work must not reach a running board, so Start refuses while any enabled role
             is blocked — and lands you here, with the report.
           </p>
-          <Button size="sm" variant="outline" class="shrink-0" @click="emit('recheck')">
-            Re-check
+          <Button
+            size="sm"
+            variant="outline"
+            class="shrink-0"
+            :disabled="checking"
+            @click="emit('recheck')"
+          >
+            <span
+              v-if="checking"
+              class="loading-pulse bg-muted-foreground mr-1.5 size-1.5 shrink-0 rounded-full"
+              aria-hidden="true"
+            />
+            {{ checking ? 'Checking…' : 'Re-check' }}
           </Button>
         </div>
-        <ReadinessPanel :readiness="readiness ?? null" />
-        <p v-if="!readiness" class="text-muted-foreground py-10 text-center text-xs">
+        <div :class="checking && 'pointer-events-none opacity-50 transition-opacity'">
+          <ReadinessPanel :readiness="readiness ?? null" />
+        </div>
+        <p
+          v-if="checking && !readiness"
+          class="text-muted-foreground py-10 text-center text-xs"
+          role="status"
+        >
+          Probing every enabled role — a version, a config parse, a model catalogue…
+        </p>
+        <p v-else-if="!readiness" class="text-muted-foreground py-10 text-center text-xs">
           Not checked yet. Press Re-check to probe every enabled role.
         </p>
       </TabsContent>

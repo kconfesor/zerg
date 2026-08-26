@@ -474,14 +474,22 @@ async function addProject() {
   }
 }
 
+/**
+ * Probing every enabled role runs real checks against real CLIs — a version, a
+ * config parse, a model catalogue — so it takes seconds, not milliseconds, and
+ * the button has to say it is working. It looked ignored until the answer
+ * arrived.
+ */
 async function checkReadiness() {
   if (!current.value) return
-  try {
-    readiness.value = await api.readiness(current.value.id)
-    showReadiness()
-  } catch (err) {
-    fail(err)
-  }
+  await busy.run('readiness', async () => {
+    try {
+      readiness.value = await api.readiness(current.value!.id)
+      showReadiness()
+    } catch (err) {
+      fail(err)
+    }
+  })
 }
 
 async function start() {
@@ -834,6 +842,7 @@ watch(current, () => (banner.value = null))
               <Settings
                 :readiness="readiness"
                 :open-tab="settingsTab"
+                :checking="busy.is('readiness')"
                 @recheck="checkReadiness"
               />
             </div>
