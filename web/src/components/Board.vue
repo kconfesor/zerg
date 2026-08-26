@@ -77,6 +77,10 @@ const byLane = computed(() => {
          sm rather than a width: flex-1 overrides width but respects basis, so
          without it lanes would silently share a phone row — tolerable at three
          roles, 45px each at eight.
+         The width is measured, not chosen: a card's tightest row — "done 6h
+         ago · 3.3M · $1.61" — needs 147px, and the card adds ~20px of padding.
+         192 leaves that a little slack; much below 176 and the line wraps and
+         every card grows a row.
          nowrap past sm is what makes the scroll box above do its job. Wrapping
          there instead meant a team of eight broke into two and three rows of
          lanes, so the pipeline no longer read left to right and a card's lane
@@ -86,7 +90,7 @@ const byLane = computed(() => {
       <section
         v-for="(lane, i) in lanes"
         :key="lane"
-        class="rise flex min-w-0 flex-1 basis-full flex-col sm:min-w-56 sm:max-w-96 sm:basis-60 sm:shrink-0"
+        class="rise flex min-w-0 flex-1 basis-full flex-col sm:min-w-44 sm:max-w-96 sm:basis-48 sm:shrink-0"
         :style="{ animationDelay: `${i * 40}ms` }"
       >
         <!-- A lane header that reads as a column, not floating text. -->
