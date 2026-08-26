@@ -154,12 +154,13 @@ async function stopTask(task: Task) {
 async function removeTask(task: Task) {
   await busy.run(`task:${task.id}`, async () => {
     try {
+      dialogError.value = ''
       await api.deleteTask(task.id)
       confirmDeleteTask.value = null
       if (activityTask.value?.id === task.id) activityTask.value = null
       await refresh()
     } catch (err) {
-      fail(err)
+      failIn(err)
     }
   })
 }
@@ -302,6 +303,25 @@ function schedulePoll(delay: number) {
 
 function fail(err: unknown) {
   banner.value = { tone: 'bad', text: err instanceof Error ? err.message : String(err) }
+}
+
+/**
+ * An error from a button inside a dialog belongs inside that dialog.
+ *
+ * The banner renders in the page behind the panel, so a failed Approve wrote
+ * its explanation somewhere the person pressing Approve could not see. On a
+ * phone the dialog is the whole screen and the banner is not merely behind it
+ * but completely covered — which is how a message naming the problem *and* the
+ * two ways to fix it arrived as nothing at all, six presses in a row.
+ *
+ * Kept in the banner too: the dialog closes, and the reason should not vanish
+ * with it.
+ */
+const dialogError = ref('')
+
+function failIn(err: unknown) {
+  dialogError.value = err instanceof Error ? err.message : String(err)
+  fail(err)
 }
 
 /**
@@ -503,13 +523,14 @@ async function createTask() {
   if (!project || !taskName.value.trim()) return
   await busy.run('newTask', async () => {
     try {
+      dialogError.value = ''
       await api.newTask(project.id, taskName.value.trim(), taskBody.value)
       taskName.value = ''
       taskBody.value = ''
       composing.value = false
       await refresh()
     } catch (err) {
-      fail(err)
+      failIn(err)
     }
   })
 }
@@ -561,29 +582,32 @@ async function deletePreset(id: string) {
 const act = {
   approve: (id: string) =>
     busy.run(`decide:${id}`, async () => {
+      dialogError.value = ''
       try {
         await api.approve(id)
       } catch (err) {
-        fail(err)
+        failIn(err)
       }
       await refresh()
     }),
   reject: (id: string, note: string) =>
     busy.run(`decide:${id}`, async () => {
+      dialogError.value = ''
       try {
         await api.reject(id, note)
       } catch (err) {
-        fail(err)
+        failIn(err)
       }
       await refresh()
     }),
   answer: (id: string, answer: string) => {
     if (!answer.trim()) return
     return busy.run(`answer:${id}`, async () => {
+      dialogError.value = ''
       try {
         await api.answer(id, answer)
       } catch (err) {
-        fail(err)
+        failIn(err)
       }
       await refresh()
     })
@@ -886,6 +910,13 @@ watch(current, () => (banner.value = null))
             repository.
           </DialogDescription>
         </DialogHeader>
+        <p
+          v-if="dialogError"
+          class="bg-destructive/10 text-destructive px-3 py-2 text-xs"
+          role="alert"
+        >
+          {{ dialogError }}
+        </p>
         <DialogFooter>
           <Button variant="outline" @click="confirmDeleteTask = null">Cancel</Button>
           <Button
@@ -922,7 +953,7 @@ watch(current, () => (banner.value = null))
       </DialogContent>
     </Dialog>
 
-    <Dialog v-model:open="attentionOpen">
+    <Dialog v-model:open="attentionOpen" @update:open="(v) => v && (dialogError = '')">
       <!-- Wider than the other dialogs: a spec is the widest thing this app
            shows, and its behaviour tables are the point of reading it.
            min-w-0 because DialogContent is a grid, and a grid child defaults to
@@ -937,6 +968,14 @@ watch(current, () => (banner.value = null))
           </DialogDescription>
         </DialogHeader>
         <DialogBody>
+          <!-- Where the person who pressed the button is looking. -->
+          <p
+            v-if="dialogError"
+            class="bg-destructive/10 text-destructive mb-3 px-3 py-2 text-xs"
+            role="alert"
+          >
+            {{ dialogError }}
+          </p>
           <Attention
             :attention="attention"
             :busy="busy.is"
@@ -950,7 +989,7 @@ watch(current, () => (banner.value = null))
 
     <TaskDetail :task="openTask" @close="openTask = null" />
 
-    <Dialog v-model:open="composing">
+    <Dialog v-model:open="composing" @update:open="(v) => v && (dialogError = '')">
       <DialogContent class="gap-0 overflow-hidden p-0 sm:max-w-lg">
         <DialogHeader class="hairline-b shrink-0 px-5 py-4 pr-12">
           <DialogTitle>New task</DialogTitle>
@@ -961,6 +1000,13 @@ watch(current, () => (banner.value = null))
         </DialogHeader>
 
         <DialogBody class="flex flex-col gap-3">
+          <p
+            v-if="dialogError"
+            class="bg-destructive/10 text-destructive px-3 py-2 text-xs"
+            role="alert"
+          >
+            {{ dialogError }}
+          </p>
           <div class="flex flex-col gap-1.5">
             <Label :for="taskNameId">Name</Label>
             <Input :id="taskNameId" v-model="taskName" autofocus />

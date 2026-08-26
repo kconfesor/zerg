@@ -44,15 +44,19 @@ func (Git) Merge(ctx context.Context, repoPath, baseBranch, commit string) error
 	if err != nil {
 		return fmt.Errorf("reading the checked-out branch: %w", err)
 	}
+	// Also the operator's to fix, and also stated: check out the base branch.
 	if current != baseBranch {
-		return fmt.Errorf("%s has %s checked out, not the base branch %s; integration would land on the wrong branch",
+		return invalid("%s has %s checked out, not the base branch %s; integration would land on the wrong branch",
 			repoPath, current, baseBranch)
 	}
 
 	if _, err := runGit(ctx, repoPath, "merge", "--ff-only", commit); err != nil {
 		// Either the base moved independently or the tree is dirty. Both are
-		// human decisions: silently picking a side is how work disappears.
-		return fmt.Errorf("cannot fast-forward %s to %s: %w", baseBranch, short(commit), err)
+		// human decisions: silently picking a side is how work disappears — and
+		// both are decisions the operator can only take if they are told, so
+		// git's own reason travels with it rather than becoming "internal
+		// error".
+		return invalid("cannot fast-forward %s to %s: %v", baseBranch, short(commit), err)
 	}
 	return nil
 }
@@ -179,13 +183,18 @@ const TaskBranchPrefix = "zerg/"
 // credentials, already knows which remote is which, and adding an HTTP client
 // and a token store here would duplicate all of it worse.
 func (Git) Publish(ctx context.Context, repoPath, base, commit, title, body string, draft bool) (string, error) {
+	// Both of these are the operator's to fix, and both say how — so they are
+	// marked as caller errors and reach the cockpit as their own text. Left as
+	// plain errors they became a 500 rendered as "internal error", which hid
+	// the sentence that says what to do. Observed on a repository with no
+	// remote: Approve failed six times in a row and said nothing either time.
 	if _, err := exec.LookPath("gh"); err != nil {
-		return "", fmt.Errorf(
+		return "", invalid(
 			"opening a pull request needs the gh CLI, which is not installed (brew install gh)")
 	}
 	remote, err := runGit(ctx, repoPath, "remote")
 	if err != nil || strings.TrimSpace(remote) == "" {
-		return "", fmt.Errorf(
+		return "", invalid(
 			"this repository has no remote, so there is nowhere to open a pull request; " +
 				"add one, or set integration to merge or branch")
 	}

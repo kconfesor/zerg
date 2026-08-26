@@ -3,15 +3,15 @@ package nydus
 import (
 	"context"
 	"errors"
+	"github.com/kconfesor/zerg/internal/hatchery"
+	"github.com/kconfesor/zerg/internal/store"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/kconfesor/zerg/internal/hatchery"
-	"github.com/kconfesor/zerg/internal/store"
 )
 
 // fakeIntegrator records merges so a test can assert integration happened
@@ -1313,5 +1313,49 @@ func TestTaskAttributionUsesTheLeaseHeldAtTheTime(t *testing.T) {
 	}
 	if now == nil || *now != second.ID {
 		t.Errorf("the role's current card is %v, want %s", now, second.ID)
+	}
+}
+
+// An integration that cannot run must say why, in the cockpit.
+//
+// These are the operator's to fix and each states how — no remote, no gh, the
+// wrong branch checked out, a base that has moved. Left as plain errors they
+// reach the API as a 500 and render as "internal error", so the sentence that
+// says what to do never arrives. Observed on a repository with no remote:
+// Approve failed six times in a row and said nothing either time.
+func TestIntegrationFailuresAreReportedToTheOperator(t *testing.T) {
+	dir := t.TempDir()
+	ctx := context.Background()
+	git := Git{}
+
+	// Not a repository at all, so the branch check fails first.
+	err := git.Merge(ctx, dir, "main", "deadbeef")
+	if err == nil {
+		t.Fatal("merging into a non-repository reported success")
+	}
+
+	// A repository with no remote cannot open a pull request, and says so.
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.CommandContext(ctx, "git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, out)
+		}
+	}
+	run("init", "-q", "-b", "main")
+	run("-c", "user.email=t@example.com", "-c", "user.name=T", "commit", "-q", "--allow-empty", "-m", "init")
+
+	_, err = git.Publish(ctx, dir, "main", "HEAD", "A task", "body", false)
+	if err == nil {
+		t.Fatal("publishing with no remote reported success")
+	}
+	var v interface{ Validation() }
+	if !errors.As(err, &v) {
+		t.Errorf("%q is not marked as the caller's to fix, so the API hides it behind \"internal error\"", err)
+	}
+	if !strings.Contains(err.Error(), "remote") {
+		t.Errorf("the message does not name the problem: %v", err)
 	}
 }
