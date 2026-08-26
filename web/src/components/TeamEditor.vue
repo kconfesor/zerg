@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { CircleCheck, Copy, Pencil, SlidersHorizontal, Star, Trash2 } from '@lucide/vue'
+import { CircleCheck, Copy, Pencil, SlidersHorizontal, Trash2 } from '@lucide/vue'
 import type {
   Model,
   ProjectTeam,
@@ -437,24 +437,19 @@ function cloneTeam() {
           <div class="flex items-start gap-1 px-3 pt-2.5">
             <button
               type="button"
-              class="focus-visible:outline-ring flex min-w-0 flex-1 items-start gap-2 py-0.5 text-left focus-visible:outline-2"
+              class="focus-visible:outline-ring min-w-0 flex-1 py-0.5 text-left focus-visible:outline-2"
               @click="selectedPresetId = preset.id"
             >
-              <Star
-                v-if="projectTeam.presetId === preset.id"
-                :size="15"
-                class="text-primary fill-primary mt-px shrink-0"
-                :aria-label="`${preset.name} is in use`"
-              />
-              <span v-else class="mt-px size-[15px] shrink-0" aria-hidden="true" />
-              <span class="min-w-0 flex-1">
-                <span class="block truncate text-xs font-medium">{{ preset.name }}</span>
-                <span class="text-muted-foreground mt-0.5 block text-[10px]">
-                  {{ preset.roles.length }} role{{ preset.roles.length === 1 ? '' : 's' }}
-                  <template v-if="projectTeam.presetId === preset.id">
-                    · in use{{ projectHasLocalChanges ? ', with local changes' : '' }}
-                  </template>
-                </span>
+              <span class="block truncate text-xs font-medium">{{ preset.name }}</span>
+              <!-- Which team is in use is said in words here, and by the
+                   absence of the adopt control on the right. A star as well was
+                   a third way of saying it, in a column whose whole job is a
+                   short list of names. -->
+              <span class="text-muted-foreground mt-0.5 block text-[10px]">
+                {{ preset.roles.length }} role{{ preset.roles.length === 1 ? '' : 's' }}
+                <template v-if="projectTeam.presetId === preset.id">
+                  · in use{{ projectHasLocalChanges ? ', with local changes' : '' }}
+                </template>
               </span>
             </button>
 

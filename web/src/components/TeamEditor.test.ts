@@ -85,7 +85,9 @@ describe('TeamEditor', () => {
     const headings = w.findAll('h2').map((heading) => heading.text())
     expect(headings).toEqual(['Teams', 'Roles', 'Pipeline'])
     expect(w.text()).toContain('Default')
-    expect(w.find('[aria-label="Default is in use"]').exists()).toBe(true)
+    // Which team is in use is said in words, not with a marker beside the name.
+    expect(w.text()).toContain('in use')
+    expect(w.findAll('[aria-label="Use this team"]')).toHaveLength(1)
     expect(w.text()).toContain('terminal')
   })
 
