@@ -333,7 +333,19 @@ func (s *Server) approvalDiff(w http.ResponseWriter, r *http.Request) {
 		files, err = hat.ChangedFiles(r.Context(), approval.Commit, maxFile)
 	}
 	if err != nil {
-		s.fail(w, r, err)
+		// A commit git cannot resolve is a fact about the repository, not a
+		// fault in the daemon, and it happens: a worktree pruned by hand, a
+		// branch deleted, a clone that never had the role's branch. Rendered as
+		// a 500 it reached the operator as "internal error" over the approval
+		// they were being asked to decide, which says nothing about what to do.
+		sha := approval.Commit
+		if len(sha) > 8 {
+			sha = sha[:8]
+		}
+		badRequest(w, fmt.Sprintf(
+			"cannot read what %s changed: git could not resolve it in %s. The role's branch may have been deleted, or its worktree pruned.",
+			sha, project.Path))
+		s.log.Warn("reading an approval's diff", "approval", approval.ID, "commit", approval.Commit, "err", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
