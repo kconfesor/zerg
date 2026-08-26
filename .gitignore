@@ -15,3 +15,4 @@ web/node_modules/
 # directory to exist at compile time, so ignoring it would break `go build`,
 # `go test` and `go vet` on a fresh clone. The built cockpit is committed;
 # ./build.sh regenerates it.
+.pi/todos
