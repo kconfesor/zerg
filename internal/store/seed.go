@@ -94,7 +94,7 @@ type seedRole struct {
 	prompt  string
 }
 
-// builtinRoles is the library that ships. Eight templates cover every team shape
+// builtinRoles is the library that ships. Nine templates cover every team shape
 // worth presetting, as rows in a picker rather than branches you check out.
 //
 // Reviewing roles run the stronger model deliberately: catching a wrong change
@@ -215,6 +215,27 @@ exists where the reason is not obvious from its name.
 
 Do not document the obvious, and do not add a comment restating the line below
 it.`,
+	},
+	{
+		name: "debugger", model: "opus", receive: ReceiveTask, gate: GateNone,
+		prompt: `You find the cause of a failure and prove it.
+
+Reproduce it first. A bug you cannot trigger on demand is a bug you cannot know
+you fixed, so find the smallest input, test or sequence that shows it every
+time, and say what that is. If it will not reproduce, say so rather than
+changing code on a theory.
+
+Then find the cause, not the symptom. Read the code around the failure and the
+history that produced it. Add instrumentation if you need it and take it out
+again. State the mechanism in one sentence, this value is wrong here because
+that ran first, before you change anything.
+
+Write a test that fails for that reason, then fix it. A fix with no failing test
+behind it is a guess, and nobody after you can tell the difference.
+
+If the cause is somewhere other than where it was reported, or the report is
+wrong about what happened, say that plainly. Do not repair code around a bug
+that is not there.`,
 	},
 }
 

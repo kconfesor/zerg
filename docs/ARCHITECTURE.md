@@ -99,10 +99,16 @@ override continue following their reusable-team defaults. A standalone custom te
 **Runtime**, per project: tasks, messages, leases, events, cost. On disk a project holds only git
 artifacts, `<repo>/.worktrees/<role>`.
 
-Each layer is edited in exactly one place, which is the point of splitting them: the library in
+Each layer is edited in one place, which is the point of splitting them: the library in
 **Settings → Roles**, the reusable team and its per-team values in **Team**, and the project's own
 values in the same view once that project is on the team. An edit's blast radius is therefore
-readable off the screen you made it on: global, one team, or one repository.
+readable off the control you used: global, one team, or one repository.
+
+The one exception is the project's *pipeline*, which is also editable from the rail beside the board
+(§10). Dropping a role for one repository is decided while looking at that repository's work, and the
+Team screen edits the shared team, so doing it there would take the role away from every project on
+that team. The rail writes the project layer instead: the team stays selected and its per-role values
+keep applying, and what changes is which roles this project runs and in what order.
 
 Every nullable override has one rule: null means inherit, while a value means local. For arguments,
 `[]` is a value, meaning explicitly run with no role arguments, and remains distinct from null.
@@ -190,7 +196,7 @@ sentences makes agents spend output tokens on telemetry.
 
 ### 4.5 The built-in library
 
-Eight templates ship, covering every team shape worth presetting, as rows in a picker rather than
+Nine templates ship, covering every team shape worth presetting, as rows in a picker rather than
 as branches of the orchestrator you have to check out to change your team.
 
 | Template | Model | Receive | Gate | Does |
@@ -198,6 +204,7 @@ as branches of the orchestrator you have to check out to change your team.
 | `planner` | opus | task | **approval** | turns intent into a written spec, then waits for a human |
 | `coder` | sonnet | task | none | implements the spec, writes tests, commits |
 | `reviewer` | opus | batch | none | reviews the change against the spec, runs tests, reports or hands back |
+| `debugger` | opus | task | none | reproduces a failure, finds the cause, fixes it behind a failing test |
 | `cleaner` | sonnet | batch | none | behavior-preserving cleanup, duplication, dead code |
 | `architect` | opus | batch | none | module boundaries, dependency direction, structural drift |
 | `hardener` | sonnet | batch | none | edge cases, error paths, mutation-style probing |
@@ -675,6 +682,12 @@ plain `//go:embed dist` silently skips Vite's `.vite/` manifest directory.
   Team** separately assigns it to the current project, so browsing never silently changes what runs.
   A banner names the mismatch when the team on screen is not the one this project is on, and says
   instead that edits apply immediately when agents are running.
+- **The rail's pipeline editor**: the same list that shows what each role is doing turns into the
+  project's own pipeline, to add a role, turn one off, reorder it, or remove one that the team does
+  not have. It writes the project layer, never the team, and says so: a project that has diverged
+  reads *own pipeline* under the team's name with a one-press way back to following it. The last
+  enabled role will not turn off, since a team with nothing enabled cannot start and has nowhere to
+  route a task.
 - **Role editor**: every field in §4.2, for one role within whichever layer opened it: the team
   editor writes team-level values, a project's own team writes project-level ones. Each field states
   what it inherits and offers **Use default** to drop back to it, and the dialog counts how many

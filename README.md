@@ -79,8 +79,10 @@ Subscription values are labelled as estimates.
 
 ![Spend by role and provider](docs/screenshots/05-spend.png)
 
-**Team and settings.** The team editor controls pipeline order and role settings. The role library
-holds reusable defaults for harnesses, models, prompts, and gates.
+**Team and settings.** The team editor controls pipeline order and role settings for every project on
+that team. For one project only, the rail beside the board edits the same pipeline: add a role, turn
+one off, or reorder it without leaving the board. The role library holds reusable defaults for
+harnesses, models, prompts, and gates.
 
 ![The team editor](docs/screenshots/04-team.png)
 
@@ -100,8 +102,8 @@ holds reusable defaults for harnesses, models, prompts, and gates.
 
 A **role** is one agent process with its own harness, model, prompt, inbox, and git worktree. A
 **team** is an ordered pipeline of roles. The built-in Default team runs a coder followed by a
-reviewer, and the role library includes planner, coder, reviewer, cleaner, architect, hardener,
-security, and docs templates.
+reviewer, and the role library includes planner, coder, reviewer, debugger, cleaner, architect,
+hardener, security, and docs templates.
 
 Work enters at the first enabled role. Each role commits its changes and hands the commit SHA to the
 next role, so downstream work starts from code rather than a description. The final role integrates
