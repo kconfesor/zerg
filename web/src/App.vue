@@ -17,6 +17,7 @@ import {
   type Task,
   type Workspace,
 } from '@/lib/api'
+import { followPreset } from '@/lib/team'
 import Attention from '@/components/Attention.vue'
 import Activity from '@/components/Activity.vue'
 import Spend from '@/components/Spend.vue'
@@ -240,7 +241,7 @@ let usageTicks = 0
 
 const library = ref<RoleTemplate[]>([])
 const presets = ref<TeamPreset[]>([])
-const projectTeam = ref<ProjectTeam>({ presetId: null, topologyOverride: true, roles: [] })
+const projectTeam = ref<ProjectTeam>({ presetId: null, roles: [] })
 const team = ref<ResolvedRole[]>([])
 const tasks = ref<Task[]>([])
 const attention = ref<AttentionData | null>(null)
@@ -262,11 +263,11 @@ function showReadiness() {
 const status = ref<SwarmStatus>({ running: false, roles: [] })
 const harnesses = ref<string[]>([])
 const models = ref<Record<string, Model[]>>({})
-const currentTeamName = computed(() => {
-  const id = projectTeam.value.presetId
-  if (!id) return projectTeam.value.topologyOverride ? 'Custom team' : ''
-  return presets.value.find((preset) => preset.id === id)?.name ?? ''
-})
+/** The team this project follows, when it follows one. */
+const currentPreset = computed(
+  () => presets.value.find((preset) => preset.id === projectTeam.value.presetId) ?? null,
+)
+const currentTeamName = computed(() => currentPreset.value?.name ?? '')
 
 /**
  * `transient` marks a message the background poller raised rather than one a
@@ -355,10 +356,11 @@ function pollerLostContact() {
 
 async function loadGlobals() {
   try {
-    ;[projects.value, library.value, presets.value, harnesses.value] = await Promise.all([
+    // Teams are not global any more: one can belong to a project, so the list
+    // is fetched with the project's own refresh rather than once at startup.
+    ;[projects.value, library.value, harnesses.value] = await Promise.all([
       api.projects(),
       api.roles(),
-      api.teamPresets(),
       api.harnesses(),
     ])
     for (const h of harnesses.value) models.value[h] = await api.models(h).catch(() => [])
@@ -387,17 +389,19 @@ async function refresh() {
   if (!project) return
   const current_ = newestRefresh()
   try {
-    const [t, tk, at, st] = await Promise.all([
+    const [t, tk, at, st, ps] = await Promise.all([
       api.team(project.id),
       api.tasks(project.id),
       api.attention(project.id),
       api.status(project.id),
+      api.teamPresets(project.id),
     ])
     // A newer refresh has been asked for; this data is already history.
     if (!current_()) return
 
     projectTeam.value = t
     team.value = t.roles
+    presets.value = ps
     tasks.value = tk
     attention.value = at
     status.value = st
@@ -584,9 +588,9 @@ async function savePreset(preset: TeamPreset) {
   }
 }
 
-async function createPreset(name: string, roles: TeamPresetRole[]) {
+async function createPreset(name: string, roles: TeamPresetRole[], projectId: string | null) {
   try {
-    const created = await api.createTeamPreset({ name, roles })
+    const created = await api.createTeamPreset({ name, roles, projectId })
     presets.value = [...presets.value, created].sort((a, b) => a.name.localeCompare(b.name))
   } catch (err) {
     fail(err)
@@ -595,6 +599,36 @@ async function createPreset(name: string, roles: TeamPresetRole[]) {
 
 /** Why the last team action was refused. Read by the dialog that asked. */
 const teamError = ref('')
+
+/** The same, for the rail's copy-this-team dialog. Separate because the two
+ *  dialogs are on different screens and a stale message in one of them is a
+ *  refusal attached to something nobody pressed. */
+const forkError = ref('')
+
+/**
+ * A shared team edited from the rail becomes this project's own team.
+ *
+ * Created and adopted in that order, and the project keeps whatever per-role
+ * overrides it had for roles the new team still has: the copy is meant to be
+ * what was running a moment ago, plus the one change that prompted it.
+ */
+async function forkTeam(name: string, roles: TeamPresetRole[]) {
+  if (!current.value) return
+  forkError.value = ''
+  try {
+    const created = await api.createTeamPreset({ name, roles, projectId: current.value.id })
+    presets.value = [...presets.value, created]
+    projectTeam.value = await api.setTeam(current.value.id, followPreset(created, team.value))
+    team.value = projectTeam.value.roles
+    const refreshed = await api.projects()
+    projects.value = refreshed
+    current.value = refreshed.find((p) => p.id === current.value?.id) ?? current.value
+  } catch (err) {
+    // Stays in the dialog, which stays open: a duplicate name is fixed by
+    // typing another one, and closing would take the edit with it.
+    forkError.value = err instanceof Error ? err.message : String(err)
+  }
+}
 
 async function deletePreset(id: string) {
   teamError.value = ''
@@ -702,10 +736,18 @@ watch(current, () => (banner.value = null))
       :current="current"
       :team-name="currentTeamName"
       :team="team"
+      :library="library"
+      :project-team="projectTeam"
+      :preset="currentPreset"
+      :presets="presets"
+      :fork-error="forkError"
       :open="navOpen"
       @close="navOpen = false"
       @navigate="go"
       @open-project="open"
+      @save-preset="savePreset"
+      @fork-team="forkTeam"
+      @clear-fork-error="forkError = ''"
     />
 
     <div class="flex min-w-0 flex-1 flex-col overflow-hidden">
@@ -879,12 +921,14 @@ watch(current, () => (banner.value = null))
           <template v-else-if="view === 'team'">
             <PageHeader
               title="Team"
-              subtitle="Choose a team, configure its roles, order its pipeline, then use it for this project."
+              subtitle="A team can belong to this project or be shared by every project. Choose one, configure its roles, order its pipeline, then use it here."
             />
             <div class="pt-4">
               <TeamEditor
                 :library="library"
                 :presets="presets"
+                :project-id="current?.id ?? ''"
+                :project-name="current?.name ?? ''"
                 :project-team="projectTeam"
                 :harnesses="harnesses"
                 :models="models"

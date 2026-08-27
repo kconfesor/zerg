@@ -87,22 +87,53 @@ Four layers make "configure once" and "every project is different" true at the s
 what a reviewer is, what prompt each carries. Ships with a set of built-ins (§4.5); you edit them and
 add your own. Editing a template changes the lowest default everywhere.
 
-**Reusable team**, global and named. It chooses library roles, orders and enables them, and may
-specialize every role field. The built-in Default team is coder → reviewer; users can create as many
-other teams as they need.
+**Team**, named, and either shared by every project or belonging to one. It chooses library roles,
+orders and enables them, and may specialize every role field. The built-in Default team is
+coder → reviewer and is always shared, since it is where a new project starts.
 
-**Project team**, per project. A project selects a reusable team and follows later edits to its
-pipeline and settings. Any role field can be overridden for that repository alone. A project can
-also customize the whole pipeline; doing so freezes membership/order while role fields without an
-override continue following their reusable-team defaults. A standalone custom team has no preset.
+Teams were global to begin with, and that was wrong in a way ownership fixes rather than explains: a
+team carries the prompts, models and arguments one repository wants, so a global list put those in
+front of every other repository, where adopting one was a click and editing it changed the first
+project. `team_presets.project_id` is the separation. NULL is shared; set means that project's, and
+then it is absent from every other project's picker, refused by `SetProjectTeam` if its id is posted
+anyway, and deleted with the project. Moving a team to one project is refused while another runs it,
+and names them; sharing one back is always allowed, since it strands nobody.
+
+Team names stay unique across the installation rather than per owner. Making them per owner means
+rebuilding `team_presets` to drop a UNIQUE constraint, and that table is what `team_preset_roles`
+cascades from and what `projects.team_preset_id` points at, so the rebuild is an implicit delete of
+every team's roles and every project's assignment. Not worth it for the ability to have two teams
+called "Review" in one database.
+
+**Project team**, per project. Every project runs exactly one team and follows later edits to its
+pipeline and settings. Any role field can be overridden for that repository alone, which is the whole
+of what a project layer is now: a prompt or a model for this repository, never a shape.
+
+A project that wants a different pipeline gets a different team, one belonging to it. There used to
+be a third possibility, a per-project topology that froze membership and order while still naming
+somebody else's team, and it was removed in schema 16 because it made a project able to be "on" a
+team and running something else, with two screens describing different layers and neither saying so.
+The migration turned every such pipeline into a team owned by that project, carrying the settings the
+named team had given its roles, and left projects whose frozen shape matched their team on the team
+they already had.
 
 **Runtime**, per project: tasks, messages, leases, events, cost. On disk a project holds only git
 artifacts, `<repo>/.worktrees/<role>`.
 
-Each layer is edited in exactly one place, which is the point of splitting them: the library in
+Each layer is edited in one place, which is the point of splitting them: the library in
 **Settings → Roles**, the reusable team and its per-team values in **Team**, and the project's own
 values in the same view once that project is on the team. An edit's blast radius is therefore
-readable off the screen you made it on: global, one team, or one repository.
+readable off the control you used: global, one team, or one repository.
+
+The project's *pipeline* is also editable from the rail beside the board (§10), because dropping a
+role for one repository is decided while looking at that repository's work. What it edits is the
+team, not a per-project copy of its shape: a team this project owns is written in place, and a shared
+one is copied into this project first, named by whoever is making the change, with its per-role
+settings carried across so the copy starts as the team that was running.
+
+That is the whole rule, and it is what ownership bought. The alternative, tried first, was a
+per-project topology layer, which is what §4.1 records the removal of: a project could be "on" a team
+and running something else, and the rail and the Team screen would each report a different layer.
 
 Every nullable override has one rule: null means inherit, while a value means local. For arguments,
 `[]` is a value, meaning explicitly run with no role arguments, and remains distinct from null.
@@ -122,9 +153,10 @@ Everything below is a form field in the UI. There is no other way to set any of 
 | prompt | editor | this role's instructions |
 | gate | select | `none` or `approval`, to hold this role's handoffs for a human |
 
-A reusable-team role adds **position**, **enabled**, and nullable defaults for every field above.
-A project can override harness, model, args, receive/batch policy, prompt and gate. Pipeline
-membership, order and enablement can be inherited as a unit or made project-local. Overriding is
+A team role adds **position**, **enabled**, and nullable defaults for every field above. A project
+can override harness, model, args, receive/batch policy, prompt and gate, and only those: membership,
+order and enablement belong to the team, so changing the pipeline means editing this project's team
+or moving it to another one. Overriding is
 explicit and visible: a role showing an override is badged in the team list, so a project that
 quietly drifted from its reusable team is legible rather than mysterious.
 
@@ -190,7 +222,7 @@ sentences makes agents spend output tokens on telemetry.
 
 ### 4.5 The built-in library
 
-Eight templates ship, covering every team shape worth presetting, as rows in a picker rather than
+Nine templates ship, covering every team shape worth presetting, as rows in a picker rather than
 as branches of the orchestrator you have to check out to change your team.
 
 | Template | Model | Receive | Gate | Does |
@@ -198,6 +230,7 @@ as branches of the orchestrator you have to check out to change your team.
 | `planner` | opus | task | **approval** | turns intent into a written spec, then waits for a human |
 | `coder` | sonnet | task | none | implements the spec, writes tests, commits |
 | `reviewer` | opus | batch | none | reviews the change against the spec, runs tests, reports or hands back |
+| `debugger` | opus | task | none | reproduces a failure, finds the cause, fixes it behind a failing test |
 | `cleaner` | sonnet | batch | none | behavior-preserving cleanup, duplication, dead code |
 | `architect` | opus | batch | none | module boundaries, dependency direction, structural drift |
 | `hardener` | sonnet | batch | none | edge cases, error paths, mutation-style probing |
@@ -547,21 +580,19 @@ role_templates (id, name, harness, model, args, receive,
                 builtin, created_at, updated_at)
 settings       (key, value)       -- shared instructions, daemon config, harness flags
 
-team_presets       (id, name, builtin, created_at, updated_at)
+team_presets       (id, name, builtin, project_id, created_at, updated_at)
 team_preset_roles  (preset_id, template_id, position, enabled,
                     harness_override, model_override, args_override,
                     receive_override, batch policy overrides,
                     prompt_override, gate_override)
 
 projects       (id, path, name, base_branch, created_at, last_opened_at,
-                integration, pr_draft, team_preset_id, team_topology_override,
+                integration, pr_draft, team_preset_id,
                 icon,                       -- a file inside the repo, resolved and served (§10)
                 chat_harness, chat_model)
 
--- present only when a project's membership/order is local
-project_roles  (project_id, template_id, position, enabled)
-
--- sparse per-field layer over the selected reusable team
+-- sparse per-field layer over the team the project runs. Fields only: a project
+-- wanting a different pipeline runs a team of its own (§4.1)
 project_role_overrides (project_id, template_id,
                         harness_override, model_override, args_override,
                         receive_override, batch policy overrides,
@@ -670,11 +701,21 @@ plain `//go:embed dist` silently skips Vite's `.vite/` manifest directory.
   **refuses** and returns the report. A disabled button says only that it cannot be pressed,
   whereas the refusal says which role is blocked and what to do about it.
 - **Team**: one three-column master-detail view over *one layer*, the reusable team. **Teams**
-  lists Default and its clones, **Roles** adds library roles to the selected team and opens their
+  lists them in two groups, this project's own and the shared ones, with a control on each row that
+  moves it between the two, and a clone that lands in this project unless it is asked to be shared.
+  It lists Default and its clones, **Roles** adds library roles to the selected team and opens their
   per-team settings, and **Pipeline** orders and enables them. Selecting a team edits it; **Use this
   Team** separately assigns it to the current project, so browsing never silently changes what runs.
   A banner names the mismatch when the team on screen is not the one this project is on, and says
   instead that edits apply immediately when agents are running.
+- **The rail's pipeline editor**: the same list that shows what each role is doing turns into an
+  editor for the team behind it, to add a role, turn one off, reorder it or remove it. On a team this
+  project owns, each change is written and reconciled within the second. On a shared team, the first
+  change opens a dialog naming the copy it is about to make for this project, since the alternative
+  is changing a pipeline every other project on that team runs. The rail says which of the two will
+  happen before the first click, the dialog carries any refusal (a duplicate name is a 400), and the
+  last enabled role will not turn off or be removed, since a team with nothing enabled cannot start
+  and has nowhere to route a task.
 - **Role editor**: every field in §4.2, for one role within whichever layer opened it: the team
   editor writes team-level values, a project's own team writes project-level ones. Each field states
   what it inherits and offers **Use default** to drop back to it, and the dialog counts how many

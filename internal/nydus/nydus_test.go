@@ -159,7 +159,7 @@ func newFixture(t *testing.T, opts ...Option) *fixture {
 		}
 		return tpl.ID
 	}
-	if err := db.SetTeam(ctx, p.ID, []store.ProjectRole{
+	if err := db.SetTeam(ctx, p.ID, []store.TeamPresetRole{
 		{TemplateID: id("planner"), Enabled: true},
 		{TemplateID: id("coder"), Enabled: true},
 		{TemplateID: id("reviewer"), Enabled: true},
@@ -715,7 +715,7 @@ func TestClaimMergesHandoffIntoWorktree(t *testing.T) {
 		}
 		return x.ID
 	}
-	if err := db.SetTeam(ctx, project.ID, []store.ProjectRole{
+	if err := db.SetTeam(ctx, project.ID, []store.TeamPresetRole{
 		{TemplateID: tpl("coder"), Enabled: true},
 		{TemplateID: tpl("reviewer"), Enabled: true},
 	}); err != nil {
@@ -784,13 +784,13 @@ func setupRealRepo(t *testing.T, roles ...string) (*Nydus, *store.Project, *hatc
 	if err != nil {
 		t.Fatalf("CreateProject: %v", err)
 	}
-	team := make([]store.ProjectRole, 0, len(roles))
+	team := make([]store.TeamPresetRole, 0, len(roles))
 	for _, role := range roles {
 		tpl, err := db.GetTemplateByName(ctx, role)
 		if err != nil {
 			t.Fatalf("GetTemplateByName(%q): %v", role, err)
 		}
-		team = append(team, store.ProjectRole{TemplateID: tpl.ID, Enabled: true})
+		team = append(team, store.TeamPresetRole{TemplateID: tpl.ID, Enabled: true})
 	}
 	if err := db.SetTeam(ctx, project.ID, team); err != nil {
 		t.Fatalf("SetTeam: %v", err)

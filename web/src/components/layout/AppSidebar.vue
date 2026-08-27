@@ -1,8 +1,10 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
 import {
   Activity as ActivityIcon,
   ChevronDown,
+  ChevronUp,
+  Check,
   Columns3,
   GitMerge,
   GitPullRequest,
@@ -10,12 +12,36 @@ import {
   FolderGit2,
   GitBranch,
   MessageSquare,
+  Pencil,
+  Plus,
   Receipt,
   Settings as SettingsIcon,
   Users,
+  X,
 } from '@lucide/vue'
-import type { Project, ResolvedRole, RoleStatus, SwarmStatus } from '@/lib/api'
+import type {
+  Project,
+  ProjectTeam,
+  ResolvedRole,
+  RoleStatus,
+  RoleTemplate,
+  SwarmStatus,
+  TeamPreset,
+  TeamPresetRole,
+} from '@/lib/api'
 import { landing } from '@/lib/utils'
+import { presetRoles } from '@/lib/team'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import QuotaBars from '@/components/QuotaBars.vue'
 import ProjectAvatar from '@/components/ProjectAvatar.vue'
 import {
@@ -44,6 +70,20 @@ const props = defineProps<{
    *  remember the heading for. */
   teamName?: string
   team: ResolvedRole[]
+  /** The whole library, so a role can be added to the pipeline from here
+   *  rather than by going to the Team screen and back. */
+  library: RoleTemplate[]
+  /** Which team the project runs. */
+  projectTeam: ProjectTeam
+  /** That team itself, whose rows an edit here is written into when this
+   *  project owns it, and copied from when it does not. */
+  preset: TeamPreset | null
+  /** Every team this project could have, so a copy can be given a name that
+   *  is not already taken. */
+  presets: TeamPreset[]
+  /** Why the last team action was refused, if it was. Rendered in the dialog
+   *  that asked, since the page banner is behind it on a phone. */
+  forkError?: string
   /** Whether the drawer is showing. Ignored at md and above, where the rail
    *  is always part of the layout. */
   open: boolean
@@ -67,7 +107,182 @@ const emit = defineEmits<{
   navigate: [view: View]
   close: []
   openProject: [project: Project]
+  /** An edit to a team this project owns. */
+  savePreset: [preset: TeamPreset]
+  /** An edit to a team it does not: copy the team under this name, give it to
+   *  this project, and run it. */
+  forkTeam: [name: string, roles: TeamPresetRole[]]
+  /** The last copy refusal is no longer about anything on screen. */
+  clearForkError: []
 }>()
+
+/**
+ * Changing the pipeline from the rail, where it is being read.
+ *
+ * This edits the *team*, which is the thing that holds a pipeline. What stops
+ * it from changing other projects is ownership, not a per-project override
+ * layer: a team belonging to this project is edited in place, and a shared one
+ * is copied into this project first, named by whoever is making the change.
+ * The copy carries the shared team's per-role settings, so it starts as the
+ * team you were running and diverges only where you change it.
+ */
+const editing = ref(false)
+/** The add list, open only while something is being picked from it. */
+const adding = ref(false)
+
+/** The live status of each role by name, for rows that are showing both. */
+const liveByRole = computed(() => new Map(props.status.roles.map((r) => [r.role, r])))
+
+/**
+ * The pipeline this rail is editing: what was sent last, until the daemon's
+ * answer catches up with it.
+ *
+ * Every edit rebuilds the whole team, and props do not move until the write has
+ * returned and the board has refreshed. Two clicks inside that window both
+ * started from the same pipeline, so the second sent a team that never had the
+ * first change in it and quietly undid it. Two clicks in a row is the ordinary
+ * way this control is used.
+ */
+const pending = ref<ResolvedRole[] | null>(null)
+const pipeline = computed(() => pending.value ?? props.team)
+
+/** Cleared when what arrived is what was sent, so the rail goes back to
+ *  following the daemon rather than its own copy. */
+watch(
+  () => props.team,
+  (arrived) => {
+    if (!pending.value) return
+    const shape = (roles: ResolvedRole[]) => roles.map((r) => `${r.id}:${r.enabled}`).join()
+    if (shape(arrived) === shape(pending.value)) pending.value = null
+  },
+)
+
+/** Editing lists the whole team. A role that is off is the thing you came to
+ *  turn back on, so it cannot be the one entry that is filtered out. */
+const editRows = computed(() =>
+  pipeline.value.map((role) => ({ role, live: liveByRole.value.get(role.name) ?? null })),
+)
+
+const enabledCount = computed(() => pipeline.value.filter((r) => r.enabled).length)
+
+/** Library roles this pipeline does not have yet. */
+const addable = computed(() => {
+  const inTeam = new Set(pipeline.value.map((r) => r.id))
+  return props.library.filter((t) => !inTeam.has(t.id))
+})
+
+/**
+ * Whether an edit lands in the team on the spot.
+ *
+ * Two things: there is a team, and it belongs to this project. Nothing else
+ * runs a team this project owns, so there is nobody to copy it away from.
+ *
+ * This used to also require that the project had no topology layer of its own,
+ * which sent a project editing its *own* team into the copy dialog, under a
+ * sentence claiming that team was shared. The layer is a leftover from before
+ * teams could be owned; it is cleared when the team is written rather than
+ * being a reason to make a second team out of one the project already has.
+ */
+const editsTeamInPlace = computed(
+  () => !!props.preset && props.preset.projectId === props.current?.id,
+)
+
+
+/** The edit waiting for a name, held until the dialog is answered. */
+const pendingPipeline = ref<ResolvedRole[] | null>(null)
+const forkName = ref('')
+
+function apply(edited: ResolvedRole[]) {
+  if (editsTeamInPlace.value && props.preset) {
+    // Held locally as well as sent, so the next click builds on this rather
+    // than on the pipeline the daemon has not finished replacing yet.
+    pending.value = edited
+    emit('savePreset', { ...props.preset, roles: presetRoles(edited, props.preset) })
+    return
+  }
+  // A shared team is not this project's to change, so the change makes it one.
+  if (pendingPipeline.value === null) emit('clearForkError')
+  pendingPipeline.value = edited
+  forkName.value = suggestedName()
+}
+
+/**
+ * What to call the copy.
+ *
+ * The project's name, because that is what the team is now for and because the
+ * list groups it under that name anyway. Falls back to the team it came from
+ * when there is no project name to use, and gets a number when something of
+ * that name is already there, since team names are unique installation-wide
+ * and a 400 on a dialog nobody expected to fail reads as the button breaking.
+ */
+function suggestedName(): string {
+  const base = props.current?.name ? `${props.current.name} team` : `${props.preset?.name ?? 'Team'} copy`
+  const taken = new Set(props.presets.map((p) => p.name))
+  if (!taken.has(base)) return base
+  for (let n = 2; n < 50; n++) {
+    if (!taken.has(`${base} ${n}`)) return `${base} ${n}`
+  }
+  return base
+}
+
+function confirmFork() {
+  const pipeline = pendingPipeline.value
+  const name = forkName.value.trim()
+  if (!pipeline || !name) return
+  emit('forkTeam', name, presetRoles(pipeline, props.preset))
+}
+
+function cancelFork() {
+  pendingPipeline.value = null
+  // The refusal belonged to the attempt being abandoned. Left behind, it turned
+  // up in the next dialog, attached to a name nobody had typed yet.
+  emit('clearForkError')
+}
+
+// The dialog closes when the team it asked for arrives, not when the button is
+// pressed. A duplicate name comes back 400, and closing on the press would put
+// that refusal behind a dialog that had already gone, with the edit lost.
+watch(
+  () => props.projectTeam.presetId,
+  () => {
+    pendingPipeline.value = null
+  },
+)
+
+function toggleRole(role: ResolvedRole) {
+  // A team with nothing enabled cannot be started and has nowhere to send a
+  // task, so the last one standing does not turn off. Better to refuse the
+  // click than to leave a project that looks configured and takes no work.
+  if (role.enabled && enabledCount.value === 1) return
+  apply(pipeline.value.map((r) => (r.id === role.id ? { ...r, enabled: !r.enabled } : r)))
+}
+
+function moveRole(index: number, by: number) {
+  const to = index + by
+  if (to < 0 || to >= pipeline.value.length) return
+  const roles = [...pipeline.value]
+  const [moved] = roles.splice(index, 1)
+  roles.splice(to, 0, moved)
+  apply(roles)
+}
+
+function removeRole(role: ResolvedRole) {
+  if (role.enabled && enabledCount.value === 1) return
+  apply(pipeline.value.filter((r) => r.id !== role.id))
+}
+
+function addRole(id: unknown) {
+  const tpl = props.library.find((t) => t.id === id)
+  if (!tpl) return
+  adding.value = false
+  // At the end, which is where the work ends up: the last enabled role is the
+  // terminal one, so the new role takes over integrating and the landing line
+  // under the list moves with it rather than reporting something else.
+  apply([
+    ...pipeline.value,
+    { ...tpl, position: pipeline.value.length, enabled: true, overridden: false, terminal: false, argsOverride: null },
+  ])
+}
 
 function pick(id: unknown) {
   const project = props.projects.find((p) => p.id === id)
@@ -255,7 +470,7 @@ function live(r: RoleStatus): boolean {
     <!-- The live readout, under the name of the team it belongs to. This is
          the panel worth glancing at: which agents exist, and what each is
          doing right now. -->
-    <div v-if="rolesShown.length" class="hairline-t mt-1 flex min-h-0 flex-1 flex-col">
+    <div v-if="current" class="hairline-t mt-1 flex min-h-0 flex-1 flex-col">
       <div class="flex items-center gap-1.5 px-3 pt-3 pb-1.5">
         <Users :size="11" class="text-muted-foreground shrink-0" aria-hidden="true" />
         <span
@@ -264,11 +479,140 @@ function live(r: RoleStatus): boolean {
         >
           {{ teamName || 'Roles' }}
         </span>
-        <span class="text-muted-foreground/70 tabular shrink-0 text-[10px]">
+        <span v-if="!editing" class="text-muted-foreground/70 tabular shrink-0 text-[10px]">
           {{ rolesShown.length }}
         </span>
+        <!-- The pipeline is edited where it is read. Everything this button
+             reveals changes this project only. -->
+        <button
+          type="button"
+          class="text-muted-foreground hover:text-foreground focus-visible:outline-ring shrink-0 p-0.5 focus-visible:outline-2"
+          :title="editing ? 'Done' : 'Add or turn off roles for this project'"
+          :aria-label="editing ? 'Done editing this pipeline' : 'Edit this pipeline'"
+          @click="editing = !editing"
+        >
+          <component :is="editing ? Check : Pencil" :size="12" aria-hidden="true" />
+        </button>
       </div>
-      <ul class="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
+
+      <!-- Whose team this is, since it decides what an edit does here: a team
+           of this project's own is changed in place, a shared one is copied
+           into this project first. Said before the first click, not after it. -->
+      <p
+        v-if="editing && !editsTeamInPlace"
+        class="text-muted-foreground px-3 pb-1.5 text-[10px] leading-snug"
+      >
+        {{ teamName }} is shared with every project, so the first change here makes
+        {{ current?.name || 'this project' }} a copy of it.
+      </p>
+
+      <!-- Editing: the whole team, including the roles that are off, since one
+           of those is what you came to turn back on. -->
+      <div v-if="editing" class="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
+        <p
+          v-if="status.running"
+          class="text-muted-foreground mb-1 px-1 text-[10px] leading-snug"
+        >
+          Agents are running. A role turned off stops within a second or so and whatever it was
+          holding goes back to the queue.
+        </p>
+        <ul>
+          <li v-for="(r, i) in editRows" :key="r.role.id" class="flex items-center gap-0.5 py-0.5">
+            <button
+              type="button"
+              role="switch"
+              :aria-checked="r.role.enabled"
+              class="focus-visible:outline-ring flex min-w-0 flex-1 items-center gap-2 px-1 py-1 text-left focus-visible:outline-2 disabled:cursor-not-allowed"
+              :disabled="r.role.enabled && enabledCount === 1"
+              :title="
+                r.role.enabled
+                  ? enabledCount === 1
+                    ? 'A team needs one role that is on'
+                    : 'Turn ' + r.role.name + ' off for this project'
+                  : 'Turn ' + r.role.name + ' on for this project'
+              "
+              @click="toggleRole(r.role)"
+            >
+              <span
+                :class="[
+                  'size-1.5 shrink-0 rounded-full',
+                  r.role.enabled
+                    ? 'bg-[var(--primary)]'
+                    : 'border-muted-foreground/40 border bg-transparent',
+                ]"
+              />
+              <span
+                :class="[
+                  'truncate text-xs',
+                  r.role.enabled ? 'font-medium' : 'text-muted-foreground/60 line-through',
+                ]"
+              >
+                {{ r.role.name }}
+              </span>
+            </button>
+            <!-- Order is the route work takes, so it is editable here too:
+                 a project with its own pipeline has nowhere else to reorder it,
+                 since the Team screen edits the shared team. -->
+            <button
+              type="button"
+              class="text-muted-foreground/70 hover:text-foreground shrink-0 p-0.5 disabled:opacity-25"
+              :disabled="i === 0"
+              :aria-label="'Move ' + r.role.name + ' earlier'"
+              @click="moveRole(i, -1)"
+            >
+              <ChevronUp :size="11" aria-hidden="true" />
+            </button>
+            <button
+              type="button"
+              class="text-muted-foreground/70 hover:text-foreground shrink-0 p-0.5 disabled:opacity-25"
+              :disabled="i === editRows.length - 1"
+              :aria-label="'Move ' + r.role.name + ' later'"
+              @click="moveRole(i, 1)"
+            >
+              <ChevronDown :size="11" aria-hidden="true" />
+            </button>
+            <button
+              type="button"
+              class="text-muted-foreground/70 hover:text-destructive shrink-0 p-0.5 disabled:opacity-25"
+              :disabled="r.role.enabled && enabledCount === 1"
+              :aria-label="'Remove ' + r.role.name + ' from this pipeline'"
+              :title="
+                r.role.enabled && enabledCount === 1
+                  ? 'A team needs one role that is on'
+                  : 'Remove ' + r.role.name + ' from this pipeline'
+              "
+              @click="removeRole(r.role)"
+            >
+              <X :size="11" aria-hidden="true" />
+            </button>
+          </li>
+        </ul>
+
+        <div v-if="addable.length" class="pt-1">
+          <button
+            type="button"
+            class="text-muted-foreground hover:text-foreground focus-visible:outline-ring flex w-full items-center gap-2 px-1 py-1 text-left text-[11px] focus-visible:outline-2"
+            @click="adding = !adding"
+          >
+            <Plus :size="11" class="shrink-0" aria-hidden="true" />
+            Add a role
+          </button>
+          <ul v-if="adding" class="border-border ml-1 border-l pl-2">
+            <li v-for="t in addable" :key="t.id">
+              <button
+                type="button"
+                class="hover:bg-muted focus-visible:outline-ring w-full truncate px-1 py-1 text-left text-xs focus-visible:outline-2"
+                :title="'Add ' + t.name + ' to the end of this pipeline'"
+                @click="addRole(t.id)"
+              >
+                {{ t.name }}
+              </button>
+            </li>
+          </ul>
+        </div>
+      </div>
+
+      <ul v-else class="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
         <li v-for="(r, i) in rolesShown" :key="r.role" class="relative px-1 py-1.5">
           <!-- The pipeline is an order, and a list does not say so on its own:
                these three names read as a set of agents rather than as a route
@@ -378,5 +722,31 @@ function live(r: RoleStatus): boolean {
     </div>
     <div v-else class="flex-1" />
 
+    <!-- Naming the copy. A dialog rather than an inline field: this is the one
+         moment the rail is not a quick edit, and what it is about to create
+         needs a sentence of explanation next to the box. -->
+    <Dialog :open="!!pendingPipeline" @update:open="(v: boolean) => !v && cancelFork()">
+      <DialogContent class="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Name this project's team</DialogTitle>
+          <DialogDescription>
+            {{ teamName }} is shared with every project, so this change copies it for
+            {{ current?.name || 'this project' }}. The copy keeps its roles and their settings, and
+            nothing on {{ teamName }} itself moves.
+          </DialogDescription>
+        </DialogHeader>
+        <div class="flex flex-col gap-1.5">
+          <Label for="fork-team-name">Team name</Label>
+          <Input id="fork-team-name" v-model="forkName" autofocus @keyup.enter="confirmFork" />
+        </div>
+        <!-- Refusals land here. A duplicate name is a 400, and the page banner
+             behind this dialog is nowhere on a phone. -->
+        <p v-if="forkError" role="alert" class="text-destructive text-xs">{{ forkError }}</p>
+        <DialogFooter>
+          <Button variant="outline" @click="cancelFork">Cancel</Button>
+          <Button :disabled="!forkName.trim()" @click="confirmFork">Create team</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   </aside>
 </template>

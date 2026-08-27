@@ -216,6 +216,48 @@ func TestSeedIsIdempotentAndPreservesEdits(t *testing.T) {
 	}
 }
 
+// A role added to the library after someone installed zerg has to reach their
+// database, or a new built-in only ever exists for people who start fresh.
+//
+// Seed inserts by name and skips what is already there, which covers both: an
+// edited built-in is left alone, and one that is simply absent is added. This
+// is the second half, and it is the half that is easy to lose by making Seed
+// run only on a database it just created.
+func TestSeedAddsRolesThatShippedLater(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	if err := Seed(ctx, db, "claude"); err != nil {
+		t.Fatalf("Seed: %v", err)
+	}
+
+	// A database from before the debugger role existed.
+	debugger, err := db.GetTemplateByName(ctx, "debugger")
+	if err != nil {
+		t.Fatalf("debugger missing from a fresh seed: %v", err)
+	}
+	if err := db.DeleteTemplate(ctx, debugger.ID); err != nil {
+		t.Fatalf("DeleteTemplate: %v", err)
+	}
+
+	if err := Seed(ctx, db, "claude"); err != nil {
+		t.Fatalf("re-Seed: %v", err)
+	}
+	again, err := db.GetTemplateByName(ctx, "debugger")
+	if err != nil {
+		t.Fatalf("a role added to the library never reached an existing database: %v", err)
+	}
+	if again.Prompt == "" || !again.Builtin {
+		t.Errorf("debugger came back as %+v, want a seeded built-in with its prompt", again)
+	}
+	tpls, err := db.ListTemplates(ctx)
+	if err != nil {
+		t.Fatalf("ListTemplates: %v", err)
+	}
+	if len(tpls) != len(builtinRoles) {
+		t.Errorf("library holds %d roles, want %d", len(tpls), len(builtinRoles))
+	}
+}
+
 func TestSeededLibraryShape(t *testing.T) {
 	ctx := context.Background()
 	db := newTestDB(t)

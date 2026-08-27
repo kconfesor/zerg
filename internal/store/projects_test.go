@@ -109,7 +109,7 @@ func TestSetTeamNormalisesPositions(t *testing.T) {
 	db, p := seeded(t)
 
 	// Whatever a drag produced: no positions supplied at all.
-	err := db.SetTeam(ctx, p.ID, []ProjectRole{
+	err := db.SetTeam(ctx, p.ID, []TeamPresetRole{
 		{TemplateID: templateID(t, db, "planner"), Enabled: true},
 		{TemplateID: templateID(t, db, "coder"), Enabled: true},
 		{TemplateID: templateID(t, db, "reviewer"), Enabled: true},
@@ -143,7 +143,7 @@ func TestTerminalFollowsLastEnabledRole(t *testing.T) {
 	ctx := context.Background()
 	db, p := seeded(t)
 
-	err := db.SetTeam(ctx, p.ID, []ProjectRole{
+	err := db.SetTeam(ctx, p.ID, []TeamPresetRole{
 		{TemplateID: templateID(t, db, "coder"), Enabled: true},
 		{TemplateID: templateID(t, db, "reviewer"), Enabled: true},
 		{TemplateID: templateID(t, db, "docs"), Enabled: false},
@@ -183,7 +183,7 @@ func TestOverridesApplyAndAreFlagged(t *testing.T) {
 
 	coder := templateID(t, db, "coder")
 	override := "opus"
-	err := db.SetTeam(ctx, p.ID, []ProjectRole{
+	err := db.SetTeam(ctx, p.ID, []TeamPresetRole{
 		{TemplateID: coder, Enabled: true, ModelOverride: &override},
 		{TemplateID: templateID(t, db, "reviewer"), Enabled: true},
 	})
@@ -223,7 +223,7 @@ func TestOverrideEqualToTemplateIsNotFlagged(t *testing.T) {
 	db, p := seeded(t)
 
 	same := "sonnet"
-	err := db.SetTeam(ctx, p.ID, []ProjectRole{
+	err := db.SetTeam(ctx, p.ID, []TeamPresetRole{
 		{TemplateID: templateID(t, db, "coder"), Enabled: true, ModelOverride: &same},
 	})
 	if err != nil {
@@ -243,7 +243,7 @@ func TestSetTeamRejectsDuplicateAndUnknownRoles(t *testing.T) {
 	db, p := seeded(t)
 	coder := templateID(t, db, "coder")
 
-	err := db.SetTeam(ctx, p.ID, []ProjectRole{
+	err := db.SetTeam(ctx, p.ID, []TeamPresetRole{
 		{TemplateID: coder, Enabled: true},
 		{TemplateID: coder, Enabled: true},
 	})
@@ -251,7 +251,7 @@ func TestSetTeamRejectsDuplicateAndUnknownRoles(t *testing.T) {
 		t.Error("a role was allowed to join the same pipeline twice")
 	}
 
-	err = db.SetTeam(ctx, p.ID, []ProjectRole{{TemplateID: "NOSUCHID", Enabled: true}})
+	err = db.SetTeam(ctx, p.ID, []TeamPresetRole{{TemplateID: "NOSUCHID", Enabled: true}})
 	if !errors.Is(err, ErrNotFound) {
 		t.Errorf("want ErrNotFound for an unknown template, got %v", err)
 	}
@@ -266,7 +266,7 @@ func TestFailedSetTeamLeavesPreviousTeamIntact(t *testing.T) {
 	if err := db.SelectDefaultTeam(ctx, p.ID); err != nil {
 		t.Fatalf("SelectDefaultTeam: %v", err)
 	}
-	if err := db.SetTeam(ctx, p.ID, []ProjectRole{{TemplateID: "NOSUCHID"}}); err == nil {
+	if err := db.SetTeam(ctx, p.ID, []TeamPresetRole{{TemplateID: "NOSUCHID"}}); err == nil {
 		t.Fatal("expected the bad update to fail")
 	}
 
@@ -438,7 +438,7 @@ func TestOverridesSurviveAnEditThatIsNotAboutThem(t *testing.T) {
 
 	// Give the first role an argument override and no model override.
 	args := []string{"--verbose", "--flag=with value"}
-	if err := db.SetTeam(ctx, p.ID, []ProjectRole{
+	if err := db.SetTeam(ctx, p.ID, []TeamPresetRole{
 		{TemplateID: team[0].ID, Position: 0, Enabled: true, ArgsOverride: args},
 		{TemplateID: team[1].ID, Position: 1, Enabled: true},
 	}); err != nil {
@@ -458,7 +458,7 @@ func TestOverridesSurviveAnEditThatIsNotAboutThem(t *testing.T) {
 
 	// Now the edit that is not about it: swap the order, round-tripping what
 	// the API reported, which is what the UI does.
-	if err := db.SetTeam(ctx, p.ID, []ProjectRole{
+	if err := db.SetTeam(ctx, p.ID, []TeamPresetRole{
 		{TemplateID: team[1].ID, Position: 0, Enabled: team[1].Enabled,
 			ModelOverride: team[1].ModelOverride, ArgsOverride: team[1].ArgsOverride},
 		{TemplateID: team[0].ID, Position: 1, Enabled: team[0].Enabled,
@@ -496,7 +496,7 @@ func TestOverridesSurviveAnEditThatIsNotAboutThem(t *testing.T) {
 // the wire, came back as nil, and the next reorder stored it as "inherit" — the
 // role quietly got back the arguments someone had deliberately removed.
 func TestEmptyArgsOverrideSurvivesJSON(t *testing.T) {
-	empty := ProjectRole{TemplateID: "t", Enabled: true, ArgsOverride: []string{}}
+	empty := ProjectRole{TemplateID: "t", ArgsOverride: []string{}}
 	raw, err := json.Marshal(empty)
 	if err != nil {
 		t.Fatal(err)
@@ -514,7 +514,7 @@ func TestEmptyArgsOverrideSurvivesJSON(t *testing.T) {
 	}
 
 	// And nil still means inherit.
-	raw, err = json.Marshal(ProjectRole{TemplateID: "t", Enabled: true})
+	raw, err = json.Marshal(ProjectRole{TemplateID: "t"})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -55,10 +55,12 @@ type Project struct {
 	CreatedAt    time.Time  `json:"createdAt"`
 	LastOpenedAt *time.Time `json:"lastOpenedAt,omitempty"`
 
-	// TeamPresetID is nil for a standalone project team. When set, unchanged
-	// topology and role fields continue to follow that reusable preset.
-	TeamPresetID         *string `json:"teamPresetId,omitempty"`
-	TeamTopologyOverride bool    `json:"teamTopologyOverride"`
+	// TeamPresetID is the team this project runs. Every project has one: a
+	// pipeline of a project's own is a team belonging to that project, not a
+	// layer over somebody else's team. It is a pointer because a project is
+	// written before its team is chosen, and because the foreign key sets it
+	// null if that team is deleted out from under it.
+	TeamPresetID *string `json:"teamPresetId,omitempty"`
 
 	// ChatHarness and ChatModel override what answers questions in Chat.
 	// Empty means inherit from the terminal role, which is the default.
@@ -85,22 +87,30 @@ type RoleOverrides struct {
 	GateOverride           *string  `json:"gateOverride,omitempty"`
 }
 
-// ProjectRole is one template in an optional project-local topology plus that
-// project's field overrides. Field overrides are stored separately from the
-// topology so changing a prompt does not freeze a preset's membership.
+// ProjectRole is one role's settings for one project: this repository's coder
+// on a stronger model, without a team of its own for it.
+//
+// Position and Enabled are the team's to say. They were this type's too, back
+// when a project could freeze a pipeline's shape while naming a team it was not
+// running (schema 16 is where that went), and a project that wants its own
+// shape now has its own team.
 type ProjectRole struct {
 	TemplateID string `json:"templateId"`
-	Position   int    `json:"position"`
-	Enabled    bool   `json:"enabled"`
 	RoleOverrides
 }
 
 // TeamPreset is a named, reusable pipeline. Its role settings are themselves
 // overrides over the role library, keeping the library as the common baseline.
 type TeamPreset struct {
-	ID        string           `json:"id"`
-	Name      string           `json:"name"`
-	Builtin   bool             `json:"builtin"`
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Builtin bool   `json:"builtin"`
+	// ProjectID is the project this team belongs to, or nil when it is shared
+	// by every project. A team carries prompts, models and arguments chosen for
+	// one repository as often as not, and those have no business in another
+	// repository's picker, let alone changing under it when the first one is
+	// edited.
+	ProjectID *string          `json:"projectId"`
 	Roles     []TeamPresetRole `json:"roles"`
 	CreatedAt time.Time        `json:"createdAt"`
 	UpdatedAt time.Time        `json:"updatedAt"`
@@ -116,9 +126,8 @@ type TeamPresetRole struct {
 // ProjectTeam is the resolved team plus enough source information for a client
 // to reset either topology or fields back to live preset defaults.
 type ProjectTeam struct {
-	PresetID         *string        `json:"presetId"`
-	TopologyOverride bool           `json:"topologyOverride"`
-	Roles            []ResolvedRole `json:"roles"`
+	PresetID *string        `json:"presetId"`
+	Roles    []ResolvedRole `json:"roles"`
 }
 
 // ResolvedRole is a template with its project overrides applied — what the

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { CircleCheck, Copy, Pencil, SlidersHorizontal, Trash2 } from '@lucide/vue'
+import { CircleCheck, Copy, FolderGit2, Globe, Pencil, SlidersHorizontal, Trash2 } from '@lucide/vue'
 import type {
   Model,
   ProjectTeam,
@@ -15,6 +15,7 @@ import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { cloneOverrides, followPreset, hasRoleOverrides } from '@/lib/team'
 import RoleOverrideDialog from '@/components/RoleOverrideDialog.vue'
 import {
   Dialog,
@@ -28,6 +29,10 @@ import {
 const props = defineProps<{
   library: RoleTemplate[]
   presets: TeamPreset[]
+  /** The project on screen. A team can belong to it, so this is needed to say
+   *  which teams are its own and to give a new one an owner. */
+  projectId: string
+  projectName: string
   projectTeam: ProjectTeam
   harnesses: string[]
   models: Record<string, Model[]>
@@ -39,7 +44,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   setTeam: [team: ProjectTeamUpdate]
   savePreset: [preset: TeamPreset]
-  createPreset: [name: string, roles: TeamPresetRole[]]
+  createPreset: [name: string, roles: TeamPresetRole[], projectId: string | null]
   deletePreset: [id: string]
 }>()
 
@@ -64,12 +69,59 @@ watch(
 )
 
 const activePreset = computed(() => props.presets.find((p) => p.id === selectedPresetId.value) ?? null)
+
+/**
+ * The two kinds of team, kept apart in the list.
+ *
+ * A team carries the prompts, models and arguments one repository wants, and a
+ * global list put those in front of every other repository, where adopting one
+ * by accident was a click and editing it changed the first project. Ownership
+ * is the separation; this is where it is read.
+ */
+const ownTeams = computed(() => props.presets.filter((p) => p.projectId === props.projectId))
+const sharedTeams = computed(() => props.presets.filter((p) => !p.projectId))
+const teamGroups = computed(() => [
+  { key: 'own', label: `${props.projectName || 'This project'} only`, teams: ownTeams.value },
+  { key: 'shared', label: 'Shared with every project', teams: sharedTeams.value },
+])
+
+/** Whether this team is shared, said as the action that would change it. */
+function ownershipLabel(preset: TeamPreset): string {
+  if (preset.builtin) return ''
+  return preset.projectId
+    ? 'Share with every project'
+    : `Make this ${props.projectName || 'project'}'s own team`
+}
+
+/**
+ * Moving a team between shared and owned.
+ *
+ * Handing a shared team to one project takes it from the others, so the daemon
+ * refuses while another project runs it and says which. Sharing one back is
+ * always allowed: it strands nobody.
+ */
+function toggleOwnership(preset: TeamPreset) {
+  const next = preset.projectId ? null : props.projectId
+  const run = () => emit('savePreset', { ...preset, projectId: next })
+  if (next) {
+    guard(`Make ${preset.name} this project's own team?`, run, {
+      detail:
+        'It leaves the shared list, so no other project can adopt it, and editing it here stops reaching anywhere else. Projects already running it are refused, and named.',
+      confirm: 'Make it this project\'s',
+    })
+    return
+  }
+  run()
+}
+
+
 const libraryById = computed(() => new Map(props.library.map((role) => [role.id, role])))
 const selectedRoleIds = computed(
   () => new Set(activePreset.value?.roles.map((role) => role.templateId) ?? []),
 )
-const projectHasLocalChanges = computed(
-  () => props.projectTeam.topologyOverride || props.projectTeam.roles.some((role) => role.overridden),
+/** Whether this project has settings of its own over the team it runs. */
+const projectHasLocalChanges = computed(() =>
+  props.projectTeam.roles.some((role) => role.overridden),
 )
 
 /**
@@ -95,32 +147,6 @@ const terminalTemplateId = computed(() => {
   }
   return ''
 })
-
-function cloneOverrides(source: Partial<RoleOverrides>): RoleOverrides {
-  return {
-    harnessOverride: source.harnessOverride ?? null,
-    modelOverride: source.modelOverride ?? null,
-    argsOverride: source.argsOverride == null ? null : [...source.argsOverride],
-    receiveOverride: source.receiveOverride ?? null,
-    batchMaxItemsOverride: source.batchMaxItemsOverride ?? null,
-    batchMaxAgeSecOverride: source.batchMaxAgeSecOverride ?? null,
-    promptOverride: source.promptOverride ?? null,
-    gateOverride: source.gateOverride ?? null,
-  }
-}
-
-function hasRoleOverrides(overrides: Partial<RoleOverrides>) {
-  return (
-    overrides.harnessOverride != null ||
-    overrides.modelOverride != null ||
-    overrides.argsOverride != null ||
-    overrides.receiveOverride != null ||
-    overrides.batchMaxItemsOverride != null ||
-    overrides.batchMaxAgeSecOverride != null ||
-    overrides.promptOverride != null ||
-    overrides.gateOverride != null
-  )
-}
 
 function apply(base: RoleTemplate, overrides: Partial<RoleOverrides>): RoleTemplate {
   return {
@@ -265,16 +291,17 @@ function saveRoleSettings(overrides: RoleOverrides) {
 /**
  * What the primary button on a team row says, or nothing at all.
  *
- * Three states, and only two of them are an action. A team this project does
- * not run can be adopted. A team it runs whose pipeline it has *overridden* can
- * be followed again — that is the one thing pressing this undoes, since field
- * overrides survive either way. A team it simply runs needs no button: the star
- * and the "in use" line already say so, and a disabled button reading "In use"
- * is a control that looks broken rather than a label that reads.
+ * A team this project does not run can be adopted. The one it runs needs no
+ * button: the "in use" line already says so, and a disabled button reading
+ * "In use" is a control that looks broken rather than a label that reads.
+ *
+ * There used to be a third state here, "Follow this pipeline again", for a
+ * project that had frozen its own copy of a team's shape. Schema 16 removed
+ * that layer: a project running its own pipeline is on its own team, and
+ * leaving one is adopting another.
  */
 function useLabel(preset: TeamPreset): string {
-  if (props.projectTeam.presetId !== preset.id) return 'Use this team'
-  return props.projectTeam.topologyOverride ? 'Follow this pipeline again' : ''
+  return props.projectTeam.presetId === preset.id ? '' : 'Use this team'
 }
 
 /**
@@ -297,31 +324,13 @@ function adopt(preset: TeamPreset) {
 
 function useTeam(preset: TeamPreset) {
   selectedPresetId.value = preset.id
-  // The project's own overrides come with it.
-  //
-  // SetProjectTeam replaces the override layer wholesale — it deletes every
-  // project_role_overrides row and re-inserts from what it is sent — so an
-  // empty array here does not mean "leave them alone", it means "delete them".
-  // Pressing this on the team already in use is exactly when a project has
-  // overrides worth keeping, including every one migration 013 carried across
-  // from the old project_roles columns.
-  //
-  // Filtered to the preset's own roles: SetProjectTeam refuses an override for
-  // a role the preset does not contain, and adopting a team that drops a role
-  // legitimately drops that role's overrides with it.
-  const inPreset = new Set(preset.roles.map((r) => r.templateId))
-  const keep = props.projectTeam.roles
-    .filter((role) => inPreset.has(role.id) && hasRoleOverrides(role))
-    .map((role) => ({ templateId: role.id, enabled: role.enabled, ...cloneOverrides(role) }))
-  emit('setTeam', {
-    presetId: preset.id,
-    topologyOverride: false,
-    roles: keep,
-  })
+  emit('setTeam', followPreset(preset, props.projectTeam.roles))
 }
 
 const cloning = ref(false)
 const cloneName = ref('')
+/** Whether the copy is for everyone. Off: it belongs to this project. */
+const cloneShared = ref(false)
 const renaming = ref(false)
 const renameName = ref('')
 const renamingPresetId = ref('')
@@ -330,6 +339,7 @@ const confirmDelete = ref<TeamPreset | null>(null)
 function openClone(preset: TeamPreset) {
   selectedPresetId.value = preset.id
   cloneName.value = `${preset.name} copy`
+  cloneShared.value = false
   cloning.value = true
 }
 
@@ -388,6 +398,11 @@ function cloneTeam() {
       position,
       ...cloneOverrides(role),
     })),
+    // Cloning a shared team is how you get one of your own to change, so the
+    // copy belongs to this project unless it is asked to be shared. A clone
+    // that landed back in the shared list put the same pipeline in front of
+    // every other repository again, which is what ownership is here to stop.
+    cloneShared.value ? null : props.projectId,
   )
   cloning.value = false
 }
@@ -428,9 +443,19 @@ function cloneTeam() {
         <p class="text-muted-foreground mt-0.5 text-[10px]">Team setup</p>
       </div>
 
-      <ul class="divide-y">
-        <li
-          v-for="preset in presets"
+      <!-- This project's teams first, then the shared ones, each said out
+           loud. One flat list is what let a pipeline built for one repository
+           be adopted into another by a click, and edited there. -->
+      <template v-for="group in teamGroups" :key="group.key">
+        <p
+          v-if="group.teams.length"
+          class="text-muted-foreground bg-muted/30 px-3 py-1.5 text-[10px] font-semibold tracking-wide uppercase"
+        >
+          {{ group.label }}
+        </p>
+        <ul v-if="group.teams.length" class="divide-y border-b last:border-b-0">
+          <li
+            v-for="preset in group.teams"
           :key="preset.id"
           :class="selectedPresetId === preset.id && 'bg-primary/[0.08]'"
         >
@@ -486,6 +511,19 @@ function cloneTeam() {
               >
                 <Copy :size="14" />
               </Button>
+              <!-- Which project a team belongs to is an edit, not a label, so
+                   the control is the same shape as rename and delete. The
+                   built-in is where new projects start, so it stays shared. -->
+              <Button
+                size="icon-xs"
+                variant="ghost"
+                :disabled="preset.builtin"
+                :title="preset.builtin ? 'The built-in team is shared by every project' : ownershipLabel(preset)"
+                :aria-label="ownershipLabel(preset) || `${preset.name} is shared`"
+                @click="toggleOwnership(preset)"
+              >
+                <component :is="preset.projectId ? FolderGit2 : Globe" :size="14" />
+              </Button>
               <Button
                 size="icon-xs"
                 variant="ghost"
@@ -520,8 +558,9 @@ function cloneTeam() {
         </li>
         <li v-if="!presets.length" class="text-muted-foreground px-3 py-6 text-center text-xs">
           No teams yet.
-        </li>
-      </ul>
+          </li>
+        </ul>
+      </template>
 
     </section>
 
@@ -709,6 +748,27 @@ function cloneTeam() {
         <Label for="clone-team-name">Team name</Label>
         <Input id="clone-team-name" v-model="cloneName" autofocus @keyup.enter="cloneTeam" />
       </div>
+      <!-- Where the copy lands. Cloning a shared team is how you get one to
+           change without changing it for everyone, so it belongs to this
+           project unless this says otherwise. -->
+      <label class="flex items-start gap-2.5 text-xs">
+        <Switch
+          :model-value="cloneShared"
+          aria-label="Share the clone with every project"
+          class="mt-0.5"
+          @update:model-value="(v: boolean) => (cloneShared = v)"
+        />
+        <span>
+          Share with every project
+          <span class="text-muted-foreground mt-0.5 block text-[10px]">
+            {{
+              cloneShared
+                ? 'Any project can adopt it, and editing it changes it for all of them.'
+                : `Belongs to ${projectName || 'this project'}. No other project sees it.`
+            }}
+          </span>
+        </span>
+      </label>
       <DialogFooter>
         <Button variant="outline" @click="cloning = false">Cancel</Button>
         <Button :disabled="!cloneName.trim()" @click="cloneTeam">Clone team</Button>

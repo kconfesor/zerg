@@ -79,8 +79,11 @@ Subscription values are labelled as estimates.
 
 ![Spend by role and provider](docs/screenshots/05-spend.png)
 
-**Team and settings.** The team editor controls pipeline order and role settings. The role library
-holds reusable defaults for harnesses, models, prompts, and gates.
+**Team and settings.** The team editor controls pipeline order and role settings. The rail beside the
+board edits the same pipeline without leaving the board: add a role, turn one off, reorder it. If the
+team belongs to this project the change lands in it; if it is shared, zerg asks for a name and copies
+it into this project first, so a shared pipeline is never changed by accident. The role library holds
+reusable defaults for harnesses, models, prompts, and gates.
 
 ![The team editor](docs/screenshots/04-team.png)
 
@@ -100,8 +103,14 @@ holds reusable defaults for harnesses, models, prompts, and gates.
 
 A **role** is one agent process with its own harness, model, prompt, inbox, and git worktree. A
 **team** is an ordered pipeline of roles. The built-in Default team runs a coder followed by a
-reviewer, and the role library includes planner, coder, reviewer, cleaner, architect, hardener,
-security, and docs templates.
+reviewer, and the role library includes planner, coder, reviewer, debugger, cleaner, architect,
+hardener, security, and docs templates.
+
+A team either belongs to one project or is shared by all of them. A team is where prompts, models and
+arguments are tuned for a particular repository, so one built for project X stays out of project Y:
+it is not in Y's picker, and editing it cannot change what Y runs. Teams meant to be reused, like
+Default, are shared, and a shared team can be cloned into a project when you want your own copy to
+change.
 
 Work enters at the first enabled role. Each role commits its changes and hands the commit SHA to the
 next role, so downstream work starts from code rather than a description. The final role integrates

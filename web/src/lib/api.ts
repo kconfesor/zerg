@@ -39,10 +39,10 @@ export interface ResolvedRole extends RoleTemplate, RoleOverrides {
   terminal: boolean
 }
 
+/** One role's settings for one project, over whatever its team says. Shape is
+ *  the team's: a project that wants its own runs a team of its own. */
 export interface ProjectRole extends RoleOverrides {
   templateId: string
-  position?: number
-  enabled: boolean
 }
 
 export interface TeamPresetRole extends RoleOverrides {
@@ -55,6 +55,10 @@ export interface TeamPreset {
   id: string
   name: string
   builtin: boolean
+  /** The project this team belongs to, or null when every project can use it.
+   *  A team carries prompts, models and arguments chosen for one repository as
+   *  often as not, and those have no business in another repository's picker. */
+  projectId: string | null
   roles: TeamPresetRole[]
   createdAt: string
   updatedAt: string
@@ -62,13 +66,11 @@ export interface TeamPreset {
 
 export interface ProjectTeam {
   presetId: string | null
-  topologyOverride: boolean
   roles: ResolvedRole[]
 }
 
 export interface ProjectTeamUpdate {
   presetId: string | null
-  topologyOverride: boolean
   roles: ProjectRole[]
 }
 
@@ -83,9 +85,8 @@ export interface Project {
   integration: Integration
   /** Only used when integration is pr. */
   prDraft: boolean
-  /** The reusable team this project follows, or empty for a standalone team. */
+  /** The team this project runs. */
   teamPresetId?: string
-  teamTopologyOverride?: boolean
   /** What answers questions in Chat. Empty inherits the terminal role. */
   chatHarness?: string
   chatModel?: string
@@ -369,8 +370,15 @@ export const api = {
   models: (harness: string) => call<Model[]>(`/harnesses/${harness}/models`),
 
   roles: () => call<RoleTemplate[]>('/roles'),
-  teamPresets: async () => (await call<TeamPreset[]>('/team-presets')).map(withRoles),
-  createTeamPreset: (p: Pick<TeamPreset, 'name' | 'roles'>) =>
+  /** The teams a project may use: the shared ones and its own. Without an id
+   *  this is every team, which is not a list to show under one project. */
+  teamPresets: async (projectId?: string) =>
+    (
+      await call<TeamPreset[]>(
+        `/team-presets${projectId ? `?project=${encodeURIComponent(projectId)}` : ''}`,
+      )
+    ).map(withRoles),
+  createTeamPreset: (p: Pick<TeamPreset, 'name' | 'roles'> & { projectId?: string | null }) =>
     call<TeamPreset>('/team-presets', { method: 'POST', body: JSON.stringify(p) }).then(withRoles),
   updateTeamPreset: (p: TeamPreset) =>
     call<TeamPreset>(`/team-presets/${p.id}`, { method: 'PUT', body: JSON.stringify(p) }).then(withRoles),
