@@ -139,8 +139,10 @@ func printVersion() {
 func usage() {
 	fmt.Fprint(os.Stderr, `zerg, a multi-agent coding orchestrator
 
-  zerg up [--addr host:port] [--db path] [--verbose]
-      Run the overmind and serve the cockpit.
+  zerg up [--addr host:port] [--db path] [--no-dev-ui] [--verbose]
+      Run the overmind and serve the cockpit. In a checkout with no cockpit
+      compiled in, this also runs the cockpit's dev server and serves it here,
+      hot-reloading; --no-dev-ui turns that off.
 
 Run by agents, not by you:
 

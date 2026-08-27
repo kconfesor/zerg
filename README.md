@@ -322,30 +322,34 @@ Readiness will tell you exactly which of these is missing per role. See step 4.
 ### 3. Build and run
 
 ```sh
-./build.sh          # cockpit → web/dist → embedded in the binary → ./zerg
+./build.sh          # cockpit → web/dist → compiled into the binary → ./zerg
 ./zerg up           # 127.0.0.1:7717
 ```
 
-Or by hand, which is what `build.sh` does:
+That is the binary you want for a daemon you actually run: the cockpit is inside it, so it needs
+nothing but itself at runtime. No Node, no pnpm, no second process.
+
+**Working on zerg is a different command, and `build.sh` is not part of it:**
 
 ```sh
-pnpm --dir web install --frozen-lockfile && pnpm --dir web build
-rm -rf internal/api/dist && cp -R web/dist internal/api/dist   # go:embed cannot reach outside its package
-touch internal/api/dist/.gitkeep                                # keeps a fresh clone compiling
-go build -o zerg ./cmd/zerg
+go build -o zerg ./cmd/zerg && ./zerg up    # about 2s, and the cockpit hot-reloads as you save
 ```
 
-The cockpit is generated rather than committed. You do not have to build it to work on it: in a
-checkout, `zerg up` starts its dev server itself and serves it on the daemon's own port, hot
-reloading as you save. `./build.sh` is for producing a binary with the UI compiled in, which is
-what you deploy and what a release ships.
+In a checkout with no cockpit compiled in, `zerg up` starts the cockpit's dev server itself,
+installs its dependencies the first time if they are missing, and serves it on the daemon's own
+port. One command, one URL, hot reload, and the dev server stops when the daemon does. It needs
+Node and pnpm on PATH; without them the API still runs and the pages say what to do.
+`--no-dev-ui` turns it off. None of this happens in a binary built by `build.sh`, which has the
+cockpit compiled in and no sources beside it.
+
+[CONTRIBUTING.md](CONTRIBUTING.md) has the same thing as a table, with what each loop costs.
 
 State lives in `~/.zerg/zerg.db` (override with `--db`), which is created on first run along with
 the eight built-in role templates. The directory and the database are `0700`/`0600`, since they hold every
 prompt, transcript and cost this machine has produced.
 
 ```
-zerg up [--addr host:port] [--no-tls] [--db path] [--verbose]
+zerg up [--addr host:port] [--no-tls] [--db path] [--no-dev-ui] [--verbose]
 ```
 
 `--addr` and `--no-tls` override the stored settings for one run. `--no-tls` is the way back in if a
