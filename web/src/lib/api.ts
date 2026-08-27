@@ -96,6 +96,25 @@ export interface Project {
   lastOpenedAt?: string
 }
 
+/** One subdirectory the folder picker can descend into or select. */
+export interface BrowseEntry {
+  name: string
+  path: string
+  /** Holds a .git, so it is a repository the create endpoint will accept. */
+  isRepo: boolean
+}
+
+/** A directory listing from the folder picker. */
+export interface BrowseDir {
+  path: string
+  /** The directory above, or empty at the filesystem root. */
+  parent: string
+  entries: BrowseEntry[]
+  /** True when the listing was cut short, so the picker can say so rather than
+   *  hiding the folder somebody is looking for. */
+  truncated?: boolean
+}
+
 /**
  * One role's spend over a window, with what it ran on.
  *
@@ -366,6 +385,15 @@ export const api = {
   projects: () => call<Project[]>('/projects'),
   createProject: (path: string, baseBranch: string) =>
     call<Project>('/projects', { method: 'POST', body: JSON.stringify({ path, baseBranch }) }),
+
+  /**
+   * The subdirectories of one directory on the daemon's machine, for picking a
+   * project without typing its path. Empty path starts at the operator's home.
+   * The daemon lists it because the repositories are on its disk, not the
+   * browser's.
+   */
+  browse: (path: string) =>
+    call<BrowseDir>(`/browse?path=${encodeURIComponent(path)}`),
   openProject: (id: string) => call<Project>(`/projects/${id}/open`, { method: 'POST' }),
   deleteProject: (id: string) => call<void>(`/projects/${id}`, { method: 'DELETE' }),
 

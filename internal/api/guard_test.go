@@ -1,12 +1,16 @@
 package api
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/kconfesor/zerg/internal/store"
 )
 
 // A page you visit can resolve its own hostname to 127.0.0.1 and then post to
@@ -97,4 +101,82 @@ func TestOversizedBodiesAreCut(t *testing.T) {
 
 func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+// The Host check is what actually stops DNS rebinding, and it is the reason
+// safe methods can stay unguarded otherwise.
+//
+// Rebinding points an attacker's hostname at this machine, so by the time the
+// request arrives the browser calls it same-origin and sends a matching Origin.
+// Both of the other checks pass. The Host does not: it is still the attacker's
+// name, because that is the name the victim's browser was aimed at.
+func TestRequestsAddressedToAnotherNameAreRefused(t *testing.T) {
+	h, _ := newTestServer(t)
+
+	cases := []struct {
+		name  string
+		host  string
+		allow bool
+	}{
+		{"loopback address", "127.0.0.1:7717", true},
+		{"loopback name", "localhost:7717", true},
+		{"IPv6 loopback", "[::1]:7717", true},
+		{"an attacker's name resolved here", "evil.example", false},
+		{"a tailnet name this daemon does not serve", "someone-else.tailnet.ts.net", false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// A GET, because reading is the whole of the attack: /api/browse
+			// enumerates the filesystem.
+			r := httptest.NewRequest("GET", "/api/projects", nil)
+			r.Host = tc.host
+			r.Header.Set("Sec-Fetch-Site", "same-origin")
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, r)
+
+			if tc.allow && rec.Code == http.StatusForbidden {
+				t.Errorf("Host %q was refused; the cockpit is reached this way", tc.host)
+			}
+			if !tc.allow && rec.Code != http.StatusForbidden {
+				t.Errorf("Host %q got %d, want 403", tc.host, rec.Code)
+			}
+		})
+	}
+}
+
+// The tailnet name the daemon serves TLS for is how a phone reaches it, so it
+// has to pass while other names under the same suffix do not.
+func TestTheTailnetNameThisDaemonServesIsAllowed(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if err := store.Seed(ctx, db, "claude"); err != nil {
+		t.Fatal(err)
+	}
+	h := New(Deps{
+		DB:  db,
+		Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Applied: store.Listener{
+			Addr:        "100.97.75.92:7717",
+			TailnetHost: "kelvins-machine.tailnet.ts.net",
+		},
+	}).Routes()
+
+	for host, want := range map[string]int{
+		"kelvins-machine.tailnet.ts.net:7717": http.StatusOK,
+		"100.97.75.92:7717":                   http.StatusOK,
+		"other-machine.tailnet.ts.net:7717":   http.StatusForbidden,
+	} {
+		r := httptest.NewRequest("GET", "/api/projects", nil)
+		r.Host = host
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, r)
+		if rec.Code != want {
+			t.Errorf("Host %q got %d, want %d", host, rec.Code, want)
+		}
+	}
 }

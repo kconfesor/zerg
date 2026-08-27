@@ -15,6 +15,7 @@ import { computed, ref, useId, watch } from 'vue'
 import { latest } from '@/lib/latest'
 import { Plus, Trash2 } from '@lucide/vue'
 import { api, type Integration, type Project } from '@/lib/api'
+import ProjectPathField from '@/components/ProjectPathField.vue'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -510,8 +511,9 @@ async function sweep() {
         <div class="flex flex-col gap-3">
           <div class="flex flex-col gap-1.5">
             <Label :for="pathId">Path</Label>
-            <Input :id="pathId" v-model="newPath" placeholder="/Users/you/source/your-repo" autofocus />
+            <ProjectPathField v-model="newPath" :input-id="pathId" autofocus />
           </div>
+
           <div class="flex flex-col gap-1.5">
             <Label :for="branchId">Base branch</Label>
             <Input :id="branchId" v-model="newBranch" />

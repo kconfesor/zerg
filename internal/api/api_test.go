@@ -50,6 +50,10 @@ func do(t *testing.T, h http.Handler, method, path string, body any) *httptest.R
 		rdr = bytes.NewReader(b)
 	}
 	req := httptest.NewRequest(method, path, rdr)
+	// What a cockpit tab sends. httptest defaults to example.com, which the
+	// daemon now refuses: a Host it does not serve is what DNS rebinding looks
+	// like, so every request here carries a real one.
+	req.Host = "127.0.0.1:7717"
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	return rec

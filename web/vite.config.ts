@@ -16,6 +16,11 @@ export default defineConfig({
     // /api is proxied. In production the daemon serves the built assets from
     // the same origin and no proxy exists.
     proxy: { '/api': 'http://127.0.0.1:7717' },
+    // `zerg up` fronts this dev server, and over Tailscale the browser's Host
+    // is the tailnet MagicDNS name, which Vite blocks by default. A leading dot
+    // allows any subdomain, so this covers every machine's ts.net name rather
+    // than hard-coding one.
+    allowedHosts: ['.ts.net'],
   },
   build: { outDir: 'dist', emptyOutDir: true },
   test: {
