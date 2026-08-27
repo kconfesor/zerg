@@ -4,586 +4,287 @@
 
 <p align="center">
   <b>Multi-agent coding orchestrator</b><br>
-  A Go daemon supervises a team of agent harnesses working in isolated git worktrees, routes work between them, and serves a Vue 3 cockpit.
+  zerg supervises coding agents in isolated git worktrees, routes work between them, and serves a Vue 3 cockpit from one local process.
 </p>
 
-**Everything is configured in the UI.** No config files or prompt files to copy. Define reusable
-teams once, clone one when a project needs different settings, and choose which team each project uses.
+**Everything is configured in the UI.** Define reusable teams, assign one to each project, and
+change only the settings that project needs. There are no config files or prompt files to copy.
 
-Status: **running.** Coordination, harnesses, preflight, board and cockpit are implemented and have
-completed real tasks end to end. See [ARCHITECTURE.md](docs/ARCHITECTURE.md).
+zerg works end to end, but it is not stable yet. Install it from source and expect forward-only
+database and API changes.
 
 ```sh
 git clone https://github.com/kconfesor/zerg.git && cd zerg
 ./build.sh && ./zerg up          # http://127.0.0.1:7717
 ```
 
-Two things to know before you point it at a repository. **It runs agent CLIs as child processes**,
-with your permissions, doing whatever the task requires. It is the same thing you accept by running
-`claude` or `pi` yourself, several at a time and unattended. And **the API has no authentication**:
-bind it to loopback or a Tailscale tailnet and nothing else. [SECURITY.md](SECURITY.md) is the
-short version of what is and is not defended.
+Before you run it:
+
+- **Agents run with your permissions.** zerg starts `claude`, `pi`, and the commands they choose as
+  child processes. This is the same trust decision as running those tools yourself, several at a
+  time and unattended.
+- **The API has no authentication.** Bind it to loopback or a Tailscale tailnet. Never expose it to
+  the public internet. Read [SECURITY.md](SECURITY.md) before changing the bind address.
+- **macOS, Linux, and WSL only.** Native Windows is not supported.
+- **No release binaries yet.** The cockpit is compiled into the binary, but you must build that
+  binary yourself for now.
 
 | | |
 |---|---|
-| [What it looks like](#what-it-looks-like) | screenshots, before you install anything |
-| [Set it up](#setting-up-on-a-new-machine) | toolchain, harness login, first project |
-| [Which harness, and which model where](#which-harness-and-which-model-where) | pi and claude, and why the reviewer should not be the coder |
-| [Reach it from a phone](#reaching-it-from-a-phone) | Tailscale, TLS, installing it as an app |
-| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | how it works, and the failures behind each decision |
-| [CONTRIBUTING.md](CONTRIBUTING.md) | building, testing, and the traps in this codebase |
-| [AGENTS.md](AGENTS.md) | the same, for a coding agent working here, on any harness |
-| [SECURITY.md](SECURITY.md) | threat model, and reporting a vulnerability |
-| [Roadmap](#roadmap) | what is next, what is later, what is undecided |
+| [What it looks like](#what-it-looks-like) | screenshots before you install it |
+| [How it works](#how-it-works) | roles, teams, worktrees, gates, and integration |
+| [Set it up](#setting-up-on-a-new-machine) | toolchain, harness login, and first project |
+| [Reach it from a phone](#reaching-it-from-a-phone) | Tailscale, TLS, and installing it as an app |
+| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | design decisions and the failures behind them |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | development loops and checks |
+| [SECURITY.md](SECURITY.md) | threat model and private vulnerability reporting |
 
 ## Why this exists
 
-I got tired of looking at terminal screens.
+I got tired of looking at terminal screens. With several agents running, the state of the work ends
+up scattered across sessions: which one is waiting, which one is stuck, what it committed, and what
+the run has cost. The answer goes stale as soon as you switch panes.
 
-Running several agents means several sessions, and the state of the work ends up scattered across
-them: which one is waiting on me, which one has been stuck for twenty minutes, what the last one
-actually committed, what any of it has cost. Answering that meant switching panes and reading
-scrollback, and the answer went stale as soon as I looked away.
-
-The part that decided it was the phone. Following work from a terminal on a phone is a mess: tiny
-text, no window management, scrollback you cannot skim, and a session that drops when the screen
-locks. But a run does not stop needing you when you leave the desk. A gated handoff waits, a role
-that hit a requirement it could not guess waits, and both of them wait until you are back in the
-room with the machine.
-
-So the state lives in a database and is served as a screen, not a scrollback: what each role is
-doing, which card is where, what it has spent, and what needs a decision. It is built for a phone
-first because that is where I read it from, which is why [setting up Tailscale](#reaching-it-from-a-phone)
-is not optional here so much as the point.
+The phone is what made me build zerg. Approvals and questions still need an answer after you leave
+the desk, but terminal sessions are poor phone interfaces and disappear when the screen locks. zerg
+keeps the state in SQLite and presents it as a board: what each role is doing, where each task is,
+what it has spent, and what needs a decision.
 
 ## What it looks like
 
-A demo project, `swarm-sim`, with a four-role pipeline: `planner` on opus, `coder` and `docs` on
-sonnet, and `reviewer` on pi with an OpenAI model, because
-[the reviewer should not be the coder](#do-not-review-your-own-work). The planner and the reviewer
-are gated, so both ends of the pipeline stop for a person.
+These screenshots use a demo project named `swarm-sim`. Its pipeline has a gated planner, coder,
+docs role, and gated reviewer.
 
-**The board.** One lane per role, plus Done. Every card carries what it is waiting on, how long it
-has been going, and what it has cost.
+**Board.** Each role has a lane, and each card shows its state, age, and cost.
 
 ![The board, with cards in four lanes](docs/screenshots/01-board.png)
 
-**What is waiting on you.** Approvals and questions in one place, over whatever you were reading.
-The gated diff is `git diff base...sha`: everything the task would land, across every role and every
-lap, not just the final commit.
+**Attention.** Approvals and questions appear together. A final approval shows everything the task
+would land, not only the last commit.
 
 ![An approval with its diff expanded, and a question from the coder](docs/screenshots/02-attention.png)
 
-**Where a card has been.** Every handoff as a sequence, with the note each role wrote and the commit
-it pointed at. Rejections point back up the pipeline, so a card that bounced looks like one.
+**Card history.** Every handoff records the role, note, and commit. Rejections point back to the role
+that must respond.
 
 ![A finished card's history as a sequence diagram](docs/screenshots/03-card-flow.png)
 
-**What the agents are doing.** Not a captured terminal: every line is a typed event, so it filters
-by role, survives a reload, and reads back later.
+**Activity.** Structured events show tool calls, messages, turns, tokens, and cost without scraping
+a terminal.
 
 ![The activity stream, filtered by role](docs/screenshots/06-activity.png)
 
-**What it cost.** Per role and per provider, with input split into its three classes, because cached
-and uncached tokens differ by roughly 50x in price and one blended number hides the only lever you
-have. Subscription rows are labelled as estimates rather than presented as a bill.
+**Spend.** Usage is grouped by role and provider, with cached and uncached input shown separately.
+Subscription values are labelled as estimates.
 
 ![Spend by role and provider](docs/screenshots/05-spend.png)
 
-**The team.** Roles on the left, what each one runs on in the middle, the order on the right.
-Changing a team changes it everywhere it is used, which the view says out loud.
+**Team and settings.** The team editor controls pipeline order and role settings. The role library
+holds reusable defaults for harnesses, models, prompts, and gates.
 
 ![The team editor](docs/screenshots/04-team.png)
 
-**Settings.** The role library, where a role's harness, model, prompt and gate are defined once for
-every team that uses it, alongside network and TLS, disk and retention, harness flags, and the
-shared instructions every role is given.
+![The role library in Settings](docs/screenshots/07-settings.png)
 
-![Settings](docs/screenshots/07-settings.png)
-
-**On a phone**, which is the case this was designed around: the nav becomes a drawer, lanes stack,
-and dialogs go full screen.
+**Phone.** Navigation becomes a drawer, lanes stack, and dialogs fill the screen.
 
 <p>
   <img src="docs/screenshots/08-phone-board.png" alt="The board on a phone" width="270">
   <img src="docs/screenshots/09-phone-attention.png" alt="An approval on a phone" width="270">
 </p>
 
-> These are a demo database against a toy repository, so nothing here is a benchmark: the numbers
-> are what that data says, not a claim about how fast or cheap your pipeline will be.
+> The screenshots use a seeded database and a toy repository. The numbers are examples, not a
+> performance or cost benchmark.
 
-## Why it is built this way
+## How it works
 
-Agents in separate git worktrees handing each other committed SHAs is the right shape for this
-problem. Coordination and configuration are where it goes wrong, and both fail quietly.
+A **role** is one agent process with its own harness, model, prompt, inbox, and git worktree. A
+**team** is an ordered pipeline of roles. The built-in Default team runs a coder followed by a
+reviewer, and the role library includes planner, coder, reviewer, cleaner, architect, hardener,
+security, and docs templates.
 
-Two incidents set the design. A day of running an earlier build produced four hangs that all
-presented identically, as an agent that looks alive and does nothing, and every one of them detectable
-before spawning. And a task was silently built in the wrong language, because config had been
-snapshotted into the worktrees and a later edit reached no one.
+Work enters at the first enabled role. Each role commits its changes and hands the commit SHA to the
+next role, so downstream work starts from code rather than a description. The final role integrates
+the result by fast-forwarding the base branch, opening a pull request with `gh`, or leaving the work
+on its branch, according to the project setting.
 
-So:
+Any role can require approval before its handoff moves. A gated final role shows
+`git diff base...sha`, covering every role and every lap of the task, before integration.
 
-- **configure in the UI**: roles, reusable teams, harnesses, models and prompts are database rows,
-  not files; prompts are composed fresh at every spawn
-- **harnesses are adapters**, not a hardcoded switch: `claude` and `pi` first
-- **model pickers from the harness's own catalog**, so you stop typing model ids that 400
-- **preflight before spawn**: a stale CLI, a corrupt config, an unanswered trust dialog or a broken
-  plugin tree becomes a visible blocked role with a stated remedy
-- **agents emit structured events**, so the cockpit renders tool calls, tokens and cost instead of
-  scraping a terminal
-- **leases, not fire-and-forget**: unacked work returns to the queue, and a stall is a state rather than silence
-- **your plan's headroom is on screen**: claude reports it on every turn, pi is asked for it, with a
-  bar per window, coloured only where it is nearly spent
-- **a spent quota is a pause, not a crash**: a role that hits its subscription limit waits for the
-  window and resumes itself, saying when ([§16](docs/ARCHITECTURE.md#16-provider-limits))
-- **one SQLite database**, one writer, real transactions
-- **nothing reports success it did not observe**. See [§6.1](docs/ARCHITECTURE.md#61-what-the-first-real-run-broke),
-  which is the record of a task reaching Done over a branch that had never moved
-- **it is a guest in your repository**: prompts are appended, never substituted, so your
-  `CLAUDE.md` and `AGENTS.md` still apply; nothing is written into the tree but `.worktrees/`, and
-  that ignore rule goes in `.git/info/exclude` rather than your `.gitignore`
-  ([§4.4.1](docs/ARCHITECTURE.md#441-what-zerg-injects-and-what-it-leaves-alone))
+The operational rules are simple:
 
-Provider setup is out of scope: log into `pi` and `claude` yourself. zerg detects credential state
-and tells you what to fix. It never runs a login flow or touches an auth file.
+- Roles, teams, models, prompts, and project overrides live in SQLite and are edited in the cockpit.
+- Prompts are composed from current settings before every spawn.
+- Preflight checks harness binaries, versions, credentials, trust state, models, and extensions
+  before any role starts. A model missing from the harness catalog is a warning rather than a block,
+  because a free-text model ID may still work.
+- Agents emit structured events for the activity stream, usage, and cost.
+- Leased work returns to the queue when a process disappears.
+- A role that exhausts a provider quota pauses until the window resets instead of crashing.
+- zerg appends its instructions to the harness. It does not replace project instructions such as
+  `CLAUDE.md` or `AGENTS.md`.
+- In an existing repository, the only directory zerg creates is `.worktrees/`, ignored through
+  `.git/info/exclude` rather than the repository's `.gitignore`.
 
-## Approving, and where work lands
+[ARCHITECTURE.md](docs/ARCHITECTURE.md) documents the full configuration model, process lifecycle,
+message protocol, database, and the failures that shaped these decisions.
 
-A role can be gated. A gated handoff is held before the next role sees it; a gated **last** role is
-the approval that performs the merge, and it shows `git diff base...sha`: everything the task would
-land, across every role and every lap, not just the final commit.
+## Choosing a harness and reviewer
 
-Per project you choose what that approval does: fast-forward the base branch, open a pull request
-with `gh`, or leave the work on its branch. Pull requests can be opened ready for review or as drafts.
-It is a project setting rather than a role setting because only the last role integrates, and which
-role that is changes when you change the team.
+zerg currently supports `pi` and `claude` through the same adapter interface. Use whichever harness
+has the models, subscription, and workflow you prefer. Model options come from the harness itself,
+with free text available when a catalog lags a working model.
 
-Finished cards can be put away one at a time; the switch to show them again is off by default.
+I get better reviews when the coder and reviewer use different model families, ideally from
+different providers. They tend to make different mistakes. The Default team reflects that choice:
+`coder` uses sonnet and `reviewer` uses opus, and you can change either globally, per team, or for one
+project.
 
-## Roles and teams
+Gate the final reviewer and read both its note and the landing diff. A rejection sends the work back
+to the role that produced it with your feedback attached.
 
-**A role is a worker.** Not a job title, but an actual agent process, with its own git worktree, its
-own harness (`claude`, `pi`), its own model, its own prompt, and its own inbox. `reviewer` means "an
-agent running opus in `.worktrees/reviewer`, carrying the reviewer prompt, that holds its handoffs
-for approval". Nothing about a role is a hint to the model; every field is what the daemon actually
-executes.
+## Technical shape
 
-**A team is an ordered pipeline of roles.** It picks roles out of the library, orders them, and
-enables or disables each one. Work enters at the first enabled role and is handed down: each role
-commits in its worktree and passes the SHA to the next, so the role below always starts from
-committed code rather than a description of it. The last enabled role is the one that integrates
-(see above). Which role that is changes when you reorder or disable, and the board's Done lane is
-what comes after it.
+The daemon uses Go 1.27, `net/http`, SQLite, and WebSockets. The cockpit uses Vue 3.5, Vite 8,
+shadcn-vue, Tailwind 4, and TypeScript 6. `modernc.org/sqlite` and `coder/websocket` are the only
+non-standard Go dependencies.
 
-A library of eight roles ships (planner, coder, reviewer, cleaner, architect, hardener, security,
-docs) plus a **Default** team of `coder` (sonnet) then `reviewer` (opus).
-
-### Four layers, and where each one is edited
-
-Settings apply in this order, and each layer only has to say what differs from the one above it:
-
-| Layer | Where | What it decides |
-|---|---|---|
-| **Role library** | Settings → Roles | What a role *is*: its harness, model, prompt, gate. Global. Editing one here changes the default for every team that uses it. |
-| **Team** | Team → *select a team* | Which roles are on it, in what order, enabled or not, plus any field it wants to specialize for this team's purposes. |
-| **Project** | Team → *the project's team* | The same fields again, for one repository only. Optionally the pipeline itself, which then stops following the team's. |
-| **Runtime** | (nowhere) | Tasks, leases, messages, cost. Never configuration. |
-
-Null means inherit, a value means local, at every layer. A role that differs from what it inherited
-is badged in the team list, so a project that drifted from its team is visible rather than a
-surprise. Empty arguments are a value, not a blank: it means *run with no arguments*, which is
-different from *inherit the arguments*.
-
-Which is why the library and the team editor are separate screens. Renaming a prompt in the library
-is a decision about every project on this machine; checking a role onto a team is a decision about
-one pipeline. Doing both in one place is how a fix to one project quietly changes another.
-
-### Working with them
-
-Teams are shared, so editing one edits it everywhere it is used. Selecting a team in the list only
-opens it for editing, and **Use this Team** is the separate button that assigns it, so browsing never
-changes what runs, and the view warns you when the team on screen is not the one this project is on.
-It warns harder while agents are running, because a pipeline change applies immediately. When a
-project needs something different, **Clone** the team, change the clone, then assign it.
-
-Deleting a role from the library takes it off every team that had it, so the confirmation names
-them first.
-
-## Which harness, and which model where
-
-Both harnesses are first-class and the adapter interface exists so neither is special. They are not
-the same tool, though, and the choice is worth making deliberately.
-
-**pi** is excellent: efficient, plain, and quick to get out of your way. It is the one I reach for
-by default, and it lets you run **OpenAI models on a subscription** rather than metered per token,
-which changes what a long pipeline costs to run.
-
-**claude** is the popular one and the original of this generation of coding agents. It is
-well-understood, well-behaved in a worktree, and the harness most people already have logged in.
-
-### Do not review your own work
-
-**Put a different model, and ideally a different provider, on the reviewer than on the coder.**
-This is the single setting that most changes what comes out of a pipeline.
-
-A model reviewing its own output agrees with itself. It made those choices twenty minutes ago for
-reasons it still finds persuasive, and the things it did not think to check are exactly the things
-it will not think to check again. A different model has different blind spots, so it reads the diff
-as a stranger would and asks the questions the author never asked. In practice a second opinion
-from another family finds real problems: an unhandled boundary, a test that asserts the
-implementation rather than the behaviour, an error path nobody ran.
-
-The point is not that the reviewer is smarter. It is that the work reaches you in better shape,
-because it has already survived somebody who was not trying to be right about it.
-
-The **Default** team is set up this way, with `coder` on sonnet and `reviewer` on opus. Mixing
-providers goes further: `coder` on claude and `reviewer` on pi with an OpenAI model, or the reverse.
-Set it per role in **Team**, and per project if one repository wants something the others do not.
-
-### Read the review
-
-Gate the last role and read what it says before approving. The gated approval shows
-`git diff base...sha`, which is everything the task would land across every role and every lap, not
-just the final commit. That is the moment to catch a change that is technically correct and not what
-you wanted, and it costs a minute.
-
-Reviewing is also the cheapest place to notice that a brief was wrong. A rejection sends the work
-back to the role that produced it with your note attached, which is a much shorter loop than
-discovering it a week later in the base branch.
-
-## Layout
-
-```
-cmd/zerg/          daemon (zerg up) and agent client (zerg next|done|send|ask)
-internal/
-  overmind/        orchestrator core: start, stop, supervise, keep work moving
-  cerebrate/       per-role agent supervisor
-  adapter/         harness contract + claude, pi implementations
-  agent/           unix socket serving the four agent verbs
-  nydus/           message transport: work plane + control plane
-  board/           cards and lanes
-  chat/            ask the repository a question, outside the pipeline
-  store/           sqlite (~/.zerg/zerg.db), migrations, role library
-  event/           typed event bus, logging and usage recording
-  preflight/       readiness checks run before anything spawns
-  api/             http, serves the embedded cockpit
-  hatchery/        workspace and worktree management
-  tailnet/         tailscale status and certificates, via its CLI
-web/               Vue 3 + Vite + shadcn-vue cockpit
+```text
+cmd/zerg/          daemon and agent-facing CLI
+internal/api/      HTTP API and embedded cockpit
+internal/store/    SQLite schema and queries
+internal/nydus/    work routing, leases, and approvals
+internal/overmind/ process lifecycle and supervision
+internal/devui/    Vite lifecycle and proxy for local development
+web/               Vue cockpit
 ```
 
-## Stack
-
-Go 1.27 · stdlib `net/http` · modernc.org/sqlite (cgo-free, so `CGO_ENABLED=0` and a static binary) · coder/websocket
-Vue 3.5 · Vite 8 · shadcn-vue 2.8 (reka-ui) · Tailwind 4 · TypeScript 6 (pinned) · pnpm
-
-`modernc.org/sqlite` and `coder/websocket` are the only non-stdlib Go dependencies. Pinned versions and their gotchas:
-[ARCHITECTURE.md §14](docs/ARCHITECTURE.md#14-stack).
+See [ARCHITECTURE.md §14](docs/ARCHITECTURE.md#14-stack) for pinned versions and dependency notes.
 
 ## Setting up on a new machine
 
-Four steps. The first three are things zerg checks and reports on rather than does for you. It
-never runs a login flow or writes to an auth file.
+### 1. Install the toolchain
 
-### 1. Toolchain
-
-| | Version | Why |
+| Tool | Version | Purpose |
 |---|---|---|
-| **Go** | 1.27+ (`go.mod`) | builds the daemon; `CGO_ENABLED=0` works, the SQLite driver is pure Go |
-| **Node** | 24.19.0 (`.nvmrc`) | builds the cockpit. Vite 8 needs `^22.18.0 \|\| >=24.12.0` |
-| **pnpm** | 11 | `pnpm-lock.yaml` is the lockfile; `npm` will not reproduce it |
-| **git** | any recent | worktrees are the isolation mechanism |
+| **Go** | 1.27+ (`go.mod`) | builds the daemon |
+| **Node** | 24.19.0 (`.nvmrc`) | builds or hot-reloads the cockpit |
+| **pnpm** | 11 | installs the locked frontend dependencies |
+| **git** | recent | provides worktree isolation |
+
+Use macOS, Linux, or WSL. zerg uses Unix process groups and a Unix socket, so it does not compile
+for native Windows.
+
+### 2. Build zerg
 
 ```sh
-go version && node -v && pnpm -v && git --version
+git clone https://github.com/kconfesor/zerg.git
+cd zerg
+./build.sh
+./zerg up
 ```
 
-**macOS and Linux.** Agents are supervised as process groups and the agent protocol runs over a unix
-socket, neither of which has a Windows equivalent here, so the daemon does not compile for Windows
-at all. Under WSL it is ordinary Linux and works.
+`build.sh` compiles the cockpit into `./zerg`. The resulting binary needs neither Node nor pnpm at
+runtime.
 
-How you install those four is your business and your platform's; every package manager has an
-opinion and none of them stays current in somebody else's README. If you have no preference:
-[go.dev/dl](https://go.dev/dl/), [nodejs.org](https://nodejs.org/) or a version manager honouring
-`.nvmrc`, and `corepack enable pnpm` from that Node, which needs nothing else installed.
-
-`build.sh` checks Node itself and refuses with the version it wanted, because a build that silently
-runs on the wrong one fails much further downstream.
-
-Optional: **`gh`**, only if a project integrates by opening a pull request. Merge and branch modes
-never call it.
-
-That is the whole list. No tmux, no babashka, no zsh: agents are child processes of the daemon
-([§7.4](docs/ARCHITECTURE.md#74-no-tmux)), so there is no session manager to install or attach to.
-
-### 2. Log a harness in
-
-At least one, and zerg will not do it for you:
+If you are developing zerg itself, use the faster loop instead:
 
 ```sh
-claude          # then /login, and answer the trust prompt in any repo you will use
+go build -o zerg ./cmd/zerg && ./zerg up
+```
+
+A source build starts Vite behind the daemon and hot-reloads the cockpit on the same URL. See
+[CONTRIBUTING.md](CONTRIBUTING.md) for the full development loop and required checks.
+
+### 3. Install and log into a harness
+
+Install at least one supported harness: [Claude Code](https://code.claude.com/docs/en/install) or
+[pi](https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent). zerg reads the credential
+state reported by the harness. It does not run login flows or store provider credentials.
+
+```sh
+claude          # then /login and answer the trust prompt for repositories you will use
 pi              # then /login for the provider whose models you plan to select
 ```
 
-zerg reads credential state and reports it; it never runs a login flow or touches an auth file.
-Readiness will tell you exactly which of these is missing per role. See step 4.
+At least one harness must be ready for the roles on your selected team.
 
-### 3. Build and run
+### 4. Add a project
 
-```sh
-./build.sh          # cockpit → web/dist → compiled into the binary → ./zerg
-./zerg up           # 127.0.0.1:7717
-```
+Open **Projects → Add a project** and enter an absolute directory path. Then open **Team**, select or
+customize a team, and run **Readiness**.
 
-That is the binary you want for a daemon you actually run: the cockpit is inside it, so it needs
-nothing but itself at runtime. No Node, no pnpm, no second process.
+Readiness checks every enabled role and blocks Start when a required harness binary, credential,
+trust prompt, or extension is unavailable. A model absent from the harness catalog produces a
+warning because free-text model IDs may still work. Each result includes a suggested fix.
 
-**Working on zerg is a different command, and `build.sh` is not part of it:**
+If the target directory is not already a repository, the first Start runs `git init`, stages its
+current contents, and creates the initial commit required for worktrees.
 
-```sh
-go build -o zerg ./cmd/zerg && ./zerg up    # about 2s, and the cockpit hot-reloads as you save
-```
+State lives in `~/.zerg/zerg.db` by default. The database contains tasks, prompts, transcripts, and
+usage records and is not encrypted.
 
-In a checkout with no cockpit compiled in, `zerg up` starts the cockpit's dev server itself,
-installs its dependencies the first time if they are missing, and serves it on the daemon's own
-port. One command, one URL, hot reload, and the dev server stops when the daemon does. It needs
-Node and pnpm on PATH; without them the API still runs and the pages say what to do.
-`--no-dev-ui` turns it off. None of this happens in a binary built by `build.sh`, which has the
-cockpit compiled in and no sources beside it.
-
-[CONTRIBUTING.md](CONTRIBUTING.md) has the same thing as a table, with what each loop costs.
-
-State lives in `~/.zerg/zerg.db` (override with `--db`), which is created on first run along with
-the eight built-in role templates. The directory and the database are `0700`/`0600`, since they hold every
-prompt, transcript and cost this machine has produced.
-
-```
+```text
 zerg up [--addr host:port] [--no-tls] [--db path] [--no-dev-ui] [--verbose]
 ```
 
-`--addr` and `--no-tls` override the stored settings for one run. `--no-tls` is the way back in if a
-TLS setting turns out not to be satisfiable: without it, saving one can lock you out of the settings
-view that sets it.
-
-### 4. Point it at a repository
-
-In the cockpit: **Projects → Add a project** (an absolute path, checked to exist and be a
-directory), then **Team** to select or customize a reusable team, then **Readiness**. On the first
-Start, a directory that is not a repository yet gets `git init` and one commit, because a worktree needs history to branch
-from. That is the only commit zerg authors rather than an agent.
-
-Readiness is the step worth not skipping, though you cannot really skip it: **Start refuses while
-any enabled role is blocked**, and the refusal carries the report, so pressing it anyway lands you
-on this screen. A team that cannot work must never reach a running board. It runs every check for
-every enabled role and states a remedy for each failure:
-
-| Check | What it catches |
-|---|---|
-| `binary_present` | the harness is not on PATH |
-| `binary_version` | the CLI does not answer `--version` |
-| `config_parses` | the CLI's own config is corrupt. Two agents racing a read-modify-write once left one holding three concatenated copies of itself |
-| `credentials` (pi) | no credential for the selected provider → *run pi and use /login for that provider* |
-| `workspace_trusted` (claude) | the trust prompt was never answered for that directory |
-| `model_available` | the model id is not in the harness's catalog |
-| `extensions_loadable` (pi) | every extension failed to load, usually a Node version mismatch |
-
 ## Reaching it from a phone
 
-The cockpit binds to `127.0.0.1:7717` and is responsive: below 768px the nav becomes a drawer, board
-lanes stack, dialogs go full screen, and the top bar names the project beside the agent count.
+zerg binds to `127.0.0.1:7717` by default. To reach it from a phone without exposing it publicly,
+join the computer and phone to the same [Tailscale](https://tailscale.com) tailnet.
 
-### What Tailscale is
-
-A private network for your own machines. Each device runs a small daemon, gets a stable address on
-a network only your devices are on, and talks to the others over an encrypted WireGuard connection
-that goes directly between them wherever it can. No port forwarding, no router configuration, no
-public URL, and no server in the middle holding your traffic. It works the same from home, from a
-café, and from a phone on mobile data.
-
-It is **free for personal use**: the Personal plan costs nothing, covers unlimited devices of your
-own, and is [documented as non-commercial](https://tailscale.com/pricing). Installing it and
-signing in with an existing identity provider is the whole setup, and this is the entire footprint
-zerg needs: one machine running the daemon, one phone joined to the same tailnet.
-
-### Why Tailscale, specifically
-
-Because agents wait for people. A gated handoff holds until someone approves it, a role that hits a
-requirement it cannot guess asks and blocks, and both happen on their schedule rather than yours,
-twenty minutes after you left the desk, as often as not. A board you cannot reach from where you
-are is a pipeline that is stopped until you get back to the room the machine is in. That is the
-whole reason there is a phone-shaped cockpit at all.
-
-Which leaves the question of how the phone reaches the daemon, and **zerg has no authentication**.
-That is [deliberate](SECURITY.md), because the alternatives are worse than they look:
-
-| | What it costs |
-|---|---|
-| **A password on the app** | An auth system I would have to build, store, rotate and get right, protecting a service whose entire job is running arbitrary code on my machine. The blast radius of getting it subtly wrong is the machine. |
-| **Port-forward the router** | The daemon reachable from the internet, defended by whatever I just built. Not a thing to do with a process that spawns shells. |
-| **A tunnel service** | A public URL and someone else's edge in the middle of my repositories and my agents' output. |
-| **A VPN into the home LAN** | Correct, and heavier: it grants the phone the whole network to reach one port, and stops working the moment I am on a network that blocks it. |
-
-A tailnet is the smallest thing that answers it. Devices authenticate to each other with WireGuard
-keys rather than to zerg with a password; the daemon is reachable from *my* devices and from nothing
-else, on hotel wifi and on LTE exactly as at home; and the trust boundary is a list of machines I
-can see and revoke in an admin console, rather than a login screen I wrote.
-
-Two details that turn out to matter more than they sound:
-
-- **MagicDNS gives the machine a stable name**, so the cockpit is a bookmark rather than an address
-  that changes with the network.
-- **`tailscale cert` issues a real Let's Encrypt certificate** for that name. Not for secrecy, since
-  the tailnet already encrypts everything on it, but so the phone gets no warning and so the cockpit
-  runs in a secure context, which is what a browser wants before it will treat a page as an
-  installable app rather than a bookmark. No self-signed certificate to trust on the phone, and
-  nothing to renew by hand.
-
-None of it is required. Without Tailscale the daemon stays on loopback and everything works from the
-machine it runs on; zerg reports what is available in **Settings → Network** and says "not
-available" rather than erroring. But the phone is the case this was designed around, and a tailnet
-is what makes it safe to have.
-
-### Check Tailscale first
+Check the computer's Tailscale state:
 
 ```sh
-tailscale status     # logged in, and what this machine is called
-tailscale ip -4      # the address to bind to
+tailscale status
+tailscale ip -4
 ```
 
-zerg asks the same daemon the same questions (`tailscale status --json`), and reports the answer in
-**Settings → Network**, so you can skip this and read it there. On a fresh machine the command is
-faster, and four things can be wrong:
-
-| Symptom | Meaning | Fix |
-|---|---|---|
-| `tailscale: command not found` | not installed | [tailscale.com/download](https://tailscale.com/download) |
-| `Logged out` or a connection error | tailscaled is not running, or this machine is logged out | `tailscale up` |
-| no MagicDNS name in `status` | MagicDNS is off | enable **MagicDNS** under DNS in the admin console |
-| `tailscale cert <name>` fails | HTTPS certificates are off for the tailnet | enable **HTTPS Certificates** under DNS in the admin console |
-
-Only the last one is specific to TLS; the first three are needed to reach the cockpit at all.
-Everything here degrades rather than fails. A machine without Tailscale is the normal case, and
-zerg says "not available" rather than erroring.
-
-### Bind and secure it
-
-In **Settings → Network**, set the address to the tailnet IP and TLS to **Tailscale certificate**.
-For one run instead:
+Enable MagicDNS and HTTPS Certificates in the Tailscale admin console first. Then, in
+**Settings → Network**, set the listener to the tailnet IP and choose **Tailscale certificate** for
+TLS. For a one-time bind:
 
 ```sh
 ./zerg up --addr $(tailscale ip -4):7717
 ```
 
-With TLS set to `tailscale`, zerg asks the local tailscaled for a real Let's Encrypt certificate for
-this machine's MagicDNS name, so a phone gets no warning. `tailscale cert` is idempotent and renews
-in place, so this happens on every start and reuses a valid certificate. Certificates land in
-`~/.zerg/state/certs/`.
+With Tailscale TLS enabled, zerg requests and renews a certificate for the machine's MagicDNS name.
+It can also keep a second plain HTTP listener on loopback for local access. Address and TLS changes
+apply after restart.
 
-The alternative is TLS **files**, pointing at a certificate and key you already have.
+> **The cockpit has no authentication.** Anything that can route to its port can start agents, read
+> transcripts, and change configuration. Use loopback or a tailnet you control. Do not bind it to a
+> public interface or an untrusted LAN. See [SECURITY.md](SECURITY.md).
 
-`localhost` keeps working alongside it: a second listener serves plain HTTP on loopback on the same
-port, one daemon with two doors, so local work does not need the MagicDNS name, and a network setting
-that breaks the main listener cannot lock you out of the view that sets it. Turn it off with
-**Local access** if you would rather it did not.
+The cockpit includes a web manifest, so **Add to Home Screen** on iOS or **Install** on Android opens
+it without browser chrome.
 
-Address and TLS changes apply on restart, and the settings view says so; retention and cleanup apply
-immediately. The daemon prints the URL at startup, and both of them once there are two:
+## Running unattended
 
-```
-Cockpit: https://your-machine.tailXXXX.ts.net:7717
-Locally: http://127.0.0.1:7717
-note: reachable at 100.x.y.z:7717 beyond this machine, with no authentication.
-      Treat anything that can route to it as trusted.
-```
+`zerg up` runs in the foreground, and its agents are child processes. Closing the terminal stops the
+daemon and its agents. There is no `--detach` command or packaged service unit yet; use launchd,
+systemd, or `nohup` if you want it to survive a terminal session.
 
-> **The cockpit has no authentication.** Anything that can route to that port can start agents, read
-> every transcript, and see which repositories are being worked on. On a tailnet that is your own
-> devices, which is the point; `--addr 0.0.0.0` also hands it to whatever else shares the local
-> network. The daemon says which of the two you have chosen at startup.
+After a restart, zerg reclaims open leases and reconciles approvals interrupted during integration.
+It does not restart swarms automatically because spawning agent processes can spend money.
 
-### Installing it as an app
+## Roadmap and limitations
 
-The cockpit ships a web manifest with `display: standalone`, so **Add to Home Screen** on iOS or
-**Install** on Android gives it its own window with no browser chrome. Dialogs account for the
-notch, spanning the safe-area insets rather than the raw viewport.
+The [Roadmap milestone](https://github.com/kconfesor/zerg/milestone/1) tracks planned work. Current
+items include more harness adapters, line-level diff review, and deployable artifacts.
 
-## Running it unattended
+Additional limitations:
 
-`zerg up` runs in the foreground and its agents are its children, so closing the terminal stops
-everything. There is no `--detach` yet; use a launchd or systemd unit, or `nohup`.
-
-A restart is a first-class path, not a recovery hack: every open lease is reclaimed immediately
-rather than left to lapse, and an approval interrupted mid-integration is settled against the
-repository. Merged means the decision is recorded and the card closed, not merged means it returns
-to you as pending. Swarms do not resume by themselves, which is deliberate while spawning an LLM
-process costs money.
-
-## Tests
-
-```sh
-go test ./internal/...            # coordination, routing, store, adapters
-pnpm --dir web test               # the cockpit's logic: arg round-trips, stale-response guards, combobox keys
-```
-
-Neither spends a token. The coordination layer is testable without one, and is tested that way. Tests that
-assert an effect check the system that was supposed to change, meaning git or the database, rather than
-reading back a field the code set. [§6.1](docs/ARCHITECTURE.md#61-what-the-first-real-run-broke) is what
-happens when they don't.
-
-## Roadmap
-
-Tracked as issues under the [Roadmap milestone](https://github.com/kconfesor/zerg/milestone/1), so
-each item can be argued with on its own rather than read as a paragraph here. Nothing in it is
-promised, and anything already designed points at the section of
-[ARCHITECTURE.md](docs/ARCHITECTURE.md) that says what it would do and why.
-
-**Being worked toward**
-
-- **[Harnesses: codex and grok](https://github.com/kconfesor/zerg/issues/7).** Two adapters is the
-  minimum number that proves the adapter layer is an interface. A third and a fourth test it.
-- **[Full diff review at the approval gate](https://github.com/kconfesor/zerg/issues/8).** The gate
-  already shows everything a task would land. Reading it properly, and rejecting with a note
-  attached to a line, is missing.
-- **[Deployable artifacts](https://github.com/kconfesor/zerg/issues/9).** Run what a task produced,
-  then deploy it somewhere, which is mostly a question about where credentials live and who is
-  allowed to trigger it.
-
-**Known gaps, not yet scheduled**
-
-- **Release binaries.** The cockpit is compiled into the binary but nobody is building tagged ones
-  yet, so installing means cloning and running `./build.sh`.
-- **Windows.** Does not compile: process groups and a unix socket have no equivalent here. WSL
-  works.
-- **Running unattended.** `zerg up` is foreground-only. No `--detach`, and no launchd or systemd
-  units worth copying.
-- **History** ([§12.3](docs/ARCHITECTURE.md#123-what-the-history-view-answers-planned)) and
-  **terminal takeover** ([§10.1](docs/ARCHITECTURE.md#101-watching-an-agent-work)) are designed and
-  unbuilt. **Authentication** is deliberately absent ([SECURITY.md](SECURITY.md)) and would need a
-  reason better than "so it can be exposed".
-
-If you want something here, or something not here,
-[say so](https://github.com/kconfesor/zerg/issues).
-
-## Scope
-
-What this is not, so you can decide quickly whether it is for you:
-
-- **Not a hosted service.** One daemon, one machine, your repositories, your provider accounts.
-  There is no multi-tenancy and no account system, which is why there is no authentication either.
-- **Not a model provider.** zerg drives coding CLIs you have already logged into. It never runs a
-  login flow, never writes an auth file, and cannot spend on an account you have not set up.
-- **Not an autonomous engineer.** It routes work between agents and holds the gates where you asked
-  for one. What lands is what a role committed and what you approved.
-- **Not stable yet.** `main` is the only branch, the database migrates forward in place, and
-  nothing here is versioned for compatibility.
+- Cross-project historical analytics and terminal takeover are designed but not implemented.
+- `main` is the only supported version, and migrations move forward in place.
 
 ## Contributing
 
-Bugs, ideas and pull requests are welcome. [CONTRIBUTING.md](CONTRIBUTING.md) covers building it,
-testing it, and the handful of things in this codebase that bite (the committed cockpit, append-only
-migrations, and why `DROP TABLE` is never the answer). Security issues go
-[privately](SECURITY.md).
+Bugs, ideas, and pull requests are welcome. [CONTRIBUTING.md](CONTRIBUTING.md) contains the development
+loops and checks. [AGENTS.md](AGENTS.md) contains the same project rules for coding harnesses.
+
+Report security issues through [GitHub's private vulnerability reporting](https://github.com/kconfesor/zerg/security/advisories/new),
+not a public issue.
 
 ## Licence
 
