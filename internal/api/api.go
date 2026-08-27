@@ -104,6 +104,11 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("PUT /api/team-presets/{id}", s.updateTeamPreset)
 	mux.HandleFunc("DELETE /api/team-presets/{id}", s.deleteTeamPreset)
 
+	// Listing directories so adding a project is picking a folder, not typing
+	// its path. Read-only, and on the daemon's filesystem because that is the
+	// side the repositories live on, not the browser's.
+	mux.HandleFunc("GET /api/browse", s.browse)
+
 	mux.HandleFunc("GET /api/projects", s.listProjects)
 	mux.HandleFunc("POST /api/projects", s.createProject)
 	mux.HandleFunc("GET /api/projects/{id}", s.getProject)

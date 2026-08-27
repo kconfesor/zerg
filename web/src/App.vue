@@ -24,6 +24,7 @@ import Board from '@/components/Board.vue'
 import Chat from '@/components/Chat.vue'
 import MarkdownEditor from '@/components/MarkdownEditor.vue'
 import Projects from '@/components/Projects.vue'
+import ProjectPathField from '@/components/ProjectPathField.vue'
 import TaskDetail from '@/components/TaskDetail.vue'
 import Settings from '@/components/Settings.vue'
 import ReadinessPanel from '@/components/Readiness.vue'
@@ -913,13 +914,7 @@ watch(current, () => (banner.value = null))
         </DialogHeader>
         <div class="flex flex-col gap-1.5">
           <Label :for="pathId">Path</Label>
-          <Input
-            :id="pathId"
-            v-model="newPath"
-            placeholder="/Users/you/source/your-repo"
-            autofocus
-            @keyup.enter="addProject"
-          />
+          <ProjectPathField v-model="newPath" :input-id="pathId" autofocus @submit="addProject" />
         </div>
         <DialogFooter>
           <Button variant="outline" @click="addingProject = false">Cancel</Button>
