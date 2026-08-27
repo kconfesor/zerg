@@ -118,11 +118,17 @@ Each layer is edited in one place, which is the point of splitting them: the lib
 values in the same view once that project is on the team. An edit's blast radius is therefore
 readable off the control you used: global, one team, or one repository.
 
-The one exception is the project's *pipeline*, which is also editable from the rail beside the board
-(§10). Dropping a role for one repository is decided while looking at that repository's work, and the
-Team screen edits the shared team, so doing it there would take the role away from every project on
-that team. The rail writes the project layer instead: the team stays selected and its per-role values
-keep applying, and what changes is which roles this project runs and in what order.
+The project's *pipeline* is also editable from the rail beside the board (§10), because dropping a
+role for one repository is decided while looking at that repository's work. What it edits is the
+team, not a per-project copy of its shape: a team this project owns is written in place, and a shared
+one is copied into this project first, named by whoever is making the change, with its per-role
+settings carried across so the copy starts as the team that was running.
+
+That is the whole rule, and it is what ownership bought. The alternative was a per-project topology
+layer, which meant a project could be "on" a team and running something else, with two screens
+describing different layers and neither saying so. The layer still exists in the schema for databases
+migrated from before teams (§9), and the first rail edit on such a project turns it into a real team
+rather than leaving it a shape nothing can name.
 
 Every nullable override has one rule: null means inherit, while a value means local. For arguments,
 `[]` is a value, meaning explicitly run with no role arguments, and remains distinct from null.
@@ -698,12 +704,14 @@ plain `//go:embed dist` silently skips Vite's `.vite/` manifest directory.
   Team** separately assigns it to the current project, so browsing never silently changes what runs.
   A banner names the mismatch when the team on screen is not the one this project is on, and says
   instead that edits apply immediately when agents are running.
-- **The rail's pipeline editor**: the same list that shows what each role is doing turns into the
-  project's own pipeline, to add a role, turn one off, reorder it, or remove one that the team does
-  not have. It writes the project layer, never the team, and says so: a project that has diverged
-  reads *own pipeline* under the team's name with a one-press way back to following it. The last
-  enabled role will not turn off, since a team with nothing enabled cannot start and has nowhere to
-  route a task.
+- **The rail's pipeline editor**: the same list that shows what each role is doing turns into an
+  editor for the team behind it, to add a role, turn one off, reorder it or remove it. On a team this
+  project owns, each change is written and reconciled within the second. On a shared team, the first
+  change opens a dialog naming the copy it is about to make for this project, since the alternative
+  is changing a pipeline every other project on that team runs. The rail says which of the two will
+  happen before the first click, the dialog carries any refusal (a duplicate name is a 400), and the
+  last enabled role will not turn off or be removed, since a team with nothing enabled cannot start
+  and has nowhere to route a task.
 - **Role editor**: every field in §4.2, for one role within whichever layer opened it: the team
   editor writes team-level values, a project's own team writes project-level ones. Each field states
   what it inherits and offers **Use default** to drop back to it, and the dialog counts how many

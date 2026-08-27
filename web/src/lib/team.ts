@@ -1,19 +1,18 @@
 /**
- * Turning the team on screen back into something the daemon will accept.
+ * Turning the pipeline on screen back into rows the daemon will accept.
  *
- * Two screens edit a project's pipeline now — the Team editor and the rail —
- * and both have to rebuild the whole team to change one thing, because
- * SetProjectTeam replaces the topology and the override layer wholesale rather
- * than diffing them. Sending an incomplete list does not mean "leave the rest
- * alone", it means "delete the rest", so the reconstruction is the part worth
- * having in one place with a test on it.
+ * Both writers rebuild the whole thing to change one part of it: SetProjectTeam
+ * replaces a project's topology and override layer wholesale, and a team update
+ * replaces its roles. Sending an incomplete list does not mean "leave the rest
+ * alone", it means "delete the rest", so the reconstruction is worth having in
+ * one place with a test on it.
  */
 import type {
-  ProjectRole,
   ProjectTeamUpdate,
   ResolvedRole,
   RoleOverrides,
   TeamPreset,
+  TeamPresetRole,
 } from '@/lib/api'
 
 /**
@@ -48,26 +47,23 @@ export function hasRoleOverrides(overrides: Partial<RoleOverrides>): boolean {
   )
 }
 
-/** The team as the daemon takes it: order is position, overrides come along. */
-export function projectRoles(team: ResolvedRole[]): ProjectRole[] {
-  return team.map((role) => ({
-    templateId: role.id,
-    enabled: role.enabled,
-    ...cloneOverrides(role),
-  }))
-}
-
 /**
- * A pipeline of this project's own, keeping the team it came from.
+ * A pipeline on screen turned back into a team's rows.
  *
- * The preset stays selected: its per-role overrides still apply, so this is
- * "that team, without the planner" rather than a copy that stops tracking it
- * everywhere else. What it costs is that later changes to the team's *shape*
- * no longer reach this project, which is why the rail says so and offers
- * followPreset back.
+ * The order and the enabled flags come from what is displayed, and the per-role
+ * overrides from the team it is being written to or copied from, matched by
+ * template. A resolved role carries the *project's* override layer, not the
+ * team's, so building these out of the resolved rows alone would quietly drop
+ * the model and prompt a team had chosen for each of its roles.
  */
-export function ownPipeline(presetId: string | null, team: ResolvedRole[]): ProjectTeamUpdate {
-  return { presetId, topologyOverride: true, roles: projectRoles(team) }
+export function presetRoles(pipeline: ResolvedRole[], source: TeamPreset | null): TeamPresetRole[] {
+  const overrides = new Map((source?.roles ?? []).map((r) => [r.templateId, r]))
+  return pipeline.map((role, position) => ({
+    templateId: role.id,
+    position,
+    enabled: role.enabled,
+    ...cloneOverrides(overrides.get(role.id) ?? {}),
+  }))
 }
 
 /**

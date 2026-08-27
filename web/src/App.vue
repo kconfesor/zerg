@@ -17,6 +17,7 @@ import {
   type Task,
   type Workspace,
 } from '@/lib/api'
+import { followPreset } from '@/lib/team'
 import Attention from '@/components/Attention.vue'
 import Activity from '@/components/Activity.vue'
 import Spend from '@/components/Spend.vue'
@@ -603,6 +604,36 @@ async function createPreset(name: string, roles: TeamPresetRole[], projectId: st
 /** Why the last team action was refused. Read by the dialog that asked. */
 const teamError = ref('')
 
+/** The same, for the rail's copy-this-team dialog. Separate because the two
+ *  dialogs are on different screens and a stale message in one of them is a
+ *  refusal attached to something nobody pressed. */
+const forkError = ref('')
+
+/**
+ * A shared team edited from the rail becomes this project's own team.
+ *
+ * Created and adopted in that order, and the project keeps whatever per-role
+ * overrides it had for roles the new team still has: the copy is meant to be
+ * what was running a moment ago, plus the one change that prompted it.
+ */
+async function forkTeam(name: string, roles: TeamPresetRole[]) {
+  if (!current.value) return
+  forkError.value = ''
+  try {
+    const created = await api.createTeamPreset({ name, roles, projectId: current.value.id })
+    presets.value = [...presets.value, created]
+    projectTeam.value = await api.setTeam(current.value.id, followPreset(created, team.value))
+    team.value = projectTeam.value.roles
+    const refreshed = await api.projects()
+    projects.value = refreshed
+    current.value = refreshed.find((p) => p.id === current.value?.id) ?? current.value
+  } catch (err) {
+    // Stays in the dialog, which stays open: a duplicate name is fixed by
+    // typing another one, and closing would take the edit with it.
+    forkError.value = err instanceof Error ? err.message : String(err)
+  }
+}
+
 async function deletePreset(id: string) {
   teamError.value = ''
   try {
@@ -712,11 +743,14 @@ watch(current, () => (banner.value = null))
       :library="library"
       :project-team="projectTeam"
       :preset="currentPreset"
+      :presets="presets"
+      :fork-error="forkError"
       :open="navOpen"
       @close="navOpen = false"
       @navigate="go"
       @open-project="open"
-      @set-team="setTeam"
+      @save-preset="savePreset"
+      @fork-team="forkTeam"
     />
 
     <div class="flex min-w-0 flex-1 flex-col overflow-hidden">

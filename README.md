@@ -79,10 +79,11 @@ Subscription values are labelled as estimates.
 
 ![Spend by role and provider](docs/screenshots/05-spend.png)
 
-**Team and settings.** The team editor controls pipeline order and role settings for every project on
-that team. For one project only, the rail beside the board edits the same pipeline: add a role, turn
-one off, or reorder it without leaving the board. The role library holds reusable defaults for
-harnesses, models, prompts, and gates.
+**Team and settings.** The team editor controls pipeline order and role settings. The rail beside the
+board edits the same pipeline without leaving the board: add a role, turn one off, reorder it. If the
+team belongs to this project the change lands in it; if it is shared, zerg asks for a name and copies
+it into this project first, so a shared pipeline is never changed by accident. The role library holds
+reusable defaults for harnesses, models, prompts, and gates.
 
 ![The team editor](docs/screenshots/04-team.png)
 
