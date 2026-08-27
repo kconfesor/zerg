@@ -55,6 +55,10 @@ tells you what to fix. Provider keys live wherever that CLI keeps them.
 holding every task, message, transcript and usage row, including whatever your agents wrote into
 their handoff notes. It is not encrypted. Back it up like anything else with your work in it.
 
+## Supported platforms
+
+macOS and Linux, and WSL, which is Linux. The daemon does not compile for Windows.
+
 ## Supported versions
 
 `main` only. There are no release branches and no backports; a fix lands on `main` and is in the

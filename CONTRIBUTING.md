@@ -17,6 +17,9 @@ about to relearn something the hard way.
 | **pnpm** | 11 | `pnpm-lock.yaml` is the lockfile; `npm install` will not reproduce it |
 | **git** | any recent | worktrees are the isolation mechanism |
 
+macOS and Linux. The daemon does not compile for Windows: agents are supervised as process groups
+and the agent protocol runs over a unix socket. Under WSL it is ordinary Linux.
+
 ```sh
 git clone https://github.com/kconfesor/zerg.git && cd zerg
 ./build.sh          # builds the cockpit, copies it into internal/api/dist, builds ./zerg

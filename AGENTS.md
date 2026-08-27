@@ -9,6 +9,9 @@ them, and serves a Vue 3 cockpit. [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) s
 usefully, why: it records the failure behind each decision. Read the section covering what you are
 about to touch. If your change contradicts it, say so and update it in the same change.
 
+macOS and Linux only: process groups and a unix socket have no Windows equivalent here, and the
+daemon does not compile for it. WSL is ordinary Linux and works.
+
 ## The loops
 
 ```sh

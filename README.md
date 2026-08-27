@@ -299,6 +299,15 @@ never runs a login flow or writes to an auth file.
 go version && node -v && pnpm -v && git --version
 ```
 
+**macOS and Linux.** Agents are supervised as process groups and the agent protocol runs over a unix
+socket, neither of which has a Windows equivalent here, so the daemon does not compile for Windows
+at all. Under WSL it is ordinary Linux and works.
+
+How you install those four is your business and your platform's; every package manager has an
+opinion and none of them stays current in somebody else's README. If you have no preference:
+[go.dev/dl](https://go.dev/dl/), [nodejs.org](https://nodejs.org/) or a version manager honouring
+`.nvmrc`, and `corepack enable pnpm` from that Node, which needs nothing else installed.
+
 `build.sh` checks Node itself and refuses with the version it wanted, because a build that silently
 runs on the wrong one fails much further downstream.
 
