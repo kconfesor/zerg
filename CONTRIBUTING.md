@@ -128,6 +128,21 @@ Layout that involves scroll containers is worth checking in Firefox as well as C
 genuinely disagree about what a scroll container's overflow area contains, and the board's right
 gutter is an element rather than padding because of it.
 
+## If you work on this with Claude Code
+
+The repository carries its own commands and a skill, so an agent working here follows the same rules
+as everyone else rather than rediscovering them:
+
+| | |
+|---|---|
+| `/verify` | everything CI runs, cheapest failure first, with the two cases where a result lies |
+| `/dev` | the two-second loop, and why `build.sh` is not part of it |
+| `/migration` | how to add one without cascading a delete through every transcript |
+| `add-feature` skill | the end-to-end shape of a change across daemon and cockpit, and the traps that have actually cost time |
+
+They live in `.claude/`, are checked in, and are the same guidance as this document. Change both
+when one goes stale.
+
 ## Reporting things
 
 Bugs and ideas: [open an issue](https://github.com/kconfesor/zerg/issues). Security problems go
