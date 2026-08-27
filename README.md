@@ -533,37 +533,37 @@ happens when they don't.
 
 ## Roadmap
 
-Rough order, and none of it is promised. Anything already designed has a section in
-[ARCHITECTURE.md](docs/ARCHITECTURE.md) saying what it will do and why.
+Tracked as issues under the [Roadmap milestone](https://github.com/kconfesor/zerg/milestone/1), so
+each item can be argued with on its own rather than read as a paragraph here. Nothing in it is
+promised, and anything already designed points at the section of
+[ARCHITECTURE.md](docs/ARCHITECTURE.md) that says what it would do and why.
 
-**Next**
+**Being worked toward**
 
-- **Move a card by hand.** Send a stuck or misrouted card to any role on the team, which is the
-  missing operator control when a role dies holding work or a pipeline routes it somewhere silly.
-- **Run unattended.** `zerg up` is foreground-only, so closing the terminal stops everything. A
-  proper detach, plus launchd and systemd units worth copying.
-- **History** ([§12.3](docs/ARCHITECTURE.md#123-what-the-history-view-answers-planned)). Spend over
-  time stacked by role, cost per task ranked, wall time against active time, cache rate as a line.
-  The per-turn rows already exist; the view and the rollups do not.
+- **[Harnesses: codex and grok](https://github.com/kconfesor/zerg/issues/7).** Two adapters is the
+  minimum number that proves the adapter layer is an interface. A third and a fourth test it.
+- **[Full diff review at the approval gate](https://github.com/kconfesor/zerg/issues/8).** The gate
+  already shows everything a task would land. Reading it properly, and rejecting with a note
+  attached to a line, is missing.
+- **[Deployable artifacts](https://github.com/kconfesor/zerg/issues/9).** Run what a task produced,
+  then deploy it somewhere, which is mostly a question about where credentials live and who is
+  allowed to trigger it.
 
-**Later**
+**Known gaps, not yet scheduled**
 
-- **Artifacts** ([§13](docs/ARCHITECTURE.md#13-artifacts-planned)). A screenshot, a chart, a report
-  or a running dev server produced by an agent, announced on the event stream and fetched over
-  plain HTTP rather than stuffed through the socket.
-- **Terminal takeover** ([§10.1](docs/ARCHITECTURE.md#101-watching-an-agent-work)). Attach to a
-  role's own TUI for the cases where you want to drive it yourself. Needs a pty and is not started.
-- **More harnesses.** The adapter interface has two implementations, which is the minimum number
-  that proves it is an interface. A third would test that claim properly.
+- **Release binaries.** The cockpit is compiled into the binary but nobody is building tagged ones
+  yet, so installing means cloning and running `./build.sh`.
+- **Windows.** Does not compile: process groups and a unix socket have no equivalent here. WSL
+  works.
+- **Running unattended.** `zerg up` is foreground-only. No `--detach`, and no launchd or systemd
+  units worth copying.
+- **History** ([§12.3](docs/ARCHITECTURE.md#123-what-the-history-view-answers-planned)) and
+  **terminal takeover** ([§10.1](docs/ARCHITECTURE.md#101-watching-an-agent-work)) are designed and
+  unbuilt. **Authentication** is deliberately absent ([SECURITY.md](SECURITY.md)) and would need a
+  reason better than "so it can be exposed".
 
-**Being considered**
-
-- **Authentication**, so the daemon can be exposed somewhere other than a tailnet. Deliberately
-  absent today ([SECURITY.md](SECURITY.md)), and adding it badly is worse than not having it.
-- **Multiple machines.** One daemon per machine today. Whether a second machine is a second cockpit
-  or one cockpit over two daemons is an open question.
-
-If you want something here, or something not here, [say so](https://github.com/kconfesor/zerg/issues).
+If you want something here, or something not here,
+[say so](https://github.com/kconfesor/zerg/issues).
 
 ## Scope
 
