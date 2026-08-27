@@ -24,3 +24,4 @@ internal/api/dist/*
 # another agent's scratch directories, if you run one here
 .pi/
 .pi-subagents/
+.playwright-mcp/
