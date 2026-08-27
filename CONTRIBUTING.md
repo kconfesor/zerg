@@ -128,20 +128,22 @@ Layout that involves scroll containers is worth checking in Firefox as well as C
 genuinely disagree about what a scroll container's overflow area contains, and the board's right
 gutter is an element rather than padding because of it.
 
-## If you work on this with Claude Code
+## If an agent works on this
 
-The repository carries its own commands and a skill, so an agent working here follows the same rules
-as everyone else rather than rediscovering them:
+[AGENTS.md](AGENTS.md) is the canonical version of everything in this document that an agent needs:
+the loops, the checks, where things live, and the rules that have been paid for. It follows the
+[agents.md](https://agents.md) convention, so any harness that reads such a file gets the same
+rules, which matters here because this project drives more than one.
+
+Harness-specific packaging sits on top of it and adds nothing new:
 
 | | |
 |---|---|
-| `/verify` | everything CI runs, cheapest failure first, with the two cases where a result lies |
-| `/dev` | the two-second loop, and why `build.sh` is not part of it |
-| `/migration` | how to add one without cascading a delete through every transcript |
-| `add-feature` skill | the end-to-end shape of a change across daemon and cockpit, and the traps that have actually cost time |
+| `CLAUDE.md` | imports AGENTS.md, so Claude Code reads the same file |
+| `.claude/commands/` | runnable loops: `/verify`, `/dev`, `/migration` |
+| `.claude/skills/add-feature` | the shape of a change that crosses daemon and cockpit |
 
-They live in `.claude/`, are checked in, and are the same guidance as this document. Change both
-when one goes stale.
+When a rule changes, change it in AGENTS.md. The rest point there on purpose.
 
 ## Reporting things
 

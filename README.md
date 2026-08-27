@@ -32,6 +32,7 @@ short version of what is and is not defended.
 | [Reach it from a phone](#reaching-it-from-a-phone) | Tailscale, TLS, installing it as an app |
 | [ARCHITECTURE.md](docs/ARCHITECTURE.md) | how it works, and the failures behind each decision |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | building, testing, and the traps in this codebase |
+| [AGENTS.md](AGENTS.md) | the same, for a coding agent working here, on any harness |
 | [SECURITY.md](SECURITY.md) | threat model, and reporting a vulnerability |
 | [Roadmap](#roadmap) | what is next, what is later, what is undecided |
 
