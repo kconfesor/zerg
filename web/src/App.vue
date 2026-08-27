@@ -586,6 +586,16 @@ async function savePreset(preset: TeamPreset) {
   try {
     const updated = await api.updateTeamPreset(preset)
     presets.value = presets.value.map((p) => (p.id === updated.id ? updated : p))
+    // An edit to the team this project runs is invisible while the project also
+    // carries a topology layer: the pipeline then comes from project_roles, not
+    // from the team, so the roles just written are not the ones resolved. The
+    // layer is a leftover from before a team could belong to a project, and
+    // there is now nothing that writes one, so writing the team drops it. The
+    // project's per-role overrides survive; only the frozen shape goes.
+    if (current.value && projectTeam.value.topologyOverride && projectTeam.value.presetId === updated.id) {
+      projectTeam.value = await api.setTeam(current.value.id, followPreset(updated, team.value))
+      team.value = projectTeam.value.roles
+    }
     await refresh()
   } catch (err) {
     fail(err)
