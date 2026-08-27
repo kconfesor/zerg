@@ -4,7 +4,7 @@
 
 <p align="center">
   <b>Multi-agent coding orchestrator</b><br>
-  A Go daemon supervises coding agents in isolated git worktrees, routes work between them, and serves a Vue 3 cockpit.
+  zerg supervises coding agents in isolated git worktrees, routes work between them, and serves a Vue 3 cockpit from one local process.
 </p>
 
 **Everything is configured in the UI.** Define reusable teams, assign one to each project, and
