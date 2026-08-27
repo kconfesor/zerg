@@ -262,10 +262,14 @@ function showReadiness() {
 const status = ref<SwarmStatus>({ running: false, roles: [] })
 const harnesses = ref<string[]>([])
 const models = ref<Record<string, Model[]>>({})
+/** The team this project follows, when it follows one. */
+const currentPreset = computed(
+  () => presets.value.find((preset) => preset.id === projectTeam.value.presetId) ?? null,
+)
 const currentTeamName = computed(() => {
   const id = projectTeam.value.presetId
   if (!id) return projectTeam.value.topologyOverride ? 'Custom team' : ''
-  return presets.value.find((preset) => preset.id === id)?.name ?? ''
+  return currentPreset.value?.name ?? ''
 })
 
 /**
@@ -702,10 +706,14 @@ watch(current, () => (banner.value = null))
       :current="current"
       :team-name="currentTeamName"
       :team="team"
+      :library="library"
+      :project-team="projectTeam"
+      :preset="currentPreset"
       :open="navOpen"
       @close="navOpen = false"
       @navigate="go"
       @open-project="open"
+      @set-team="setTeam"
     />
 
     <div class="flex min-w-0 flex-1 flex-col overflow-hidden">

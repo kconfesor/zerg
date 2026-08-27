@@ -15,6 +15,7 @@ import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { cloneOverrides, followPreset, hasRoleOverrides } from '@/lib/team'
 import RoleOverrideDialog from '@/components/RoleOverrideDialog.vue'
 import {
   Dialog,
@@ -95,32 +96,6 @@ const terminalTemplateId = computed(() => {
   }
   return ''
 })
-
-function cloneOverrides(source: Partial<RoleOverrides>): RoleOverrides {
-  return {
-    harnessOverride: source.harnessOverride ?? null,
-    modelOverride: source.modelOverride ?? null,
-    argsOverride: source.argsOverride == null ? null : [...source.argsOverride],
-    receiveOverride: source.receiveOverride ?? null,
-    batchMaxItemsOverride: source.batchMaxItemsOverride ?? null,
-    batchMaxAgeSecOverride: source.batchMaxAgeSecOverride ?? null,
-    promptOverride: source.promptOverride ?? null,
-    gateOverride: source.gateOverride ?? null,
-  }
-}
-
-function hasRoleOverrides(overrides: Partial<RoleOverrides>) {
-  return (
-    overrides.harnessOverride != null ||
-    overrides.modelOverride != null ||
-    overrides.argsOverride != null ||
-    overrides.receiveOverride != null ||
-    overrides.batchMaxItemsOverride != null ||
-    overrides.batchMaxAgeSecOverride != null ||
-    overrides.promptOverride != null ||
-    overrides.gateOverride != null
-  )
-}
 
 function apply(base: RoleTemplate, overrides: Partial<RoleOverrides>): RoleTemplate {
   return {
@@ -297,27 +272,7 @@ function adopt(preset: TeamPreset) {
 
 function useTeam(preset: TeamPreset) {
   selectedPresetId.value = preset.id
-  // The project's own overrides come with it.
-  //
-  // SetProjectTeam replaces the override layer wholesale — it deletes every
-  // project_role_overrides row and re-inserts from what it is sent — so an
-  // empty array here does not mean "leave them alone", it means "delete them".
-  // Pressing this on the team already in use is exactly when a project has
-  // overrides worth keeping, including every one migration 013 carried across
-  // from the old project_roles columns.
-  //
-  // Filtered to the preset's own roles: SetProjectTeam refuses an override for
-  // a role the preset does not contain, and adopting a team that drops a role
-  // legitimately drops that role's overrides with it.
-  const inPreset = new Set(preset.roles.map((r) => r.templateId))
-  const keep = props.projectTeam.roles
-    .filter((role) => inPreset.has(role.id) && hasRoleOverrides(role))
-    .map((role) => ({ templateId: role.id, enabled: role.enabled, ...cloneOverrides(role) }))
-  emit('setTeam', {
-    presetId: preset.id,
-    topologyOverride: false,
-    roles: keep,
-  })
+  emit('setTeam', followPreset(preset, props.projectTeam.roles))
 }
 
 const cloning = ref(false)

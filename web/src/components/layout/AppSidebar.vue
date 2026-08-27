@@ -1,8 +1,10 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import {
   Activity as ActivityIcon,
   ChevronDown,
+  ChevronUp,
+  Check,
   Columns3,
   GitMerge,
   GitPullRequest,
@@ -10,12 +12,26 @@ import {
   FolderGit2,
   GitBranch,
   MessageSquare,
+  Pencil,
+  Plus,
   Receipt,
   Settings as SettingsIcon,
+  Undo2,
   Users,
+  X,
 } from '@lucide/vue'
-import type { Project, ResolvedRole, RoleStatus, SwarmStatus } from '@/lib/api'
+import type {
+  Project,
+  ProjectTeam,
+  ProjectTeamUpdate,
+  ResolvedRole,
+  RoleStatus,
+  RoleTemplate,
+  SwarmStatus,
+  TeamPreset,
+} from '@/lib/api'
 import { landing } from '@/lib/utils'
+import { followPreset, ownPipeline, projectRoles } from '@/lib/team'
 import QuotaBars from '@/components/QuotaBars.vue'
 import ProjectAvatar from '@/components/ProjectAvatar.vue'
 import {
@@ -44,6 +60,15 @@ const props = defineProps<{
    *  remember the heading for. */
   teamName?: string
   team: ResolvedRole[]
+  /** The whole library, so a role can be added to the pipeline from here
+   *  rather than by going to the Team screen and back. */
+  library: RoleTemplate[]
+  /** Which team the project follows and whether its pipeline has already
+   *  diverged from it. Editing here is what makes it diverge. */
+  projectTeam: ProjectTeam
+  /** The followed team itself, when there is one: needed to say which roles
+   *  came from it, and to go back to following it. */
+  preset: TeamPreset | null
   /** Whether the drawer is showing. Ignored at md and above, where the rail
    *  is always part of the layout. */
   open: boolean
@@ -63,10 +88,105 @@ const rolesShown = computed<{ role: string; live: RoleStatus | null }[]>(() => {
   }
   return props.team.filter((r) => r.enabled).map((r) => ({ role: r.name, live: null }))
 })
+/**
+ * Changing the pipeline from the rail, where it is being read.
+ *
+ * Dropping a role for one piece of work meant the Team screen, which edits the
+ * *shared* team: turning off the planner there turns it off for every project
+ * that adopted that team. So this edits the project instead. The team keeps its
+ * shape and its per-role overrides still apply, and what changes is which roles
+ * this project runs and in what order.
+ *
+ * The cost is stated rather than discovered: once a project has its own
+ * pipeline, later changes to the team's shape stop reaching it, and the notice
+ * below carries the way back.
+ */
+const editing = ref(false)
+/** The add list, open only while something is being picked from it. */
+const adding = ref(false)
+
+/** The live status of each role by name, for rows that are showing both. */
+const liveByRole = computed(() => new Map(props.status.roles.map((r) => [r.role, r])))
+
+/** Editing lists the whole team. A role that is off is the thing you came to
+ *  turn back on, so it cannot be the one entry that is filtered out. */
+const editRows = computed(() =>
+  props.team.map((role) => ({ role, live: liveByRole.value.get(role.name) ?? null })),
+)
+
+const enabledCount = computed(() => props.team.filter((r) => r.enabled).length)
+const presetRoleIds = computed(() => new Set(props.preset?.roles.map((r) => r.templateId) ?? []))
+
+/** Library roles this team does not have yet. */
+const addable = computed(() => {
+  const inTeam = new Set(props.team.map((r) => r.id))
+  return props.library.filter((t) => !inTeam.has(t.id))
+})
+
+/** Following a team, but not its pipeline: reversible, and worth saying. */
+const divergedFromPreset = computed(() => props.projectTeam.topologyOverride && !!props.preset)
+
+function saveTeam(team: ResolvedRole[]) {
+  emit('setTeam', ownPipeline(props.projectTeam.presetId, team))
+}
+
+function toggleRole(role: ResolvedRole) {
+  // A team with nothing enabled cannot be started and has nowhere to send a
+  // task, so the last one standing does not turn off. Better to refuse the
+  // click than to leave a project that looks configured and takes no work.
+  if (role.enabled && enabledCount.value === 1) return
+  saveTeam(props.team.map((r) => (r.id === role.id ? { ...r, enabled: !r.enabled } : r)))
+}
+
+function moveRole(index: number, by: number) {
+  const to = index + by
+  if (to < 0 || to >= props.team.length) return
+  const team = [...props.team]
+  const [moved] = team.splice(index, 1)
+  team.splice(to, 0, moved)
+  saveTeam(team)
+}
+
+/**
+ * Removing is for roles added here; a role the team itself has is turned off.
+ *
+ * Both are undone by following the team again, but only one of them survives
+ * it: deleting a role that the team has would come straight back the moment
+ * anything re-followed the preset, which reads as the click not working.
+ */
+function removable(role: ResolvedRole) {
+  return !presetRoleIds.value.has(role.id)
+}
+
+function removeRole(role: ResolvedRole) {
+  saveTeam(props.team.filter((r) => r.id !== role.id))
+}
+
+/**
+ * Added at the end, which is where the work ends up: the last enabled role is
+ * the terminal one, so the new role takes over integrating, and the landing
+ * line under the list moves with it rather than reporting something else.
+ */
+function addRole(id: unknown) {
+  const tpl = props.library.find((t) => t.id === id)
+  if (!tpl) return
+  adding.value = false
+  emit('setTeam', {
+    presetId: props.projectTeam.presetId,
+    topologyOverride: true,
+    roles: [...projectRoles(props.team), { templateId: tpl.id, enabled: true, argsOverride: null }],
+  })
+}
+
+function followTeamAgain() {
+  if (props.preset) emit('setTeam', followPreset(props.preset, props.team))
+}
+
 const emit = defineEmits<{
   navigate: [view: View]
   close: []
   openProject: [project: Project]
+  setTeam: [team: ProjectTeamUpdate]
 }>()
 
 function pick(id: unknown) {
@@ -255,7 +375,7 @@ function live(r: RoleStatus): boolean {
     <!-- The live readout, under the name of the team it belongs to. This is
          the panel worth glancing at: which agents exist, and what each is
          doing right now. -->
-    <div v-if="rolesShown.length" class="hairline-t mt-1 flex min-h-0 flex-1 flex-col">
+    <div v-if="current" class="hairline-t mt-1 flex min-h-0 flex-1 flex-col">
       <div class="flex items-center gap-1.5 px-3 pt-3 pb-1.5">
         <Users :size="11" class="text-muted-foreground shrink-0" aria-hidden="true" />
         <span
@@ -264,11 +384,144 @@ function live(r: RoleStatus): boolean {
         >
           {{ teamName || 'Roles' }}
         </span>
-        <span class="text-muted-foreground/70 tabular shrink-0 text-[10px]">
+        <span v-if="!editing" class="text-muted-foreground/70 tabular shrink-0 text-[10px]">
           {{ rolesShown.length }}
         </span>
+        <!-- The pipeline is edited where it is read. Everything this button
+             reveals changes this project only. -->
+        <button
+          type="button"
+          class="text-muted-foreground hover:text-foreground focus-visible:outline-ring shrink-0 p-0.5 focus-visible:outline-2"
+          :title="editing ? 'Done' : 'Add or turn off roles for this project'"
+          :aria-label="editing ? 'Done editing this pipeline' : 'Edit this pipeline'"
+          @click="editing = !editing"
+        >
+          <component :is="editing ? Check : Pencil" :size="12" aria-hidden="true" />
+        </button>
       </div>
-      <ul class="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
+
+      <!-- A pipeline of this project's own. Said in both modes: a reader who
+           never opens the editor still needs to know that changes to the team
+           no longer arrive here, and the way back is one press. -->
+      <div
+        v-if="divergedFromPreset"
+        class="text-muted-foreground/80 flex items-center gap-1.5 px-3 pb-1.5 text-[10px]"
+      >
+        <span class="min-w-0 flex-1 truncate">own pipeline</span>
+        <button
+          type="button"
+          class="hover:text-foreground focus-visible:outline-ring flex shrink-0 items-center gap-1 focus-visible:outline-2"
+          :title="'Drop this project\'s own pipeline and follow ' + (teamName || 'the team') + ' again'"
+          @click="followTeamAgain"
+        >
+          <Undo2 :size="10" aria-hidden="true" />
+          follow {{ teamName }}
+        </button>
+      </div>
+
+      <!-- Editing: the whole team, including the roles that are off, since one
+           of those is what you came to turn back on. -->
+      <div v-if="editing" class="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
+        <p
+          v-if="status.running"
+          class="text-muted-foreground mb-1 px-1 text-[10px] leading-snug"
+        >
+          Agents are running. A role turned off stops within a second or so and whatever it was
+          holding goes back to the queue.
+        </p>
+        <ul>
+          <li v-for="(r, i) in editRows" :key="r.role.id" class="flex items-center gap-0.5 py-0.5">
+            <button
+              type="button"
+              role="switch"
+              :aria-checked="r.role.enabled"
+              class="focus-visible:outline-ring flex min-w-0 flex-1 items-center gap-2 px-1 py-1 text-left focus-visible:outline-2 disabled:cursor-not-allowed"
+              :disabled="r.role.enabled && enabledCount === 1"
+              :title="
+                r.role.enabled
+                  ? enabledCount === 1
+                    ? 'A team needs one role that is on'
+                    : 'Turn ' + r.role.name + ' off for this project'
+                  : 'Turn ' + r.role.name + ' on for this project'
+              "
+              @click="toggleRole(r.role)"
+            >
+              <span
+                :class="[
+                  'size-1.5 shrink-0 rounded-full',
+                  r.role.enabled
+                    ? 'bg-[var(--primary)]'
+                    : 'border-muted-foreground/40 border bg-transparent',
+                ]"
+              />
+              <span
+                :class="[
+                  'truncate text-xs',
+                  r.role.enabled ? 'font-medium' : 'text-muted-foreground/60 line-through',
+                ]"
+              >
+                {{ r.role.name }}
+              </span>
+            </button>
+            <!-- Order is the route work takes, so it is editable here too:
+                 a project with its own pipeline has nowhere else to reorder it,
+                 since the Team screen edits the shared team. -->
+            <button
+              type="button"
+              class="text-muted-foreground/70 hover:text-foreground shrink-0 p-0.5 disabled:opacity-25"
+              :disabled="i === 0"
+              :aria-label="'Move ' + r.role.name + ' earlier'"
+              @click="moveRole(i, -1)"
+            >
+              <ChevronUp :size="11" aria-hidden="true" />
+            </button>
+            <button
+              type="button"
+              class="text-muted-foreground/70 hover:text-foreground shrink-0 p-0.5 disabled:opacity-25"
+              :disabled="i === editRows.length - 1"
+              :aria-label="'Move ' + r.role.name + ' later'"
+              @click="moveRole(i, 1)"
+            >
+              <ChevronDown :size="11" aria-hidden="true" />
+            </button>
+            <button
+              v-if="removable(r.role)"
+              type="button"
+              class="text-muted-foreground/70 hover:text-destructive shrink-0 p-0.5"
+              :aria-label="'Remove ' + r.role.name + ' from this pipeline'"
+              :title="'Remove ' + r.role.name + ' from this pipeline'"
+              @click="removeRole(r.role)"
+            >
+              <X :size="11" aria-hidden="true" />
+            </button>
+          </li>
+        </ul>
+
+        <div v-if="addable.length" class="pt-1">
+          <button
+            type="button"
+            class="text-muted-foreground hover:text-foreground focus-visible:outline-ring flex w-full items-center gap-2 px-1 py-1 text-left text-[11px] focus-visible:outline-2"
+            @click="adding = !adding"
+          >
+            <Plus :size="11" class="shrink-0" aria-hidden="true" />
+            Add a role
+          </button>
+          <ul v-if="adding" class="border-border ml-1 border-l pl-2">
+            <li v-for="t in addable" :key="t.id">
+              <button
+                type="button"
+                class="hover:bg-muted focus-visible:outline-ring w-full truncate px-1 py-1 text-left text-xs focus-visible:outline-2"
+                :title="'Add ' + t.name + ' to the end of this pipeline'"
+                @click="addRole(t.id)"
+              >
+                {{ t.name }}
+              </button>
+            </li>
+          </ul>
+        </div>
+      </div>
+
+      <ul v-else class="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
         <li v-for="(r, i) in rolesShown" :key="r.role" class="relative px-1 py-1.5">
           <!-- The pipeline is an order, and a list does not say so on its own:
                these three names read as a set of agents rather than as a route
