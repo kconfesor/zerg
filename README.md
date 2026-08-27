@@ -26,11 +26,13 @@ short version of what is and is not defended.
 
 | | |
 |---|---|
+| [What it looks like](#what-it-looks-like) | screenshots, before you install anything |
 | [Set it up](#setting-up-on-a-new-machine) | toolchain, harness login, first project |
 | [Which harness, and which model where](#which-harness-and-which-model-where) | pi and claude, and why the reviewer should not be the coder |
 | [Reach it from a phone](#reaching-it-from-a-phone) | Tailscale, TLS, installing it as an app |
 | [ARCHITECTURE.md](docs/ARCHITECTURE.md) | how it works, and the failures behind each decision |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | building, testing, and the traps in this codebase |
+| [AGENTS.md](AGENTS.md) | the same, for a coding agent working here, on any harness |
 | [SECURITY.md](SECURITY.md) | threat model, and reporting a vulnerability |
 | [Roadmap](#roadmap) | what is next, what is later, what is undecided |
 
@@ -53,6 +55,62 @@ So the state lives in a database and is served as a screen, not a scrollback: wh
 doing, which card is where, what it has spent, and what needs a decision. It is built for a phone
 first because that is where I read it from, which is why [setting up Tailscale](#reaching-it-from-a-phone)
 is not optional here so much as the point.
+
+## What it looks like
+
+A demo project, `swarm-sim`, with a four-role pipeline: `planner` on opus, `coder` and `docs` on
+sonnet, and `reviewer` on pi with an OpenAI model, because
+[the reviewer should not be the coder](#do-not-review-your-own-work). The planner and the reviewer
+are gated, so both ends of the pipeline stop for a person.
+
+**The board.** One lane per role, plus Done. Every card carries what it is waiting on, how long it
+has been going, and what it has cost.
+
+![The board, with cards in four lanes](docs/screenshots/01-board.png)
+
+**What is waiting on you.** Approvals and questions in one place, over whatever you were reading.
+The gated diff is `git diff base...sha`: everything the task would land, across every role and every
+lap, not just the final commit.
+
+![An approval with its diff expanded, and a question from the coder](docs/screenshots/02-attention.png)
+
+**Where a card has been.** Every handoff as a sequence, with the note each role wrote and the commit
+it pointed at. Rejections point back up the pipeline, so a card that bounced looks like one.
+
+![A finished card's history as a sequence diagram](docs/screenshots/03-card-flow.png)
+
+**What the agents are doing.** Not a captured terminal: every line is a typed event, so it filters
+by role, survives a reload, and reads back later.
+
+![The activity stream, filtered by role](docs/screenshots/06-activity.png)
+
+**What it cost.** Per role and per provider, with input split into its three classes, because cached
+and uncached tokens differ by roughly 50x in price and one blended number hides the only lever you
+have. Subscription rows are labelled as estimates rather than presented as a bill.
+
+![Spend by role and provider](docs/screenshots/05-spend.png)
+
+**The team.** Roles on the left, what each one runs on in the middle, the order on the right.
+Changing a team changes it everywhere it is used, which the view says out loud.
+
+![The team editor](docs/screenshots/04-team.png)
+
+**Settings.** The role library, where a role's harness, model, prompt and gate are defined once for
+every team that uses it, alongside network and TLS, disk and retention, harness flags, and the
+shared instructions every role is given.
+
+![Settings](docs/screenshots/07-settings.png)
+
+**On a phone**, which is the case this was designed around: the nav becomes a drawer, lanes stack,
+and dialogs go full screen.
+
+<p>
+  <img src="docs/screenshots/08-phone-board.png" alt="The board on a phone" width="270">
+  <img src="docs/screenshots/09-phone-attention.png" alt="An approval on a phone" width="270">
+</p>
+
+> These are a demo database against a toy repository, so nothing here is a benchmark: the numbers
+> are what that data says, not a claim about how fast or cheap your pipeline will be.
 
 ## Why it is built this way
 
@@ -241,6 +299,15 @@ never runs a login flow or writes to an auth file.
 go version && node -v && pnpm -v && git --version
 ```
 
+**macOS and Linux.** Agents are supervised as process groups and the agent protocol runs over a unix
+socket, neither of which has a Windows equivalent here, so the daemon does not compile for Windows
+at all. Under WSL it is ordinary Linux and works.
+
+How you install those four is your business and your platform's; every package manager has an
+opinion and none of them stays current in somebody else's README. If you have no preference:
+[go.dev/dl](https://go.dev/dl/), [nodejs.org](https://nodejs.org/) or a version manager honouring
+`.nvmrc`, and `corepack enable pnpm` from that Node, which needs nothing else installed.
+
 `build.sh` checks Node itself and refuses with the version it wanted, because a build that silently
 runs on the wrong one fails much further downstream.
 
@@ -265,24 +332,34 @@ Readiness will tell you exactly which of these is missing per role. See step 4.
 ### 3. Build and run
 
 ```sh
-./build.sh          # cockpit → web/dist → embedded in the binary → ./zerg
+./build.sh          # cockpit → web/dist → compiled into the binary → ./zerg
 ./zerg up           # 127.0.0.1:7717
 ```
 
-Or by hand, which is what `build.sh` does:
+That is the binary you want for a daemon you actually run: the cockpit is inside it, so it needs
+nothing but itself at runtime. No Node, no pnpm, no second process.
+
+**Working on zerg is a different command, and `build.sh` is not part of it:**
 
 ```sh
-pnpm --dir web install --frozen-lockfile && pnpm --dir web build
-rm -rf internal/api/dist && cp -R web/dist internal/api/dist   # go:embed cannot reach outside its package
-go build -o zerg ./cmd/zerg
+go build -o zerg ./cmd/zerg && ./zerg up    # about 2s, and the cockpit hot-reloads as you save
 ```
+
+In a checkout with no cockpit compiled in, `zerg up` starts the cockpit's dev server itself,
+installs its dependencies the first time if they are missing, and serves it on the daemon's own
+port. One command, one URL, hot reload, and the dev server stops when the daemon does. It needs
+Node and pnpm on PATH; without them the API still runs and the pages say what to do.
+`--no-dev-ui` turns it off. None of this happens in a binary built by `build.sh`, which has the
+cockpit compiled in and no sources beside it.
+
+[CONTRIBUTING.md](CONTRIBUTING.md) has the same thing as a table, with what each loop costs.
 
 State lives in `~/.zerg/zerg.db` (override with `--db`), which is created on first run along with
 the eight built-in role templates. The directory and the database are `0700`/`0600`, since they hold every
 prompt, transcript and cost this machine has produced.
 
 ```
-zerg up [--addr host:port] [--no-tls] [--db path] [--verbose]
+zerg up [--addr host:port] [--no-tls] [--db path] [--no-dev-ui] [--verbose]
 ```
 
 `--addr` and `--no-tls` override the stored settings for one run. `--no-tls` is the way back in if a

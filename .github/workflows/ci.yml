@@ -83,16 +83,18 @@ jobs:
 
       - run: pnpm build
 
-  embedded:
-    # The cockpit is committed under internal/api/dist because go:embed needs it
-    # at compile time. Nothing enforced that it matched web/ — a build could
-    # ship the previous UI and every test would pass.
+  # The cockpit is generated rather than committed, so `go test` above runs
+  # against a placeholder and the three tests that serve real pages skip
+  # themselves. This job is where they actually run: build the UI, put it where
+  # go:embed will find it, and test that package for real.
+  cockpit:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+          cache: true
       - uses: pnpm/action-setup@v4
         with:
           version: 11
@@ -101,14 +103,11 @@ jobs:
           node-version-file: .nvmrc
           cache: pnpm
           cache-dependency-path: web/pnpm-lock.yaml
+
       - run: pnpm --dir web install --frozen-lockfile
       - run: pnpm --dir web build
-      - name: the committed cockpit matches the sources
-        run: |
-          rm -rf internal/api/dist
-          cp -R web/dist internal/api/dist
-          if ! git diff --quiet -- internal/api/dist; then
-            echo "internal/api/dist is stale; run ./build.sh and commit the result"
-            git diff --stat -- internal/api/dist
-            exit 1
-          fi
+      - name: embed the built cockpit
+        run: rm -rf internal/api/dist && cp -R web/dist internal/api/dist
+
+      - name: the cockpit is served, cached and deep-linkable
+        run: go test ./internal/api/ -run 'Cockpit|DeepLinks|AssetCaching' -v

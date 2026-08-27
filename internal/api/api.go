@@ -40,6 +40,9 @@ type Server struct {
 	applied store.Listener
 
 	chatMgr *chat.Manager
+
+	// ui is an override for the embedded cockpit; see Deps.UI.
+	ui http.Handler
 }
 
 // Deps are what the API needs to serve the cockpit.
@@ -61,6 +64,11 @@ type Deps struct {
 	// Applied is the listener configuration the daemon bound at startup.
 	Applied store.Listener
 
+	// UI replaces the embedded cockpit, which is how the dev server is put in
+	// front of it: same origin, same API, hot reload. Nil serves what was
+	// compiled in, which is what a released binary does.
+	UI http.Handler
+
 	// Chat answers questions about a project without touching the pipeline.
 	Chat *chat.Manager
 }
@@ -73,7 +81,7 @@ func New(d Deps) *Server {
 	return &Server{
 		db: d.DB, log: d.Log, registry: d.Registry,
 		preflt: pf, over: d.Overmind, nyd: d.Nydus, bus: d.Bus, applied: d.Applied, chatMgr: d.Chat,
-		recorder: d.Recorder,
+		recorder: d.Recorder, ui: d.UI,
 	}
 }
 
@@ -150,8 +158,21 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/settings/shared-instructions", s.getSharedInstructions)
 	mux.HandleFunc("PUT /api/settings/shared-instructions", s.setSharedInstructions)
 
+	// The API namespace is claimed here, on the mux, not inside the cockpit
+	// handler that used to guard it.
+	//
+	// With the dev server in front, "everything the API did not claim" reached
+	// Vite, whose own config proxies /api straight back to this daemon. An
+	// unknown endpoint therefore bounced zerg to Vite to zerg to Vite until
+	// something gave out. Claiming the namespace means a wrong URL is answered
+	// once, with the 404 the caller can act on, whichever UI is mounted.
+	mux.HandleFunc("/api", s.noSuchEndpoint)
+	mux.HandleFunc("/api/", s.noSuchEndpoint)
+
 	// The cockpit itself, on everything the API did not claim.
-	if ui, err := cockpit(); err != nil {
+	if s.ui != nil {
+		mux.Handle("/", s.ui)
+	} else if ui, err := cockpit(); err != nil {
 		s.log.Error("the cockpit could not be served", "err", err)
 	} else {
 		mux.Handle("/", ui)
@@ -781,6 +802,15 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 }
 
 func badRequest(w http.ResponseWriter, msg string) { writeError(w, http.StatusBadRequest, msg) }
+
+// noSuchEndpoint answers anything under /api that no route matched.
+//
+// JSON rather than the app shell: a mistyped endpoint answered with HTML is a
+// response a client parses as neither, so a wrong URL looks like a malformed
+// reply for as long as it takes someone to check.
+func (s *Server) noSuchEndpoint(w http.ResponseWriter, r *http.Request) {
+	writeError(w, http.StatusNotFound, "no such endpoint: "+r.URL.Path)
+}
 
 // orEmpty renders a nil slice as [] rather than null, so a client never has to
 // special-case "no rows yet".

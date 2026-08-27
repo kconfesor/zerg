@@ -11,9 +11,16 @@ web/node_modules/
 # os
 .DS_Store
 
-# internal/api/dist is deliberately NOT ignored. //go:embed requires the
-# directory to exist at compile time, so ignoring it would break `go build`,
-# `go test` and `go vet` on a fresh clone. The built cockpit is committed;
-# ./build.sh regenerates it.
-# another agent's scratch directory, if you run one here
+# The built cockpit is generated, so it is not committed. //go:embed still needs
+# the directory to exist at compile time, which the committed .gitkeep provides:
+# a fresh clone builds, vets and tests without running the frontend build at
+# all, and `zerg up` says how to produce the UI rather than 404ing.
+#
+# It used to be committed, and every asset filename carries a content hash, so
+# two branches that both ran ./build.sh always conflicted on files that are pure
+# output. Twenty commits in a row touched it.
+internal/api/dist/*
+!internal/api/dist/.gitkeep
+# another agent's scratch directories, if you run one here
 .pi/
+.pi-subagents/

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -350,7 +351,26 @@ func TestEmptyCollectionsEncodeAsArrays(t *testing.T) {
 
 // ── cockpit ───────────────────────────────────────────────────────────────
 
+// needCockpit skips a test that requires the built UI.
+//
+// The cockpit is generated rather than committed, so a clone that has not run
+// ./build.sh embeds only the placeholder. Skipping is honest: these tests are
+// about serving a page that does not exist here yet, and failing would tell a
+// contributor their checkout is broken when it is merely unbuilt. CI builds the
+// cockpit and runs them for real.
+func needCockpit(t *testing.T) {
+	t.Helper()
+	sub, err := fs.Sub(cockpitFS, "dist")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !built(sub) {
+		t.Skip("cockpit not built; run ./build.sh to exercise this")
+	}
+}
+
 func TestCockpitIsServedAtTheRoot(t *testing.T) {
+	needCockpit(t)
 	h, _ := newTestServer(t)
 	rec := do(t, h, "GET", "/", nil)
 	if rec.Code != http.StatusOK {
@@ -363,6 +383,7 @@ func TestCockpitIsServedAtTheRoot(t *testing.T) {
 
 // A deep link must reload, so unknown paths fall through to the app shell.
 func TestDeepLinksFallBackToTheAppShell(t *testing.T) {
+	needCockpit(t)
 	h, _ := newTestServer(t)
 	rec := do(t, h, "GET", "/projects/anything", nil)
 	if rec.Code != http.StatusOK {
@@ -395,6 +416,7 @@ func TestUnknownApiPathIs404NotHtml(t *testing.T) {
 // Hashed assets are immutable; the shell must always revalidate, or a deploy
 // serves an old index.html pointing at assets that no longer exist.
 func TestAssetCachingHeaders(t *testing.T) {
+	needCockpit(t)
 	h, _ := newTestServer(t)
 
 	shell := do(t, h, "GET", "/", nil)
@@ -528,5 +550,84 @@ func TestFindIconsReachesWhereMarksActuallyLive(t *testing.T) {
 		if paths[i] != want[i] {
 			t.Errorf("position %d is %s, want %s", i, paths[i], want[i])
 		}
+	}
+}
+
+// Without a built cockpit the daemon still runs, and every page says why there
+// is no UI. A 404 over a working API reads as a broken install rather than an
+// unfinished one, which is the wrong thing to tell someone who has just cloned
+// the repository.
+func TestUnbuiltCockpitExplainsItself(t *testing.T) {
+	sub, err := fs.Sub(cockpitFS, "dist")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if built(sub) {
+		t.Skip("cockpit is built; this is the fresh-clone case")
+	}
+
+	h, _ := newTestServer(t)
+	rec := do(t, h, "GET", "/", nil)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "./build.sh") {
+		t.Errorf("the page does not say how to build it:\n%.200s", rec.Body.String())
+	}
+	// The API is unaffected, which is the whole point of saying 503 on pages
+	// rather than refusing to start.
+	if rec := do(t, h, "GET", "/api/projects", nil); rec.Code != http.StatusOK {
+		t.Errorf("api status = %d, want 200; only the UI is missing", rec.Code)
+	}
+}
+
+// An unknown API path is answered here, not handed to whatever is serving the
+// cockpit.
+//
+// With the dev server mounted, handing it on was a loop: Vite's config proxies
+// /api back to this daemon, so a wrong URL bounced between the two. The bug is
+// invisible with the embedded cockpit, which is why the test mounts a UI
+// handler that records being reached.
+func TestUnknownApiPathsNeverReachTheCockpit(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if err := store.Seed(ctx, db, "claude"); err != nil {
+		t.Fatal(err)
+	}
+
+	var uiHits []string
+	ui := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		uiHits = append(uiHits, r.URL.Path)
+		w.WriteHeader(http.StatusOK)
+	})
+	h := New(Deps{
+		DB:  db,
+		Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		UI:  ui,
+	}).Routes()
+
+	for _, path := range []string{"/api", "/api/", "/api/nope", "/api/projects/x/not-a-thing"} {
+		rec := do(t, h, "GET", path, nil)
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("GET %s = %d, want 404", path, rec.Code)
+		}
+		if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "json") {
+			t.Errorf("GET %s content-type = %q, want JSON: an HTML answer parses as neither", path, ct)
+		}
+	}
+	if len(uiHits) != 0 {
+		t.Errorf("the cockpit was asked for %v; unknown API paths must not reach it", uiHits)
+	}
+
+	// And the UI still gets everything else, including deep links.
+	if rec := do(t, h, "GET", "/board", nil); rec.Code != http.StatusOK {
+		t.Errorf("GET /board = %d, want the cockpit to answer", rec.Code)
+	}
+	if len(uiHits) != 1 || uiHits[0] != "/board" {
+		t.Errorf("cockpit saw %v, want [/board]", uiHits)
 	}
 }

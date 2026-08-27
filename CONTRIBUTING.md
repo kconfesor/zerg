@@ -17,6 +17,9 @@ about to relearn something the hard way.
 | **pnpm** | 11 | `pnpm-lock.yaml` is the lockfile; `npm install` will not reproduce it |
 | **git** | any recent | worktrees are the isolation mechanism |
 
+macOS and Linux. The daemon does not compile for Windows: agents are supervised as process groups
+and the agent protocol runs over a unix socket. Under WSL it is ordinary Linux.
+
 ```sh
 git clone https://github.com/kconfesor/zerg.git && cd zerg
 ./build.sh          # builds the cockpit, copies it into internal/api/dist, builds ./zerg
@@ -26,12 +29,26 @@ git clone https://github.com/kconfesor/zerg.git && cd zerg
 `build.sh` checks your Node version itself and refuses with the one it wanted, because a build that
 silently runs on the wrong version fails much further downstream.
 
-Working on the cockpit alone is faster with Vite's dev server, which proxies the API:
+You do not need it to develop, though. **In a checkout, `zerg up` runs the cockpit's dev server
+itself and serves it on its own port**, so a UI change is hot-reloaded with no build step and no
+second URL:
 
 ```sh
-./zerg up &         # the daemon on 7717
-pnpm --dir web dev  # the cockpit on 5173, hot-reloading
+go build -o zerg ./cmd/zerg && ./zerg up     # about 2s, then hot reload for the UI
 ```
+
+It installs the dependencies once if `web/node_modules` is missing, and the dev server stops when
+the daemon does. `--no-dev-ui` turns it off, for when you have a Vite already running or want the
+daemon alone. A released binary has no `web/` beside it, so none of this happens there: it serves
+the cockpit that was compiled into it.
+
+Which loop to use:
+
+| changing | what to run | cost |
+|---|---|---|
+| the daemon | `go build -o zerg ./cmd/zerg` and restart | ~2s |
+| the cockpit | nothing: save the file | hot reload |
+| shipping a binary | `./build.sh` | ~11s |
 
 ## Before you open a pull request
 
@@ -41,11 +58,10 @@ go vet ./... && go test ./...
 pnpm --dir web lint
 pnpm --dir web exec vue-tsc --noEmit          # templates, not just script blocks
 pnpm --dir web test
-./build.sh                                    # and commit internal/api/dist if it changed
+./build.sh                                    # if you changed anything under web/
 ```
 
-CI runs all of that. It also rebuilds the cockpit and fails if `internal/api/dist` does not match
-`web/`. See below.
+CI runs all of that, and builds the cockpit itself.
 
 The race detector is not in CI, because it is slow and it kept the workflow red while unrelated
 things were being fixed. It has caught real bugs. Run it by hand whenever you touch anything that
@@ -58,10 +74,15 @@ go test -race ./internal/agent ./internal/event ./internal/cerebrate \
 
 ## Things that will bite you
 
-**The built cockpit is committed.** `//go:embed` needs `internal/api/dist` to exist at compile
-time, so it is in git and `.gitignore` deliberately does not cover it. If you change anything under
-`web/`, run `./build.sh` and commit the result, or you will ship the previous UI while every test
-passes. CI checks this.
+**The built cockpit is generated, not committed.** `//go:embed` needs `internal/api/dist` to exist
+at compile time, which a committed `.gitkeep` provides; everything else in there is ignored. A fresh
+clone builds, vets and tests without Node installed at all, and `zerg up` serves a page saying to
+run `./build.sh` rather than a 404. Run `./build.sh` when you want the UI, and note that the binary
+you build is only as current as the last time you ran it.
+
+It used to be committed, which is worth knowing if you read older history: every asset filename
+carries a content hash, so any two branches that both built the cockpit conflicted on files nobody
+writes by hand.
 
 **Migrations are append-only.** Add `internal/store/schema_0NN.sql` and a line in `store.go`; never
 edit one that has shipped, because a database at `user_version N` has already run the old text.
@@ -109,6 +130,23 @@ supposed to scroll. Screenshots in a pull request are welcome; measurements are 
 Layout that involves scroll containers is worth checking in Firefox as well as Chrome. They
 genuinely disagree about what a scroll container's overflow area contains, and the board's right
 gutter is an element rather than padding because of it.
+
+## If an agent works on this
+
+[AGENTS.md](AGENTS.md) is the canonical version of everything in this document that an agent needs:
+the loops, the checks, where things live, and the rules that have been paid for. It follows the
+[agents.md](https://agents.md) convention, so any harness that reads such a file gets the same
+rules, which matters here because this project drives more than one.
+
+Harness-specific packaging sits on top of it and adds nothing new:
+
+| | |
+|---|---|
+| `CLAUDE.md` | imports AGENTS.md, so Claude Code reads the same file |
+| `.claude/commands/` | runnable loops: `/verify`, `/dev`, `/migration` |
+| `.claude/skills/add-feature` | the shape of a change that crosses daemon and cockpit |
+
+When a rule changes, change it in AGENTS.md. The rest point there on purpose.
 
 ## Reporting things
 

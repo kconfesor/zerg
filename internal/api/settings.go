@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -333,6 +334,24 @@ func (s *Server) approvalDiff(w http.ResponseWriter, r *http.Request) {
 		files, err = hat.ChangedFiles(r.Context(), approval.Commit, maxFile)
 	}
 	if err != nil {
+		// A ref this repository does not have is the operator's problem, not the
+		// daemon's: a branch deleted, a worktree pruned by hand, a clone that
+		// never had it. Rendered as a 500 it reached them as "internal error"
+		// over the approval they were being asked to decide, which says nothing
+		// about what to do next.
+		//
+		// Only that case. Everything else the diff can fail on -- git missing
+		// from PATH, an unreadable repository, a cancelled request -- is a
+		// server fault, and answering it with "your commit does not exist"
+		// would send someone looking in the wrong place entirely.
+		if errors.Is(err, hatchery.ErrNoSuchRevision) {
+			badRequest(w, fmt.Sprintf(
+				"cannot read what this approval changed: %v. The role's branch may have been deleted, or its worktree pruned.",
+				err))
+			s.log.Warn("an approval points at a revision this repository does not have",
+				"approval", approval.ID, "commit", approval.Commit, "err", err)
+			return
+		}
 		s.fail(w, r, err)
 		return
 	}
