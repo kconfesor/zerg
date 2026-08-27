@@ -31,21 +31,37 @@ them, unattended, on a schedule you set.
 **The HTTP API has no authentication.** None, by design: the intended deployment is a loopback bind
 or a [Tailscale](https://tailscale.com) tailnet, where the network is the authentication. The daemon
 says so on startup when it binds to anything other than loopback: "reachable at … with no
-authentication". Anything that can route to the port can start swarms, read every transcript, and
-change what agents are told to do. **Do not expose it to a LAN you do not control, and never to the
+authentication". Anything that can route to the port, and addresses the daemon by a name it
+serves, can start swarms, read every transcript, list directories on the machine, and change what
+agents are told to do. **Do not expose it to a LAN you do not control, and never to the
 public internet.**
 
 What is defended, because it can be reached from a browser that is not yours:
 
+- **Requests addressed to another name are refused.** The daemon answers to loopback, to the address
+  it bound, and to the tailnet name it serves TLS for, and to nothing else. This is what stops DNS
+  rebinding, where a page you visit resolves its own hostname to your machine: the browser then
+  calls the request same-origin and sends a matching Origin, so an origin check alone passes it. The
+  Host does not match, because it is still the attacker's name. Reads are refused too, since reading
+  is the whole of that attack.
 - **Cross-origin writes are refused.** Mutating requests are checked against the daemon's own
-  origin, so a page you visit cannot drive a daemon bound to your loopback address.
+  origin, so an ordinary cross-site page cannot drive a daemon bound to your loopback address.
+- **Reads are not origin-checked**, deliberately: refusing them would break linking to the cockpit,
+  and a cross-site page cannot read the response, because nothing here sends CORS headers. What
+  makes that safe is the Host check above.
 - **Request bodies are capped**, and read and idle timeouts are bounded, so one client cannot hold
   the daemon open or exhaust it.
+- **Filesystem listing is bounded.** The folder picker reads directories on this machine, capped per
+  listing and stopped when the caller goes away.
 - **Agent output is never rendered as HTML.** The Markdown renderer escapes first and builds markup
   only from characters it put there itself, so nothing an agent reads out of a repository can become
   script in the cockpit.
 - **A project's files stay inside the project.** Paths served for icons and diffs are resolved and
   checked for containment after symlinks are followed.
+
+One caveat on the first of those. Bound to `0.0.0.0` there is no name to check a request against,
+so the Host check allows anything and only the network is left between the daemon and whoever is on
+it. That is the configuration the startup warning is about, and it is the one not to use.
 
 **Credentials are never zerg's to hold.** It never runs a login flow, never writes an auth file and
 never reads a token out of one. It reports what a harness says about its own credential state and
