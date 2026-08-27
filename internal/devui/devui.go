@@ -92,7 +92,7 @@ func cockpitOf(dir string) (string, bool) {
 	if err != nil {
 		return "", false
 	}
-	if !strings.Contains(gomod, "module "+module) {
+	if moduleOf(gomod) != module {
 		return "", false
 	}
 
@@ -108,6 +108,27 @@ func cockpitOf(dir string) (string, bool) {
 		return "", false
 	}
 	return web, true
+}
+
+// moduleOf returns the module path a go.mod declares, or "".
+//
+// Parsed rather than searched for. `strings.Contains(gomod, "module "+module)`
+// is true of `module github.com/kconfesor/zerg-other`, and this is the check
+// standing between an unembedded `zerg up` and running `pnpm install` inside
+// somebody else's repository, so a prefix match is not good enough.
+func moduleOf(gomod string) string {
+	for _, line := range strings.Split(gomod, "\n") {
+		if i := strings.Index(line, "//"); i >= 0 {
+			line = line[:i]
+		}
+		fields := strings.Fields(line)
+		// Exactly two: the directive and its path. A go.mod has one module
+		// directive and it takes no block form, so anything else is not it.
+		if len(fields) == 2 && fields[0] == "module" {
+			return fields[1]
+		}
+	}
+	return ""
 }
 
 func readCapped(path string) (string, error) {

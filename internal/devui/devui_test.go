@@ -52,6 +52,10 @@ func TestFindOnlyAcceptsThisProject(t *testing.T) {
 			"the cockpit is identified by its package name, not by being called web/"},
 		{"their module, our cockpit name", "example.com/other", cockpitPkg, false,
 			"a package.json is easy to copy; the module has to agree"},
+		{"a module whose name starts with ours", module + "-other", cockpitPkg, false,
+			"the module directive is parsed, not searched for: a prefix is a different project"},
+		{"ours, with the name commented out", "example.com/x // " + module, cockpitPkg, false,
+			"a mention in a comment is not a declaration"},
 	}
 
 	for _, tc := range cases {
@@ -181,5 +185,22 @@ func TestProxySaysWhenTheDevServerIsGone(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "dev server") {
 		t.Errorf("body = %q, want it to name what is not responding", rec.Body.String())
+	}
+}
+
+func TestModuleOfReadsTheDirective(t *testing.T) {
+	cases := map[string]string{
+		"module " + module + "\n\ngo 1.27.0\n":             module,
+		"// module example.com/x\nmodule " + module + "\n": module,
+		"module " + module + " // the real one\n":          module,
+		"\tmodule " + module + "\n":                        module,
+		"module " + module + "-other\n":                    module + "-other",
+		"require example.com/x v1.0.0\n":                   "",
+		"":                                                 "",
+	}
+	for gomod, want := range cases {
+		if got := moduleOf(gomod); got != want {
+			t.Errorf("moduleOf(%q) = %q, want %q", gomod, got, want)
+		}
 	}
 }
