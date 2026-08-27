@@ -157,6 +157,27 @@ Everything is configured in the cockpit; there are no config files.
 `)
 }
 
+// listenerFor is the configuration the server is built from, including the name
+// this daemon answers to.
+//
+// cfg.TailnetHost is usually empty: the MagicDNS name is discovered rather than
+// configured, and the startup banner probed for it separately. The guard
+// refuses a Host it does not recognise, so a name known only to the banner is a
+// daemon that prints a URL and then rejects it, which is what shipped: the
+// cockpit's own tailnet address answered 403.
+//
+// One resolution, used by both, so the URL printed is a URL that works by
+// construction. The probe is a parameter because it shells out to tailscale,
+// and this decision is worth testing without one.
+func listenerFor(cfg store.Config, probe func() string) store.Listener {
+	applied := cfg.Listener()
+	if applied.TailnetHost != "" || cfg.TLSMode != store.TLSTailscale {
+		return applied
+	}
+	applied.TailnetHost = probe()
+	return applied
+}
+
 func runUp(args []string) error {
 	fs := flag.NewFlagSet("up", flag.ContinueOnError)
 	addr := fs.String("addr", "", "override the stored bind address for this run only")
@@ -321,10 +342,18 @@ func runUp(args []string) error {
 		}
 	}
 
+	applied := listenerFor(cfg, func() string {
+		st := tailnet.Probe(ctx)
+		if st.Available {
+			return st.DNSName
+		}
+		return ""
+	})
+
 	srv := &http.Server{
 		Handler: api.New(api.Deps{
 			DB: db, Log: log, Registry: registry,
-			Overmind: over, Nydus: nyd, Bus: bus, Recorder: recorder, Applied: cfg.Listener(), Chat: chatMgr,
+			Overmind: over, Nydus: nyd, Bus: bus, Recorder: recorder, Applied: applied, Chat: chatMgr,
 			UI: ui,
 		}).Routes(),
 		ReadHeaderTimeout: 10 * time.Second,
@@ -360,11 +389,9 @@ func runUp(args []string) error {
 	// The MagicDNS name, not the IP: a certificate is issued for the name, so
 	// the address that avoids a warning is the one worth printing.
 	shown := ln.Addr().String()
-	if cfg.TLSMode == store.TLSTailscale {
-		if st := tailnet.Probe(ctx); st.Available && st.DNSName != "" {
-			_, port, _ := net.SplitHostPort(cfg.Addr)
-			shown = net.JoinHostPort(st.DNSName, port)
-		}
+	if cfg.TLSMode == store.TLSTailscale && applied.TailnetHost != "" {
+		_, port, _ := net.SplitHostPort(cfg.Addr)
+		shown = net.JoinHostPort(applied.TailnetHost, port)
 	}
 
 	// A second listener on loopback, plain, when the first is somewhere else.
