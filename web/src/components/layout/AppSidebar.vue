@@ -112,6 +112,8 @@ const emit = defineEmits<{
   /** An edit to a team it does not: copy the team under this name, give it to
    *  this project, and run it. */
   forkTeam: [name: string, roles: TeamPresetRole[]]
+  /** The last copy refusal is no longer about anything on screen. */
+  clearForkError: []
 }>()
 
 /**
@@ -131,17 +133,41 @@ const adding = ref(false)
 /** The live status of each role by name, for rows that are showing both. */
 const liveByRole = computed(() => new Map(props.status.roles.map((r) => [r.role, r])))
 
+/**
+ * The pipeline this rail is editing: what was sent last, until the daemon's
+ * answer catches up with it.
+ *
+ * Every edit rebuilds the whole team, and props do not move until the write has
+ * returned and the board has refreshed. Two clicks inside that window both
+ * started from the same pipeline, so the second sent a team that never had the
+ * first change in it and quietly undid it. Two clicks in a row is the ordinary
+ * way this control is used.
+ */
+const pending = ref<ResolvedRole[] | null>(null)
+const pipeline = computed(() => pending.value ?? props.team)
+
+/** Cleared when what arrived is what was sent, so the rail goes back to
+ *  following the daemon rather than its own copy. */
+watch(
+  () => props.team,
+  (arrived) => {
+    if (!pending.value) return
+    const shape = (roles: ResolvedRole[]) => roles.map((r) => `${r.id}:${r.enabled}`).join()
+    if (shape(arrived) === shape(pending.value)) pending.value = null
+  },
+)
+
 /** Editing lists the whole team. A role that is off is the thing you came to
  *  turn back on, so it cannot be the one entry that is filtered out. */
 const editRows = computed(() =>
-  props.team.map((role) => ({ role, live: liveByRole.value.get(role.name) ?? null })),
+  pipeline.value.map((role) => ({ role, live: liveByRole.value.get(role.name) ?? null })),
 )
 
-const enabledCount = computed(() => props.team.filter((r) => r.enabled).length)
+const enabledCount = computed(() => pipeline.value.filter((r) => r.enabled).length)
 
 /** Library roles this pipeline does not have yet. */
 const addable = computed(() => {
-  const inTeam = new Set(props.team.map((r) => r.id))
+  const inTeam = new Set(pipeline.value.map((r) => r.id))
   return props.library.filter((t) => !inTeam.has(t.id))
 })
 
@@ -166,13 +192,17 @@ const editsTeamInPlace = computed(
 const pendingPipeline = ref<ResolvedRole[] | null>(null)
 const forkName = ref('')
 
-function apply(pipeline: ResolvedRole[]) {
+function apply(edited: ResolvedRole[]) {
   if (editsTeamInPlace.value && props.preset) {
-    emit('savePreset', { ...props.preset, roles: presetRoles(pipeline, props.preset) })
+    // Held locally as well as sent, so the next click builds on this rather
+    // than on the pipeline the daemon has not finished replacing yet.
+    pending.value = edited
+    emit('savePreset', { ...props.preset, roles: presetRoles(edited, props.preset) })
     return
   }
   // A shared team is not this project's to change, so the change makes it one.
-  pendingPipeline.value = pipeline
+  if (pendingPipeline.value === null) emit('clearForkError')
+  pendingPipeline.value = edited
   forkName.value = suggestedName()
 }
 
@@ -204,6 +234,9 @@ function confirmFork() {
 
 function cancelFork() {
   pendingPipeline.value = null
+  // The refusal belonged to the attempt being abandoned. Left behind, it turned
+  // up in the next dialog, attached to a name nobody had typed yet.
+  emit('clearForkError')
 }
 
 // The dialog closes when the team it asked for arrives, not when the button is
@@ -221,21 +254,21 @@ function toggleRole(role: ResolvedRole) {
   // task, so the last one standing does not turn off. Better to refuse the
   // click than to leave a project that looks configured and takes no work.
   if (role.enabled && enabledCount.value === 1) return
-  apply(props.team.map((r) => (r.id === role.id ? { ...r, enabled: !r.enabled } : r)))
+  apply(pipeline.value.map((r) => (r.id === role.id ? { ...r, enabled: !r.enabled } : r)))
 }
 
 function moveRole(index: number, by: number) {
   const to = index + by
-  if (to < 0 || to >= props.team.length) return
-  const pipeline = [...props.team]
-  const [moved] = pipeline.splice(index, 1)
-  pipeline.splice(to, 0, moved)
-  apply(pipeline)
+  if (to < 0 || to >= pipeline.value.length) return
+  const roles = [...pipeline.value]
+  const [moved] = roles.splice(index, 1)
+  roles.splice(to, 0, moved)
+  apply(roles)
 }
 
 function removeRole(role: ResolvedRole) {
   if (role.enabled && enabledCount.value === 1) return
-  apply(props.team.filter((r) => r.id !== role.id))
+  apply(pipeline.value.filter((r) => r.id !== role.id))
 }
 
 function addRole(id: unknown) {
@@ -246,8 +279,8 @@ function addRole(id: unknown) {
   // terminal one, so the new role takes over integrating and the landing line
   // under the list moves with it rather than reporting something else.
   apply([
-    ...props.team,
-    { ...tpl, position: props.team.length, enabled: true, overridden: false, terminal: false, argsOverride: null },
+    ...pipeline.value,
+    { ...tpl, position: pipeline.value.length, enabled: true, overridden: false, terminal: false, argsOverride: null },
   ])
 }
 
@@ -708,7 +741,7 @@ function live(r: RoleStatus): boolean {
         </div>
         <!-- Refusals land here. A duplicate name is a 400, and the page banner
              behind this dialog is nowhere on a phone. -->
-        <p v-if="forkError" class="text-destructive text-xs">{{ forkError }}</p>
+        <p v-if="forkError" role="alert" class="text-destructive text-xs">{{ forkError }}</p>
         <DialogFooter>
           <Button variant="outline" @click="cancelFork">Cancel</Button>
           <Button :disabled="!forkName.trim()" @click="confirmFork">Create team</Button>

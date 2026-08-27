@@ -134,9 +134,31 @@ func (db *DB) UpdateTeamPreset(ctx context.Context, p *TeamPreset) error {
 	}
 	defer tx.Rollback()
 	p.UpdatedAt = time.Now().UTC()
-	if _, err := tx.ExecContext(ctx, `UPDATE team_presets SET name=?, updated_at=?, project_id=? WHERE id=?`,
-		p.Name, p.UpdatedAt.Format(time.RFC3339Nano), presetOwner(p.ProjectID), p.ID); err != nil {
+	// Giving a team to one project is conditional on no other project running
+	// it, tested here rather than only in validateOwnerChange above: that check
+	// reads on another pool before this transaction opens, so a project can be
+	// put on the team in between, and it would come out running a team it is
+	// not allowed to be on. Sharing a team back has no condition, since it
+	// strands nobody.
+	var res sql.Result
+	if p.ProjectID == nil {
+		res, err = tx.ExecContext(ctx, `UPDATE team_presets SET name=?, updated_at=?, project_id=NULL WHERE id=?`,
+			p.Name, p.UpdatedAt.Format(time.RFC3339Nano), p.ID)
+	} else {
+		res, err = tx.ExecContext(ctx, `UPDATE team_presets SET name=?, updated_at=?, project_id=?
+			WHERE id=? AND NOT EXISTS (SELECT 1 FROM projects other
+			                            WHERE other.team_preset_id=team_presets.id AND other.id<>?)`,
+			p.Name, p.UpdatedAt.Format(time.RFC3339Nano), *p.ProjectID, p.ID, *p.ProjectID)
+	}
+	if err != nil {
 		return fmt.Errorf("updating team preset %q: %w", p.Name, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return invalid("another project started running %s; move it off that team first", p.Name)
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM team_preset_roles WHERE preset_id=?`, p.ID); err != nil {
 		return err

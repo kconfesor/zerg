@@ -274,8 +274,25 @@ func (db *DB) SetProjectTeam(ctx context.Context, projectID string, presetID *st
 		return fmt.Errorf("beginning team update: %w", err)
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `UPDATE projects SET team_preset_id=? WHERE id=?`, *presetID, projectID); err != nil {
+	// The ownership test is repeated as a condition on the write, not just as
+	// the read above. The read happens on another pool and before the
+	// transaction opens, so between the two, something else can give this team
+	// to another project: two requests both pass, then one assigns the team and
+	// the other takes it away, and the invariant this whole layer exists for is
+	// gone. Cheap to state here, where it is decided.
+	res, err := tx.ExecContext(ctx, `UPDATE projects SET team_preset_id=?
+		WHERE id=? AND EXISTS (SELECT 1 FROM team_presets t
+		                        WHERE t.id=? AND (t.project_id IS NULL OR t.project_id=?))`,
+		*presetID, projectID, *presetID, projectID)
+	if err != nil {
 		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return invalid("team %s belongs to another project", preset.Name)
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM project_role_overrides WHERE project_id=?`, projectID); err != nil {
 		return err

@@ -305,6 +305,32 @@ describe('AppSidebar', () => {
     expect(document.body.textContent).toContain('already exists')
   })
 
+  it('drops a copy refusal when the dialog it belonged to is abandoned', async () => {
+    // The message outlived its attempt: cancel, edit something else, and the
+    // new dialog opened with the old refusal already in it, attached to a name
+    // nobody had typed.
+    const shared = preset('preset-shared', 'Calc pipeline', ['coder', 'reviewer'])
+    const w = await edit(
+      sidebar(
+        { running: false, roles: [] },
+        [role('coder', { position: 0 }), role('reviewer', { position: 1 })],
+        'Calc pipeline',
+        { preset: shared, forkError: 'a team called CalcRust team already exists' },
+      ),
+    )
+    await w.get('[aria-label="Move reviewer earlier"]').trigger('click')
+    dialogButton('Cancel').click()
+    await w.vm.$nextTick()
+    expect(w.emitted('clearForkError')).toBeTruthy()
+
+    // Opening clears it too, so a refusal cannot precede the attempt it is
+    // about: three in all, for the first open, the cancel, and this open.
+    await w.get('[aria-label="Move reviewer earlier"]').trigger('click')
+    expect(w.emitted('clearForkError')).toHaveLength(3)
+    // And while one is showing it is announced, not only coloured.
+    expect(document.body.querySelector('[role="alert"]')?.textContent).toContain('already exists')
+  })
+
   it('refuses to turn off or remove the only role that is left', async () => {
     // A team with nothing enabled cannot start and has nowhere to route a task,
     // which looks like a configured project that silently takes no work.
@@ -322,6 +348,34 @@ describe('AppSidebar', () => {
     expect(w.get('[aria-label="Remove coder from this pipeline"]').attributes('disabled')).toBeDefined()
     await on.trigger('click')
     expect(w.emitted('savePreset')).toBeUndefined()
+  })
+
+  it('composes two quick edits instead of the second undoing the first', async () => {
+    // Every edit rebuilds the whole team from props, and props do not change
+    // until the daemon has answered and the board has refreshed. Two clicks in
+    // that window both start from the same pipeline, so the second sends a team
+    // that never had the first change in it.
+    const mine = preset('preset-mine', 'Calc pipeline', ['coder', 'reviewer', 'docs'], project.id)
+    const w = await edit(
+      sidebar(
+        { running: false, roles: [] },
+        [
+          role('coder', { position: 0 }),
+          role('reviewer', { position: 1 }),
+          role('docs', { position: 2 }),
+        ],
+        'Calc pipeline',
+        { preset: mine },
+      ),
+    )
+
+    // Nothing updates the props in between, which is the case being tested.
+    await w.get('[aria-label="Move docs earlier"]').trigger('click')
+    await w.get('[title="Turn coder off for this project"]').trigger('click')
+
+    const team = saved(w)
+    expect(team.roles.map((r) => r.templateId)).toEqual(['tpl-coder', 'tpl-docs', 'tpl-reviewer'])
+    expect(team.roles.find((r) => r.templateId === 'tpl-coder')!.enabled).toBe(false)
   })
 
   it('adds a library role at the end of the pipeline', async () => {

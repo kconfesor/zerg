@@ -16,21 +16,17 @@
 --
 -- Two ways to need one: running a frozen shape that is not the shape of the team
 -- named, or naming no team at all. A frozen shape identical to its team's is a
--- layer that was doing nothing, and those projects simply keep the team they are
+-- layer that was doing nothing, and those projects keep the team they are
 -- already on rather than collecting a duplicate of it.
+--
+-- A project with the override on and no roles under it is included, and gets an
+-- empty team. That pipeline ran nothing, deliberately, and leaving it out sent
+-- it back to whichever team it was nominally on, so a database where nothing
+-- ran came up running a coder and a reviewer.
 CREATE TABLE zerg_016_own_pipeline AS
-SELECT
-    p.id AS project_id,
-    'own-' || p.id AS preset_id,
-    CASE
-        WHEN EXISTS (SELECT 1 FROM team_presets t WHERE t.name = p.name || ' team')
-          OR EXISTS (SELECT 1 FROM projects q WHERE q.id < p.id AND q.name = p.name)
-        THEN p.name || ' team ' || substr(p.id, -6)
-        ELSE p.name || ' team'
-    END AS name
+SELECT p.id AS project_id, 'own-' || p.id AS preset_id, '' AS name
 FROM projects p
 WHERE (p.team_topology_override = 1 OR p.team_preset_id IS NULL)
-  AND EXISTS (SELECT 1 FROM project_roles r WHERE r.project_id = p.id)
   AND NOT (
         p.team_preset_id IS NOT NULL
     AND (SELECT count(*) FROM project_roles r WHERE r.project_id = p.id)
@@ -46,6 +42,36 @@ WHERE (p.team_topology_override = 1 OR p.team_preset_id IS NULL)
                     AND t.enabled = r.enabled)
         )
   );
+
+-- Naming them, in a second pass so the choice can be made against the other
+-- rows of this table as well as against the teams already there.
+--
+-- Three candidates, each checked against both. The plain name is what anyone
+-- would want; the id's tail disambiguates the ordinary collision; the whole id
+-- is the one nothing else can be holding, and exists because the alternative to
+-- a third candidate is a UNIQUE violation inside a migration, which is a daemon
+-- that will not open the database at all rather than a team with an awkward
+-- name.
+UPDATE zerg_016_own_pipeline
+   SET name = (
+       SELECT CASE
+           WHEN NOT EXISTS (SELECT 1 FROM team_presets t WHERE t.name = p.name || ' team')
+            AND NOT EXISTS (SELECT 1 FROM zerg_016_own_pipeline o
+                             JOIN projects q ON q.id = o.project_id
+                            WHERE o.project_id < p.id AND q.name = p.name)
+           THEN p.name || ' team'
+
+           WHEN NOT EXISTS (SELECT 1 FROM team_presets t WHERE t.name = p.name || ' team ' || substr(p.id, -6))
+            AND NOT EXISTS (SELECT 1 FROM zerg_016_own_pipeline o
+                             JOIN projects q ON q.id = o.project_id
+                            WHERE o.project_id < p.id
+                              AND q.name = p.name
+                              AND substr(q.id, -6) = substr(p.id, -6))
+           THEN p.name || ' team ' || substr(p.id, -6)
+
+           ELSE p.name || ' team ' || p.id
+       END
+       FROM projects p WHERE p.id = zerg_016_own_pipeline.project_id);
 
 INSERT INTO team_presets (id, name, builtin, project_id, created_at, updated_at)
 SELECT o.preset_id, o.name, 0, o.project_id,

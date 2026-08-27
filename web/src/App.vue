@@ -747,6 +747,7 @@ watch(current, () => (banner.value = null))
       @open-project="open"
       @save-preset="savePreset"
       @fork-team="forkTeam"
+      @clear-fork-error="forkError = ''"
     />
 
     <div class="flex min-w-0 flex-1 flex-col overflow-hidden">

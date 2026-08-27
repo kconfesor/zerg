@@ -719,3 +719,238 @@ func TestMigrationLeavesANoOpLayerWithoutADuplicateTeam(t *testing.T) {
 		}
 	}
 }
+
+// v15 builds a database one migration short of the topology removal, with a
+// shared team of coder then reviewer, for the migration tests below.
+func v15DB(t *testing.T, name string) (string, *sql.DB) {
+	t.Helper()
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), name)
+	raw, err := sql.Open("sqlite", path+"?_pragma=foreign_keys(1)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 15; i++ {
+		if _, err := raw.ExecContext(ctx, migrations[i]); err != nil {
+			t.Fatalf("migration %d: %v", i+1, err)
+		}
+	}
+	if _, err := raw.ExecContext(ctx, `PRAGMA user_version=15`); err != nil {
+		t.Fatal(err)
+	}
+	now := "2026-01-01T00:00:00Z"
+	for _, r := range []string{"coder", "reviewer"} {
+		if _, err := raw.ExecContext(ctx, `INSERT INTO role_templates
+			(id,name,harness,model,args,receive,batch_max_items,batch_max_age_sec,prompt,gate,builtin,created_at,updated_at)
+			VALUES (?,?,'claude','sonnet','[]','task',8,300,'p','none',1,?,?)`, r, r, now, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := raw.ExecContext(ctx, `INSERT INTO team_presets (id,name,builtin,created_at,updated_at) VALUES ('shared','Shared',0,?,?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.ExecContext(ctx, `INSERT INTO team_preset_roles (preset_id,template_id,position,enabled) VALUES ('shared','coder',0,1),('shared','reviewer',1,1)`); err != nil {
+		t.Fatal(err)
+	}
+	return path, raw
+}
+
+// A pipeline of no roles is a decision, and the migration has to carry it.
+//
+// It was left out of the materialisation for having nothing to copy, which sent
+// the project back to whichever team it nominally named: a database where
+// nothing ran came up running a coder and a reviewer.
+func TestMigrationKeepsAnEmptyPipelineEmpty(t *testing.T) {
+	ctx := context.Background()
+	path, raw := v15DB(t, "empty.db")
+	if _, err := raw.ExecContext(ctx, `INSERT INTO projects (id,path,name,base_branch,created_at,team_preset_id,team_topology_override)
+		VALUES ('p',?,'Empty','main','2026-01-01T00:00:00Z','shared',1)`, repoDir(t, "empty")); err != nil {
+		t.Fatal(err)
+	}
+	raw.Close()
+
+	db, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("migrating: %v", err)
+	}
+	defer db.Close()
+
+	team, err := db.ResolveTeam(ctx, "p")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(team) != 0 {
+		names := make([]string, 0, len(team))
+		for _, r := range team {
+			names = append(names, r.Name)
+		}
+		t.Errorf("a pipeline that ran nothing came up running %v", names)
+	}
+	p, err := db.GetProject(ctx, "p")
+	if err != nil {
+		t.Fatal(err)
+	}
+	own, err := db.GetTeamPreset(ctx, *p.TeamPresetID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if own.ProjectID == nil || *own.ProjectID != "p" {
+		t.Errorf("it landed on team %+v, want an empty one of its own", own)
+	}
+}
+
+// A name the migration wanted, twice over.
+//
+// Two candidates were not enough: with both taken, the INSERT hit the UNIQUE on
+// team_presets.name, the migration failed, and the daemon could not open that
+// database at all. An awkward team name is the better failure.
+func TestMigrationSurvivesTakenTeamNames(t *testing.T) {
+	ctx := context.Background()
+	path, raw := v15DB(t, "collide.db")
+	now := "2026-01-01T00:00:00Z"
+	const id = "01M0000000000000000123456"
+	if _, err := raw.ExecContext(ctx, `INSERT INTO team_presets (id,name,builtin,created_at,updated_at) VALUES
+		('a','Calc team',0,?,?), ('b','Calc team 123456',0,?,?)`, now, now, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.ExecContext(ctx, `INSERT INTO projects (id,path,name,base_branch,created_at,team_preset_id,team_topology_override)
+		VALUES (?,?,'Calc','main',?,'shared',1)`, id, repoDir(t, "collide"), now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.ExecContext(ctx, `INSERT INTO project_roles (project_id,template_id,position,enabled) VALUES (?,'coder',0,1)`, id); err != nil {
+		t.Fatal(err)
+	}
+	raw.Close()
+
+	db, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("the daemon cannot open a database whose team names were taken: %v", err)
+	}
+	defer db.Close()
+
+	p, err := db.GetProject(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	own, err := db.GetTeamPreset(ctx, *p.TeamPresetID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if own.Name != "Calc team "+id {
+		t.Errorf("materialised team is called %q, want the candidate nothing else can hold", own.Name)
+	}
+	team, err := db.ResolveTeam(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(team) != 1 || team[0].Name != "coder" {
+		t.Errorf("pipeline came out %+v, want the one coder it had", team)
+	}
+}
+
+// Two projects of the same name both needing a team of their own.
+func TestMigrationNamesTwoProjectsCalledTheSameThing(t *testing.T) {
+	ctx := context.Background()
+	path, raw := v15DB(t, "twins.db")
+	now := "2026-01-01T00:00:00Z"
+	for _, id := range []string{"aaa", "bbb"} {
+		if _, err := raw.ExecContext(ctx, `INSERT INTO projects (id,path,name,base_branch,created_at,team_topology_override)
+			VALUES (?,?,'Twin','main',?,1)`, id, repoDir(t, "twin-"+id), now); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := raw.ExecContext(ctx, `INSERT INTO project_roles (project_id,template_id,position,enabled) VALUES (?,'coder',0,1)`, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	raw.Close()
+
+	db, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("migrating two projects with one name: %v", err)
+	}
+	defer db.Close()
+
+	seen := map[string]bool{}
+	for _, id := range []string{"aaa", "bbb"} {
+		p, err := db.GetProject(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		own, err := db.GetTeamPreset(ctx, *p.TeamPresetID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if own.ProjectID == nil || *own.ProjectID != id {
+			t.Errorf("project %s is on %+v, want a team of its own", id, own)
+		}
+		if seen[own.Name] {
+			t.Errorf("both projects got a team called %q", own.Name)
+		}
+		seen[own.Name] = true
+	}
+}
+
+// The ownership rules are conditions on the writes, not only checks before
+// them.
+//
+// Validation reads on a different pool and before the transaction opens, so two
+// requests can both pass and then interleave: one assigns a shared team to a
+// project while the other hands that team to a different project. Simulated
+// here by validating against state that then changes underneath, which is what
+// the interleaving amounts to.
+func TestOwnershipIsEnforcedByTheWriteItself(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	if err := Seed(ctx, db, "claude"); err != nil {
+		t.Fatal(err)
+	}
+	x, err := db.CreateProject(ctx, repoDir(t, "race-x"), "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	y, err := db.CreateProject(ctx, repoDir(t, "race-y"), "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	coder := templateID(t, db, "coder")
+	shared, err := db.CreateTeamPreset(ctx, &TeamPreset{
+		Name:  "Contested",
+		Roles: []TeamPresetRole{{TemplateID: coder, Enabled: true}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// X reads the team as shared and is about to put itself on it. Y claims it
+	// first. The write X was about to make must not go through.
+	claim := *shared
+	claim.ProjectID = &y.ID
+	if err := db.UpdateTeamPreset(ctx, &claim); err != nil {
+		t.Fatalf("Y claiming an unused team: %v", err)
+	}
+	if err := db.SetProjectTeam(ctx, x.ID, &shared.ID, nil); !isInvalid(err) {
+		t.Errorf("X was put on Y's team: %v", err)
+	}
+
+	// And the other way: Y reads nobody else on its team, X gets there first.
+	back := claim
+	back.ProjectID = nil
+	if err := db.UpdateTeamPreset(ctx, &back); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetProjectTeam(ctx, x.ID, &shared.ID, nil); err != nil {
+		t.Fatal(err)
+	}
+	steal := *shared
+	steal.ProjectID = &y.ID
+	if err := db.UpdateTeamPreset(ctx, &steal); !isInvalid(err) {
+		t.Errorf("Y took a team X is running: %v", err)
+	}
+	p, err := db.GetProject(ctx, x.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.TeamPresetID == nil || *p.TeamPresetID != shared.ID {
+		t.Errorf("X ended up on %v, want the team it was running", p.TeamPresetID)
+	}
+}

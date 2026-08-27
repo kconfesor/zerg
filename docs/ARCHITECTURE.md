@@ -153,9 +153,10 @@ Everything below is a form field in the UI. There is no other way to set any of 
 | prompt | editor | this role's instructions |
 | gate | select | `none` or `approval`, to hold this role's handoffs for a human |
 
-A reusable-team role adds **position**, **enabled**, and nullable defaults for every field above.
-A project can override harness, model, args, receive/batch policy, prompt and gate. Pipeline
-membership, order and enablement can be inherited as a unit or made project-local. Overriding is
+A team role adds **position**, **enabled**, and nullable defaults for every field above. A project
+can override harness, model, args, receive/batch policy, prompt and gate, and only those: membership,
+order and enablement belong to the team, so changing the pipeline means editing this project's team
+or moving it to another one. Overriding is
 explicit and visible: a role showing an override is badged in the team list, so a project that
 quietly drifted from its reusable team is legible rather than mysterious.
 
