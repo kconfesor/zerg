@@ -14,6 +14,65 @@ import (
 // machine decides which process to kill.
 const maxBody = 1 << 20
 
+// expectedHost reports whether a request arrived addressed to a name this
+// daemon actually serves.
+//
+// This is the check that stops DNS rebinding, and the one the comment below
+// used to imply the other two were doing. They are not: rebinding resolves the
+// attacker's own hostname to this machine, so by the time the request is made
+// the browser considers it same-origin and sends Sec-Fetch-Site: same-origin
+// with a matching Origin. Both checks pass. What does not match is the Host,
+// which is still the attacker's name, because that is the name the victim's
+// browser was pointed at.
+//
+// Allowed: loopback in any spelling, whatever address the daemon bound, and the
+// tailnet name it serves TLS for. Those are the ways the cockpit is reached,
+// and they are the URLs the daemon prints at startup.
+//
+// An unrecognised Host is refused for every method, safe ones included, because
+// a read is the whole of the attack here: GET /api/browse enumerates the
+// filesystem, and the answer is worth taking from someone whose page is
+// pretending to be this daemon.
+func (s *Server) expectedHost(r *http.Request) bool {
+	host := r.Host
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
+	if host == "" {
+		// HTTP/1.0 without a Host header. Not a browser, and not what rebinding
+		// looks like.
+		return true
+	}
+	if strings.EqualFold(host, "localhost") || strings.HasSuffix(strings.ToLower(host), ".localhost") {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return true
+	}
+
+	for _, known := range []string{s.applied.Addr, s.applied.TailnetHost} {
+		if known == "" {
+			continue
+		}
+		name := known
+		if h, _, err := net.SplitHostPort(name); err == nil {
+			name = h
+		}
+		if name == "" || name == "0.0.0.0" || name == "::" {
+			// Bound to everything, so the Host is whatever route was taken to
+			// get here and there is nothing to compare it against. Saying so
+			// out loud rather than silently allowing anything: this is the
+			// configuration the startup warning is about.
+			return true
+		}
+		if strings.EqualFold(name, host) {
+			return true
+		}
+	}
+	return false
+}
+
 // guard rejects requests a browser tab of this app would never make.
 //
 // There is no authentication yet, so the cockpit trusts whoever reaches the
@@ -35,11 +94,18 @@ const maxBody = 1 << 20
 //   - Origin, for anything that does not send Sec-Fetch-Site, compared against
 //     the Host the request arrived on.
 //
-// Safe methods are left alone: a GET that leaks is a problem authentication
-// solves, and refusing them would break linking to the cockpit.
+// Safe methods are left alone by the cross-site checks: refusing them would
+// break linking to the cockpit, and a cross-site page cannot read the response
+// anyway, since nothing here sends CORS headers. The Host check above applies
+// to them, because rebinding defeats exactly that reasoning.
 func (s *Server) guard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		r.Body = http.MaxBytesReader(w, r.Body, maxBody)
+
+		if !s.expectedHost(r) {
+			s.refuseHost(w, r)
+			return
+		}
 
 		if r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodOptions {
 			next.ServeHTTP(w, r)
@@ -69,6 +135,18 @@ func (s *Server) guard(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// refuseHost answers a request addressed to a name this daemon does not serve.
+//
+// Named separately from refuse because the remedy is different: this is not a
+// page misbehaving, it is a request that arrived under the wrong name, and the
+// operator's fix is to use the URL the daemon printed.
+func (s *Server) refuseHost(w http.ResponseWriter, r *http.Request) {
+	s.log.Warn("refused a request addressed to an unknown host",
+		"method", r.Method, "path", r.URL.Path, "host", r.Host, "remote", r.RemoteAddr)
+	writeError(w, http.StatusForbidden,
+		"this daemon does not answer to "+r.Host+"; reach it at the address it printed at startup")
 }
 
 func (s *Server) refuse(w http.ResponseWriter, r *http.Request, why string) {

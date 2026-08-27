@@ -110,6 +110,9 @@ export interface BrowseDir {
   /** The directory above, or empty at the filesystem root. */
   parent: string
   entries: BrowseEntry[]
+  /** True when the listing was cut short, so the picker can say so rather than
+   *  hiding the folder somebody is looking for. */
+  truncated?: boolean
 }
 
 /**

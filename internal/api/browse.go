@@ -29,7 +29,7 @@ type browseEntry struct {
 	Path string `json:"path"`
 	// IsRepo is true when the directory holds a .git, so the picker can show
 	// which folders are actually a repository and which are only the way to
-	// one — the create endpoint rejects anything that is not.
+	// one. The create endpoint rejects anything that is not.
 	IsRepo bool `json:"isRepo"`
 }
 
@@ -48,9 +48,12 @@ func (s *Server) browse(w http.ResponseWriter, r *http.Request) {
 		}
 		path = home
 	}
-	if strings.HasPrefix(path, "~") {
+	// "~" and "~/..." only. `~bob` names another user's home, which this does
+	// not resolve, and treating it as a prefix produced "/Users/mebob/src": a
+	// path nobody typed, reported back as missing.
+	if path == "~" || strings.HasPrefix(path, "~/") {
 		if home, err := os.UserHomeDir(); err == nil {
-			path = home + path[1:]
+			path = filepath.Join(home, strings.TrimPrefix(path, "~"))
 		}
 	}
 	path = filepath.Clean(path)
@@ -72,15 +75,29 @@ func (s *Server) browse(w http.ResponseWriter, r *http.Request) {
 	}
 
 	entries := []browseEntry{}
+	truncated := false
 	for _, it := range items {
-		if !it.IsDir() {
-			continue
+		// The client is gone, or the daemon is shutting down. Every entry costs
+		// a stat, so a directory big enough to matter is a directory worth
+		// stopping in the middle of.
+		if err := r.Context().Err(); err != nil {
+			return
 		}
-		// ponytail: hidden directories are dropped as noise — a git repository
-		// is almost never named .something. Show them if a real repo turns up
-		// dotted and someone complains.
+		// Hidden directories are dropped as noise: a git repository is almost
+		// never named .something. Show them if a real one turns up dotted and
+		// someone complains.
 		if strings.HasPrefix(it.Name(), ".") {
 			continue
+		}
+		if !isDir(path, it) {
+			continue
+		}
+		if len(entries) >= maxEntries {
+			// Said out loud rather than silently cut. A picker that shows the
+			// first two thousand of six thousand folders, with no sign it did,
+			// is a picker that has hidden the one being looked for.
+			truncated = true
+			break
 		}
 		full := filepath.Join(path, it.Name())
 		entries = append(entries, browseEntry{
@@ -99,10 +116,41 @@ func (s *Server) browse(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"path":    path,
-		"parent":  parent,
-		"entries": entries,
+		"path":      path,
+		"parent":    parent,
+		"entries":   entries,
+		"truncated": truncated,
 	})
+}
+
+// maxEntries bounds one listing.
+//
+// A stat per entry is cheap and not free: twenty thousand subdirectories
+// measured twelve milliseconds to read and sixty to stat, and produced about
+// two megabytes of JSON. Nobody picks a folder out of twenty thousand by
+// scrolling, so the cost buys nothing. On a network mount the same loop is
+// bounded by the filesystem rather than by this number, which is why the
+// context is checked as well.
+const maxEntries = 2000
+
+// isDir reports whether an entry is a directory, following symlinks.
+//
+// ReadDir describes the link rather than its target, so a plain IsDir() check
+// says false for `~/src -> /Volumes/Work/src` and the folder simply does not
+// appear in the picker, with nothing on screen to say why. That layout is
+// common enough that the extra stat is worth paying: it only runs for the
+// entries that are links.
+func isDir(parent string, it os.DirEntry) bool {
+	if it.IsDir() {
+		return true
+	}
+	if it.Type()&os.ModeSymlink == 0 {
+		return false
+	}
+	// Stat follows the link. A broken one, or a link to a file, is not a
+	// directory and is left out.
+	info, err := os.Stat(filepath.Join(parent, it.Name()))
+	return err == nil && info.IsDir()
 }
 
 // isRepo reports whether dir holds a .git. A worktree's .git is a file rather
