@@ -263,6 +263,9 @@ function showReadiness() {
 const status = ref<SwarmStatus>({ running: false, roles: [] })
 const harnesses = ref<string[]>([])
 const models = ref<Record<string, Model[]>>({})
+/** What each harness will accept as a reasoning level, from the daemon: the
+ *  two shipped harnesses do not offer the same ones. */
+const thinking = ref<Record<string, string[]>>({})
 /** The team this project follows, when it follows one. */
 const currentPreset = computed(
   () => presets.value.find((preset) => preset.id === projectTeam.value.presetId) ?? null,
@@ -363,7 +366,10 @@ async function loadGlobals() {
       api.roles(),
       api.harnesses(),
     ])
-    for (const h of harnesses.value) models.value[h] = await api.models(h).catch(() => [])
+    for (const h of harnesses.value) {
+      models.value[h] = await api.models(h).catch(() => [])
+      thinking.value[h] = await api.thinking(h).catch(() => [])
+    }
   } catch (err) {
     fail(err)
   }
@@ -859,6 +865,7 @@ watch(current, () => (banner.value = null))
                 :project="current"
                 :harnesses="harnesses"
                 :models="models"
+                :thinking="thinking"
                 @updated="(p: Project) => (current = p)"
               />
             </div>
@@ -931,6 +938,7 @@ watch(current, () => (banner.value = null))
                 :project-name="current?.name ?? ''"
                 :project-team="projectTeam"
                 :harnesses="harnesses"
+                :thinking="thinking"
                 :models="models"
                 :running="status.running"
                 @set-team="setTeam"

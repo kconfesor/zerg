@@ -9,6 +9,7 @@ const coder: RoleTemplate = {
   harness: 'claude',
   model: 'sonnet',
   args: [],
+  thinking: '',
   receive: 'task',
   batchMaxItems: 8,
   batchMaxAgeSec: 300,
@@ -36,8 +37,8 @@ const defaultTeam: TeamPreset = {
   createdAt: '2026-01-01T00:00:00Z',
   updatedAt: '2026-01-01T00:00:00Z',
   roles: [
-    { templateId: 'coder', position: 0, enabled: true, argsOverride: null },
-    { templateId: 'reviewer', position: 1, enabled: true, argsOverride: null },
+    { templateId: 'coder', position: 0, enabled: true, terminal: false, argsOverride: null },
+    { templateId: 'reviewer', position: 1, enabled: true, terminal: true, argsOverride: null },
   ],
 }
 
@@ -46,7 +47,7 @@ const docsTeam: TeamPreset = {
   id: 'docs-team',
   name: 'Docs team',
   builtin: false,
-  roles: [{ templateId: 'reviewer', position: 0, enabled: true, argsOverride: null }],
+  roles: [{ templateId: 'reviewer', position: 0, enabled: true, terminal: true, argsOverride: null }],
 }
 
 const resolved: ResolvedRole[] = [
@@ -78,6 +79,7 @@ function editor(team: ProjectTeam, presets: TeamPreset[] = [defaultTeam, docsTea
       projectTeam: team,
       harnesses: ['claude'],
       models: {},
+      thinking: { claude: ['low', 'medium', 'high', 'xhigh', 'max'] },
       running: false,
     },
     global: { stubs: { RoleOverrideDialog: true } },
@@ -113,6 +115,33 @@ describe('TeamEditor', () => {
     expect(w.text()).toContain('in use')
     expect(w.find('[aria-label="Follow this pipeline again"]').exists()).toBe(false)
     expect(w.findAll('[aria-label="Use this team"]')).toHaveLength(1)
+  })
+
+  it('chooses which role finishes rather than counting off the end', async () => {
+    // Terminality was whichever enabled role sat last, so adding a role to the
+    // end took the job of integrating from the role that had been doing it.
+    const w = editor({ presetId: defaultTeam.id, roles: resolved })
+    expect(w.text()).toContain('terminal')
+
+    await w.get('[aria-label="Make coder the finishing role"]').trigger('click')
+    const saved = w.emitted('savePreset')!.at(-1)![0] as TeamPreset
+    expect(saved.roles.filter((r) => r.terminal).map((r) => r.templateId)).toEqual(['coder'])
+    // The daemon is what moves it to the end and clears the old one, so the
+    // team goes out saying only which role it is.
+    expect(saved.roles.map((r) => r.templateId)).toEqual(['coder', 'reviewer'])
+  })
+
+  it('adds a role without handing it the job of finishing', async () => {
+    // Docs team runs the reviewer only, so adding the coder to it appends one.
+    // The new role must not be the finisher: that is the whole bug the flag
+    // replaced, where the role added last quietly took over integrating.
+    const w = editor({ presetId: docsTeam.id, roles: resolved }, [docsTeam])
+    await w.get('[aria-label="coder in Docs team"]').trigger('click')
+
+    const saved = w.emitted('savePreset')!.at(-1)![0] as TeamPreset
+    expect(saved.roles.map((r) => r.templateId)).toEqual(['reviewer', 'coder'])
+    expect(saved.roles.find((r) => r.templateId === 'coder')!.terminal).toBe(false)
+    expect(saved.roles.find((r) => r.templateId === 'reviewer')!.terminal).toBe(true)
   })
 
   it('keeps rename and delete on every row, and off the built-in', () => {
@@ -186,6 +215,7 @@ describe('TeamEditor', () => {
         projectTeam: { presetId: defaultTeam.id, roles: resolved },
         harnesses: ['claude'],
         models: {},
+        thinking: { claude: ['low', 'medium', 'high', 'xhigh', 'max'] },
         running: true,
       },
       global: { stubs: { RoleOverrideDialog: true } },

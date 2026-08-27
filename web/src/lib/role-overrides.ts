@@ -14,6 +14,7 @@ export function roleOverrides(value: RoleTemplate, inherited: RoleTemplate): Rol
     harnessOverride: value.harness === inherited.harness ? null : value.harness,
     modelOverride: value.model === inherited.model ? null : value.model,
     argsOverride: sameArgs(value.args, inherited.args) ? null : [...value.args],
+    thinkingOverride: value.thinking === inherited.thinking ? null : value.thinking,
     receiveOverride: value.receive === inherited.receive ? null : value.receive,
     batchMaxItemsOverride:
       value.batchMaxItems === inherited.batchMaxItems ? null : value.batchMaxItems,

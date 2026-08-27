@@ -133,6 +133,7 @@ func (s *Server) Routes() http.Handler {
 	// What this build can drive, and what a role may be pointed at.
 	mux.HandleFunc("GET /api/harnesses", s.listHarnesses)
 	mux.HandleFunc("GET /api/harnesses/{name}/models", s.listModels)
+	mux.HandleFunc("GET /api/harnesses/{name}/thinking", s.listThinking)
 
 	// The readiness gate: a team that cannot work must not reach a board.
 	mux.HandleFunc("GET /api/projects/{id}/readiness", s.readiness)
@@ -511,6 +512,21 @@ func (s *Server) listModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, orEmpty(models))
+}
+
+// listThinking reports the reasoning levels a harness accepts, weakest first.
+//
+// From the adapter rather than a list in the cockpit: claude takes low through
+// max and pi starts two levels lower at off, so a hardcoded picker would offer
+// one harness levels it refuses. An empty list means this harness has no such
+// control, and the field is not offered for it at all.
+func (s *Server) listThinking(w http.ResponseWriter, r *http.Request) {
+	a, err := s.registry.Get(r.PathValue("name"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, orEmpty(a.Capabilities().Thinking))
 }
 
 // readiness runs every check across every enabled role. The cockpit disables

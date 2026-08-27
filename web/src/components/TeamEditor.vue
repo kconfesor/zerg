@@ -36,6 +36,8 @@ const props = defineProps<{
   projectTeam: ProjectTeam
   harnesses: string[]
   models: Record<string, Model[]>
+  /** Reasoning levels per harness, for the role editor this opens. */
+  thinking: Record<string, string[]>
   running: boolean
   /** Why the last team action was refused, if it was. Rendered where it was
    *  pressed: the page banner behind this dialog is not visible on a phone. */
@@ -140,8 +142,36 @@ const editingSomethingElse = computed(
 const projectRunsItsOwn = computed(
   () => !props.projectTeam.presetId && props.projectTeam.roles.length > 0,
 )
+/**
+ * Choosing the role that finishes.
+ *
+ * The daemon keeps it last and clears the old one, so this only has to say
+ * which. Sending the whole team as usual: a flag and a reorder are the same
+ * write, and this is where the reorder becomes visible.
+ */
+function makeTerminal(templateId: string) {
+  const preset = activePreset.value
+  if (!preset) return
+  saveRoles(
+    preset.roles.map((role) => ({
+      ...role,
+      ...cloneOverrides(role),
+      terminal: role.templateId === templateId,
+    })),
+  )
+}
+
+/**
+ * Which role finishes, read off the flag rather than counted off the end.
+ *
+ * The fallback is for a team stored before the flag existed, and for one whose
+ * flagged role has since been parked: the daemon normalises both away on the
+ * next write, and until then the badge should still say something true.
+ */
 const terminalTemplateId = computed(() => {
   const roles = activePreset.value?.roles ?? []
+  const flagged = roles.find((role) => role.terminal && role.enabled)
+  if (flagged) return flagged.templateId
   for (let i = roles.length - 1; i >= 0; i--) {
     if (roles[i].enabled) return roles[i].templateId
   }
@@ -216,6 +246,10 @@ function toggleRole(template: RoleTemplate) {
     {
       templateId: template.id,
       position: roles.length,
+      // Not the finisher: the daemon moves the role that is back to the end,
+      // so a role added here lands in front of it rather than taking over
+      // integrating, which is what used to happen.
+      terminal: false,
       enabled: true,
       ...cloneOverrides({}),
     },
@@ -652,7 +686,20 @@ function cloneTeam() {
               <span class="truncate text-xs font-medium">
                 {{ libraryById.get(role.templateId)?.name ?? role.templateId }}
               </span>
+              <!-- Which role finishes, and the way to change it. A badge alone
+                   read as a fact about the last row rather than a choice, which
+                   is what it was until it became a flag. -->
               <Badge v-if="role.templateId === terminalTemplateId">terminal</Badge>
+              <button
+                v-else-if="role.enabled"
+                type="button"
+                class="text-muted-foreground/70 hover:text-foreground focus-visible:outline-ring text-[10px] underline-offset-2 hover:underline focus-visible:outline-2"
+                :title="`Finish tasks at ${libraryById.get(role.templateId)?.name}, which moves it to the end`"
+                :aria-label="`Make ${libraryById.get(role.templateId)?.name} the finishing role`"
+                @click="makeTerminal(role.templateId)"
+              >
+                finish here
+              </button>
               <!-- A parked role keeps its place and its settings; it just does
                    not run, and work routes past it. -->
               <Badge v-if="!role.enabled" variant="outline">off</Badge>
@@ -733,6 +780,7 @@ function cloneTeam() {
     :scope="`${activePreset?.name ?? 'Team'} role settings`"
     :harnesses="harnesses"
     :models="models"
+    :thinking="thinking"
     @save="saveRoleSettings"
   />
 

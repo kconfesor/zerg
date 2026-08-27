@@ -13,7 +13,7 @@ import (
 // ErrNotFound is returned when a lookup by id finds nothing.
 var ErrNotFound = errors.New("not found")
 
-const templateCols = `id, name, harness, model, args, receive, batch_max_items,
+const templateCols = `id, name, harness, model, args, thinking, receive, batch_max_items,
 	batch_max_age_sec, prompt, gate, builtin, created_at, updated_at`
 
 // CreateTemplate adds a role to the library.
@@ -32,8 +32,8 @@ func (db *DB) CreateTemplate(ctx context.Context, t *RoleTemplate) (*RoleTemplat
 
 	_, err = db.sql.ExecContext(ctx,
 		`INSERT INTO role_templates (`+templateCols+`)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		t.ID, t.Name, t.Harness, t.Model, args, t.Receive, t.BatchMaxItems,
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		t.ID, t.Name, t.Harness, t.Model, args, t.Thinking, t.Receive, t.BatchMaxItems,
 		t.BatchMaxAgeSec, t.Prompt, t.Gate, t.Builtin,
 		now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
 	if err != nil {
@@ -141,10 +141,10 @@ func (db *DB) UpdateTemplate(ctx context.Context, t *RoleTemplate) error {
 	t.UpdatedAt = time.Now().UTC()
 
 	res, err := db.sql.ExecContext(ctx,
-		`UPDATE role_templates SET name=?, harness=?, model=?, args=?, receive=?,
+		`UPDATE role_templates SET name=?, harness=?, model=?, args=?, thinking=?, receive=?,
 		   batch_max_items=?, batch_max_age_sec=?, prompt=?, gate=?, updated_at=?
 		 WHERE id=?`,
-		t.Name, t.Harness, t.Model, args, t.Receive, t.BatchMaxItems,
+		t.Name, t.Harness, t.Model, args, t.Thinking, t.Receive, t.BatchMaxItems,
 		t.BatchMaxAgeSec, t.Prompt, t.Gate, t.UpdatedAt.Format(time.RFC3339Nano), t.ID)
 	if err != nil {
 		return fmt.Errorf("updating role %q: %w", t.Name, err)
@@ -174,7 +174,7 @@ func scanTemplate(s scanner) (*RoleTemplate, error) {
 		updated    string
 		builtinInt int
 	)
-	if err := s.Scan(&t.ID, &t.Name, &t.Harness, &t.Model, &args, &t.Receive,
+	if err := s.Scan(&t.ID, &t.Name, &t.Harness, &t.Model, &args, &t.Thinking, &t.Receive,
 		&t.BatchMaxItems, &t.BatchMaxAgeSec, &t.Prompt, &t.Gate, &builtinInt,
 		&created, &updated); err != nil {
 		return nil, err

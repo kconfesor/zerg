@@ -62,6 +62,10 @@ export function presetRoles(pipeline: ResolvedRole[], source: TeamPreset | null)
     templateId: role.id,
     position,
     enabled: role.enabled,
+    // Which role finishes travels with the copy. Left off, the daemon would
+    // fall back to whichever role happened to be last, which is the guessing
+    // the flag exists to end.
+    terminal: role.terminal,
     ...cloneOverrides(overrides.get(role.id) ?? {}),
   }))
 }

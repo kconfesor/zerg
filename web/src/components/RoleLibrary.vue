@@ -41,7 +41,27 @@ import {
 
 const library = ref<RoleTemplate[]>([])
 const harnesses = ref<string[]>([])
+/**
+ * The value that means "leave the harness alone".
+ *
+ * Not the empty string: reka's SelectItem refuses one, because Select uses ""
+ * to mean no selection at all, and an item carrying it throws on mount rather
+ * than rendering. A level is one word, so this cannot collide with a real one.
+ */
+const HARNESS_DEFAULT = 'harness default'
+
 const models = ref<Record<string, Model[]>>({})
+/** The reasoning levels each harness accepts. Read from the daemon, since only
+ *  the adapter knows what its CLI will take. */
+const thinking = ref<Record<string, string[]>>({})
+
+/** The select's value, which is the level or the sentinel above. */
+const thinkingChoice = computed({
+  get: () => editing.value?.thinking || HARNESS_DEFAULT,
+  set: (v: string) => {
+    if (editing.value) editing.value.thinking = v === HARNESS_DEFAULT ? '' : v
+  },
+})
 const presets = ref<TeamPreset[]>([])
 const note = ref<{ tone: 'ok' | 'bad'; text: string } | null>(null)
 const busy = usePending()
@@ -49,6 +69,7 @@ const newest = latest()
 
 const nameId = useId()
 const harnessId = useId()
+const thinkingId = useId()
 const receiveId = useId()
 const gateId = useId()
 const batchId = useId()
@@ -64,6 +85,8 @@ async function load() {
     presets.value = ps
     // The catalogs, so the model picker can narrow rather than constrain.
     const catalogs = await Promise.all(hs.map((h) => api.models(h).catch(() => [] as Model[])))
+    const levels = await Promise.all(hs.map((h) => api.thinking(h).catch(() => [] as string[])))
+    thinking.value = Object.fromEntries(hs.map((h, i) => [h, levels[i]]))
     if (!current()) return
     models.value = Object.fromEntries(hs.map((h, i) => [h, catalogs[i]]))
   } catch (e) {
@@ -108,6 +131,7 @@ function create() {
     name: '',
     harness: harnesses.value[0] ?? 'claude',
     model: '',
+    thinking: '',
     args: [],
     receive: 'task',
     batchMaxItems: 8,
@@ -290,6 +314,25 @@ async function remove(tpl: RoleTemplate) {
             <span class="text-muted-foreground text-[11px]">
               {{ (models[editing.harness] ?? []).length }} listed by {{ editing.harness }}. A working
               model can be absent from a catalog, so anything you type is accepted.
+            </span>
+          </div>
+
+          <!-- Offered only where the harness has one, and with that harness's
+               own levels: claude takes low through max, pi starts at off. -->
+          <div v-if="(thinking[editing.harness] ?? []).length" class="flex flex-col gap-1.5">
+            <Label :for="thinkingId">Thinking</Label>
+            <Select v-model="thinkingChoice">
+              <SelectTrigger :id="thinkingId"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem :value="HARNESS_DEFAULT">{{ HARNESS_DEFAULT }}</SelectItem>
+                <SelectItem v-for="level in thinking[editing.harness] ?? []" :key="level" :value="level">
+                  {{ level }}
+                </SelectItem>
+              </SelectContent>
+            </Select>
+            <span class="text-muted-foreground text-[11px]">
+              How hard {{ editing.harness }} reasons before answering. It costs tokens and time, so
+              it is worth raising for the roles that review and lowering for the ones that do not.
             </span>
           </div>
 

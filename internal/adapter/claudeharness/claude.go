@@ -88,6 +88,9 @@ func (*Adapter) Name() string { return "claude" }
 func (*Adapter) Capabilities() adapter.Caps {
 	return adapter.Caps{
 		StructuredOutput: true,
+		// `claude --help`: "Effort level for the current session (low, medium,
+		// high, xhigh, max)". No "off": the floor is low.
+		Thinking: []string{"low", "medium", "high", "xhigh", "max"},
 		// --input-format stream-json accepts messages on stdin while the process
 		// keeps running, so chat and clarification answers reach a live agent.
 		StructuredInput: true,
@@ -133,6 +136,9 @@ func (*Adapter) Command(ctx context.Context, spec adapter.Spec) (*exec.Cmd, erro
 	}
 	if spec.Model != "" {
 		args = append(args, "--model", spec.Model)
+	}
+	if spec.Thinking != "" {
+		args = append(args, "--effort", spec.Thinking)
 	}
 	// A last-resort floor, not a policy. An agent running unattended with no
 	// permission setting at all will stop at the first prompt and look alive

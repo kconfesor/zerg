@@ -40,6 +40,12 @@ func (*Adapter) Name() string { return "pi" }
 func (*Adapter) Capabilities() adapter.Caps {
 	return adapter.Caps{
 		StructuredOutput: true,
+		// `pi --help`: "Set thinking level: off, minimal, low, medium, high,
+		// xhigh, max". Two levels below claude's floor, and pi also takes it as
+		// a suffix on the model id, which this does not use: one way to say a
+		// thing is enough, and the flag is the one that does not have to be
+		// parsed back out of a model name.
+		Thinking: []string{"off", "minimal", "low", "medium", "high", "xhigh", "max"},
 		// Verified: --mode rpc reads newline-delimited commands on stdin and
 		// answers {"type":"response","command":"prompt","success":true} while
 		// streaming the same events as --mode json.
@@ -77,6 +83,9 @@ func (*Adapter) Command(ctx context.Context, spec adapter.Spec) (*exec.Cmd, erro
 	}
 	if spec.Model != "" {
 		args = append(args, "--model", spec.Model)
+	}
+	if spec.Thinking != "" {
+		args = append(args, "--thinking", spec.Thinking)
 	}
 	// Extensions are opt-out because a broken extension tree takes the whole
 	// process down before it reads a single turn — which is exactly how pi

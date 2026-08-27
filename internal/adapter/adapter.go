@@ -74,9 +74,15 @@ type Model struct {
 // database — there is no config file to read and no snapshot in a worktree to
 // go stale.
 type Spec struct {
-	Role      string
-	Worktree  string // agent cwd; a git worktree owned by this role
-	Model     string
+	Role     string
+	Worktree string // agent cwd; a git worktree owned by this role
+	Model    string
+	// Thinking is the reasoning level, in the harness's own vocabulary. Empty
+	// leaves the harness's default alone. The two shipped harnesses spell it
+	// differently and offer different levels, which is why this is passed
+	// through rather than translated: claude takes --effort, pi --thinking, and
+	// only pi has "off" and "minimal".
+	Thinking  string
 	ExtraArgs []string
 
 	// SystemFile is composed fresh at every spawn from the shared instructions
@@ -214,6 +220,11 @@ type Caps struct {
 	// switch, not a parallel view: a process is either emitting structured
 	// events or painting a screen, never both.
 	InteractiveTUI bool
+
+	// Thinking lists the reasoning levels this harness accepts, weakest first,
+	// for the picker in the role editor. Empty means the harness has no such
+	// control and the field is not offered for it.
+	Thinking []string
 
 	// PrivateConfigDir says whether this harness can run with its config
 	// relocated per role.

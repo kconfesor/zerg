@@ -12,6 +12,9 @@ export interface RoleTemplate {
   harness: string
   model: string
   args: string[]
+  /** How hard the harness reasons, in that harness's own word for it: claude
+   *  spends it as --effort, pi as --thinking. Empty leaves its default. */
+  thinking: string
   receive: 'task' | 'batch'
   batchMaxItems: number
   batchMaxAgeSec: number
@@ -25,6 +28,7 @@ export interface RoleOverrides {
   modelOverride?: string | null
   /** null inherits; [] explicitly removes every argument. */
   argsOverride: string[] | null
+  thinkingOverride?: string | null
   receiveOverride?: 'task' | 'batch' | null
   batchMaxItemsOverride?: number | null
   batchMaxAgeSecOverride?: number | null
@@ -49,6 +53,10 @@ export interface TeamPresetRole extends RoleOverrides {
   templateId: string
   position: number
   enabled: boolean
+  /** The role that finishes a task rather than handing it on, which is what
+   *  integrates the work. Exactly one enabled role carries it, and the daemon
+   *  keeps that role last, so adding a role never takes the job over. */
+  terminal: boolean
 }
 
 export interface TeamPreset {
@@ -368,6 +376,9 @@ export const api = {
 
   harnesses: () => call<string[]>('/harnesses'),
   models: (harness: string) => call<Model[]>(`/harnesses/${harness}/models`),
+  /** The reasoning levels this harness accepts, weakest first. Empty means it
+   *  has no such control, and the field is not offered for it. */
+  thinking: (harness: string) => call<string[]>(`/harnesses/${harness}/thinking`),
 
   roles: () => call<RoleTemplate[]>('/roles'),
   /** The teams a project may use: the shared ones and its own. Without an id

@@ -25,11 +25,16 @@ const (
 // RoleTemplate is an entry in the global library — the idea of a role,
 // independent of any project. Projects select templates; see ProjectRole.
 type RoleTemplate struct {
-	ID             string    `json:"id"`
-	Name           string    `json:"name"`
-	Harness        string    `json:"harness"`
-	Model          string    `json:"model"`
-	Args           []string  `json:"args"`
+	ID      string   `json:"id"`
+	Name    string   `json:"name"`
+	Harness string   `json:"harness"`
+	Model   string   `json:"model"`
+	Args    []string `json:"args"`
+	// Thinking is how hard the harness reasons before answering, in that
+	// harness's own vocabulary: claude spends it as --effort, pi as --thinking,
+	// and their level sets are not the same. Empty leaves the harness's default
+	// alone, which is what every role had before this existed.
+	Thinking       string    `json:"thinking"`
 	Receive        string    `json:"receive"`
 	BatchMaxItems  int       `json:"batchMaxItems"`
 	BatchMaxAgeSec int       `json:"batchMaxAgeSec"`
@@ -80,6 +85,7 @@ type RoleOverrides struct {
 	HarnessOverride        *string  `json:"harnessOverride,omitempty"`
 	ModelOverride          *string  `json:"modelOverride,omitempty"`
 	ArgsOverride           []string `json:"argsOverride"`
+	ThinkingOverride       *string  `json:"thinkingOverride,omitempty"`
 	ReceiveOverride        *string  `json:"receiveOverride,omitempty"`
 	BatchMaxItemsOverride  *int     `json:"batchMaxItemsOverride,omitempty"`
 	BatchMaxAgeSecOverride *int     `json:"batchMaxAgeSecOverride,omitempty"`
@@ -120,6 +126,13 @@ type TeamPresetRole struct {
 	TemplateID string `json:"templateId"`
 	Position   int    `json:"position"`
 	Enabled    bool   `json:"enabled"`
+	// Terminal marks the role that finishes a task instead of handing it on,
+	// which is what integrates the work (§9.2). Chosen rather than computed:
+	// it used to be whichever enabled role happened to be last, so adding a
+	// role to the end quietly moved the job of merging to a role that had never
+	// done it. Writes normalise this, so exactly one enabled role carries it and
+	// that role is last.
+	Terminal bool `json:"terminal"`
 	RoleOverrides
 }
 
