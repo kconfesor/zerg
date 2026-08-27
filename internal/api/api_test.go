@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -633,5 +634,63 @@ func TestUnknownApiPathsNeverReachTheCockpit(t *testing.T) {
 	}
 	if len(uiHits) != 1 || uiHits[0] != "/board" {
 		t.Errorf("cockpit saw %v, want [/board]", uiHits)
+	}
+}
+
+// A team belonging to one project stays out of another project's picker, and
+// out of its team assignment, whatever is posted at the daemon.
+func TestATeamCanBelongToOneProject(t *testing.T) {
+	h, db := newTestServer(t)
+	ctx := context.Background()
+
+	project := func() store.Project {
+		var p store.Project
+		decodeInto(t, do(t, h, "POST", "/api/projects", map[string]any{"path": t.TempDir()}), &p)
+		return p
+	}
+	x, y := project(), project()
+	coder, err := db.GetTemplateByName(ctx, "coder")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rec := do(t, h, "POST", "/api/team-presets", map[string]any{
+		"name":      "X only",
+		"projectId": x.ID,
+		"roles":     []map[string]any{{"templateId": coder.ID, "position": 0, "enabled": true}},
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("creating a project's team: %d %s", rec.Code, rec.Body)
+	}
+	var created store.TeamPreset
+	decodeInto(t, rec, &created)
+	if created.ProjectID == nil || *created.ProjectID != x.ID {
+		t.Fatalf("team came back owned by %v, want %s", created.ProjectID, x.ID)
+	}
+
+	// The teams each project is offered.
+	var forX, forY []store.TeamPreset
+	decodeInto(t, do(t, h, "GET", "/api/team-presets?project="+x.ID, nil), &forX)
+	decodeInto(t, do(t, h, "GET", "/api/team-presets?project="+y.ID, nil), &forY)
+	if !slices.ContainsFunc(forX, func(p store.TeamPreset) bool { return p.ID == created.ID }) {
+		t.Error("a project is not offered its own team")
+	}
+	if slices.ContainsFunc(forY, func(p store.TeamPreset) bool { return p.ID == created.ID }) {
+		t.Error("another project's team is offered here")
+	}
+	if !slices.ContainsFunc(forY, func(p store.TeamPreset) bool { return p.Builtin }) {
+		t.Error("the shared built-in team is missing from a project's picker")
+	}
+
+	// And the assignment refuses it, so the owner is not merely a filter on a
+	// list: anything that posts the id straight at the daemon is refused too.
+	assign := map[string]any{"presetId": created.ID, "topologyOverride": false, "roles": []any{}}
+	rec = do(t, h, "PUT", "/api/projects/"+y.ID+"/team", assign)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("putting Y on X's team: %d %s, want 400", rec.Code, rec.Body)
+	}
+	rec = do(t, h, "PUT", "/api/projects/"+x.ID+"/team", assign)
+	if rec.Code != http.StatusOK {
+		t.Errorf("putting X on its own team: %d %s", rec.Code, rec.Body)
 	}
 }

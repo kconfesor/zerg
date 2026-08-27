@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { CircleCheck, Copy, Pencil, SlidersHorizontal, Trash2 } from '@lucide/vue'
+import { CircleCheck, Copy, FolderGit2, Globe, Pencil, SlidersHorizontal, Trash2 } from '@lucide/vue'
 import type {
   Model,
   ProjectTeam,
@@ -29,6 +29,10 @@ import {
 const props = defineProps<{
   library: RoleTemplate[]
   presets: TeamPreset[]
+  /** The project on screen. A team can belong to it, so this is needed to say
+   *  which teams are its own and to give a new one an owner. */
+  projectId: string
+  projectName: string
   projectTeam: ProjectTeam
   harnesses: string[]
   models: Record<string, Model[]>
@@ -40,7 +44,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   setTeam: [team: ProjectTeamUpdate]
   savePreset: [preset: TeamPreset]
-  createPreset: [name: string, roles: TeamPresetRole[]]
+  createPreset: [name: string, roles: TeamPresetRole[], projectId: string | null]
   deletePreset: [id: string]
 }>()
 
@@ -65,6 +69,52 @@ watch(
 )
 
 const activePreset = computed(() => props.presets.find((p) => p.id === selectedPresetId.value) ?? null)
+
+/**
+ * The two kinds of team, kept apart in the list.
+ *
+ * A team carries the prompts, models and arguments one repository wants, and a
+ * global list put those in front of every other repository, where adopting one
+ * by accident was a click and editing it changed the first project. Ownership
+ * is the separation; this is where it is read.
+ */
+const ownTeams = computed(() => props.presets.filter((p) => p.projectId === props.projectId))
+const sharedTeams = computed(() => props.presets.filter((p) => !p.projectId))
+const teamGroups = computed(() => [
+  { key: 'own', label: `${props.projectName || 'This project'} only`, teams: ownTeams.value },
+  { key: 'shared', label: 'Shared with every project', teams: sharedTeams.value },
+])
+
+/** Whether this team is shared, said as the action that would change it. */
+function ownershipLabel(preset: TeamPreset): string {
+  if (preset.builtin) return ''
+  return preset.projectId
+    ? 'Share with every project'
+    : `Make this ${props.projectName || 'project'}'s own team`
+}
+
+/**
+ * Moving a team between shared and owned.
+ *
+ * Handing a shared team to one project takes it from the others, so the daemon
+ * refuses while another project runs it and says which. Sharing one back is
+ * always allowed: it strands nobody.
+ */
+function toggleOwnership(preset: TeamPreset) {
+  const next = preset.projectId ? null : props.projectId
+  const run = () => emit('savePreset', { ...preset, projectId: next })
+  if (next) {
+    guard(`Make ${preset.name} this project's own team?`, run, {
+      detail:
+        'It leaves the shared list, so no other project can adopt it, and editing it here stops reaching anywhere else. Projects already running it are refused, and named.',
+      confirm: 'Make it this project\'s',
+    })
+    return
+  }
+  run()
+}
+
+
 const libraryById = computed(() => new Map(props.library.map((role) => [role.id, role])))
 const selectedRoleIds = computed(
   () => new Set(activePreset.value?.roles.map((role) => role.templateId) ?? []),
@@ -277,6 +327,8 @@ function useTeam(preset: TeamPreset) {
 
 const cloning = ref(false)
 const cloneName = ref('')
+/** Whether the copy is for everyone. Off: it belongs to this project. */
+const cloneShared = ref(false)
 const renaming = ref(false)
 const renameName = ref('')
 const renamingPresetId = ref('')
@@ -285,6 +337,7 @@ const confirmDelete = ref<TeamPreset | null>(null)
 function openClone(preset: TeamPreset) {
   selectedPresetId.value = preset.id
   cloneName.value = `${preset.name} copy`
+  cloneShared.value = false
   cloning.value = true
 }
 
@@ -343,6 +396,11 @@ function cloneTeam() {
       position,
       ...cloneOverrides(role),
     })),
+    // Cloning a shared team is how you get one of your own to change, so the
+    // copy belongs to this project unless it is asked to be shared. A clone
+    // that landed back in the shared list put the same pipeline in front of
+    // every other repository again, which is what ownership is here to stop.
+    cloneShared.value ? null : props.projectId,
   )
   cloning.value = false
 }
@@ -383,9 +441,19 @@ function cloneTeam() {
         <p class="text-muted-foreground mt-0.5 text-[10px]">Team setup</p>
       </div>
 
-      <ul class="divide-y">
-        <li
-          v-for="preset in presets"
+      <!-- This project's teams first, then the shared ones, each said out
+           loud. One flat list is what let a pipeline built for one repository
+           be adopted into another by a click, and edited there. -->
+      <template v-for="group in teamGroups" :key="group.key">
+        <p
+          v-if="group.teams.length"
+          class="text-muted-foreground bg-muted/30 px-3 py-1.5 text-[10px] font-semibold tracking-wide uppercase"
+        >
+          {{ group.label }}
+        </p>
+        <ul v-if="group.teams.length" class="divide-y border-b last:border-b-0">
+          <li
+            v-for="preset in group.teams"
           :key="preset.id"
           :class="selectedPresetId === preset.id && 'bg-primary/[0.08]'"
         >
@@ -441,6 +509,19 @@ function cloneTeam() {
               >
                 <Copy :size="14" />
               </Button>
+              <!-- Which project a team belongs to is an edit, not a label, so
+                   the control is the same shape as rename and delete. The
+                   built-in is where new projects start, so it stays shared. -->
+              <Button
+                size="icon-xs"
+                variant="ghost"
+                :disabled="preset.builtin"
+                :title="preset.builtin ? 'The built-in team is shared by every project' : ownershipLabel(preset)"
+                :aria-label="ownershipLabel(preset) || `${preset.name} is shared`"
+                @click="toggleOwnership(preset)"
+              >
+                <component :is="preset.projectId ? FolderGit2 : Globe" :size="14" />
+              </Button>
               <Button
                 size="icon-xs"
                 variant="ghost"
@@ -475,8 +556,9 @@ function cloneTeam() {
         </li>
         <li v-if="!presets.length" class="text-muted-foreground px-3 py-6 text-center text-xs">
           No teams yet.
-        </li>
-      </ul>
+          </li>
+        </ul>
+      </template>
 
     </section>
 
@@ -664,6 +746,27 @@ function cloneTeam() {
         <Label for="clone-team-name">Team name</Label>
         <Input id="clone-team-name" v-model="cloneName" autofocus @keyup.enter="cloneTeam" />
       </div>
+      <!-- Where the copy lands. Cloning a shared team is how you get one to
+           change without changing it for everyone, so it belongs to this
+           project unless this says otherwise. -->
+      <label class="flex items-start gap-2.5 text-xs">
+        <Switch
+          :model-value="cloneShared"
+          aria-label="Share the clone with every project"
+          class="mt-0.5"
+          @update:model-value="(v: boolean) => (cloneShared = v)"
+        />
+        <span>
+          Share with every project
+          <span class="text-muted-foreground mt-0.5 block text-[10px]">
+            {{
+              cloneShared
+                ? 'Any project can adopt it, and editing it changes it for all of them.'
+                : `Belongs to ${projectName || 'this project'}. No other project sees it.`
+            }}
+          </span>
+        </span>
+      </label>
       <DialogFooter>
         <Button variant="outline" @click="cloning = false">Cancel</Button>
         <Button :disabled="!cloneName.trim()" @click="cloneTeam">Clone team</Button>

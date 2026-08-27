@@ -98,9 +98,15 @@ type ProjectRole struct {
 // TeamPreset is a named, reusable pipeline. Its role settings are themselves
 // overrides over the role library, keeping the library as the common baseline.
 type TeamPreset struct {
-	ID        string           `json:"id"`
-	Name      string           `json:"name"`
-	Builtin   bool             `json:"builtin"`
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Builtin bool   `json:"builtin"`
+	// ProjectID is the project this team belongs to, or nil when it is shared
+	// by every project. A team carries prompts, models and arguments chosen for
+	// one repository as often as not, and those have no business in another
+	// repository's picker, let alone changing under it when the first one is
+	// edited.
+	ProjectID *string          `json:"projectId"`
 	Roles     []TeamPresetRole `json:"roles"`
 	CreatedAt time.Time        `json:"createdAt"`
 	UpdatedAt time.Time        `json:"updatedAt"`

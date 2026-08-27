@@ -359,10 +359,11 @@ function pollerLostContact() {
 
 async function loadGlobals() {
   try {
-    ;[projects.value, library.value, presets.value, harnesses.value] = await Promise.all([
+    // Teams are not global any more: one can belong to a project, so the list
+    // is fetched with the project's own refresh rather than once at startup.
+    ;[projects.value, library.value, harnesses.value] = await Promise.all([
       api.projects(),
       api.roles(),
-      api.teamPresets(),
       api.harnesses(),
     ])
     for (const h of harnesses.value) models.value[h] = await api.models(h).catch(() => [])
@@ -391,17 +392,19 @@ async function refresh() {
   if (!project) return
   const current_ = newestRefresh()
   try {
-    const [t, tk, at, st] = await Promise.all([
+    const [t, tk, at, st, ps] = await Promise.all([
       api.team(project.id),
       api.tasks(project.id),
       api.attention(project.id),
       api.status(project.id),
+      api.teamPresets(project.id),
     ])
     // A newer refresh has been asked for; this data is already history.
     if (!current_()) return
 
     projectTeam.value = t
     team.value = t.roles
+    presets.value = ps
     tasks.value = tk
     attention.value = at
     status.value = st
@@ -588,9 +591,9 @@ async function savePreset(preset: TeamPreset) {
   }
 }
 
-async function createPreset(name: string, roles: TeamPresetRole[]) {
+async function createPreset(name: string, roles: TeamPresetRole[], projectId: string | null) {
   try {
-    const created = await api.createTeamPreset({ name, roles })
+    const created = await api.createTeamPreset({ name, roles, projectId })
     presets.value = [...presets.value, created].sort((a, b) => a.name.localeCompare(b.name))
   } catch (err) {
     fail(err)
@@ -887,12 +890,14 @@ watch(current, () => (banner.value = null))
           <template v-else-if="view === 'team'">
             <PageHeader
               title="Team"
-              subtitle="Choose a team, configure its roles, order its pipeline, then use it for this project."
+              subtitle="A team can belong to this project or be shared by every project. Choose one, configure its roles, order its pipeline, then use it here."
             />
             <div class="pt-4">
               <TeamEditor
                 :library="library"
                 :presets="presets"
+                :project-id="current?.id ?? ''"
+                :project-name="current?.name ?? ''"
                 :project-team="projectTeam"
                 :harnesses="harnesses"
                 :models="models"

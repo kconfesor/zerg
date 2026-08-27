@@ -60,6 +60,7 @@ function preset(id: string, name: string, names: string[]): TeamPreset {
     id,
     name,
     builtin: false,
+    projectId: null,
     roles: names.map((n, position) => ({
       templateId: `tpl-${n}`,
       position,

@@ -26,10 +26,13 @@ const reviewer: RoleTemplate = {
   prompt: 'review',
 }
 
+const project = { id: 'project-x', name: 'CalcRust' }
+
 const defaultTeam: TeamPreset = {
   id: 'default',
   name: 'Default',
   builtin: true,
+  projectId: null,
   createdAt: '2026-01-01T00:00:00Z',
   updatedAt: '2026-01-01T00:00:00Z',
   roles: [
@@ -65,11 +68,13 @@ const resolved: ResolvedRole[] = [
   },
 ]
 
-function editor(team: ProjectTeam) {
+function editor(team: ProjectTeam, presets: TeamPreset[] = [defaultTeam, docsTeam]) {
   return mount(TeamEditor, {
     props: {
       library: [coder, reviewer],
-      presets: [defaultTeam, docsTeam],
+      presets,
+      projectId: project.id,
+      projectName: project.name,
       projectTeam: team,
       harnesses: ['claude'],
       models: {},
@@ -116,11 +121,64 @@ describe('TeamEditor', () => {
     expect(w.find('[aria-label="Clone Default"]').exists()).toBe(true)
   })
 
+
+  it('keeps this project\'s teams apart from the shared ones', () => {
+    // A team carries prompts, models and arguments chosen for one repository,
+    // and a flat global list put those in front of every other repository,
+    // where adopting one was a click and editing it changed the first project.
+    const mine: TeamPreset = { ...docsTeam, id: 'mine', name: 'CalcRust review', projectId: project.id }
+    const w = editor({ presetId: defaultTeam.id, topologyOverride: false, roles: resolved }, [
+      defaultTeam,
+      mine,
+    ])
+
+    const text = w.text()
+    expect(text).toContain('CalcRust only')
+    expect(text).toContain('Shared with every project')
+    // Its own team is listed under the project, the built-in under shared.
+    expect(text.indexOf('CalcRust only')).toBeLessThan(text.indexOf('CalcRust review'))
+    expect(text.indexOf('Shared with every project')).toBeLessThan(text.indexOf('Default'))
+  })
+
+  it('moves a team between shared and this project, and never the built-in', async () => {
+    const mine: TeamPreset = { ...docsTeam, id: 'mine', name: 'CalcRust review', projectId: project.id }
+    const w = editor({ presetId: defaultTeam.id, topologyOverride: false, roles: resolved }, [
+      defaultTeam,
+      docsTeam,
+      mine,
+    ])
+
+    // Sharing a project's team back strands nobody, so it happens on the press.
+    await w.get('[aria-label="Share with every project"]').trigger('click')
+    const shared = w.emitted('savePreset')![0][0] as TeamPreset
+    expect(shared.id).toBe(mine.id)
+    expect(shared.projectId).toBeNull()
+
+    // Default is where a new project starts, so it cannot become one project's.
+    expect(w.get('[aria-label="Default is shared"]').attributes('disabled')).toBeDefined()
+  })
+
+  it('gives a clone to this project, since that is what cloning a shared team is for', async () => {
+    const w = editor({ presetId: defaultTeam.id, topologyOverride: false, roles: resolved })
+    await w.get('[aria-label="Clone Default"]').trigger('click')
+    // The dialog teleports to the body, so the confirm is read there.
+    const clone = [...document.body.querySelectorAll('button')].find(
+      (b) => b.textContent?.trim() === 'Clone team',
+    )
+    clone!.click()
+    await w.vm.$nextTick()
+
+    const [, , owner] = w.emitted('createPreset')![0] as [string, unknown, string | null]
+    expect(owner).toBe(project.id)
+  })
+
   it('asks before moving a project to another team while agents are running', async () => {
     const w = mount(TeamEditor, {
       props: {
         library: [coder, reviewer],
         presets: [defaultTeam, docsTeam],
+        projectId: project.id,
+        projectName: project.name,
         projectTeam: { presetId: defaultTeam.id, topologyOverride: false, roles: resolved },
         harnesses: ['claude'],
         models: {},

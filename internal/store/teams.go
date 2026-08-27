@@ -83,6 +83,9 @@ func (db *DB) CreateTeamPreset(ctx context.Context, p *TeamPreset) (*TeamPreset,
 	if err := db.validatePresetRoles(ctx, p.Roles); err != nil {
 		return nil, err
 	}
+	if err := db.validatePresetOwner(ctx, p.ProjectID); err != nil {
+		return nil, err
+	}
 	now := time.Now().UTC()
 	p.ID, p.CreatedAt, p.UpdatedAt = NewID(), now, now
 	tx, err := db.sql.BeginTx(ctx, nil)
@@ -91,8 +94,9 @@ func (db *DB) CreateTeamPreset(ctx context.Context, p *TeamPreset) (*TeamPreset,
 	}
 	defer tx.Rollback()
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO team_presets (id,name,builtin,created_at,updated_at) VALUES (?,?,?,?,?)`,
-		p.ID, p.Name, p.Builtin, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)); err != nil {
+		`INSERT INTO team_presets (id,name,builtin,created_at,updated_at,project_id) VALUES (?,?,?,?,?,?)`,
+		p.ID, p.Name, p.Builtin, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano),
+		presetOwner(p.ProjectID)); err != nil {
 		return nil, fmt.Errorf("creating team preset %q: %w", p.Name, err)
 	}
 	if err := insertPresetRoles(ctx, tx, p.ID, p.Roles); err != nil {
@@ -118,14 +122,20 @@ func (db *DB) UpdateTeamPreset(ctx context.Context, p *TeamPreset) error {
 	if err := db.validatePresetProjectOverrides(ctx, p); err != nil {
 		return err
 	}
+	if err := db.validatePresetOwner(ctx, p.ProjectID); err != nil {
+		return err
+	}
+	if err := db.validateOwnerChange(ctx, p); err != nil {
+		return err
+	}
 	tx, err := db.sql.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 	p.UpdatedAt = time.Now().UTC()
-	if _, err := tx.ExecContext(ctx, `UPDATE team_presets SET name=?, updated_at=? WHERE id=?`,
-		p.Name, p.UpdatedAt.Format(time.RFC3339Nano), p.ID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE team_presets SET name=?, updated_at=?, project_id=? WHERE id=?`,
+		p.Name, p.UpdatedAt.Format(time.RFC3339Nano), presetOwner(p.ProjectID), p.ID); err != nil {
 		return fmt.Errorf("updating team preset %q: %w", p.Name, err)
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM team_preset_roles WHERE preset_id=?`, p.ID); err != nil {
@@ -146,7 +156,7 @@ func (db *DB) UpdateTeamPreset(ctx context.Context, p *TeamPreset) error {
 // whichever name sorts first.
 func (db *DB) ListTeamPresets(ctx context.Context) ([]TeamPreset, error) {
 	rows, err := db.read.QueryContext(ctx,
-		`SELECT id,name,builtin,created_at,updated_at FROM team_presets ORDER BY builtin DESC, name`)
+		`SELECT id,name,builtin,created_at,updated_at,project_id FROM team_presets ORDER BY builtin DESC, name`)
 	if err != nil {
 		return nil, err
 	}
@@ -178,7 +188,7 @@ func (db *DB) ListTeamPresets(ctx context.Context) ([]TeamPreset, error) {
 
 func (db *DB) GetTeamPreset(ctx context.Context, id string) (*TeamPreset, error) {
 	p, err := scanPreset(db.read.QueryRowContext(ctx,
-		`SELECT id,name,builtin,created_at,updated_at FROM team_presets WHERE id=?`, id))
+		`SELECT id,name,builtin,created_at,updated_at,project_id FROM team_presets WHERE id=?`, id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("team preset %s: %w", id, ErrNotFound)
 	}
@@ -212,14 +222,109 @@ func (db *DB) DeleteTeamPreset(ctx context.Context, id string) error {
 	return mustAffect(res, fmt.Sprintf("team preset %s", id))
 }
 
+// presetOwner renders the owning project for SQL: NULL for a shared team.
+func presetOwner(projectID *string) any {
+	if projectID == nil {
+		return nil
+	}
+	return *projectID
+}
+
+// validatePresetOwner refuses a team owned by a project that is not there.
+func (db *DB) validatePresetOwner(ctx context.Context, projectID *string) error {
+	if projectID == nil {
+		return nil
+	}
+	if _, err := db.GetProject(ctx, *projectID); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return invalid("no project %s to own this team", *projectID)
+		}
+		return err
+	}
+	return nil
+}
+
+// validateOwnerChange guards the two ways moving a team between owners would
+// take a pipeline away from a project that is running it.
+//
+// Giving a shared team to one project takes it from every other project on it,
+// and the built-in Default is the team a new project starts on, so it stays
+// shared whatever a caller asks for.
+func (db *DB) validateOwnerChange(ctx context.Context, p *TeamPreset) error {
+	before, err := db.GetTeamPreset(ctx, p.ID)
+	if err != nil {
+		return err
+	}
+	if samePtr(before.ProjectID, p.ProjectID) {
+		return nil
+	}
+	if before.Builtin {
+		return invalid("%s is the team new projects start on, so it stays shared", before.Name)
+	}
+	if p.ProjectID == nil {
+		return nil // sharing a project's team with everyone strands nobody
+	}
+	rows, err := db.read.QueryContext(ctx,
+		`SELECT name FROM projects WHERE team_preset_id=? AND id<>?`, p.ID, *p.ProjectID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	var others []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return err
+		}
+		others = append(others, name)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if len(others) > 0 {
+		return invalid("%s is running %s; move those projects to another team first",
+			strings.Join(others, ", "), before.Name)
+	}
+	return nil
+}
+
+func samePtr(a, b *string) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
+}
+
+// ListTeamPresetsFor returns the teams a project may choose from: the shared
+// ones, and its own. Another project's team is not among them, which is the
+// whole point of an owner.
+func (db *DB) ListTeamPresetsFor(ctx context.Context, projectID string) ([]TeamPreset, error) {
+	all, err := db.ListTeamPresets(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]TeamPreset, 0, len(all))
+	for _, p := range all {
+		if p.ProjectID == nil || *p.ProjectID == projectID {
+			out = append(out, p)
+		}
+	}
+	return out, nil
+}
+
 func scanPreset(s scanner) (*TeamPreset, error) {
 	var p TeamPreset
 	var builtin int
 	var created, updated string
-	if err := s.Scan(&p.ID, &p.Name, &builtin, &created, &updated); err != nil {
+	var owner sql.NullString
+	if err := s.Scan(&p.ID, &p.Name, &builtin, &created, &updated, &owner); err != nil {
 		return nil, err
 	}
 	p.Builtin = builtin != 0
+	if owner.Valid {
+		v := owner.String
+		p.ProjectID = &v
+	}
 	var err error
 	p.CreatedAt, err = time.Parse(time.RFC3339Nano, created)
 	if err != nil {

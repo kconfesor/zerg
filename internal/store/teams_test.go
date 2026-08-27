@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -353,4 +355,145 @@ func TestResolveTeamSurvivesAnInvalidMergedRole(t *testing.T) {
 	if len(team) == 0 {
 		t.Error("the team resolved to nothing")
 	}
+}
+
+// A team can belong to one project.
+//
+// Teams were global, so a pipeline built around one repository's prompts and
+// models appeared in every other repository's picker, and editing it there
+// changed the first one. These are the rules that separate them.
+func TestATeamCanBelongToOneProject(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	if err := Seed(ctx, db, "claude"); err != nil {
+		t.Fatalf("Seed: %v", err)
+	}
+	x, err := db.CreateProject(ctx, repoDir(t, "own-x"), "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	y, err := db.CreateProject(ctx, repoDir(t, "own-y"), "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	coder, err := db.GetTemplateByName(ctx, "coder")
+	if err != nil {
+		t.Fatal(err)
+	}
+	roles := []TeamPresetRole{{TemplateID: coder.ID, Enabled: true}}
+
+	mine, err := db.CreateTeamPreset(ctx, &TeamPreset{Name: "X team", ProjectID: &x.ID, Roles: roles})
+	if err != nil {
+		t.Fatalf("creating a project's team: %v", err)
+	}
+	if mine.ProjectID == nil || *mine.ProjectID != x.ID {
+		t.Fatalf("team came back owned by %v, want %s", mine.ProjectID, x.ID)
+	}
+
+	// X sees the shared teams and its own; Y sees the shared ones only.
+	forX, err := db.ListTeamPresetsFor(ctx, x.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forY, err := db.ListTeamPresetsFor(ctx, y.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(forX, func(p TeamPreset) bool { return p.ID == mine.ID }) {
+		t.Error("a project cannot see its own team")
+	}
+	if slices.ContainsFunc(forY, func(p TeamPreset) bool { return p.ID == mine.ID }) {
+		t.Error("another project's team is in this project's picker")
+	}
+	if !slices.ContainsFunc(forY, func(p TeamPreset) bool { return p.ID == DefaultTeamPresetID }) {
+		t.Error("the shared Default team is missing from a project's picker")
+	}
+
+	// The picker is not the only way in: the daemon refuses the id outright.
+	if err := db.SetProjectTeam(ctx, y.ID, &mine.ID, false, nil); !isInvalid(err) {
+		t.Errorf("putting Y on X's team: %v, want a 400-class refusal", err)
+	}
+	if err := db.SetProjectTeam(ctx, x.ID, &mine.ID, false, nil); err != nil {
+		t.Errorf("putting X on its own team: %v", err)
+	}
+
+	// Deleting the project takes its team with it, and leaves the shared ones.
+	if err := db.DeleteProject(ctx, x.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.GetTeamPreset(ctx, mine.ID); !errors.Is(err, ErrNotFound) {
+		t.Errorf("a deleted project's team outlived it: %v", err)
+	}
+	if _, err := db.GetTeamPreset(ctx, DefaultTeamPresetID); err != nil {
+		t.Errorf("deleting a project took a shared team with it: %v", err)
+	}
+}
+
+// Moving a team between owners must not take a pipeline away from a project
+// that is running it.
+func TestClaimingATeamOtherProjectsRunIsRefused(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	if err := Seed(ctx, db, "claude"); err != nil {
+		t.Fatalf("Seed: %v", err)
+	}
+	x, err := db.CreateProject(ctx, repoDir(t, "claim-x"), "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	y, err := db.CreateProject(ctx, repoDir(t, "claim-y"), "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	coder, err := db.GetTemplateByName(ctx, "coder")
+	if err != nil {
+		t.Fatal(err)
+	}
+	shared, err := db.CreateTeamPreset(ctx, &TeamPreset{
+		Name:  "Shared review",
+		Roles: []TeamPresetRole{{TemplateID: coder.ID, Enabled: true}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetProjectTeam(ctx, y.ID, &shared.ID, false, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	claim := *shared
+	claim.ProjectID = &x.ID
+	if err := db.UpdateTeamPreset(ctx, &claim); !isInvalid(err) {
+		t.Errorf("claiming a team Y runs: %v, want a refusal naming Y", err)
+	}
+
+	// With nobody else on it, the same claim goes through, and sharing it
+	// back is always allowed since that strands nobody.
+	if err := db.SelectDefaultTeam(ctx, y.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpdateTeamPreset(ctx, &claim); err != nil {
+		t.Fatalf("claiming an unused team: %v", err)
+	}
+	back := claim
+	back.ProjectID = nil
+	if err := db.UpdateTeamPreset(ctx, &back); err != nil {
+		t.Errorf("sharing a project's team back: %v", err)
+	}
+
+	// Default is where a new project starts, so it cannot become one project's.
+	def, err := db.GetTeamPreset(ctx, DefaultTeamPresetID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	def.ProjectID = &x.ID
+	if err := db.UpdateTeamPreset(ctx, def); !isInvalid(err) {
+		t.Errorf("claiming the built-in team: %v, want a refusal", err)
+	}
+}
+
+// isInvalid reports whether an error is the kind the API renders as a 400: a
+// problem with what was asked for, not a fault.
+func isInvalid(err error) bool {
+	var v *ValidationError
+	return errors.As(err, &v)
 }

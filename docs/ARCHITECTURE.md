@@ -87,9 +87,23 @@ Four layers make "configure once" and "every project is different" true at the s
 what a reviewer is, what prompt each carries. Ships with a set of built-ins (§4.5); you edit them and
 add your own. Editing a template changes the lowest default everywhere.
 
-**Reusable team**, global and named. It chooses library roles, orders and enables them, and may
-specialize every role field. The built-in Default team is coder → reviewer; users can create as many
-other teams as they need.
+**Team**, named, and either shared by every project or belonging to one. It chooses library roles,
+orders and enables them, and may specialize every role field. The built-in Default team is
+coder → reviewer and is always shared, since it is where a new project starts.
+
+Teams were global to begin with, and that was wrong in a way ownership fixes rather than explains: a
+team carries the prompts, models and arguments one repository wants, so a global list put those in
+front of every other repository, where adopting one was a click and editing it changed the first
+project. `team_presets.project_id` is the separation. NULL is shared; set means that project's, and
+then it is absent from every other project's picker, refused by `SetProjectTeam` if its id is posted
+anyway, and deleted with the project. Moving a team to one project is refused while another runs it,
+and names them; sharing one back is always allowed, since it strands nobody.
+
+Team names stay unique across the installation rather than per owner. Making them per owner means
+rebuilding `team_presets` to drop a UNIQUE constraint, and that table is what `team_preset_roles`
+cascades from and what `projects.team_preset_id` points at, so the rebuild is an implicit delete of
+every team's roles and every project's assignment. Not worth it for the ability to have two teams
+called "Review" in one database.
 
 **Project team**, per project. A project selects a reusable team and follows later edits to its
 pipeline and settings. Any role field can be overridden for that repository alone. A project can
@@ -554,7 +568,7 @@ role_templates (id, name, harness, model, args, receive,
                 builtin, created_at, updated_at)
 settings       (key, value)       -- shared instructions, daemon config, harness flags
 
-team_presets       (id, name, builtin, created_at, updated_at)
+team_presets       (id, name, builtin, project_id, created_at, updated_at)
 team_preset_roles  (preset_id, template_id, position, enabled,
                     harness_override, model_override, args_override,
                     receive_override, batch policy overrides,
@@ -677,7 +691,9 @@ plain `//go:embed dist` silently skips Vite's `.vite/` manifest directory.
   **refuses** and returns the report. A disabled button says only that it cannot be pressed,
   whereas the refusal says which role is blocked and what to do about it.
 - **Team**: one three-column master-detail view over *one layer*, the reusable team. **Teams**
-  lists Default and its clones, **Roles** adds library roles to the selected team and opens their
+  lists them in two groups, this project's own and the shared ones, with a control on each row that
+  moves it between the two, and a clone that lands in this project unless it is asked to be shared.
+  It lists Default and its clones, **Roles** adds library roles to the selected team and opens their
   per-team settings, and **Pipeline** orders and enables them. Selecting a team edits it; **Use this
   Team** separately assigns it to the current project, so browsing never silently changes what runs.
   A banner names the mismatch when the team on screen is not the one this project is on, and says

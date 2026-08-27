@@ -174,6 +174,12 @@ func (db *DB) SetProjectTeam(ctx context.Context, projectID string, presetID *st
 		if err != nil {
 			return err
 		}
+		// A team belonging to another project is not on offer here. Without
+		// this the owner is only a filter in the picker, and anything that
+		// posts an id straight at the daemon walks around it.
+		if preset.ProjectID != nil && *preset.ProjectID != projectID {
+			return invalid("team %s belongs to another project", preset.Name)
+		}
 	}
 	if !topologyOverride && preset == nil {
 		return invalid("a project without a preset needs its own topology")

@@ -105,6 +105,12 @@ A **role** is one agent process with its own harness, model, prompt, inbox, and 
 reviewer, and the role library includes planner, coder, reviewer, debugger, cleaner, architect,
 hardener, security, and docs templates.
 
+A team either belongs to one project or is shared by all of them. A team is where prompts, models and
+arguments are tuned for a particular repository, so one built for project X stays out of project Y:
+it is not in Y's picker, and editing it cannot change what Y runs. Teams meant to be reused, like
+Default, are shared, and a shared team can be cloned into a project when you want your own copy to
+change.
+
 Work enters at the first enabled role. Each role commits its changes and hands the commit SHA to the
 next role, so downstream work starts from code rather than a description. The final role integrates
 the result by fast-forwarding the base branch, opening a pull request with `gh`, or leaving the work

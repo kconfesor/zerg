@@ -294,8 +294,20 @@ func (s *Server) deleteRole(w http.ResponseWriter, r *http.Request) {
 
 // ── reusable team presets ─────────────────────────────────────────────────
 
+// listTeamPresets answers with every team, or with the ones a project may use.
+//
+// ?project= is what the cockpit sends, because a team can belong to one
+// project now: the teams on offer for a repository are the shared ones plus its
+// own, and another repository's team is not among them. Without the parameter
+// this is still the whole list, which is what Settings and the tests want.
 func (s *Server) listTeamPresets(w http.ResponseWriter, r *http.Request) {
-	teams, err := s.db.ListTeamPresets(r.Context())
+	var teams []store.TeamPreset
+	var err error
+	if projectID := r.URL.Query().Get("project"); projectID != "" {
+		teams, err = s.db.ListTeamPresetsFor(r.Context(), projectID)
+	} else {
+		teams, err = s.db.ListTeamPresets(r.Context())
+	}
 	if err != nil {
 		s.fail(w, r, err)
 		return
