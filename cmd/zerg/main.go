@@ -157,6 +157,35 @@ Everything is configured in the cockpit; there are no config files.
 `)
 }
 
+// tailnetHostFor is the MagicDNS name this daemon serves, resolved once.
+//
+// cfg.TailnetHost is usually empty: the name is discovered rather than
+// configured. Three things need it and each used to find out for itself, which
+// is how the guard came to refuse the URL the banner had just printed, and how
+// a certificate could be issued for a name neither of the other two had.
+//
+// Resolved when there is a reason to: tailscale TLS needs a name to get a
+// certificate for, and any non-loopback bind can be reached by that name even
+// with TLS off, which `zerg up --no-tls --addr $(tailscale ip -4):7717` is.
+//
+// The status comes back too, so the caller that cannot continue without a name
+// can say why rather than reporting an empty one. The probe is a parameter
+// because it shells out to tailscale, and this decision is worth testing
+// without one.
+func tailnetHostFor(cfg store.Config, probe func() tailnet.Status) (string, tailnet.Status) {
+	if cfg.TailnetHost != "" {
+		return cfg.TailnetHost, tailnet.Status{Available: true, DNSName: cfg.TailnetHost}
+	}
+	if cfg.TLSMode != store.TLSTailscale && cfg.LoopbackOnly() {
+		return "", tailnet.Status{}
+	}
+	st := probe()
+	if !st.Available {
+		return "", st
+	}
+	return st.DNSName, st
+}
+
 func runUp(args []string) error {
 	fs := flag.NewFlagSet("up", flag.ContinueOnError)
 	addr := fs.String("addr", "", "override the stored bind address for this run only")
@@ -321,11 +350,14 @@ func runUp(args []string) error {
 		}
 	}
 
+	// One probe for the certificate, the guard and the banner.
+	tailnetHost, tailnetStatus := tailnetHostFor(cfg, func() tailnet.Status { return tailnet.Probe(ctx) })
+
 	srv := &http.Server{
 		Handler: api.New(api.Deps{
 			DB: db, Log: log, Registry: registry,
 			Overmind: over, Nydus: nyd, Bus: bus, Recorder: recorder, Applied: cfg.Listener(), Chat: chatMgr,
-			UI: ui,
+			TailnetHost: tailnetHost, UI: ui,
 		}).Routes(),
 		ReadHeaderTimeout: 10 * time.Second,
 		// A body that arrives a byte at a time holds a connection open
@@ -338,7 +370,7 @@ func runUp(args []string) error {
 		// stream sets its own per-write deadline instead.
 	}
 
-	tlsCert, tlsKey, err := resolveTLS(ctx, cfg, filepath.Join(stateDir, "certs"))
+	tlsCert, tlsKey, err := resolveTLS(ctx, cfg, tailnetHost, tailnetStatus, filepath.Join(stateDir, "certs"))
 	if err != nil {
 		// Loud, and with the way out. Starting on plain HTTP instead would
 		// serve an address the operator asked to be encrypted, which is the
@@ -360,11 +392,9 @@ func runUp(args []string) error {
 	// The MagicDNS name, not the IP: a certificate is issued for the name, so
 	// the address that avoids a warning is the one worth printing.
 	shown := ln.Addr().String()
-	if cfg.TLSMode == store.TLSTailscale {
-		if st := tailnet.Probe(ctx); st.Available && st.DNSName != "" {
-			_, port, _ := net.SplitHostPort(cfg.Addr)
-			shown = net.JoinHostPort(st.DNSName, port)
-		}
+	if cfg.TLSMode == store.TLSTailscale && tailnetHost != "" {
+		_, port, _ := net.SplitHostPort(cfg.Addr)
+		shown = net.JoinHostPort(tailnetHost, port)
 	}
 
 	// A second listener on loopback, plain, when the first is somewhere else.
@@ -428,7 +458,7 @@ func runUp(args []string) error {
 // A tailscale certificate is requested on every start: the command is
 // idempotent, reusing a valid certificate and renewing one near expiry, so
 // there is nothing to cache and nothing to go stale.
-func resolveTLS(ctx context.Context, cfg store.Config, certDir string) (certFile, keyFile string, err error) {
+func resolveTLS(ctx context.Context, cfg store.Config, tailnetHost string, st tailnet.Status, certDir string) (certFile, keyFile string, err error) {
 	switch cfg.TLSMode {
 	case store.TLSOff:
 		return "", "", nil
@@ -437,15 +467,14 @@ func resolveTLS(ctx context.Context, cfg store.Config, certDir string) (certFile
 		return cfg.CertFile, cfg.KeyFile, nil
 
 	case store.TLSTailscale:
-		host := cfg.TailnetHost
-		if host == "" {
-			st := tailnet.Probe(ctx)
-			if !st.Available {
-				return "", "", fmt.Errorf("TLS is set to tailscale but %s", st.Reason)
-			}
-			host = st.DNSName
+		// The name resolved once at startup, rather than probed again here. A
+		// second probe can answer differently from the first, and a certificate
+		// issued for a name the guard refuses and the banner never printed is
+		// the same failure this was meant to end.
+		if tailnetHost == "" {
+			return "", "", fmt.Errorf("TLS is set to tailscale but %s", st.Reason)
 		}
-		return tailnet.EnsureCert(ctx, host, certDir)
+		return tailnet.EnsureCert(ctx, tailnetHost, certDir)
 	}
 	return "", "", fmt.Errorf("unknown TLS mode %q", cfg.TLSMode)
 }
