@@ -86,7 +86,7 @@ function editor(team: ProjectTeam, presets: TeamPreset[] = [defaultTeam, docsTea
 
 describe('TeamEditor', () => {
   it('presents the team, roles and pipeline as three columns', () => {
-    const w = editor({ presetId: defaultTeam.id, topologyOverride: false, roles: resolved })
+    const w = editor({ presetId: defaultTeam.id, roles: resolved })
     const headings = w.findAll('h2').map((heading) => heading.text())
     expect(headings).toEqual(['Teams', 'Roles', 'Pipeline'])
     expect(w.text()).toContain('Default')
@@ -97,7 +97,7 @@ describe('TeamEditor', () => {
   })
 
   it('offers no adopt button for the team already in use, and one for every other', () => {
-    const w = editor({ presetId: defaultTeam.id, topologyOverride: false, roles: resolved })
+    const w = editor({ presetId: defaultTeam.id, roles: resolved })
     // Exactly one, for Docs team. The team in use says so with the star and
     // the "in use" line instead of a control that cannot be pressed. The adopt
     // action is an icon now, so it is found by its label rather than its text.
@@ -105,14 +105,18 @@ describe('TeamEditor', () => {
     expect(w.findAll('button').map((b) => b.text())).not.toContain('In use')
   })
 
-  it('offers the team in use a way back when the project overrode its pipeline', () => {
-    const w = editor({ presetId: defaultTeam.id, topologyOverride: true, roles: resolved })
-    expect(w.text()).toContain('in use, with local changes')
-    expect(w.find('[aria-label="Follow this pipeline again"]').exists()).toBe(true)
+  it('offers no adopt control for the team in use, and says it is in use', () => {
+    // "Follow this pipeline again" lived here, for a project that had frozen a
+    // copy of its team's shape. Schema 16 removed that layer: a project running
+    // its own pipeline is on its own team, so leaving one is adopting another.
+    const w = editor({ presetId: defaultTeam.id, roles: resolved })
+    expect(w.text()).toContain('in use')
+    expect(w.find('[aria-label="Follow this pipeline again"]').exists()).toBe(false)
+    expect(w.findAll('[aria-label="Use this team"]')).toHaveLength(1)
   })
 
   it('keeps rename and delete on every row, and off the built-in', () => {
-    const w = editor({ presetId: defaultTeam.id, topologyOverride: false, roles: resolved })
+    const w = editor({ presetId: defaultTeam.id, roles: resolved })
     // Always rendered rather than revealed on hover: there is no hover on a
     // phone, and this column is the only place a team can be removed.
     expect(w.get('[aria-label="Delete Docs team"]').attributes('disabled')).toBeUndefined()
@@ -127,7 +131,7 @@ describe('TeamEditor', () => {
     // and a flat global list put those in front of every other repository,
     // where adopting one was a click and editing it changed the first project.
     const mine: TeamPreset = { ...docsTeam, id: 'mine', name: 'CalcRust review', projectId: project.id }
-    const w = editor({ presetId: defaultTeam.id, topologyOverride: false, roles: resolved }, [
+    const w = editor({ presetId: defaultTeam.id, roles: resolved }, [
       defaultTeam,
       mine,
     ])
@@ -142,7 +146,7 @@ describe('TeamEditor', () => {
 
   it('moves a team between shared and this project, and never the built-in', async () => {
     const mine: TeamPreset = { ...docsTeam, id: 'mine', name: 'CalcRust review', projectId: project.id }
-    const w = editor({ presetId: defaultTeam.id, topologyOverride: false, roles: resolved }, [
+    const w = editor({ presetId: defaultTeam.id, roles: resolved }, [
       defaultTeam,
       docsTeam,
       mine,
@@ -159,7 +163,7 @@ describe('TeamEditor', () => {
   })
 
   it('gives a clone to this project, since that is what cloning a shared team is for', async () => {
-    const w = editor({ presetId: defaultTeam.id, topologyOverride: false, roles: resolved })
+    const w = editor({ presetId: defaultTeam.id, roles: resolved })
     await w.get('[aria-label="Clone Default"]').trigger('click')
     // The dialog teleports to the body, so the confirm is read there.
     const clone = [...document.body.querySelectorAll('button')].find(
@@ -179,7 +183,7 @@ describe('TeamEditor', () => {
         presets: [defaultTeam, docsTeam],
         projectId: project.id,
         projectName: project.name,
-        projectTeam: { presetId: defaultTeam.id, topologyOverride: false, roles: resolved },
+        projectTeam: { presetId: defaultTeam.id, roles: resolved },
         harnesses: ['claude'],
         models: {},
         running: true,
@@ -201,20 +205,16 @@ describe('TeamEditor', () => {
   })
 
   it('selects a team for editing without using it until the explicit button is pressed', async () => {
-    const w = editor({ presetId: defaultTeam.id, topologyOverride: false, roles: resolved })
+    const w = editor({ presetId: defaultTeam.id, roles: resolved })
     await w.findAll('button').find((button) => button.text().includes('Docs team'))!.trigger('click')
 
     expect(w.emitted('setTeam')).toBeUndefined()
     await w.get('[aria-label="Use this team"]').trigger('click')
-    expect(w.emitted('setTeam')?.at(-1)?.[0]).toEqual({
-      presetId: docsTeam.id,
-      topologyOverride: false,
-      roles: [],
-    })
+    expect(w.emitted('setTeam')?.at(-1)?.[0]).toEqual({ presetId: docsTeam.id, roles: [] })
   })
 
   it('reorders the selected team in the pipeline', async () => {
-    const w = editor({ presetId: defaultTeam.id, topologyOverride: false, roles: resolved })
+    const w = editor({ presetId: defaultTeam.id, roles: resolved })
     await w.get('[aria-label="Move coder down"]').trigger('click')
     const updated = w.emitted('savePreset')?.at(-1)?.[0] as TeamPreset
     expect(updated.roles.map((role) => role.templateId)).toEqual(['reviewer', 'coder'])

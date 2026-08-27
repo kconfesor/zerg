@@ -119,8 +119,9 @@ const libraryById = computed(() => new Map(props.library.map((role) => [role.id,
 const selectedRoleIds = computed(
   () => new Set(activePreset.value?.roles.map((role) => role.templateId) ?? []),
 )
-const projectHasLocalChanges = computed(
-  () => props.projectTeam.topologyOverride || props.projectTeam.roles.some((role) => role.overridden),
+/** Whether this project has settings of its own over the team it runs. */
+const projectHasLocalChanges = computed(() =>
+  props.projectTeam.roles.some((role) => role.overridden),
 )
 
 /**
@@ -290,16 +291,17 @@ function saveRoleSettings(overrides: RoleOverrides) {
 /**
  * What the primary button on a team row says, or nothing at all.
  *
- * Three states, and only two of them are an action. A team this project does
- * not run can be adopted. A team it runs whose pipeline it has *overridden* can
- * be followed again — that is the one thing pressing this undoes, since field
- * overrides survive either way. A team it simply runs needs no button: the star
- * and the "in use" line already say so, and a disabled button reading "In use"
- * is a control that looks broken rather than a label that reads.
+ * A team this project does not run can be adopted. The one it runs needs no
+ * button: the "in use" line already says so, and a disabled button reading
+ * "In use" is a control that looks broken rather than a label that reads.
+ *
+ * There used to be a third state here, "Follow this pipeline again", for a
+ * project that had frozen its own copy of a team's shape. Schema 16 removed
+ * that layer: a project running its own pipeline is on its own team, and
+ * leaving one is adopting another.
  */
 function useLabel(preset: TeamPreset): string {
-  if (props.projectTeam.presetId !== preset.id) return 'Use this team'
-  return props.projectTeam.topologyOverride ? 'Follow this pipeline again' : ''
+  return props.projectTeam.presetId === preset.id ? '' : 'Use this team'
 }
 
 /**

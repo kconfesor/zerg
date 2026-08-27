@@ -241,7 +241,7 @@ let usageTicks = 0
 
 const library = ref<RoleTemplate[]>([])
 const presets = ref<TeamPreset[]>([])
-const projectTeam = ref<ProjectTeam>({ presetId: null, topologyOverride: true, roles: [] })
+const projectTeam = ref<ProjectTeam>({ presetId: null, roles: [] })
 const team = ref<ResolvedRole[]>([])
 const tasks = ref<Task[]>([])
 const attention = ref<AttentionData | null>(null)
@@ -267,11 +267,7 @@ const models = ref<Record<string, Model[]>>({})
 const currentPreset = computed(
   () => presets.value.find((preset) => preset.id === projectTeam.value.presetId) ?? null,
 )
-const currentTeamName = computed(() => {
-  const id = projectTeam.value.presetId
-  if (!id) return projectTeam.value.topologyOverride ? 'Custom team' : ''
-  return currentPreset.value?.name ?? ''
-})
+const currentTeamName = computed(() => currentPreset.value?.name ?? '')
 
 /**
  * `transient` marks a message the background poller raised rather than one a
@@ -586,16 +582,6 @@ async function savePreset(preset: TeamPreset) {
   try {
     const updated = await api.updateTeamPreset(preset)
     presets.value = presets.value.map((p) => (p.id === updated.id ? updated : p))
-    // An edit to the team this project runs is invisible while the project also
-    // carries a topology layer: the pipeline then comes from project_roles, not
-    // from the team, so the roles just written are not the ones resolved. The
-    // layer is a leftover from before a team could belong to a project, and
-    // there is now nothing that writes one, so writing the team drops it. The
-    // project's per-role overrides survive; only the frozen shape goes.
-    if (current.value && projectTeam.value.topologyOverride && projectTeam.value.presetId === updated.id) {
-      projectTeam.value = await api.setTeam(current.value.id, followPreset(updated, team.value))
-      team.value = projectTeam.value.roles
-    }
     await refresh()
   } catch (err) {
     fail(err)

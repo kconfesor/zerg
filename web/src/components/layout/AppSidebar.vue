@@ -161,11 +161,6 @@ const editsTeamInPlace = computed(
   () => !!props.preset && props.preset.projectId === props.current?.id,
 )
 
-/**
- * Why a copy is needed, since it is not always the same reason and the reader
- * is about to be asked to name something.
- */
-const forkReason = computed(() => (props.preset ? 'shared' : 'no team'))
 
 /** The edit waiting for a name, held until the dialog is answered. */
 const pendingPipeline = ref<ResolvedRole[] | null>(null)
@@ -474,14 +469,8 @@ function live(r: RoleStatus): boolean {
         v-if="editing && !editsTeamInPlace"
         class="text-muted-foreground px-3 pb-1.5 text-[10px] leading-snug"
       >
-        <template v-if="forkReason === 'shared'">
-          {{ teamName }} is shared with every project, so the first change here makes
-          {{ current?.name || 'this project' }} a copy of it.
-        </template>
-        <template v-else>
-          This pipeline belongs to no team, so the first change here asks for a name and makes one
-          for {{ current?.name || 'this project' }}.
-        </template>
+        {{ teamName }} is shared with every project, so the first change here makes
+        {{ current?.name || 'this project' }} a copy of it.
       </p>
 
       <!-- Editing: the whole team, including the roles that are off, since one
@@ -708,15 +697,9 @@ function live(r: RoleStatus): boolean {
         <DialogHeader>
           <DialogTitle>Name this project's team</DialogTitle>
           <DialogDescription>
-            <template v-if="forkReason === 'shared'">
-              {{ teamName }} is shared with every project, so this change copies it for
-              {{ current?.name || 'this project' }}. The copy keeps its roles and their settings, and
-              nothing on {{ teamName }} itself moves.
-            </template>
-            <template v-else>
-              This project runs a pipeline that belongs to no team. Naming it makes it one, owned by
-              {{ current?.name || 'this project' }}, with the roles and order it has now.
-            </template>
+            {{ teamName }} is shared with every project, so this change copies it for
+            {{ current?.name || 'this project' }}. The copy keeps its roles and their settings, and
+            nothing on {{ teamName }} itself moves.
           </DialogDescription>
         </DialogHeader>
         <div class="flex flex-col gap-1.5">

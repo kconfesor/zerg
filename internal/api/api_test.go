@@ -186,7 +186,7 @@ func TestProjectLifecycleAndDefaultTeam(t *testing.T) {
 	}
 	var team store.ProjectTeam
 	decodeInto(t, rec, &team)
-	if team.PresetID == nil || *team.PresetID != store.DefaultTeamPresetID || team.TopologyOverride {
+	if team.PresetID == nil || *team.PresetID != store.DefaultTeamPresetID {
 		t.Fatalf("new project did not inherit the default preset: %+v", team)
 	}
 	if len(team.Roles) != 2 || team.Roles[0].Name != "coder" || team.Roles[1].Name != "reviewer" {
@@ -221,14 +221,28 @@ func TestSetTeamReordersAndOverrides(t *testing.T) {
 		return tpl.ID
 	}
 
+	// The pipeline is a team's, so a project that wants its own gets one that
+	// belongs to it. The project layer is what it overrides on top.
 	opus := "opus"
+	rec = do(t, h, "POST", "/api/team-presets", map[string]any{
+		"name": "Its own team", "projectId": p.ID,
+		"roles": []store.TeamPresetRole{
+			{TemplateID: id("planner"), Position: 0, Enabled: true},
+			{TemplateID: id("coder"), Position: 1, Enabled: true},
+			{TemplateID: id("reviewer"), Position: 2, Enabled: true},
+			{TemplateID: id("docs"), Position: 3, Enabled: false},
+		},
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("creating the project's team: %d %s", rec.Code, rec.Body)
+	}
+	var own store.TeamPreset
+	decodeInto(t, rec, &own)
+
 	rec = do(t, h, "PUT", "/api/projects/"+p.ID+"/team", map[string]any{
-		"presetId": store.DefaultTeamPresetID, "topologyOverride": true,
+		"presetId": own.ID,
 		"roles": []store.ProjectRole{
-			{TemplateID: id("planner"), Enabled: true},
-			{TemplateID: id("coder"), Enabled: true, RoleOverrides: store.RoleOverrides{ModelOverride: &opus}},
-			{TemplateID: id("reviewer"), Enabled: true},
-			{TemplateID: id("docs"), Enabled: false},
+			{TemplateID: id("coder"), RoleOverrides: store.RoleOverrides{ModelOverride: &opus}},
 		},
 	})
 	if rec.Code != http.StatusOK {
@@ -258,7 +272,7 @@ func TestSetTeamReordersAndOverrides(t *testing.T) {
 
 func TestSetTeamOnMissingProjectIs404(t *testing.T) {
 	h, _ := newTestServer(t)
-	rec := do(t, h, "PUT", "/api/projects/NOSUCHID/team", map[string]any{"topologyOverride": true, "roles": []store.ProjectRole{}})
+	rec := do(t, h, "PUT", "/api/projects/NOSUCHID/team", map[string]any{"roles": []store.ProjectRole{}})
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404: %s", rec.Code, rec.Body)
 	}
@@ -288,7 +302,7 @@ func TestTeamPresetCRUDAndProjectSelection(t *testing.T) {
 	var p store.Project
 	decodeInto(t, rec, &p)
 	rec = do(t, h, "PUT", "/api/projects/"+p.ID+"/team", map[string]any{
-		"presetId": preset.ID, "topologyOverride": false, "roles": []store.ProjectRole{},
+		"presetId": preset.ID, "roles": []store.ProjectRole{},
 	})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("select preset: %d %s", rec.Code, rec.Body)
@@ -684,7 +698,7 @@ func TestATeamCanBelongToOneProject(t *testing.T) {
 
 	// And the assignment refuses it, so the owner is not merely a filter on a
 	// list: anything that posts the id straight at the daemon is refused too.
-	assign := map[string]any{"presetId": created.ID, "topologyOverride": false, "roles": []any{}}
+	assign := map[string]any{"presetId": created.ID, "roles": []any{}}
 	rec = do(t, h, "PUT", "/api/projects/"+y.ID+"/team", assign)
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("putting Y on X's team: %d %s, want 400", rec.Code, rec.Body)

@@ -255,7 +255,7 @@ func TestDisabledRolesAreNotChecked(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveTeam: %v", err)
 	}
-	roles := []store.ProjectRole{
+	roles := []store.TeamPresetRole{
 		{TemplateID: team[0].ID, Enabled: true},
 		{TemplateID: team[1].ID, Enabled: false},
 	}

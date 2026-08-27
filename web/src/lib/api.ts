@@ -39,10 +39,10 @@ export interface ResolvedRole extends RoleTemplate, RoleOverrides {
   terminal: boolean
 }
 
+/** One role's settings for one project, over whatever its team says. Shape is
+ *  the team's: a project that wants its own runs a team of its own. */
 export interface ProjectRole extends RoleOverrides {
   templateId: string
-  position?: number
-  enabled: boolean
 }
 
 export interface TeamPresetRole extends RoleOverrides {
@@ -66,13 +66,11 @@ export interface TeamPreset {
 
 export interface ProjectTeam {
   presetId: string | null
-  topologyOverride: boolean
   roles: ResolvedRole[]
 }
 
 export interface ProjectTeamUpdate {
   presetId: string | null
-  topologyOverride: boolean
   roles: ProjectRole[]
 }
 
@@ -87,9 +85,8 @@ export interface Project {
   integration: Integration
   /** Only used when integration is pr. */
   prDraft: boolean
-  /** The reusable team this project follows, or empty for a standalone team. */
+  /** The team this project runs. */
   teamPresetId?: string
-  teamTopologyOverride?: boolean
   /** What answers questions in Chat. Empty inherits the terminal role. */
   chatHarness?: string
   chatModel?: string

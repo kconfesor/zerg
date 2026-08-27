@@ -105,10 +105,17 @@ cascades from and what `projects.team_preset_id` points at, so the rebuild is an
 every team's roles and every project's assignment. Not worth it for the ability to have two teams
 called "Review" in one database.
 
-**Project team**, per project. A project selects a reusable team and follows later edits to its
-pipeline and settings. Any role field can be overridden for that repository alone. A project can
-also customize the whole pipeline; doing so freezes membership/order while role fields without an
-override continue following their reusable-team defaults. A standalone custom team has no preset.
+**Project team**, per project. Every project runs exactly one team and follows later edits to its
+pipeline and settings. Any role field can be overridden for that repository alone, which is the whole
+of what a project layer is now: a prompt or a model for this repository, never a shape.
+
+A project that wants a different pipeline gets a different team, one belonging to it. There used to
+be a third possibility, a per-project topology that froze membership and order while still naming
+somebody else's team, and it was removed in schema 16 because it made a project able to be "on" a
+team and running something else, with two screens describing different layers and neither saying so.
+The migration turned every such pipeline into a team owned by that project, carrying the settings the
+named team had given its roles, and left projects whose frozen shape matched their team on the team
+they already had.
 
 **Runtime**, per project: tasks, messages, leases, events, cost. On disk a project holds only git
 artifacts, `<repo>/.worktrees/<role>`.
@@ -124,11 +131,9 @@ team, not a per-project copy of its shape: a team this project owns is written i
 one is copied into this project first, named by whoever is making the change, with its per-role
 settings carried across so the copy starts as the team that was running.
 
-That is the whole rule, and it is what ownership bought. The alternative was a per-project topology
-layer, which meant a project could be "on" a team and running something else, with two screens
-describing different layers and neither saying so. The layer still exists in the schema for databases
-migrated from before teams (§9), and the first rail edit on such a project turns it into a real team
-rather than leaving it a shape nothing can name.
+That is the whole rule, and it is what ownership bought. The alternative, tried first, was a
+per-project topology layer, which is what §4.1 records the removal of: a project could be "on" a team
+and running something else, and the rail and the Team screen would each report a different layer.
 
 Every nullable override has one rule: null means inherit, while a value means local. For arguments,
 `[]` is a value, meaning explicitly run with no role arguments, and remains distinct from null.
@@ -581,14 +586,12 @@ team_preset_roles  (preset_id, template_id, position, enabled,
                     prompt_override, gate_override)
 
 projects       (id, path, name, base_branch, created_at, last_opened_at,
-                integration, pr_draft, team_preset_id, team_topology_override,
+                integration, pr_draft, team_preset_id,
                 icon,                       -- a file inside the repo, resolved and served (§10)
                 chat_harness, chat_model)
 
--- present only when a project's membership/order is local
-project_roles  (project_id, template_id, position, enabled)
-
--- sparse per-field layer over the selected reusable team
+-- sparse per-field layer over the team the project runs. Fields only: a project
+-- wanting a different pipeline runs a team of its own (§4.1)
 project_role_overrides (project_id, template_id,
                         harness_override, model_override, args_override,
                         receive_override, batch policy overrides,

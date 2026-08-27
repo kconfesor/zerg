@@ -67,23 +67,21 @@ export function presetRoles(pipeline: ResolvedRole[], source: TeamPreset | null)
 }
 
 /**
- * Following a team's pipeline again, or adopting it for the first time.
+/**
+ * Putting a project on a team, keeping the settings it overrode.
  *
- * The project's own overrides come with it. An empty roles array here would
- * delete every project_role_overrides row, and pressing this on the team
- * already in use is exactly when a project has overrides worth keeping, including
-every one migration 013 carried across from the old project_roles columns.
- * Filtered to the preset's own roles, since SetProjectTeam refuses an override
- * for a role the preset does not contain, and adopting a team that drops a role
- * legitimately drops that role's overrides with it.
+ * An empty roles array would delete every project_role_overrides row, and this
+ * is often pressed on the team already in use, which is exactly when a project
+ * has overrides worth keeping. Filtered to the team's own roles, since the
+ * daemon refuses an override for a role the team does not have, and moving to a
+ * team without a role legitimately drops that role's settings with it.
  */
 export function followPreset(preset: TeamPreset, team: ResolvedRole[]): ProjectTeamUpdate {
   const inPreset = new Set(preset.roles.map((r) => r.templateId))
   return {
     presetId: preset.id,
-    topologyOverride: false,
     roles: team
       .filter((role) => inPreset.has(role.id) && hasRoleOverrides(role))
-      .map((role) => ({ templateId: role.id, enabled: role.enabled, ...cloneOverrides(role) })),
+      .map((role) => ({ templateId: role.id, ...cloneOverrides(role) })),
   }
 }

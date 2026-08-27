@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -38,7 +39,7 @@ func TestPresetAndProjectOverridesAreLayeredAndLive(t *testing.T) {
 		t.Fatal(err)
 	}
 	localPrompt := "project prompt"
-	if err := db.SetProjectTeam(ctx, p.ID, &preset.ID, false, []ProjectRole{{
+	if err := db.SetProjectTeam(ctx, p.ID, &preset.ID, []ProjectRole{{
 		TemplateID: coder, RoleOverrides: RoleOverrides{PromptOverride: &localPrompt},
 	}}); err != nil {
 		t.Fatalf("SetProjectTeam: %v", err)
@@ -64,7 +65,7 @@ func TestPresetAndProjectOverridesAreLayeredAndLive(t *testing.T) {
 	if team[0].Model != "changed-model" || team[0].Prompt != localPrompt {
 		t.Fatalf("live preset/local override behavior wrong: %+v", team[0])
 	}
-	if err := db.SetProjectTeam(ctx, p.ID, &preset.ID, false, nil); err != nil {
+	if err := db.SetProjectTeam(ctx, p.ID, &preset.ID, nil); err != nil {
 		t.Fatal(err)
 	}
 	team, _ = db.ResolveTeam(ctx, p.ID)
@@ -87,7 +88,7 @@ func TestExplicitEmptyArgsSurvivesAndNilResets(t *testing.T) {
 		t.Fatal(err)
 	}
 	p, _ := db.CreateProject(ctx, repoDir(t, "args"), "", "")
-	if err := db.SetProjectTeam(ctx, p.ID, &preset.ID, false, []ProjectRole{{
+	if err := db.SetProjectTeam(ctx, p.ID, &preset.ID, []ProjectRole{{
 		TemplateID: coder, RoleOverrides: RoleOverrides{ArgsOverride: []string{}},
 	}}); err != nil {
 		t.Fatal(err)
@@ -96,7 +97,7 @@ func TestExplicitEmptyArgsSurvivesAndNilResets(t *testing.T) {
 	if team[0].ArgsOverride == nil || len(team[0].Args) != 0 {
 		t.Fatalf("explicit empty args were lost: %+v", team[0])
 	}
-	if err := db.SetProjectTeam(ctx, p.ID, &preset.ID, false, nil); err != nil {
+	if err := db.SetProjectTeam(ctx, p.ID, &preset.ID, nil); err != nil {
 		t.Fatal(err)
 	}
 	team, _ = db.ResolveTeam(ctx, p.ID)
@@ -124,7 +125,7 @@ func TestExplicitEmptyPromptSurvivesAndNilResets(t *testing.T) {
 		t.Fatal(err)
 	}
 	empty := ""
-	if err := db.SetProjectTeam(ctx, p.ID, &preset.ID, false, []ProjectRole{{
+	if err := db.SetProjectTeam(ctx, p.ID, &preset.ID, []ProjectRole{{
 		TemplateID: coder, RoleOverrides: RoleOverrides{PromptOverride: &empty},
 	}}); err != nil {
 		t.Fatal(err)
@@ -136,7 +137,7 @@ func TestExplicitEmptyPromptSurvivesAndNilResets(t *testing.T) {
 	if team[0].Prompt != "" || team[0].PromptOverride == nil {
 		t.Fatalf("explicit empty prompt was lost: %+v", team[0])
 	}
-	if err := db.SetProjectTeam(ctx, p.ID, &preset.ID, false, nil); err != nil {
+	if err := db.SetProjectTeam(ctx, p.ID, &preset.ID, nil); err != nil {
 		t.Fatal(err)
 	}
 	team, err = db.ResolveTeam(ctx, p.ID)
@@ -148,7 +149,12 @@ func TestExplicitEmptyPromptSurvivesAndNilResets(t *testing.T) {
 	}
 }
 
-func TestPresetTopologyIsLiveUntilProjectOverridesIt(t *testing.T) {
+// A project's pipeline is its team's, and stays that way.
+//
+// It used to be its team's until the project froze a copy of the shape, which
+// is what schema 16 removed: a project running something else now runs a team
+// of its own, and the way to tell is that it is a different team.
+func TestAProjectsPipelineFollowsItsTeam(t *testing.T) {
 	ctx := context.Background()
 	db := newTestDB(t)
 	if err := Seed(ctx, db, "claude"); err != nil {
@@ -160,7 +166,7 @@ func TestPresetTopologyIsLiveUntilProjectOverridesIt(t *testing.T) {
 		t.Fatal(err)
 	}
 	p, _ := db.CreateProject(ctx, repoDir(t, "topology"), "", "")
-	if err := db.SetProjectTeam(ctx, p.ID, &preset.ID, false, nil); err != nil {
+	if err := db.SetProjectTeam(ctx, p.ID, &preset.ID, nil); err != nil {
 		t.Fatal(err)
 	}
 	preset.Roles = append(preset.Roles, TeamPresetRole{TemplateID: reviewer, Enabled: true})
@@ -169,18 +175,37 @@ func TestPresetTopologyIsLiveUntilProjectOverridesIt(t *testing.T) {
 	}
 	team, _ := db.ResolveTeam(ctx, p.ID)
 	if len(team) != 2 {
-		t.Fatalf("inherited topology did not update: %+v", team)
+		t.Fatalf("a role added to the team did not reach the project on it: %+v", team)
 	}
-	if err := db.SetProjectTeam(ctx, p.ID, &preset.ID, true, []ProjectRole{{TemplateID: coder, Enabled: true}}); err != nil {
+
+	// Wanting a different shape gives the project a team of its own, named
+	// after it and belonging to it.
+	if err := db.SetTeam(ctx, p.ID, []TeamPresetRole{{TemplateID: coder, Enabled: true}}); err != nil {
 		t.Fatal(err)
 	}
+	after, err := db.GetProjectTeam(ctx, p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.PresetID == nil || *after.PresetID == preset.ID {
+		t.Fatalf("the project is still on Growing: %+v", after.PresetID)
+	}
+	own, err := db.GetTeamPreset(ctx, *after.PresetID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if own.ProjectID == nil || *own.ProjectID != p.ID {
+		t.Errorf("the project's own pipeline landed in a team owned by %v", own.ProjectID)
+	}
+
+	// And the team it left carries on without it.
 	preset.Roles = nil
 	if err := db.UpdateTeamPreset(ctx, preset); err != nil {
 		t.Fatal(err)
 	}
 	team, _ = db.ResolveTeam(ctx, p.ID)
 	if len(team) != 1 || team[0].Name != "coder" {
-		t.Fatalf("local topology changed with preset: %+v", team)
+		t.Fatalf("emptying the old team reached a project that had left it: %+v", team)
 	}
 }
 
@@ -223,9 +248,21 @@ func TestMigrationFromV12PreservesEffectiveProjectTeam(t *testing.T) {
 	if len(team) != 1 || team[0].Model != "opus" || team[0].ArgsOverride == nil {
 		t.Fatalf("v12 team changed: %+v", team)
 	}
+	// The pipeline it had is now a team of its own rather than a layer over
+	// nothing: schema 16 materialised it, keeping the project on what it ran.
 	p, _ := db.GetProject(ctx, "p")
-	if !p.TeamTopologyOverride || p.TeamPresetID != nil {
-		t.Fatalf("legacy project source changed: %+v", p)
+	if p.TeamPresetID == nil {
+		t.Fatalf("a legacy project ended up on no team at all: %+v", p)
+	}
+	own, err := db.GetTeamPreset(ctx, *p.TeamPresetID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if own.ProjectID == nil || *own.ProjectID != "p" {
+		t.Errorf("its pipeline landed in a team owned by %v, want the project's own", own.ProjectID)
+	}
+	if own.Name != "legacy team" {
+		t.Errorf("the materialised team is called %q, want it named after the project", own.Name)
 	}
 }
 
@@ -410,10 +447,10 @@ func TestATeamCanBelongToOneProject(t *testing.T) {
 	}
 
 	// The picker is not the only way in: the daemon refuses the id outright.
-	if err := db.SetProjectTeam(ctx, y.ID, &mine.ID, false, nil); !isInvalid(err) {
+	if err := db.SetProjectTeam(ctx, y.ID, &mine.ID, nil); !isInvalid(err) {
 		t.Errorf("putting Y on X's team: %v, want a 400-class refusal", err)
 	}
-	if err := db.SetProjectTeam(ctx, x.ID, &mine.ID, false, nil); err != nil {
+	if err := db.SetProjectTeam(ctx, x.ID, &mine.ID, nil); err != nil {
 		t.Errorf("putting X on its own team: %v", err)
 	}
 
@@ -456,7 +493,7 @@ func TestClaimingATeamOtherProjectsRunIsRefused(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.SetProjectTeam(ctx, y.ID, &shared.ID, false, nil); err != nil {
+	if err := db.SetProjectTeam(ctx, y.ID, &shared.ID, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -496,4 +533,189 @@ func TestClaimingATeamOtherProjectsRunIsRefused(t *testing.T) {
 func isInvalid(err error) bool {
 	var v *ValidationError
 	return errors.As(err, &v)
+}
+
+// Migration 16 turns a project's own shape into a team the project owns, and
+// the pipeline that resolves out the other side is the one that went in.
+//
+// The shape came from project_roles while the per-role settings came from the
+// team the project was naming, so the copy has to carry both or a role quietly
+// changes model or prompt on upgrade.
+func TestMigrationFromV15MaterialisesAnOwnPipelineAsATeam(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "v15.db")
+	raw, err := sql.Open("sqlite", path+"?_pragma=foreign_keys(1)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 15; i++ {
+		if _, err := raw.ExecContext(ctx, migrations[i]); err != nil {
+			t.Fatalf("migration %d: %v", i+1, err)
+		}
+	}
+	if _, err := raw.ExecContext(ctx, `PRAGMA user_version=15`); err != nil {
+		t.Fatal(err)
+	}
+	now := "2026-01-01T00:00:00Z"
+	for _, name := range []string{"coder", "reviewer", "docs"} {
+		if _, err := raw.ExecContext(ctx, `INSERT INTO role_templates
+			(id,name,harness,model,args,receive,batch_max_items,batch_max_age_sec,prompt,gate,builtin,created_at,updated_at)
+			VALUES (?,?,'claude','sonnet','[]','task',8,300,'p','none',1,?,?)`, name, name, now, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := raw.ExecContext(ctx, `INSERT INTO team_presets (id,name,builtin,created_at,updated_at) VALUES ('shared','Calc pipeline',0,?,?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	// The team's own per-role setting: the reviewer it runs is on opus.
+	if _, err := raw.ExecContext(ctx, `INSERT INTO team_preset_roles (preset_id,template_id,position,enabled,model_override) VALUES
+		('shared','coder',0,1,NULL), ('shared','reviewer',1,1,'opus')`); err != nil {
+		t.Fatal(err)
+	}
+	dir := repoDir(t, "frozen")
+	if _, err := raw.ExecContext(ctx, `INSERT INTO projects (id,path,name,base_branch,created_at,team_preset_id,team_topology_override)
+		VALUES ('p',?,'Credix','main',?,'shared',1)`, dir, now); err != nil {
+		t.Fatal(err)
+	}
+	// The project ran something else: docs first, its own order, reviewer off.
+	if _, err := raw.ExecContext(ctx, `INSERT INTO project_roles (project_id,template_id,position,enabled) VALUES
+		('p','docs',0,1), ('p','coder',1,1), ('p','reviewer',2,0)`); err != nil {
+		t.Fatal(err)
+	}
+	// And its own setting on top of the team's.
+	if _, err := raw.ExecContext(ctx, `INSERT INTO project_role_overrides (project_id,template_id,prompt_override) VALUES ('p','coder','this repo only')`); err != nil {
+		t.Fatal(err)
+	}
+	raw.Close()
+
+	db, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("migrating: %v", err)
+	}
+	defer db.Close()
+
+	team, err := db.ResolveTeam(ctx, "p")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make([][2]any, 0, len(team))
+	for _, r := range team {
+		got = append(got, [2]any{r.Name, r.Enabled})
+	}
+	want := [][2]any{{"docs", true}, {"coder", true}, {"reviewer", false}}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("pipeline came out %v, want %v", got, want)
+	}
+	if team[1].Prompt != "this repo only" {
+		t.Errorf("the project's own prompt override was lost: %q", team[1].Prompt)
+	}
+	// Carried from the team the project was naming, which still applied to
+	// roles it also had while the order was the project's.
+	if team[2].Model != "opus" {
+		t.Errorf("reviewer runs %q, want the opus its team gave it", team[2].Model)
+	}
+
+	p, err := db.GetProject(ctx, "p")
+	if err != nil {
+		t.Fatal(err)
+	}
+	own, err := db.GetTeamPreset(ctx, *p.TeamPresetID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if own.ProjectID == nil || *own.ProjectID != "p" || own.Name != "Credix team" {
+		t.Errorf("materialised team is %+v, want one named Credix team owned by the project", own)
+	}
+	// The shared team it left is untouched, and still shared.
+	shared, err := db.GetTeamPreset(ctx, "shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if shared.ProjectID != nil || len(shared.Roles) != 2 {
+		t.Errorf("the shared team changed: %+v", shared)
+	}
+
+	// The layer itself is gone, not merely unused.
+	var n int
+	if err := db.read.QueryRowContext(ctx,
+		`SELECT count(*) FROM pragma_table_info('projects') WHERE name='team_topology_override'`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Error("projects still carries team_topology_override")
+	}
+	if err := db.read.QueryRowContext(ctx,
+		`SELECT count(*) FROM sqlite_master WHERE type='table' AND name='project_roles'`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Error("project_roles is still there")
+	}
+}
+
+// A frozen shape identical to its team's was a layer doing nothing, and the
+// project keeps the team it is on rather than collecting a copy of it.
+func TestMigrationLeavesANoOpLayerWithoutADuplicateTeam(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "noop.db")
+	raw, err := sql.Open("sqlite", path+"?_pragma=foreign_keys(1)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 15; i++ {
+		if _, err := raw.ExecContext(ctx, migrations[i]); err != nil {
+			t.Fatalf("migration %d: %v", i+1, err)
+		}
+	}
+	if _, err := raw.ExecContext(ctx, `PRAGMA user_version=15`); err != nil {
+		t.Fatal(err)
+	}
+	now := "2026-01-01T00:00:00Z"
+	for _, name := range []string{"coder", "reviewer"} {
+		if _, err := raw.ExecContext(ctx, `INSERT INTO role_templates
+			(id,name,harness,model,args,receive,batch_max_items,batch_max_age_sec,prompt,gate,builtin,created_at,updated_at)
+			VALUES (?,?,'claude','sonnet','[]','task',8,300,'p','none',1,?,?)`, name, name, now, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := raw.ExecContext(ctx, `INSERT INTO team_presets (id,name,builtin,created_at,updated_at) VALUES ('shared','Shared',0,?,?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.ExecContext(ctx, `INSERT INTO team_preset_roles (preset_id,template_id,position,enabled) VALUES
+		('shared','coder',0,1), ('shared','reviewer',1,1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.ExecContext(ctx, `INSERT INTO projects (id,path,name,base_branch,created_at,team_preset_id,team_topology_override)
+		VALUES ('p',?,'Same','main',?,'shared',1)`, repoDir(t, "noop"), now); err != nil {
+		t.Fatal(err)
+	}
+	// The same membership, order and flags the team already has.
+	if _, err := raw.ExecContext(ctx, `INSERT INTO project_roles (project_id,template_id,position,enabled) VALUES
+		('p','coder',0,1), ('p','reviewer',1,1)`); err != nil {
+		t.Fatal(err)
+	}
+	raw.Close()
+
+	db, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("migrating: %v", err)
+	}
+	defer db.Close()
+
+	p, err := db.GetProject(ctx, "p")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.TeamPresetID == nil || *p.TeamPresetID != "shared" {
+		t.Errorf("project moved to %v, want the team it was already running", p.TeamPresetID)
+	}
+	teams, err := db.ListTeamPresets(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, team := range teams {
+		if team.ProjectID != nil {
+			t.Errorf("a copy was made for a layer that changed nothing: %s", team.Name)
+		}
+	}
 }

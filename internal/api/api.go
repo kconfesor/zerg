@@ -455,20 +455,21 @@ func (s *Server) getTeam(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, team)
 }
 
-// setTeam takes the whole desired pipeline rather than a diff: a reorder and a
-// selection change are the same operation, and sending the whole thing means
-// they cannot half-apply.
+// setTeam puts a project on a team and replaces its per-role settings.
+//
+// The whole override layer is sent rather than a diff, so a change and a
+// removal are the same operation and cannot half-apply. The pipeline itself is
+// the team's, and is edited through the team.
 func (s *Server) setTeam(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		PresetID         *string             `json:"presetId"`
-		TopologyOverride bool                `json:"topologyOverride"`
-		Roles            []store.ProjectRole `json:"roles"`
+		PresetID *string             `json:"presetId"`
+		Roles    []store.ProjectRole `json:"roles"`
 	}
 	if !decode(w, r, &req) {
 		return
 	}
 	id := r.PathValue("id")
-	if err := s.db.SetProjectTeam(r.Context(), id, req.PresetID, req.TopologyOverride, req.Roles); err != nil {
+	if err := s.db.SetProjectTeam(r.Context(), id, req.PresetID, req.Roles); err != nil {
 		s.fail(w, r, err)
 		return
 	}

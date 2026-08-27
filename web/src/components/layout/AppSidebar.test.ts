@@ -101,7 +101,6 @@ function sidebar(
       library: extra.library ?? team.map((r) => template(r.name)),
       projectTeam: {
         presetId: extra.preset === undefined ? null : (extra.preset?.id ?? null),
-        topologyOverride: false,
         roles: team,
         ...extra.projectTeam,
       },
@@ -206,19 +205,19 @@ describe('AppSidebar', () => {
     ])
   })
 
-  it("writes in place when this project owns the team, even carrying an old layer", async () => {
+  it('writes in place when this project owns the team', async () => {
     // Reported from testing: editing a team belonging to this project opened
     // the copy dialog, under a sentence saying that team was shared. The
-    // project was carrying a topology layer from before teams could be owned,
-    // and that was being read as a reason to make a second team out of one the
-    // project already had.
+    // project was carrying a topology layer, and that was read as a reason to
+    // make a second team out of one the project already had. The layer is gone
+    // as of schema 16; owning the team is the whole test.
     const mine = preset('preset-mine', 'Team Credix', ['coder', 'reviewer'], project.id)
     const w = await edit(
       sidebar(
         { running: false, roles: [] },
         [role('coder', { position: 0 }), role('reviewer', { position: 1 })],
         'Team Credix',
-        { preset: mine, projectTeam: { topologyOverride: true } },
+        { preset: mine },
       ),
     )
     expect(w.text()).not.toContain('is shared with every project')
@@ -227,22 +226,6 @@ describe('AppSidebar', () => {
     expect(w.emitted('forkTeam')).toBeUndefined()
     expect(document.body.textContent).not.toContain("Name this project's team")
     expect(saved(w).roles.map((r) => r.templateId)).toEqual(['tpl-reviewer', 'tpl-coder'])
-  })
-
-  it('asks for a name when the pipeline belongs to no team at all', async () => {
-    const w = await edit(
-      sidebar({ running: false, roles: [] }, [role('coder'), role('reviewer', { position: 1 })], '', {
-        preset: null,
-        projectTeam: { presetId: null, topologyOverride: true },
-      }),
-    )
-    expect(w.text()).toContain('belongs to no team')
-
-    await w.get('[aria-label="Move reviewer earlier"]').trigger('click')
-    expect(document.body.textContent).toContain('belongs to no team')
-    dialogButton('Create team').click()
-    await w.vm.$nextTick()
-    expect(forked(w).roles.map((r) => r.templateId)).toEqual(['tpl-reviewer', 'tpl-coder'])
   })
 
   it('copies a shared team into this project instead of changing it', async () => {

@@ -587,7 +587,7 @@ func TestReconcileFollowsATeamEdit(t *testing.T) {
 	for _, tpl := range tpls {
 		byName[tpl.Name] = tpl.ID
 	}
-	if err := h.db.SetTeam(ctx, h.project.ID, []store.ProjectRole{
+	if err := h.db.SetTeam(ctx, h.project.ID, []store.TeamPresetRole{
 		{TemplateID: byName["coder"], Enabled: true},
 		{TemplateID: byName["cleaner"], Enabled: true},
 	}); err != nil {
