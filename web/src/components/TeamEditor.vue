@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { CircleCheck, Copy, FolderGit2, Globe, Pencil, SlidersHorizontal, Trash2 } from '@lucide/vue'
+import { CircleCheck, Copy, Flag, FolderGit2, Globe, Pencil, SlidersHorizontal, Trash2 } from '@lucide/vue'
 import type {
   Model,
   ProjectTeam,
@@ -665,7 +665,7 @@ function cloneTeam() {
           <template v-if="running">
             Agents are running, so changes apply immediately, to every project on this team
           </template>
-          <template v-else>Work flows from top to bottom</template>
+          <template v-else>Work flows from top to bottom, and ends at the role marked finishes</template>
         </p>
       </div>
 
@@ -674,11 +674,24 @@ function cloneTeam() {
           v-for="(role, index) in activePreset.roles"
           :key="role.templateId"
           :class="[
-            'flex items-center gap-3 px-4 py-3',
+            'flex items-center gap-3 py-3 pr-4 pl-3',
             role.enabled ? '' : 'opacity-55',
+            // The end of the pipeline, marked on the row rather than by a word
+            // inside it: this is the role that merges, opens the pull request
+            // or leaves the branch, and it was taking a second look to find.
+            role.templateId === terminalTemplateId
+              ? 'border-l-2 border-l-[var(--primary)] bg-primary/[0.06]'
+              : 'border-l-2 border-l-transparent',
           ]"
         >
-          <span class="text-muted-foreground grid size-6 shrink-0 place-items-center border text-[11px]">
+          <span
+            :class="[
+              'grid size-6 shrink-0 place-items-center border text-[11px]',
+              role.templateId === terminalTemplateId
+                ? 'border-[var(--primary)] text-[var(--primary)] font-semibold'
+                : 'text-muted-foreground',
+            ]"
+          >
             {{ index + 1 }}
           </span>
           <div class="min-w-0 flex-1">
@@ -686,20 +699,15 @@ function cloneTeam() {
               <span class="truncate text-xs font-medium">
                 {{ libraryById.get(role.templateId)?.name ?? role.templateId }}
               </span>
-              <!-- Which role finishes, and the way to change it. A badge alone
-                   read as a fact about the last row rather than a choice, which
-                   is what it was until it became a flag. -->
-              <Badge v-if="role.templateId === terminalTemplateId">terminal</Badge>
-              <button
-                v-else-if="role.enabled"
-                type="button"
-                class="text-muted-foreground/70 hover:text-foreground focus-visible:outline-ring text-[10px] underline-offset-2 hover:underline focus-visible:outline-2"
-                :title="`Finish tasks at ${libraryById.get(role.templateId)?.name}, which moves it to the end`"
-                :aria-label="`Make ${libraryById.get(role.templateId)?.name} the finishing role`"
-                @click="makeTerminal(role.templateId)"
-              >
-                finish here
-              </button>
+              <!-- Which role finishes, and the way to change it. The badge
+                   said "terminal", which is the word the protocol uses and not
+                   one that says what the role does; and the control beside it
+                   was 10px of muted text with nothing to say it could be
+                   pressed. -->
+              <Badge v-if="role.templateId === terminalTemplateId" class="gap-1">
+                <Flag :size="10" aria-hidden="true" />
+                finishes the task
+              </Badge>
               <!-- A parked role keeps its place and its settings; it just does
                    not run, and work routes past it. -->
               <Badge v-if="!role.enabled" variant="outline">off</Badge>
@@ -708,6 +716,18 @@ function cloneTeam() {
               {{ effectiveRole(role)?.harness }} · {{ effectiveRole(role)?.model || 'default model' }}
             </p>
           </div>
+          <Button
+            v-if="role.enabled && role.templateId !== terminalTemplateId"
+            size="xs"
+            variant="outline"
+            class="h-6 shrink-0 gap-1 px-1.5 text-[10px]"
+            :title="`Finish tasks at ${libraryById.get(role.templateId)?.name}, which moves it to the end of the pipeline`"
+            :aria-label="`Make ${libraryById.get(role.templateId)?.name} the finishing role`"
+            @click="makeTerminal(role.templateId)"
+          >
+            <Flag :size="10" aria-hidden="true" />
+            finish here
+          </Button>
           <Switch
             :model-value="role.enabled"
             :aria-label="`${libraryById.get(role.templateId)?.name ?? role.templateId} runs`"

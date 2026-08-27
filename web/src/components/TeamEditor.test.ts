@@ -95,7 +95,8 @@ describe('TeamEditor', () => {
     // Which team is in use is said in words, not with a marker beside the name.
     expect(w.text()).toContain('in use')
     expect(w.findAll('[aria-label="Use this team"]')).toHaveLength(1)
-    expect(w.text()).toContain('terminal')
+    // The row that finishes says so in words, not in the protocol's noun.
+    expect(w.text()).toContain('finishes the task')
   })
 
   it('offers no adopt button for the team already in use, and one for every other', () => {
@@ -121,7 +122,8 @@ describe('TeamEditor', () => {
     // Terminality was whichever enabled role sat last, so adding a role to the
     // end took the job of integrating from the role that had been doing it.
     const w = editor({ presetId: defaultTeam.id, roles: resolved })
-    expect(w.text()).toContain('terminal')
+    // The row that finishes says so in words, not in the protocol's noun.
+    expect(w.text()).toContain('finishes the task')
 
     await w.get('[aria-label="Make coder the finishing role"]').trigger('click')
     const saved = w.emitted('savePreset')!.at(-1)![0] as TeamPreset
