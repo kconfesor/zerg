@@ -43,6 +43,9 @@ type Server struct {
 
 	// ui is an override for the embedded cockpit; see Deps.UI.
 	ui http.Handler
+
+	// tailnetHost is the discovered MagicDNS name; see Deps.TailnetHost.
+	tailnetHost string
 }
 
 // Deps are what the API needs to serve the cockpit.
@@ -64,6 +67,14 @@ type Deps struct {
 	// Applied is the listener configuration the daemon bound at startup.
 	Applied store.Listener
 
+	// TailnetHost is the MagicDNS name this daemon serves, resolved at startup
+	// rather than read from configuration, because it is discovered rather than
+	// configured. Kept beside Applied instead of inside it: Applied is compared
+	// against the saved settings to decide whether a restart is pending, so a
+	// discovered value in there is a daemon reporting "restart to apply" about a
+	// change nobody made and no restart can clear.
+	TailnetHost string
+
 	// UI replaces the embedded cockpit, which is how the dev server is put in
 	// front of it: same origin, same API, hot reload. Nil serves what was
 	// compiled in, which is what a released binary does.
@@ -81,7 +92,7 @@ func New(d Deps) *Server {
 	return &Server{
 		db: d.DB, log: d.Log, registry: d.Registry,
 		preflt: pf, over: d.Overmind, nyd: d.Nydus, bus: d.Bus, applied: d.Applied, chatMgr: d.Chat,
-		recorder: d.Recorder, ui: d.UI,
+		recorder: d.Recorder, ui: d.UI, tailnetHost: d.TailnetHost,
 	}
 }
 

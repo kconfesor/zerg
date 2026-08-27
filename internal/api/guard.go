@@ -51,7 +51,7 @@ func (s *Server) expectedHost(r *http.Request) bool {
 		return true
 	}
 
-	for _, known := range []string{s.applied.Addr, s.applied.TailnetHost} {
+	for _, known := range []string{s.applied.Addr, s.applied.TailnetHost, s.tailnetHost} {
 		if known == "" {
 			continue
 		}

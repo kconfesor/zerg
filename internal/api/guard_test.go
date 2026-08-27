@@ -180,3 +180,50 @@ func TestTheTailnetNameThisDaemonServesIsAllowed(t *testing.T) {
 		}
 	}
 }
+
+// The discovered tailnet name is allowed without being written into the saved
+// listener, which is the shape that broke the settings view.
+//
+// Applied is compared against the stored configuration to decide whether a
+// restart is pending. A discovered value in there is a daemon reporting a
+// change nobody made, permanently, since restarting rediscovers it.
+func TestTheDiscoveredTailnetNameIsAllowedWithoutFakingAPendingRestart(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if err := store.Seed(ctx, db, "claude"); err != nil {
+		t.Fatal(err)
+	}
+
+	// What a tailscale-TLS install looks like: an address, no configured name.
+	saved := store.Config{Addr: "100.64.0.1:7717", TLSMode: store.TLSTailscale}
+	s := New(Deps{
+		DB:          db,
+		Log:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Applied:     saved.Listener(),
+		TailnetHost: "kelvins-machine.tailnet.ts.net",
+	})
+	h := s.Routes()
+
+	for host, want := range map[string]int{
+		"kelvins-machine.tailnet.ts.net:7717": http.StatusOK,
+		"100.64.0.1:7717":                     http.StatusOK,
+		"127.0.0.1:7717":                      http.StatusOK,
+		"evil.example":                        http.StatusForbidden,
+	} {
+		r := httptest.NewRequest("GET", "/api/projects", nil)
+		r.Host = host
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, r)
+		if rec.Code != want {
+			t.Errorf("Host %q got %d, want %d", host, rec.Code, want)
+		}
+	}
+
+	if s.restartNeeded(saved) {
+		t.Error("a freshly started daemon says a restart is pending, which no restart can clear")
+	}
+}
