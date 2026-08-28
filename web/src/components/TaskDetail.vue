@@ -109,6 +109,7 @@ function tokensOf(u: TaskDetail['usage']): number {
              way the work went. -->
         <TaskFlow
           v-else
+          :task-id="task?.id"
           :steps="detail.history"
           :roles="roles ?? []"
           :project="project"

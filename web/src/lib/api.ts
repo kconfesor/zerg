@@ -475,6 +475,24 @@ export const api = {
     }),
 
   taskDetail: (id: string) => call<TaskDetail>(`/tasks/${id}`),
+  /**
+   * One step's transcript: what a role did while it held the work.
+   *
+   * Bounded by that step's window rather than the card's whole history, which
+   * is the question being asked. Events are the tier that ages out, so an
+   * empty answer is ordinary and means the transcript is no longer kept.
+   */
+  taskEvents: (
+    id: string,
+    opts: { role?: string; from?: string; until?: string; limit?: number } = {},
+  ) => {
+    const query = new URLSearchParams()
+    for (const [key, value] of Object.entries(opts)) {
+      if (value) query.set(key, String(value))
+    }
+    const suffix = query.toString()
+    return call<ActivityEvent[]>(`/tasks/${id}/events${suffix ? '?' + suffix : ''}`)
+  },
   workspace: (projectId: string) => call<Workspace>(`/projects/${projectId}/workspace`),
   resetChat: (projectId: string) =>
     call<void>(`/projects/${projectId}/chat`, { method: 'DELETE' }),

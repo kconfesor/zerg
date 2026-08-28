@@ -16,9 +16,11 @@ import (
 	"strings"
 	"testing"
 
+	"fmt"
 	"github.com/kconfesor/zerg/internal/adapter"
 	"github.com/kconfesor/zerg/internal/adapter/claudeharness"
 	"github.com/kconfesor/zerg/internal/store"
+	"time"
 )
 
 func newTestServer(t *testing.T) (http.Handler, *store.DB) {
@@ -706,5 +708,65 @@ func TestATeamCanBelongToOneProject(t *testing.T) {
 	rec = do(t, h, "PUT", "/api/projects/"+x.ID+"/team", assign)
 	if rec.Code != http.StatusOK {
 		t.Errorf("putting X on its own team: %d %s", rec.Code, rec.Body)
+	}
+}
+
+// A step's transcript is the window the trail gives it, not the whole card.
+func TestTaskEventsReadOneStepOfTheTrail(t *testing.T) {
+	h, db := newTestServer(t)
+	ctx := context.Background()
+
+	var p store.Project
+	decodeInto(t, do(t, h, "POST", "/api/projects", map[string]any{"path": t.TempDir()}), &p)
+	task, err := db.CreateTask(ctx, p.ID, "Factorial", "body", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	at := func(min int) time.Time { return time.Date(2026, 1, 1, 9, min, 0, 0, time.UTC) }
+	for _, e := range []struct {
+		role   string
+		minute int
+		text   string
+	}{
+		{"coder", 2, "reading the parser"},
+		{"coder", 8, "running the tests"},
+		{"reviewer", 20, "checking the diff"},
+		{"coder", 40, "second lap"},
+	} {
+		if err := db.RecordEvent(ctx, &store.Event{
+			ID: store.NewID(), ProjectID: p.ID, TaskID: &task.ID,
+			Role: e.role, Kind: "message", At: at(e.minute), Text: e.text,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// The coder's first step: its own role, its own window. Not the reviewer's
+	// work, and not the lap the coder took later.
+	rec := do(t, h, "GET", fmt.Sprintf("/api/tasks/%s/events?role=coder&from=%s&until=%s",
+		task.ID, at(0).Format(time.RFC3339Nano), at(10).Format(time.RFC3339Nano)), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body)
+	}
+	var events []store.Event
+	decodeInto(t, rec, &events)
+	if len(events) != 2 {
+		t.Fatalf("got %d events, want the two inside the step: %+v", len(events), events)
+	}
+	if events[0].Text != "reading the parser" || events[1].Text != "running the tests" {
+		t.Errorf("a step is read from where it started: %q then %q", events[0].Text, events[1].Text)
+	}
+
+	// A window that has aged out is an ordinary answer, not an error: events
+	// are the tier that gets swept (ARCHITECTURE §12.1).
+	rec = do(t, h, "GET", fmt.Sprintf("/api/tasks/%s/events?role=docs&from=%s&until=%s",
+		task.ID, at(0).Format(time.RFC3339Nano), at(10).Format(time.RFC3339Nano)), nil)
+	if rec.Code != http.StatusOK || strings.TrimSpace(rec.Body.String()) != "[]" {
+		t.Errorf("an empty window answered %d %s, want 200 []", rec.Code, rec.Body)
+	}
+
+	if rec := do(t, h, "GET", "/api/tasks/"+task.ID+"/events?from=yesterday", nil); rec.Code != http.StatusBadRequest {
+		t.Errorf("an unreadable time answered %d, want 400 naming it", rec.Code)
 	}
 }

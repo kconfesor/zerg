@@ -11,6 +11,8 @@ import (
 	"github.com/kconfesor/zerg/internal/hatchery"
 	"github.com/kconfesor/zerg/internal/store"
 	"github.com/kconfesor/zerg/internal/tailnet"
+	"strconv"
+	"time"
 )
 
 // settingsResponse is the settings form plus the facts it needs to be filled
@@ -219,6 +221,53 @@ func (s *Server) taskDetail(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, taskDetail{Task: task, History: steps, Usage: usage})
+}
+
+// taskEvents is one step's transcript: what a role actually did while it held
+// the work.
+//
+// Bounded by the window the trail gives it rather than returning a card's whole
+// history, because that is the question being asked. Events are the tier that
+// ages out (ARCHITECTURE §12.1), so an empty answer is an ordinary one and the
+// caller says so rather than showing an empty box.
+func (s *Server) taskEvents(w http.ResponseWriter, r *http.Request) {
+	task, err := s.db.GetTask(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	q := r.URL.Query()
+	from, err := optionalTime(q.Get("from"))
+	if err != nil {
+		badRequest(w, "from is not a time: "+q.Get("from"))
+		return
+	}
+	until, err := optionalTime(q.Get("until"))
+	if err != nil {
+		badRequest(w, "until is not a time: "+q.Get("until"))
+		return
+	}
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	events, err := s.db.ListEvents(r.Context(), store.EventQuery{
+		ProjectID: task.ProjectID,
+		Task:      task.ID,
+		Role:      q.Get("role"),
+		From:      from,
+		Until:     until,
+		Limit:     limit,
+	})
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, orEmpty(events))
+}
+
+func optionalTime(v string) (time.Time, error) {
+	if v == "" {
+		return time.Time{}, nil
+	}
+	return time.Parse(time.RFC3339Nano, v)
 }
 
 type integrationRequest struct {

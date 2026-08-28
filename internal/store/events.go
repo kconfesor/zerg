@@ -94,6 +94,13 @@ type EventQuery struct {
 	Role string
 	Task string
 
+	// From and Until bound the window, which is how one step of a task's trail
+	// is read rather than the whole card. Zero means unbounded. With From set
+	// the oldest matching events come back rather than the newest: a step is
+	// read from where it started, not from where it stopped.
+	From  time.Time
+	Until time.Time
+
 	// Limit caps the rows returned. A replay has to be bounded — a project with
 	// a week of history would otherwise send megabytes before the first live
 	// event arrived.
@@ -125,12 +132,20 @@ func (db *DB) ListEvents(ctx context.Context, q EventQuery) ([]Event, error) {
 		where += " AND task_id = ?"
 		args = append(args, q.Task)
 	}
+	if !q.From.IsZero() {
+		where += " AND ts >= ?"
+		args = append(args, q.From.Format(time.RFC3339Nano))
+	}
+	if !q.Until.IsZero() {
+		where += " AND ts <= ?"
+		args = append(args, q.Until.Format(time.RFC3339Nano))
+	}
 
 	// Without a cursor, take the newest rows and put them back in order. The
 	// inner query is what bounds the scan; ordering the outer one is free.
 	query := `SELECT id, project_id, task_id, role, kind, ts, text, tool, data, fatal
 	          FROM events WHERE ` + where + ` ORDER BY id ASC LIMIT ?`
-	if q.After == "" {
+	if q.After == "" && q.From.IsZero() {
 		query = `SELECT * FROM (
 		             SELECT id, project_id, task_id, role, kind, ts, text, tool, data, fatal
 		             FROM events WHERE ` + where + ` ORDER BY id DESC LIMIT ?

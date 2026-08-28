@@ -912,10 +912,13 @@ useless as an invoice. Tokens are always real; dollars sometimes are not.
 ## 12. History and metrics
 
 > **Status: partly built.** `usage_turns` exists and is what the cost panel
-> reads. `daily_rollup`, the price table and task pinning are described below as
-> the design they will follow and are **not implemented**. §9 lists the tables
-> that actually exist. The retention arithmetic in §12.1 is the reasoning for the
-> tiering, not a description of a running sweep.
+> reads, and §12.3 is built: the History screen, a task's trail, and the slice of
+> transcript behind each step. `daily_rollup`, the price table, the charts in
+> §12.4 and task pinning are described below as the design they will follow and
+> are **not implemented**. §9 lists the tables that actually exist. The retention
+> arithmetic in §12.1 is the reasoning for the tiering, not a description of a
+> running sweep, so nothing ages out yet and a step's transcript is there because
+> nothing has removed it.
 
 The database makes history nearly free, but only if the three kinds of record are kept on different
 terms. Treating them alike is how a local SQLite file becomes a 14 GB liability.
@@ -952,7 +955,38 @@ approval gate, a clarification, or a queue behind another card. Without that dis
 pipeline and a genuinely hard task look identical. Charting them together turns
 "where does our time go" from a guess into a reading.
 
-### 12.3 What the history view answers, planned
+### 12.3 What a task's own history answers
+
+> **Built.** The rest of this section, the charts over `daily_rollup`, is still
+> the design it will follow.
+
+A **History** screen per project lists what was worked on, newest first, paged on
+a cursor rather than an offset because the list is read while work continues.
+Each row carries its outcome (§9.2, recorded on the card rather than
+reconstructed from a project setting that can change), wall time against active
+time, cost, laps, and the roles that touched it.
+
+Opening one gives the **trail**: every hop, with how long that role held the
+work, what its turns cost, the approval it waited on and for how long, and the
+questions it raised. Two things the schema decides here:
+
+- A step's window runs from one of a role's leases to that role's *next* one,
+  not to the handoff between them. The turn that ends a step is recorded after
+  the handoff it produced, since the agent calls `zerg send` and the turn
+  carrying that call finishes afterwards. Closing at the handoff put the largest
+  turn of every step outside it: one real card totalled $1.61 with $0.23 across
+  its steps.
+- Messages carried no `source_lease_id` before schema 11, so those steps have no
+  lease to measure from and fall back to the span between the handoff that gave
+  the role the work and whatever it did next. Weaker, and better than a card
+  whose steps all read $0 against a card reading $2.74.
+
+A step opens its own slice of the transcript, bounded by that same window and
+filtered to what a person reads: the calls it made, what it said, what broke.
+The rest is counted rather than listed. Events are the tier that ages out
+(§12.1), so an empty slice is an ordinary answer and says so.
+
+### 12.4 What the history charts will answer, planned
 
 Every panel below is a query against `daily_rollup` joined to `tasks`, scoped by project:
 
@@ -966,7 +1000,7 @@ Every panel below is a query against `daily_rollup` joined to `tasks`, scoped by
   in a bill.
 - **Sessions**: a table of when, how long, roles active, tasks completed, cost.
 
-### 12.4 Cross-project comparison
+### 12.5 Cross-project comparison
 
 Because roles are global (§4.1) and rollups carry `project_id`, the same queries aggregate across
 projects: cost per project, which project a role earns its keep in, whether a prompt change helped
