@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
 import type { Attention } from '@/lib/api'
-import { AlertTriangle, ChevronRight, GitMerge } from '@lucide/vue'
-import { api, type ChangedFile, type Mergeable } from '@/lib/api'
+import { AlertTriangle, ChevronRight, GitMerge, MessageSquare } from '@lucide/vue'
+import { api, type ChangedFile, type Mergeable, type ReviewThread } from '@/lib/api'
 import { renderMarkdown } from '@/lib/markdown'
 import DiffView from '@/components/DiffView.vue'
 import { Badge } from '@/components/ui/badge'
@@ -91,6 +91,98 @@ function isDoc(f: ChangedFile): boolean {
  * the card should open with it.
  */
 /**
+ * The conversation about the code, anchored to it.
+ *
+ * Rejecting used to be one note for a whole diff, and the exchange ended there.
+ * A remark now points at a file and a line, the answer lands on the thread that
+ * asked, and the card does not merge while one is open, which the daemon
+ * enforces rather than this panel.
+ */
+const threads = ref<Record<string, ReviewThread[]>>({})
+const composing = ref<{ task: string; file: string; line: number } | null>(null)
+const draft = ref('')
+const replies = ref<Record<string, string>>({})
+const reviewError = ref('')
+
+async function loadThreads(taskId: string) {
+  try {
+    threads.value = { ...threads.value, [taskId]: await api.review(taskId) }
+  } catch (e) {
+    reviewError.value = e instanceof Error ? e.message : String(e)
+  }
+}
+
+function threadsFor(taskId: string | undefined, file: string): ReviewThread[] {
+  return (threads.value[taskId ?? ''] ?? []).filter((t) => (t.file ?? '') === file)
+}
+
+/** Lines already carrying a thread, so the gutter can show where the
+ *  conversation is without opening anything. */
+function discussed(taskId: string | undefined, file: string): number[] {
+  return threadsFor(taskId, file)
+    .filter((t) => t.state === 'open' && t.line > 0)
+    .map((t) => t.line)
+}
+
+function openCount(taskId: string | undefined): number {
+  return (threads.value[taskId ?? ''] ?? []).filter((t) => t.state === 'open').length
+}
+
+function compose(taskId: string | undefined, file: string, line: number) {
+  if (!taskId) return
+  composing.value = { task: taskId, file, line }
+  draft.value = ''
+}
+
+function composingHere(taskId: string | undefined, file: string): boolean {
+  return composing.value?.task === taskId && composing.value?.file === file
+}
+
+async function startThread(approval: { id: string; commit?: string }) {
+  const at = composing.value
+  if (!at || !draft.value.trim()) return
+  reviewError.value = ''
+  try {
+    await api.openReviewThread(at.task, {
+      approvalId: approval.id,
+      commitSha: approval.commit,
+      file: at.file,
+      line: at.line,
+      body: draft.value,
+    })
+    composing.value = null
+    draft.value = ''
+    await loadThreads(at.task)
+  } catch (e) {
+    reviewError.value = e instanceof Error ? e.message : String(e)
+  }
+}
+
+async function reply(taskId: string | undefined, threadId: string) {
+  const text = replies.value[threadId]
+  if (!taskId || !text?.trim()) return
+  reviewError.value = ''
+  try {
+    await api.addReviewComment(threadId, text)
+    replies.value = { ...replies.value, [threadId]: '' }
+    await loadThreads(taskId)
+  } catch (e) {
+    reviewError.value = e instanceof Error ? e.message : String(e)
+  }
+}
+
+async function settle(taskId: string | undefined, thread: ReviewThread) {
+  if (!taskId) return
+  reviewError.value = ''
+  try {
+    await api.resolveReviewThread(thread.id, thread.state === 'open')
+    await loadThreads(taskId)
+  } catch (e) {
+    reviewError.value = e instanceof Error ? e.message : String(e)
+  }
+}
+
+/**
  * Whether approving would actually land the work.
  *
  * Asked when the diff is, and separately from it: the merge runs in memory, so
@@ -132,6 +224,7 @@ watch(
     for (const a of props.attention?.approvals ?? []) {
       if (a.commit && !diffs.value[a.id]) void loadFiles(a.id)
       if (a.commit && !merges.value[a.id]) void loadMergeable(a.id)
+      if (a.taskId && !threads.value[a.taskId]) void loadThreads(a.taskId)
     }
   },
   { immediate: true },
@@ -290,12 +383,109 @@ function empty(a: Attention | null): boolean {
               v-html="renderMarkdown(f.content ?? '')"
             />
             <div v-else-if="defaultOpen(a, f)" class="max-h-96 overflow-y-auto py-1">
-              <DiffView v-if="f.diff" :diff="f.diff" />
+              <DiffView
+                v-if="f.diff"
+                :diff="f.diff"
+                :discussed="discussed(a.taskId, f.path)"
+                @comment="(line) => compose(a.taskId, f.path, line)"
+              />
               <p v-else class="text-muted-foreground px-2 text-[11px]">(no diff)</p>
             </div>
+
+            <!-- The conversation about this file, under it. A remark points at
+                 a line; an answer lands on the thread that asked rather than
+                 arriving as an unrelated handoff. -->
+            <div
+              v-if="defaultOpen(a, f) && (threadsFor(a.taskId, f.path).length || composingHere(a.taskId, f.path))"
+              class="hairline-t flex flex-col gap-2 px-2 py-2"
+            >
+              <div
+                v-for="t in threadsFor(a.taskId, f.path)"
+                :key="t.id"
+                :class="[
+                  'border-l-2 pl-2',
+                  t.state === 'open' ? 'border-l-[var(--status-warning)]' : 'border-l-border',
+                ]"
+              >
+                <div class="text-muted-foreground mb-1 flex items-center gap-1.5 text-[10px]">
+                  <MessageSquare :size="10" aria-hidden="true" />
+                  <span v-if="t.line">line {{ t.line }}</span>
+                  <span v-else>this file</span>
+                  <span v-if="t.state === 'resolved'">· settled</span>
+                  <button
+                    type="button"
+                    class="hover:text-foreground focus-visible:outline-ring ml-auto underline-offset-2 hover:underline focus-visible:outline-2"
+                    @click="settle(a.taskId, t)"
+                  >
+                    {{ t.state === 'open' ? 'settle' : 'reopen' }}
+                  </button>
+                </div>
+                <p v-for="c in t.comments" :key="c.id" class="mb-1 text-[11px] leading-relaxed">
+                  <span class="text-muted-foreground font-semibold">{{ c.author }}</span>
+                  <span class="ml-1.5">{{ c.body }}</span>
+                </p>
+                <InputGroup>
+                  <InputGroupInput
+                    v-model="replies[t.id]"
+                    placeholder="reply"
+                    @keyup.enter="reply(a.taskId, t.id)"
+                  />
+                  <InputGroupAddon align="inline-end">
+                    <InputGroupButton size="sm" @click="reply(a.taskId, t.id)">Send</InputGroupButton>
+                  </InputGroupAddon>
+                </InputGroup>
+              </div>
+
+              <div v-if="composingHere(a.taskId, f.path)" class="flex flex-col gap-1">
+                <p class="text-muted-foreground text-[10px]">
+                  <template v-if="composing?.line">on line {{ composing?.line }}</template>
+                  <template v-else>on this file</template>
+                </p>
+                <InputGroup>
+                  <InputGroupInput
+                    v-model="draft"
+                    placeholder="what about it?"
+                    autofocus
+                    @keyup.enter="startThread(a)"
+                  />
+                  <InputGroupAddon align="inline-end">
+                    <InputGroupButton size="sm" :disabled="!draft.trim()" @click="startThread(a)">
+                      Comment
+                    </InputGroupButton>
+                    <InputGroupButton size="sm" variant="ghost" @click="composing = null">
+                      Cancel
+                    </InputGroupButton>
+                  </InputGroupAddon>
+                </InputGroup>
+              </div>
+            </div>
+
+            <!-- A remark about the file itself, for the case a line cannot
+                 carry: a file that should not exist, or one that is missing. -->
+            <button
+              v-if="defaultOpen(a, f) && !composingHere(a.taskId, f.path)"
+              type="button"
+              class="text-muted-foreground hover:text-foreground focus-visible:outline-ring hairline-t w-full px-2 py-1 text-left text-[10px] focus-visible:outline-2"
+              @click="compose(a.taskId, f.path, 0)"
+            >
+              comment on this file
+            </button>
           </div>
         </div>
       </div>
+
+      <p v-if="reviewError" class="text-destructive text-[11px]">{{ reviewError }}</p>
+
+      <!-- What is still unsettled, next to the button it stops. The daemon
+           refuses the approval as well; this is so the reason is on screen
+           before it is pressed rather than after. -->
+      <p v-if="openCount(a.taskId)" class="flex items-center gap-1.5 text-[11px]">
+        <MessageSquare :size="12" class="text-[var(--status-warning)] shrink-0" aria-hidden="true" />
+        <span class="text-[var(--status-warning)]">
+          {{ openCount(a.taskId) }} open
+          {{ openCount(a.taskId) === 1 ? 'thread' : 'threads' }}: settle them, or reject
+        </span>
+      </p>
 
       <!-- Whether it would land, beside the button that lands it. An approval
            is the moment a person decides, and until now nothing said whether

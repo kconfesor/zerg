@@ -518,6 +518,24 @@ export const api = {
   /** Keep this card's transcript past the retention window, or let it go. */
   setTaskPinned: (id: string, pinned: boolean) =>
     call<Task>(`/tasks/${id}/pinned`, { method: 'PUT', body: JSON.stringify({ pinned }) }),
+  /** The conversation about a card's code. */
+  review: (taskId: string) => call<ReviewThread[]>(`/tasks/${taskId}/review`),
+  /** Start a thread on a line. Line 0 is the file as a whole. */
+  openReviewThread: (
+    taskId: string,
+    body: { approvalId?: string; commitSha?: string; file?: string; line: number; body: string },
+  ) => call<ReviewThread>(`/tasks/${taskId}/review`, { method: 'POST', body: JSON.stringify(body) }),
+  addReviewComment: (threadId: string, body: string, author?: string) =>
+    call<ReviewThread>(`/review-threads/${threadId}/comments`, {
+      method: 'POST',
+      body: JSON.stringify({ body, author }),
+    }),
+  /** Settle a thread, or open it again. A person only: the gate reads this. */
+  resolveReviewThread: (threadId: string, resolved: boolean) =>
+    call<ReviewThread>(`/review-threads/${threadId}/resolved`, {
+      method: 'PUT',
+      body: JSON.stringify({ resolved }),
+    }),
   approvalDiff: (id: string) =>
     call<{ files: ChangedFile[]; range: boolean; base: string }>(`/approvals/${id}/diff`),
   /** Whether this work still merges into the base, and how far the base has
@@ -821,6 +839,31 @@ export interface TaskDetail {
   task: Task
   history: TaskStep[]
   usage: UsageTotal
+}
+
+/** One remark on a card's code, and everything said about it. */
+export interface ReviewThread {
+  id: string
+  projectId: string
+  taskId: string
+  approvalId?: string
+  commitSha?: string
+  file?: string
+  /** 0 means the file as a whole rather than a line within it. */
+  line: number
+  state: 'open' | 'resolved'
+  createdAt: string
+  resolvedAt?: string
+  comments: ReviewComment[]
+}
+
+export interface ReviewComment {
+  id: string
+  threadId: string
+  /** The operator, a role, or the agent that answered a question about a hunk. */
+  author: string
+  body: string
+  createdAt: string
 }
 
 /** Whether approving would land the work, and what stands in the way. */

@@ -1064,6 +1064,20 @@ func (n *Nydus) decide(ctx context.Context, approvalID, decision, note string) e
 		return invalid("approval %s was already %s", approvalID, state)
 	}
 
+	// A card does not merge with a question still open on it, which is the
+	// whole reason a review remark is a row with a state rather than a note in
+	// a body. Only approving is refused: rejecting *is* the answer to those
+	// threads, and sending the card back with them unsettled is the point.
+	if decision == store.ApprovalApproved && taskID.Valid {
+		open, err := n.db.OpenReviewThreads(ctx, taskID.String)
+		if err != nil {
+			return err
+		}
+		if open > 0 {
+			return invalid("%d review thread(s) are still open on this card; settle them or reject", open)
+		}
+	}
+
 	// Approving a completion lands it, and that happens before the decision is
 	// recorded — the same order complete() uses. If the merge fails nothing has
 	// been written, the approval is still pending, and it can be approved again

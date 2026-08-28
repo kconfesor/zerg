@@ -530,6 +530,102 @@ func (s *Server) approvalMergeable(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, answer)
 }
 
+// ── review ────────────────────────────────────────────────────────────────
+
+// reviewThreads is the conversation about a card's code, anchored to it.
+func (s *Server) reviewThreads(w http.ResponseWriter, r *http.Request) {
+	threads, err := s.db.ReviewThreads(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, orEmpty(threads))
+}
+
+// openReviewThread starts a thread on a line, with the remark that opened it.
+func (s *Server) openReviewThread(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ApprovalID string `json:"approvalId"`
+		CommitSHA  string `json:"commitSha"`
+		File       string `json:"file"`
+		Line       int    `json:"line"`
+		Body       string `json:"body"`
+	}
+	if !decode(w, r, &req) {
+		return
+	}
+	task, err := s.db.GetTask(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	thread := &store.ReviewThread{
+		ProjectID: task.ProjectID,
+		TaskID:    task.ID,
+		CommitSHA: req.CommitSHA,
+		File:      req.File,
+		Line:      req.Line,
+	}
+	if req.ApprovalID != "" {
+		thread.ApprovalID = &req.ApprovalID
+	}
+	// The person reading the diff is the author. An agent's answer arrives on
+	// the same thread later, under its own name.
+	opened, err := s.db.OpenReviewThread(r.Context(), thread, store.OperatorRole, req.Body)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, opened)
+}
+
+// addReviewComment adds a turn to a thread.
+func (s *Server) addReviewComment(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Author string `json:"author"`
+		Body   string `json:"body"`
+	}
+	if !decode(w, r, &req) {
+		return
+	}
+	if req.Author == "" {
+		req.Author = store.OperatorRole
+	}
+	if _, err := s.db.AddReviewComment(r.Context(), r.PathValue("id"), req.Author, req.Body); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	thread, err := s.db.ReviewThread(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, thread)
+}
+
+// resolveReviewThread settles a thread, or opens it again.
+//
+// A person only: an agent that could resolve the thread asking about its own
+// work would be marking its own homework, and the gate reads this.
+func (s *Server) resolveReviewThread(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Resolved bool `json:"resolved"`
+	}
+	if !decode(w, r, &req) {
+		return
+	}
+	if err := s.db.SetReviewThreadState(r.Context(), r.PathValue("id"), req.Resolved); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	thread, err := s.db.ReviewThread(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, thread)
+}
+
 // stopTask parks a card so nothing picks it up again.
 func (s *Server) stopTask(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")

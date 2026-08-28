@@ -1520,3 +1520,87 @@ func TestInterruptedGatedPullRequestKeepsItsURL(t *testing.T) {
 		t.Errorf("recovered card points at %q; the pull request it opened is unreachable", done.OutcomeRef)
 	}
 }
+
+// Work does not merge with a question still open on it.
+//
+// That is the whole reason a review remark is a row with a state rather than a
+// note in a body: the gate can ask. Rejecting is not refused, because rejecting
+// is the answer to those threads.
+func TestApprovingIsRefusedWhileAReviewThreadIsOpen(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	if _, err := f.db.SQL().ExecContext(ctx,
+		`UPDATE role_templates SET gate = ? WHERE name = 'reviewer'`, store.GateApproval); err != nil {
+		t.Fatal(err)
+	}
+	task := f.task(t, "Calculator")
+	if _, err := f.n.Send(ctx, f.project.ID, "reviewer", SendRequest{
+		TaskID: task.ID, Commit: "aaaaaaaaaa", Body: "ready",
+	}); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	pending, _ := f.db.ListPendingApprovals(ctx, f.project.ID)
+	if len(pending) != 1 {
+		t.Fatalf("got %d approvals, want 1", len(pending))
+	}
+
+	thread, err := f.db.OpenReviewThread(ctx, &store.ReviewThread{
+		ProjectID: f.project.ID, TaskID: task.ID, File: "src/parse.rs", Line: 41,
+	}, store.OperatorRole, "why is this recursive?")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := f.n.Approve(ctx, pending[0].ID); err == nil {
+		t.Fatal("approved over an open question")
+	} else if !strings.Contains(err.Error(), "review thread") {
+		t.Errorf("refusal is %q; it has to say what is in the way", err)
+	}
+	if len(f.git.merges) != 0 {
+		t.Errorf("merged %v with a thread open", f.git.merges)
+	}
+	if got := f.reload(t, task.ID).State; got == store.TaskDone {
+		t.Error("the card says done over an unanswered question")
+	}
+
+	// Settling it lets the decision through.
+	if err := f.db.SetReviewThreadState(ctx, thread.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.n.Approve(ctx, pending[0].ID); err != nil {
+		t.Fatalf("approving a settled review: %v", err)
+	}
+	if len(f.git.merges) != 1 {
+		t.Errorf("approving after settling did not land the work: %d merges", len(f.git.merges))
+	}
+}
+
+// Rejecting is how those threads get answered, so it is never in their way.
+func TestRejectingIsAllowedWithThreadsOpen(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	if _, err := f.db.SQL().ExecContext(ctx,
+		`UPDATE role_templates SET gate = ? WHERE name = 'reviewer'`, store.GateApproval); err != nil {
+		t.Fatal(err)
+	}
+	task := f.task(t, "Calculator")
+	if _, err := f.n.Send(ctx, f.project.ID, "reviewer", SendRequest{
+		TaskID: task.ID, Commit: "aaaaaaaaaa", Body: "ready",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	pending, _ := f.db.ListPendingApprovals(ctx, f.project.ID)
+	if _, err := f.db.OpenReviewThread(ctx, &store.ReviewThread{
+		ProjectID: f.project.ID, TaskID: task.ID, File: "src/parse.rs", Line: 41,
+	}, store.OperatorRole, "this needs a test"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := f.n.Reject(ctx, pending[0].ID, "see the comments"); err != nil {
+		t.Fatalf("rejecting with threads open: %v", err)
+	}
+	// The card goes back to whoever wrote it, with the threads still on it.
+	if n, _ := f.db.OpenReviewThreads(ctx, task.ID); n != 1 {
+		t.Errorf("%d open threads after rejecting, want the one that caused it", n)
+	}
+}

@@ -13,7 +13,29 @@
  */
 import { computed } from 'vue'
 
-const props = defineProps<{ diff: string }>()
+const props = defineProps<{
+  diff: string
+  /** Lines that already carry a review thread, marked so a reader can see
+   *  where the conversation is without opening anything. */
+  discussed?: number[]
+}>()
+
+/**
+ * A line is where a remark points.
+ *
+ * The gutter is the target rather than the whole row: selecting the code to
+ * copy it is the other thing people do here, and a row that opens a comment box
+ * on every click fights that.
+ */
+const emit = defineEmits<{ comment: [line: number] }>()
+
+const marked = computed(() => new Set(props.discussed ?? []))
+
+/** The line a remark on this row would point at: the version that still exists
+ *  after the change, falling back to the one it replaced. */
+function anchor(r: Row): number {
+  return r.newNo ?? r.oldNo ?? 0
+}
 
 interface Row {
   kind: 'add' | 'del' | 'ctx' | 'hunk' | 'meta'
@@ -78,11 +100,29 @@ const stat = computed(() => ({
           r.kind === 'meta' && 'text-muted-foreground/60',
         ]"
       >
-        <!-- Both sides, so a line can be cited by number in either version. -->
+        <!-- Both sides, so a line can be cited by number in either version.
+             The new-side number is also the button that starts a thread there:
+             the gutter rather than the row, so selecting code to copy it still
+             works. -->
         <span class="text-muted-foreground/50 w-8 shrink-0 text-right tabular-nums select-none">
           {{ r.oldNo ?? '' }}
         </span>
-        <span class="text-muted-foreground/50 w-8 shrink-0 text-right tabular-nums select-none">
+        <button
+          v-if="anchor(r) && r.kind !== 'meta' && r.kind !== 'hunk'"
+          type="button"
+          :class="[
+            'w-8 shrink-0 text-right tabular-nums select-none',
+            marked.has(anchor(r))
+              ? 'text-[var(--primary)] font-semibold'
+              : 'text-muted-foreground/50 hover:text-foreground',
+          ]"
+          :title="marked.has(anchor(r)) ? 'This line is being discussed' : 'Comment on this line'"
+          :aria-label="`Comment on line ${anchor(r)}`"
+          @click="emit('comment', anchor(r))"
+        >
+          {{ r.newNo ?? r.oldNo }}
+        </button>
+        <span v-else class="text-muted-foreground/50 w-8 shrink-0 text-right tabular-nums select-none">
           {{ r.newNo ?? '' }}
         </span>
         <span
