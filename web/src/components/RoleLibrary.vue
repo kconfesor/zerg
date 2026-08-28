@@ -329,6 +329,20 @@ async function remove(tpl: RoleTemplate) {
         </DialogHeader>
 
         <DialogBody class="grid gap-3 sm:grid-cols-2">
+          <!-- What this role is, before the fields that configure it. Spanning
+               both columns because it is about the whole role rather than any
+               one setting, which is what it looked like sitting in a column of
+               its own. -->
+          <p
+            v-if="editing.purpose === 'runner'"
+            class="bg-muted/30 border-l-primary border border-l-2 p-2.5 text-[11px] leading-relaxed sm:col-span-2"
+          >
+            Not part of any pipeline. This one is started when somebody asks to see the app
+            running: it reads the project, works out how it serves itself, and starts it. It never
+            claims work, never appears on the board, and cannot be added to a team. Its harness,
+            model, thinking and prompt are yours to change, like any other role's.
+          </p>
+
           <div class="flex flex-col gap-1.5">
             <Label :for="nameId">Name</Label>
             <Input :id="nameId" v-model="editing.name" />
@@ -378,7 +392,7 @@ async function remove(tpl: RoleTemplate) {
             </span>
           </div>
 
-          <div class="flex flex-col gap-1.5">
+          <div v-if="editing.purpose !== 'runner'" class="flex flex-col gap-1.5">
             <Label :for="receiveId">Receive</Label>
             <Select v-model="editing.receive">
               <SelectTrigger :id="receiveId"><SelectValue /></SelectTrigger>
@@ -389,7 +403,7 @@ async function remove(tpl: RoleTemplate) {
             </Select>
           </div>
 
-          <div class="flex flex-col gap-1.5">
+          <div v-if="editing.purpose !== 'runner'" class="flex flex-col gap-1.5">
             <Label :for="gateId">Gate</Label>
             <Select v-model="editing.gate">
               <SelectTrigger :id="gateId"><SelectValue /></SelectTrigger>
@@ -402,17 +416,6 @@ async function remove(tpl: RoleTemplate) {
               An approval gate holds this role's handoffs for a human.
             </span>
           </div>
-
-          <p
-            v-if="editing.purpose === 'runner'"
-            class="bg-muted/30 border-l-primary border border-l-2 p-2 text-[11px] leading-relaxed"
-          >
-            This role is not part of any pipeline. It is started when somebody
-            asks to see the app running: it reads the project, works out how it
-            serves itself, and starts it. It never claims work, never appears on
-            the board, and cannot be added to a team. Its harness, model,
-            thinking and prompt are yours to change, like any other role's.
-          </p>
 
           <!-- Where this role belongs in a pipeline, which is a fact about the
                role rather than about any one team: a reviewer or a cleaner ends
