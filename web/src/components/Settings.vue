@@ -94,7 +94,11 @@ defineProps<{
   /** Whether a readiness probe is in flight, so the button can say so. */
   checking?: boolean
 }>()
-const emit = defineEmits<{ readiness: [] }>()
+const emit = defineEmits<{
+  readiness: []
+  /** The role library changed, and everything else is holding a copy of it. */
+  rolesChanged: []
+}>()
 
 const FIRST_TAB = 'network'
 
@@ -314,7 +318,7 @@ const loopback = computed(() => {
            role is not a team: a team is an ordering of roles for one project,
            and a role is what those entries mean everywhere. -->
       <TabsContent value="roles" class="pt-4">
-        <RoleLibrary />
+        <RoleLibrary @changed="emit('rolesChanged')" />
       </TabsContent>
 
       <TabsContent value="network" class="pt-4">

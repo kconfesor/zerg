@@ -376,6 +376,21 @@ async function loadGlobals() {
 }
 
 /**
+ * The library, again, after Settings has edited it.
+ *
+ * It is loaded once at startup and read by the team editor and the rail, which
+ * place a role by whether it ends a pipeline. Without this, changing that
+ * setting and then adding the role put it where the old value said.
+ */
+async function reloadLibrary() {
+  try {
+    library.value = await api.roles()
+  } catch (err) {
+    fail(err)
+  }
+}
+
+/**
  * Refreshes everything scoped to the open project.
  *
  * Four requests go out per refresh and each takes its own time. Switch project
@@ -895,7 +910,11 @@ watch(current, () => (banner.value = null))
               subtitle="Everything a project is set up with: whether its team can work, what each role is, how the daemon serves the cockpit, and what it keeps on disk."
             />
             <div class="pt-4">
-              <Settings :checking="busy.is('readiness')" @readiness="checkReadiness" />
+              <Settings
+                :checking="busy.is('readiness')"
+                @readiness="checkReadiness"
+                @roles-changed="reloadLibrary"
+              />
             </div>
           </template>
 

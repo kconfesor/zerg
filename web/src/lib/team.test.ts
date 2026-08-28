@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
+import { cloneOverrides, followPreset, hasRoleOverrides, presetRoles } from '@/lib/team'
 import { placeInPipeline } from '@/lib/team'
-import type { RoleTemplate } from '@/lib/api'
+import type { ResolvedRole, RoleTemplate, TeamPreset } from '@/lib/api'
 
 function role(id: string, finisher = false): RoleTemplate {
   return {
@@ -51,5 +52,56 @@ describe('where a role joins a pipeline', () => {
   it('appends to an empty pipeline whatever the role is', () => {
     expect(placeInPipeline([], docs, library)).toBe(0)
     expect(placeInPipeline([], reviewer, library)).toBe(0)
+  })
+})
+
+describe('what survives a write', () => {
+  const resolved = (over: Partial<ResolvedRole>): ResolvedRole => ({
+    ...coder,
+    position: 0,
+    enabled: true,
+    overridden: false,
+    terminal: false,
+    argsOverride: null,
+    ...over,
+  })
+
+  it('carries a thinking override through a copy', () => {
+    // Every one of these rebuilds the whole team, so a field the helpers do not
+    // know about is not preserved, it is deleted: reordering, parking, cloning
+    // or adopting a team erased the level a role was set to think at.
+    expect(cloneOverrides({ thinkingOverride: 'xhigh' }).thinkingOverride).toBe('xhigh')
+    expect(hasRoleOverrides({ thinkingOverride: 'xhigh', argsOverride: null })).toBe(true)
+  })
+
+  it('keeps a thinking-only project override when a team is adopted', () => {
+    const team: TeamPreset = {
+      id: 'team',
+      name: 'Team',
+      builtin: false,
+      projectId: null,
+      roles: [{ templateId: 'coder', position: 0, enabled: true, argsOverride: null }],
+      createdAt: '2026-01-01T00:00:00Z',
+      updatedAt: '2026-01-01T00:00:00Z',
+    }
+    const update = followPreset(team, [resolved({ thinkingOverride: 'max' })])
+    expect(update.roles).toHaveLength(1)
+    expect(update.roles[0].thinkingOverride).toBe('max')
+  })
+
+  it("carries the team's own thinking setting into a copy of that team", () => {
+    const source: TeamPreset = {
+      id: 'source',
+      name: 'Source',
+      builtin: false,
+      projectId: null,
+      roles: [
+        { templateId: 'coder', position: 0, enabled: true, argsOverride: null, thinkingOverride: 'high' },
+      ],
+      createdAt: '2026-01-01T00:00:00Z',
+      updatedAt: '2026-01-01T00:00:00Z',
+    }
+    const rows = presetRoles([resolved({})], source)
+    expect(rows[0].thinkingOverride).toBe('high')
   })
 })

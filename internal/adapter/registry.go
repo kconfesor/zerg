@@ -3,7 +3,9 @@ package adapter
 import (
 	"fmt"
 	"os/exec"
+	"slices"
 	"sort"
+	"strings"
 	"sync"
 )
 
@@ -56,6 +58,39 @@ func (r *Registry) namesLocked() []string {
 }
 
 // ── generic checks ────────────────────────────────────────────────────────
+
+// ThinkingSupported reports whether this role's reasoning level is one the
+// harness takes.
+//
+// Unlike a model, which is free text because a working id can be missing from
+// any catalog, the levels are the CLI's own and come from its --help: claude
+// takes low through max, pi starts two lower at off. A level from the wrong
+// list is not a slow failure, it is a process that exits on its usage message
+// before reading a single turn, which reads as a role that will not start and
+// says nothing about why.
+func ThinkingSupported(levels []string) Check {
+	return Check{
+		Name: "thinking_level",
+		Run: func(_ Ctx, spec Spec) Result {
+			if spec.Thinking == "" {
+				return Result{OK: true, Detail: "harness default"}
+			}
+			if len(levels) == 0 {
+				return Result{
+					Reason: fmt.Sprintf("this harness takes no thinking level, and this role asks for %q", spec.Thinking),
+					Remedy: "clear the thinking level in the role editor",
+				}
+			}
+			if slices.Contains(levels, spec.Thinking) {
+				return Result{OK: true, Detail: spec.Thinking}
+			}
+			return Result{
+				Reason: fmt.Sprintf("%q is not a level this harness takes", spec.Thinking),
+				Remedy: "choose one of: " + strings.Join(levels, ", "),
+			}
+		},
+	}
+}
 
 // BinaryPresent reports whether the harness executable is on PATH.
 //

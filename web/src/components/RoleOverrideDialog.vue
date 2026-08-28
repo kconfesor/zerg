@@ -72,6 +72,22 @@ const form = reactive({
   gate: 'none' as 'none' | 'approval',
 })
 
+/**
+ * A level the new harness does not take is not a level.
+ *
+ * The field hides itself for a harness with no such control, and kept its old
+ * value while hidden, so a role moved from pi to claude went on asking for
+ * "off" and claude exits on its usage message. Readiness catches that now, but
+ * the value should not survive the switch that invalidated it.
+ */
+watch(
+  () => form.harness,
+  (harness) => {
+    const levels = props.thinking[harness] ?? []
+    if (form.thinking && !levels.includes(form.thinking)) form.thinking = ''
+  },
+)
+
 /** The select's value, which is the level or the sentinel above. */
 const thinkingChoice = computed({
   get: () => form.thinking || HARNESS_DEFAULT,

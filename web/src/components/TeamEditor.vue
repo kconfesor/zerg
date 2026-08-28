@@ -163,6 +163,7 @@ function apply(base: RoleTemplate, overrides: Partial<RoleOverrides>): RoleTempl
     harness: overrides.harnessOverride ?? base.harness,
     model: overrides.modelOverride ?? base.model,
     args: overrides.argsOverride == null ? [...base.args] : [...overrides.argsOverride],
+    thinking: overrides.thinkingOverride ?? base.thinking,
     receive: overrides.receiveOverride ?? base.receive,
     batchMaxItems: overrides.batchMaxItemsOverride ?? base.batchMaxItems,
     batchMaxAgeSec: overrides.batchMaxAgeSecOverride ?? base.batchMaxAgeSec,

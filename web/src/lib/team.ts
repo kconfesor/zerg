@@ -27,6 +27,7 @@ export function cloneOverrides(source: Partial<RoleOverrides>): RoleOverrides {
     harnessOverride: source.harnessOverride ?? null,
     modelOverride: source.modelOverride ?? null,
     argsOverride: source.argsOverride == null ? null : [...source.argsOverride],
+    thinkingOverride: source.thinkingOverride ?? null,
     receiveOverride: source.receiveOverride ?? null,
     batchMaxItemsOverride: source.batchMaxItemsOverride ?? null,
     batchMaxAgeSecOverride: source.batchMaxAgeSecOverride ?? null,
@@ -40,6 +41,7 @@ export function hasRoleOverrides(overrides: Partial<RoleOverrides>): boolean {
     overrides.harnessOverride != null ||
     overrides.modelOverride != null ||
     overrides.argsOverride != null ||
+    overrides.thinkingOverride != null ||
     overrides.receiveOverride != null ||
     overrides.batchMaxItemsOverride != null ||
     overrides.batchMaxAgeSecOverride != null ||

@@ -11,7 +11,7 @@
  * Self-contained, like the rest of Settings: it fetches what it needs rather
  * than having it threaded down through the shell.
  */
-import { computed, onMounted, ref, useId } from 'vue'
+import { computed, onMounted, ref, useId, watch } from 'vue'
 import { Flag, Plus, Trash2 } from '@lucide/vue'
 import { api, type Model, type RoleTemplate, type TeamPreset } from '@/lib/api'
 import { latest } from '@/lib/latest'
@@ -51,10 +51,31 @@ const harnesses = ref<string[]>([])
  */
 const HARNESS_DEFAULT = 'harness default'
 
+/** Told to whoever else is holding a copy of the library. */
+const emit = defineEmits<{ changed: [] }>()
+
 const models = ref<Record<string, Model[]>>({})
 /** The reasoning levels each harness accepts. Read from the daemon, since only
  *  the adapter knows what its CLI will take. */
 const thinking = ref<Record<string, string[]>>({})
+
+/**
+ * A level the new harness does not take is not a level.
+ *
+ * The field hides itself for a harness with no such control, and kept its old
+ * value while hidden, so a role moved from pi to claude went on asking for
+ * "off", which claude exits on rather than runs.
+ */
+watch(
+  () => editing.value?.harness,
+  (harness) => {
+    if (!editing.value || !harness) return
+    const levels = thinking.value[harness] ?? []
+    if (editing.value.thinking && !levels.includes(editing.value.thinking)) {
+      editing.value.thinking = ''
+    }
+  },
+)
 
 /** The select's value, which is the level or the sentinel above. */
 const thinkingChoice = computed({
@@ -159,6 +180,11 @@ async function save() {
       }
       open.value = false
       await load()
+      // The rest of the cockpit holds its own copy of the library, taken at
+      // startup. Without this, adding a role to a pipeline placed it by its old
+      // "ends a pipeline" setting, and a team editor open in another tab kept
+      // the old prompt and model.
+      emit('changed')
       // A running swarm already has its processes; the daemon reconciles the
       // ones whose harness changed, and the rest pick this up when they next
       // respawn. Saying which is better than implying a control that does not
@@ -182,6 +208,7 @@ async function remove(tpl: RoleTemplate) {
       await api.deleteRole(tpl.id)
       confirmDelete.value = null
       await load()
+      emit('changed')
       note.value = { tone: 'ok', text: `Removed ${tpl.name}.` }
     } catch (e) {
       note.value = { tone: 'bad', text: e instanceof Error ? e.message : String(e) }

@@ -472,7 +472,7 @@ func (db *DB) resolveLayeredTeam(ctx context.Context, p *Project) ([]ResolvedRol
 		r := ResolvedRole{RoleTemplate: *t, Position: i, Enabled: membership.Enabled, RoleOverrides: o}
 		r.Overridden = t.Harness != baseline.Harness || t.Model != baseline.Model || !slices.Equal(t.Args, baseline.Args) ||
 			t.Receive != baseline.Receive || t.BatchMaxItems != baseline.BatchMaxItems || t.BatchMaxAgeSec != baseline.BatchMaxAgeSec ||
-			t.Prompt != baseline.Prompt || t.Gate != baseline.Gate
+			t.Prompt != baseline.Prompt || t.Gate != baseline.Gate || t.Thinking != baseline.Thinking
 		out = append(out, r)
 	}
 	// The last enabled role finishes the task. What stops a role added later
