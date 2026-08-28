@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { onMounted, onUnmounted, ref, watch } from 'vue'
 import type { Attention } from '@/lib/api'
 import { AlertTriangle, ChevronRight, GitMerge, HelpCircle, MessageSquare } from '@lucide/vue'
 import { api, type ChangedFile, type Mergeable, type ReviewThread } from '@/lib/api'
@@ -72,7 +72,18 @@ function stat(f: ChangedFile): string {
   return `+${add} −${del}`
 }
 const diffs = ref<
-  Record<string, { open: boolean; files: ChangedFile[]; range?: boolean; base?: string; error?: string }>
+  Record<
+    string,
+    {
+      open: boolean
+      files: ChangedFile[]
+      range?: boolean
+      base?: string
+      error?: string
+      /** Files already read at this gate, as the daemon remembers them. */
+      seen?: string[]
+    }
+  >
 >({})
 
 /** Markdown is shown as the document it is. Everything else is shown as a
@@ -90,6 +101,130 @@ function isDoc(f: ChangedFile): boolean {
  * away than the buttons that decide it. The document is the point of the card;
  * the card should open with it.
  */
+/**
+ * File by file, with somewhere to stand.
+ *
+ * A twelve-file diff is one long scroll and no sense of progress, and an
+ * approval is read in the gaps: on a phone, and finished later at a desk.
+ * Which files have been read is the daemon's to remember, so the second sitting
+ * does not start at the top again.
+ *
+ * The mark is the reader's own. A file that scrolled past the viewport is not a
+ * file that was read, and a review that decides for you what you have seen is
+ * worse than one that keeps asking.
+ */
+const current = ref<Record<string, string>>({})
+
+function seenFiles(id: string): string[] {
+  return diffs.value[id]?.seen ?? []
+}
+
+function isSeen(id: string, path: string): boolean {
+  return seenFiles(id).includes(path)
+}
+
+function unread(id: string): number {
+  return (diffs.value[id]?.files ?? []).filter((f) => !isSeen(id, f.path)).length
+}
+
+/** Which file is being read: the one chosen, or the first not yet read. */
+function reading(id: string): string {
+  const files = diffs.value[id]?.files ?? []
+  if (!files.length) return ''
+  const chosen = current.value[id]
+  if (chosen && files.some((f) => f.path === chosen)) return chosen
+  return (files.find((f) => !isSeen(id, f.path)) ?? files[0]).path
+}
+
+function positionOf(id: string): { at: number; of: number } {
+  const files = diffs.value[id]?.files ?? []
+  return { at: files.findIndex((f) => f.path === reading(id)) + 1, of: files.length }
+}
+
+async function setSeen(id: string, path: string, seen: boolean) {
+  const before = diffs.value[id]
+  if (!before) return
+  // Optimistic: the mark is the reader's own record and should not wait on a
+  // round trip to appear.
+  diffs.value = {
+    ...diffs.value,
+    [id]: {
+      ...before,
+      seen: seen ? [...seenFiles(id), path] : seenFiles(id).filter((f) => f !== path),
+    },
+  }
+  try {
+    const r = await api.markFileSeen(id, path, seen)
+    diffs.value = { ...diffs.value, [id]: { ...diffs.value[id]!, seen: r.seen } }
+  } catch (e) {
+    reviewError.value = e instanceof Error ? e.message : String(e)
+  }
+}
+
+/**
+ * Move on, marking what was being read as read.
+ *
+ * Forward marks; backward does not. Going back to look at something again is
+ * not a statement that you finished with it.
+ */
+function step(id: string, by: 1 | -1) {
+  const files = diffs.value[id]?.files ?? []
+  if (!files.length) return
+  const here = files.findIndex((f) => f.path === reading(id))
+  if (by === 1 && files[here]) void setSeen(id, files[here].path, true)
+  const next = Math.min(files.length - 1, Math.max(0, here + by))
+  current.value = { ...current.value, [id]: files[next].path }
+  focusFile(files[next].path)
+}
+
+/** The next file that still wants reading, rather than the next in the list. */
+function nextUnread(id: string) {
+  const files = diffs.value[id]?.files ?? []
+  const here = files.findIndex((f) => f.path === reading(id))
+  if (files[here]) void setSeen(id, files[here].path, true)
+  const rest = [...files.slice(here + 1), ...files.slice(0, here)]
+  const next = rest.find((f) => !isSeen(id, f.path))
+  if (!next) return
+  current.value = { ...current.value, [id]: next.path }
+  focusFile(next.path)
+}
+
+/**
+ * j and k move between files.
+ *
+ * Guarded on where the focus is: this panel is full of boxes for remarks and
+ * questions, and a shortcut that fires while somebody is typing "just checking"
+ * would jump the page twice and eat the letters.
+ */
+function onKey(e: KeyboardEvent) {
+  if (e.metaKey || e.ctrlKey || e.altKey) return
+  const el = e.target as HTMLElement | null
+  if (el && (el.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(el.tagName))) return
+  const approvals = props.attention?.approvals ?? []
+  // One approval is the ordinary case; with several, the shortcut drives the
+  // first, and the buttons are there for the rest.
+  const id = approvals.find((a) => a.commit && diffs.value[a.id]?.files.length)?.id
+  if (!id) return
+  if (e.key === 'j') {
+    e.preventDefault()
+    step(id, 1)
+  } else if (e.key === 'k') {
+    e.preventDefault()
+    step(id, -1)
+  }
+}
+
+onMounted(() => window.addEventListener('keydown', onKey))
+onUnmounted(() => window.removeEventListener('keydown', onKey))
+
+/** Scroll the file being read to the top of the panel, since the panel is what
+ *  scrolls rather than the page. */
+function focusFile(path: string) {
+  requestAnimationFrame(() => {
+    document.querySelector(`[data-file="${CSS.escape(path)}"]`)?.scrollIntoView({ block: 'start' })
+  })
+}
+
 /**
  * The conversation about the code, anchored to it.
  *
@@ -333,7 +468,7 @@ async function loadFiles(id: string) {
     const r = await api.approvalDiff(id)
     diffs.value = {
       ...diffs.value,
-      [id]: { open: true, files: r.files ?? [], range: r.range, base: r.base },
+      [id]: { open: true, files: r.files ?? [], range: r.range, base: r.base, seen: r.seen ?? [] },
     }
   } catch (e) {
     diffs.value = {
@@ -447,10 +582,52 @@ function empty(a: Attention | null): boolean {
             {{ diffs[a.id]!.files.length === 1 ? 'file' : 'files' }}.
           </p>
 
+          <!-- Where you are and what is left. A twelve-file diff is otherwise
+               one long scroll with no sense of progress, and this one may have
+               been started on a phone yesterday. -->
+          <div
+            v-if="(diffs[a.id]?.files.length ?? 0) > 1"
+            class="bg-muted/40 mb-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 border px-2 py-1 text-[10px]"
+          >
+            <span class="text-muted-foreground tabular-nums">
+              file {{ positionOf(a.id).at }} of {{ positionOf(a.id).of }}
+            </span>
+            <span v-if="unread(a.id)" class="text-muted-foreground/80">
+              · {{ unread(a.id) }} not read yet
+            </span>
+            <span v-else class="text-[var(--status-good)]">· all read</span>
+            <span class="ml-auto flex items-center gap-1">
+              <Button size="xs" variant="ghost" class="h-5 px-1.5 text-[10px]" @click="step(a.id, -1)">
+                previous
+              </Button>
+              <Button size="xs" variant="ghost" class="h-5 px-1.5 text-[10px]" @click="step(a.id, 1)">
+                next
+              </Button>
+              <Button
+                v-if="unread(a.id)"
+                size="xs"
+                variant="outline"
+                class="h-5 px-1.5 text-[10px]"
+                title="The next file you have not read (j)"
+                @click="nextUnread(a.id)"
+              >
+                next unread
+              </Button>
+            </span>
+            <span class="text-muted-foreground/60 w-full">
+              j and k move, and mark what you leave as read
+            </span>
+          </div>
+
           <div
             v-for="f in diffs[a.id]?.files ?? []"
             :key="f.path"
-            class="mb-3 border last:mb-0"
+            :data-file="f.path"
+            :class="[
+              'mb-3 border last:mb-0',
+              reading(a.id) === f.path && 'border-l-2 border-l-[var(--primary)]',
+              isSeen(a.id, f.path) && reading(a.id) !== f.path && 'opacity-70',
+            ]"
           >
             <!-- The header is the toggle. A file you are not reading should
                  cost one line, not a screen. -->
@@ -470,7 +647,31 @@ function empty(a: Attention | null): boolean {
                 {{ stat(f) }}
               </span>
               <span v-if="isDoc(f)" class="text-muted-foreground shrink-0 text-[10px]">doc</span>
+              <!-- Files with something open on them, so "next" can mean the
+                   next thing that needs you. -->
+              <span
+                v-if="threadsFor(a.taskId, f.path).some((t) => t.kind === 'remark' && t.state === 'open')"
+                class="shrink-0 text-[10px] text-[var(--status-warning)]"
+              >
+                open remark
+              </span>
             </button>
+
+            <!-- The reader's own mark. Scrolling past a file is not reading it,
+                 and a review that decides that for you is worse than one that
+                 keeps asking. -->
+            <label
+              class="hairline-b text-muted-foreground flex items-center gap-1.5 px-2 py-1 text-[10px]"
+            >
+              <input
+                type="checkbox"
+                class="size-3"
+                :checked="isSeen(a.id, f.path)"
+                :aria-label="`Mark ${f.path} read`"
+                @change="setSeen(a.id, f.path, ($event.target as HTMLInputElement).checked)"
+              />
+              read
+            </label>
 
             <!-- A document, rendered. This is the thing being approved; showing
                  it as a diff makes the reader reconstruct it line by line. -->

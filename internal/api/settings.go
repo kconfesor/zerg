@@ -394,6 +394,12 @@ func (s *Server) approvalDiff(w http.ResponseWriter, r *http.Request) {
 	// about what that role just wrote; the approval that lands the work is
 	// about everything that would reach the base branch, which is usually
 	// several commits by several roles.
+	seen, err := s.db.FilesSeen(r.Context(), approval.ID)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+
 	var files []hatchery.ChangedFile
 	if approval.Terminal {
 		files, err = hat.RangeFiles(r.Context(), project.BaseBranch, approval.Commit, maxFile)
@@ -427,6 +433,10 @@ func (s *Server) approvalDiff(w http.ResponseWriter, r *http.Request) {
 		// So the view can say whether this is one commit or a merge.
 		"range": approval.Terminal,
 		"base":  project.BaseBranch,
+		// Where the reader got to last time. With the files rather than in a
+		// second request: it is about these files, and an approval read on a
+		// phone and finished at a desk should open where it was left.
+		"seen": seen,
 	})
 }
 
@@ -764,6 +774,31 @@ func (s *Server) raiseReviewThread(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, thread)
+}
+
+// markFileSeen records where a reader has got to in a diff.
+func (s *Server) markFileSeen(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		File string `json:"file"`
+		Seen bool   `json:"seen"`
+	}
+	if !decode(w, r, &req) {
+		return
+	}
+	if req.File == "" {
+		badRequest(w, "which file?")
+		return
+	}
+	if err := s.db.MarkFileSeen(r.Context(), r.PathValue("id"), req.File, req.Seen); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	seen, err := s.db.FilesSeen(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"seen": seen})
 }
 
 // stopTask parks a card so nothing picks it up again.

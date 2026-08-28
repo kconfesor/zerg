@@ -1080,7 +1080,15 @@ watch(current, () => (banner.value = null))
            min-width:auto — it refuses to shrink below its content and overflows
            the panel instead of scrolling inside it, which is what cut the right
            side off a wide table. -->
-      <DialogContent class="min-w-0 gap-0 overflow-hidden p-0 sm:max-w-4xl">
+      <!-- Nothing is focused on opening. The first focusable thing here is the
+           box for a rejection reason, and a dialog that opens with the cursor
+           in it is a dialog whose keyboard shortcuts can never fire: j and k
+           move between files, and every press was going into that field
+           instead. Rejecting is also not the thing you came to do. -->
+      <DialogContent
+        class="min-w-0 gap-0 overflow-hidden p-0 sm:max-w-4xl"
+        @open-auto-focus.prevent
+      >
         <DialogHeader class="hairline-b shrink-0 px-5 py-4 pr-12">
           <DialogTitle>Waiting on you</DialogTitle>
           <DialogDescription>

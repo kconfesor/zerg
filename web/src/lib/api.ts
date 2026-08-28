@@ -561,7 +561,16 @@ export const api = {
       body: JSON.stringify({ resolved }),
     }),
   approvalDiff: (id: string) =>
-    call<{ files: ChangedFile[]; range: boolean; base: string }>(`/approvals/${id}/diff`),
+    call<{ files: ChangedFile[]; range: boolean; base: string; seen: string[] }>(
+      `/approvals/${id}/diff`,
+    ),
+  /** Record where a reader got to, so a review interrupted on one device
+   *  resumes on the next. */
+  markFileSeen: (approvalId: string, file: string, seen: boolean) =>
+    call<{ seen: string[] }>(`/approvals/${approvalId}/seen`, {
+      method: 'PUT',
+      body: JSON.stringify({ file, seen }),
+    }),
   /** Whether this work still merges into the base, and how far the base has
    *  moved since it was written. The merge happens in memory, so asking costs
    *  nothing and leaves nothing behind. */

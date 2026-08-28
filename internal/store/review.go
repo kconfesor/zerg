@@ -273,3 +273,48 @@ func scanThread(s scanner) (*ReviewThread, error) {
 	t.Comments = []ReviewComment{}
 	return &t, nil
 }
+
+// ── where you got to ──────────────────────────────────────────────────────
+
+// MarkFileSeen records that a file has been read at this gate, or unrecords it.
+//
+// The reader's own mark rather than something inferred from scrolling: a file
+// that went past the viewport is not a file that was read, and a review that
+// quietly decides you have seen something is worse than one that keeps asking.
+func (db *DB) MarkFileSeen(ctx context.Context, approvalID, file string, seen bool) error {
+	if seen {
+		_, err := db.sql.ExecContext(ctx,
+			`INSERT INTO review_seen (approval_id, file, seen_at) VALUES (?,?,?)
+			 ON CONFLICT(approval_id, file) DO UPDATE SET seen_at = excluded.seen_at`,
+			approvalID, file, time.Now().UTC().Format(time.RFC3339Nano))
+		if err != nil {
+			return fmt.Errorf("marking %s seen: %w", file, err)
+		}
+		return nil
+	}
+	if _, err := db.sql.ExecContext(ctx,
+		`DELETE FROM review_seen WHERE approval_id = ? AND file = ?`, approvalID, file); err != nil {
+		return fmt.Errorf("unmarking %s: %w", file, err)
+	}
+	return nil
+}
+
+// FilesSeen is what has already been read at this gate.
+func (db *DB) FilesSeen(ctx context.Context, approvalID string) ([]string, error) {
+	rows, err := db.read.QueryContext(ctx,
+		`SELECT file FROM review_seen WHERE approval_id = ? ORDER BY file`, approvalID)
+	if err != nil {
+		return nil, fmt.Errorf("reading review progress: %w", err)
+	}
+	defer rows.Close()
+
+	out := []string{}
+	for rows.Next() {
+		var file string
+		if err := rows.Scan(&file); err != nil {
+			return nil, err
+		}
+		out = append(out, file)
+	}
+	return out, rows.Err()
+}
