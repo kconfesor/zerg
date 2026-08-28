@@ -388,6 +388,12 @@ func (s *Server) approvalDiff(w http.ResponseWriter, r *http.Request) {
 	// — which is not how anyone reads a document they are being asked to
 	// approve.
 	const maxFile = 256 * 1024
+
+	// How many files are read in full before the rest are left to be opened.
+	// A hundred-file change otherwise reads every file and every diff before
+	// anyone has looked at the first one, and a reviewer reads them one at a
+	// time by construction now.
+	const eagerFiles = 30
 	hat := hatchery.New(project.Path)
 
 	// The final gate asks a different question. A hand-off between roles is
@@ -402,9 +408,9 @@ func (s *Server) approvalDiff(w http.ResponseWriter, r *http.Request) {
 
 	var files []hatchery.ChangedFile
 	if approval.Terminal {
-		files, err = hat.RangeFiles(r.Context(), project.BaseBranch, approval.Commit, maxFile)
+		files, err = hat.RangeFiles(r.Context(), project.BaseBranch, approval.Commit, maxFile, eagerFiles)
 	} else {
-		files, err = hat.ChangedFiles(r.Context(), approval.Commit, maxFile)
+		files, err = hat.ChangedFiles(r.Context(), approval.Commit, maxFile, eagerFiles)
 	}
 	if err != nil {
 		// A ref this repository does not have is the operator's problem, not the
@@ -774,6 +780,39 @@ func (s *Server) raiseReviewThread(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, thread)
+}
+
+// approvalFile reads one file of a change, for the ones the listing left alone.
+func (s *Server) approvalFile(w http.ResponseWriter, r *http.Request) {
+	approval, err := s.db.GetApproval(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	project, err := s.db.GetProject(r.Context(), approval.ProjectID)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	path := r.URL.Query().Get("path")
+	if path == "" || approval.Commit == "" {
+		badRequest(w, "which file, of which commit?")
+		return
+	}
+	base := ""
+	if approval.Terminal {
+		base = project.BaseBranch
+	}
+	file, err := hatchery.New(project.Path).LoadFile(r.Context(), base, approval.Commit, path, 256*1024)
+	if err != nil {
+		if errors.Is(err, hatchery.ErrNoSuchRevision) {
+			badRequest(w, err.Error())
+			return
+		}
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, file)
 }
 
 // markFileSeen records where a reader has got to in a diff.

@@ -345,6 +345,28 @@ type ChangedFile struct {
 	// Diff is the unified diff for this file, which is what you want for a
 	// change to existing code and not what you want for a new document.
 	Diff string `json:"diff,omitempty"`
+
+	// Added and Removed are the line counts, which git reports without reading
+	// the file. They are what a list of files can show before anything is
+	// loaded.
+	Added   int `json:"added"`
+	Removed int `json:"removed"`
+
+	// Binary is a file git will not diff: an image, a font, a compiled thing.
+	// Said rather than fetched. Its bytes are not text, and reading them into a
+	// string to send to a browser is how a review of a change to a PNG became
+	// a megabyte of mojibake.
+	Binary bool `json:"binary,omitempty"`
+
+	// TooLarge is a file past the byte cap. Also said rather than left empty:
+	// a file with no content and no diff is otherwise indistinguishable from a
+	// file that did not change, which is the wrong thing to tell a reviewer.
+	TooLarge bool `json:"tooLarge,omitempty"`
+
+	// Deferred is a file whose content was not read because the diff is large.
+	// Every changed file is listed; the ones past the eager limit are fetched
+	// when they are opened.
+	Deferred bool `json:"deferred,omitempty"`
 }
 
 // ChangedFiles returns what a commit touched, with the content of each file as
@@ -354,8 +376,8 @@ type ChangedFile struct {
 // is right for a change to existing code. For a file the commit created — a
 // spec, a design note — the diff is the document with a plus in front of every
 // line, and the thing you actually want to read is the document.
-func (h *Hatchery) ChangedFiles(ctx context.Context, sha string, maxBytes int) ([]ChangedFile, error) {
-	return h.changed(ctx, sha, "", maxBytes)
+func (h *Hatchery) ChangedFiles(ctx context.Context, sha string, maxBytes, eager int) ([]ChangedFile, error) {
+	return h.changed(ctx, sha, "", maxBytes, eager)
 }
 
 // RangeFiles returns everything between base and sha — what would land if the
@@ -369,8 +391,55 @@ func (h *Hatchery) ChangedFiles(ctx context.Context, sha string, maxBytes int) (
 // base...sha, three dots: the changes on sha's side since the two diverged,
 // not everything that happened on base meanwhile. Two dots would show the base
 // branch's own progress as if this task had made it.
-func (h *Hatchery) RangeFiles(ctx context.Context, base, sha string, maxBytes int) ([]ChangedFile, error) {
-	return h.changed(ctx, sha, base, maxBytes)
+func (h *Hatchery) RangeFiles(ctx context.Context, base, sha string, maxBytes, eager int) ([]ChangedFile, error) {
+	return h.changed(ctx, sha, base, maxBytes, eager)
+}
+
+// lineStats asks git how much each file changed, and which files it will not
+// diff at all.
+//
+// --numstat answers both without reading a file: counts per path, and a pair of
+// dashes where the file is binary. That is how a listing can show the shape of
+// a change before any of it is loaded.
+func (h *Hatchery) lineStats(ctx context.Context, sha, base string) (map[string]struct {
+	added, removed int
+	binary         bool
+}, error) {
+	var out string
+	var err error
+	if base != "" {
+		out, err = git(ctx, h.repoPath, "diff", "--numstat", base+"..."+sha)
+	} else {
+		out, err = git(ctx, h.repoPath, "show", "--format=", "--numstat", sha)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("counting what %s changed: %w", sha, err)
+	}
+	stats := map[string]struct {
+		added, removed int
+		binary         bool
+	}{}
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		parts := strings.Split(line, "\t")
+		if len(parts) < 3 {
+			continue
+		}
+		path := parts[len(parts)-1]
+		if parts[0] == "-" && parts[1] == "-" {
+			stats[path] = struct {
+				added, removed int
+				binary         bool
+			}{binary: true}
+			continue
+		}
+		added, _ := strconv.Atoi(parts[0])
+		removed, _ := strconv.Atoi(parts[1])
+		stats[path] = struct {
+			added, removed int
+			binary         bool
+		}{added: added, removed: removed}
+	}
+	return stats, nil
 }
 
 // ErrNoSuchRevision means git could not resolve a ref this repository was asked
@@ -414,7 +483,64 @@ func (h *Hatchery) resolves(ctx context.Context, ref string) (bool, error) {
 	return true, nil
 }
 
-func (h *Hatchery) changed(ctx context.Context, sha, base string, maxBytes int) ([]ChangedFile, error) {
+// load fills in one file's content and diff, or says why it did not.
+func (h *Hatchery) load(ctx context.Context, f *ChangedFile, sha, base string, maxBytes int) {
+	if f.Status != "D" {
+		if body, err := git(ctx, h.repoPath, "show", sha+":"+f.Path); err == nil {
+			if maxBytes <= 0 || len(body) <= maxBytes {
+				f.Content = body
+			} else {
+				f.TooLarge = true
+			}
+		}
+	}
+	// The diff comes too: content alone cannot show what changed in a file
+	// that already existed.
+	var d string
+	var err error
+	if base != "" {
+		d, err = git(ctx, h.repoPath, "diff", base+"..."+sha, "--", f.Path)
+	} else {
+		d, err = git(ctx, h.repoPath, "show", "--format=", "--patch", sha, "--", f.Path)
+	}
+	if err != nil {
+		return
+	}
+	if maxBytes <= 0 || len(d) <= maxBytes {
+		f.Diff = d
+		return
+	}
+	f.TooLarge = true
+}
+
+// LoadFile reads one file of a change, for the ones a listing left alone.
+func (h *Hatchery) LoadFile(ctx context.Context, base, sha, path string, maxBytes int) (*ChangedFile, error) {
+	files, err := h.changed(ctx, sha, base, maxBytes, 0)
+	if err != nil {
+		return nil, err
+	}
+	for i := range files {
+		if files[i].Path != path {
+			continue
+		}
+		f := files[i]
+		if f.Binary {
+			return &f, nil
+		}
+		f.Deferred = false
+		h.load(ctx, &f, sha, base, maxBytes)
+		return &f, nil
+	}
+	return nil, fmt.Errorf("%q is not in this change: %w", path, ErrNoSuchRevision)
+}
+
+// changed lists what a commit touched.
+//
+// eager bounds how many of those files are read in full; the rest are listed
+// and fetched when they are opened. Zero reads none of them, which is what
+// LoadFile wants: it needs the list to find one file, not the contents of the
+// other ninety-nine. Negative reads them all.
+func (h *Hatchery) changed(ctx context.Context, sha, base string, maxBytes, eager int) ([]ChangedFile, error) {
 	// Checked before the diff, so a ref this repository does not have is
 	// reported as that rather than as whatever the diff command said about it.
 	for _, ref := range []struct{ what, ref string }{{"", sha}, {"base branch ", base}} {
@@ -442,6 +568,11 @@ func (h *Hatchery) changed(ctx context.Context, sha, base string, maxBytes int) 
 		return nil, fmt.Errorf("listing what %s changed: %w", sha, err)
 	}
 
+	stats, err := h.lineStats(ctx, sha, base)
+	if err != nil {
+		return nil, err
+	}
+
 	var files []ChangedFile
 	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
 		parts := strings.Fields(line)
@@ -449,26 +580,25 @@ func (h *Hatchery) changed(ctx context.Context, sha, base string, maxBytes int) 
 			continue
 		}
 		f := ChangedFile{Status: parts[0][:1], Path: parts[len(parts)-1]}
+		if st, ok := stats[f.Path]; ok {
+			f.Added, f.Removed, f.Binary = st.added, st.removed, st.binary
+		}
 
-		if f.Status != "D" {
-			if body, err := git(ctx, h.repoPath, "show", sha+":"+f.Path); err == nil {
-				if maxBytes <= 0 || len(body) <= maxBytes {
-					f.Content = body
-				}
-			}
+		// A binary file is named and counted and not read. There is nothing in
+		// it a reviewer can read in a browser, and its bytes are not a string.
+		if f.Binary {
+			files = append(files, f)
+			continue
 		}
-		// The diff comes too: content alone cannot show what changed in a file
-		// that already existed.
-		var d string
-		var derr error
-		if base != "" {
-			d, derr = git(ctx, h.repoPath, "diff", base+"..."+sha, "--", f.Path)
-		} else {
-			d, derr = git(ctx, h.repoPath, "show", "--format=", "--patch", sha, "--", f.Path)
+		// Past the eager limit the file is listed and left to be opened. A
+		// hundred-file change otherwise reads every file, and its diff, before
+		// anyone has looked at the first one.
+		if eager >= 0 && len(files) >= eager {
+			f.Deferred = true
+			files = append(files, f)
+			continue
 		}
-		if derr == nil && (maxBytes <= 0 || len(d) <= maxBytes) {
-			f.Diff = d
-		}
+		h.load(ctx, &f, sha, base, maxBytes)
 		files = append(files, f)
 	}
 	return files, nil

@@ -474,14 +474,14 @@ func TestChangedFilesSeparatesUnknownRevisionsFromRealFailures(t *testing.T) {
 	}
 
 	t.Run("a commit that does not exist", func(t *testing.T) {
-		_, err := h.ChangedFiles(ctx, "0000000000000000000000000000000000000000", 0)
+		_, err := h.ChangedFiles(ctx, "0000000000000000000000000000000000000000", 0, -1)
 		if !errors.Is(err, ErrNoSuchRevision) {
 			t.Errorf("err = %v, want ErrNoSuchRevision", err)
 		}
 	})
 
 	t.Run("a base branch that does not exist", func(t *testing.T) {
-		_, err := h.RangeFiles(ctx, "no-such-branch", head, 0)
+		_, err := h.RangeFiles(ctx, "no-such-branch", head, 0, -1)
 		if !errors.Is(err, ErrNoSuchRevision) {
 			t.Errorf("err = %v, want ErrNoSuchRevision", err)
 		}
@@ -494,7 +494,7 @@ func TestChangedFilesSeparatesUnknownRevisionsFromRealFailures(t *testing.T) {
 		// Operational: git runs and fails for a reason that has nothing to do
 		// with the revision, which must not be reported as a missing revision.
 		other := New(t.TempDir())
-		_, err := other.ChangedFiles(ctx, head, 0)
+		_, err := other.ChangedFiles(ctx, head, 0, -1)
 		if err == nil {
 			t.Fatal("reading a diff out of a non-repository succeeded")
 		}
@@ -504,7 +504,7 @@ func TestChangedFilesSeparatesUnknownRevisionsFromRealFailures(t *testing.T) {
 	})
 
 	t.Run("a revision that does exist", func(t *testing.T) {
-		if _, err := h.ChangedFiles(ctx, head, 0); err != nil {
+		if _, err := h.ChangedFiles(ctx, head, 0, -1); err != nil {
 			t.Errorf("ChangedFiles on HEAD: %v", err)
 		}
 	})
@@ -584,5 +584,140 @@ func TestMergeCheckAnswersBeforeAnythingIsMerged(t *testing.T) {
 	// answerable as one rather than as a fault.
 	if _, err := h.MergeCheck(ctx, "main", "0000000000000000000000000000000000000000"); !errors.Is(err, ErrNoSuchRevision) {
 		t.Errorf("an unknown commit gave %v, want ErrNoSuchRevision", err)
+	}
+}
+
+// A change is listed in full and read a little at a time.
+//
+// Every changed file appears, with its line counts, because that is the shape
+// of the change. What is not read is a binary file, whose bytes are not a
+// string a browser can show, and everything past the eager limit, because a
+// hundred-file change otherwise reads every file before anyone has looked at
+// the first one.
+func TestListingAChangeSaysWhatItDidNotRead(t *testing.T) {
+	h, dir := newProject(t)
+	ctx := context.Background()
+
+	if _, err := git(ctx, dir, "checkout", "-b", "work"); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []struct{ name, body string }{
+		{"a.txt", "one\ntwo\n"},
+		{"b.txt", "three\n"},
+		{"c.txt", "four\n"},
+	} {
+		if err := os.WriteFile(filepath.Join(dir, f.name), []byte(f.body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A file git will not diff: a NUL byte is enough to make it binary.
+	if err := os.WriteFile(filepath.Join(dir, "logo.png"), []byte{0x89, 'P', 'N', 'G', 0x00, 0x1a}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git(ctx, dir, "add", "."); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git(ctx, dir, "commit", "-m", "four files"); err != nil {
+		t.Fatal(err)
+	}
+	head, err := git(ctx, dir, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	files, err := h.ChangedFiles(ctx, head, 0, 2)
+	if err != nil {
+		t.Fatalf("ChangedFiles: %v", err)
+	}
+	if len(files) != 4 {
+		t.Fatalf("listed %d files, want all four: %+v", len(files), files)
+	}
+
+	by := map[string]ChangedFile{}
+	for _, f := range files {
+		by[f.Path] = f
+	}
+
+	// Counted without being read, which is what lets a list show the shape of
+	// a change before any of it is loaded.
+	if got := by["a.txt"]; got.Added != 2 {
+		t.Errorf("a.txt reports %d added, want 2", got.Added)
+	}
+
+	// The binary file is named and counted and not read: its bytes are not
+	// text, and reading them into a string to send to a browser is how a change
+	// to an image becomes a megabyte of mojibake.
+	png := by["logo.png"]
+	if !png.Binary || png.Content != "" || png.Diff != "" {
+		t.Errorf("the binary file came back %+v", png)
+	}
+
+	// Past the limit, files are listed and left. Not silently empty: a file
+	// with no content and no diff is otherwise indistinguishable from one that
+	// did not change.
+	deferred := 0
+	for _, f := range files {
+		if f.Deferred {
+			deferred++
+			if f.Content != "" || f.Diff != "" {
+				t.Errorf("%s is marked deferred and was read anyway", f.Path)
+			}
+		}
+	}
+	if deferred == 0 {
+		t.Error("nothing was deferred with an eager limit of two")
+	}
+
+	// And a deferred file is readable on demand.
+	var name string
+	for _, f := range files {
+		if f.Deferred && !f.Binary {
+			name = f.Path
+			break
+		}
+	}
+	one, err := h.LoadFile(ctx, "", head, name, 0)
+	if err != nil {
+		t.Fatalf("LoadFile(%s): %v", name, err)
+	}
+	if one.Deferred || one.Diff == "" {
+		t.Errorf("%s came back %+v, want it read", name, one)
+	}
+
+	// A file that is not in the change is the caller's mistake, and is
+	// answerable as one.
+	if _, err := h.LoadFile(ctx, "", head, "nothing.txt", 0); !errors.Is(err, ErrNoSuchRevision) {
+		t.Errorf("asking for a file outside the change gave %v", err)
+	}
+}
+
+// A file past the byte cap says so rather than coming back empty.
+func TestAnOversizedFileSaysSo(t *testing.T) {
+	h, dir := newProject(t)
+	ctx := context.Background()
+
+	if _, err := git(ctx, dir, "checkout", "-b", "big"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "big.txt"), []byte(strings.Repeat("line\n", 5000)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git(ctx, dir, "add", "."); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git(ctx, dir, "commit", "-m", "a big file"); err != nil {
+		t.Fatal(err)
+	}
+	head, _ := git(ctx, dir, "rev-parse", "HEAD")
+
+	files, err := h.ChangedFiles(ctx, head, 1024, -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("got %d files", len(files))
+	}
+	if !files[0].TooLarge {
+		t.Errorf("a file over the cap came back as %+v, which reads as a file that did not change", files[0])
 	}
 }

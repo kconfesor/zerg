@@ -564,6 +564,9 @@ export const api = {
     call<{ files: ChangedFile[]; range: boolean; base: string; seen: string[] }>(
       `/approvals/${id}/diff`,
     ),
+  /** One file of a change, for the ones a large diff left unread. */
+  approvalFile: (approvalId: string, path: string) =>
+    call<ChangedFile>(`/approvals/${approvalId}/file?path=${encodeURIComponent(path)}`),
   /** Record where a reader got to, so a review interrupted on one device
    *  resumes on the next. */
   markFileSeen: (approvalId: string, file: string, seen: boolean) =>
@@ -918,4 +921,15 @@ export interface ChangedFile {
   status: 'A' | 'M' | 'D' | string
   content?: string
   diff?: string
+  /** Line counts, which git reports without reading the file. */
+  added: number
+  removed: number
+  /** A file git will not diff: an image, a font, a compiled thing. Named and
+   *  counted rather than fetched. */
+  binary?: boolean
+  /** Past the byte cap. Said rather than left empty, since a file with no diff
+   *  is otherwise indistinguishable from one that did not change. */
+  tooLarge?: boolean
+  /** Listed but not read, because the change is large. Fetched when opened. */
+  deferred?: boolean
 }

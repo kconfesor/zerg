@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref, watch } from 'vue'
+import { useMediaQuery } from '@vueuse/core'
 import type { Attention } from '@/lib/api'
 import { AlertTriangle, ChevronRight, GitMerge, HelpCircle, MessageSquare } from '@lucide/vue'
 import { api, type ChangedFile, type Mergeable, type ReviewThread } from '@/lib/api'
@@ -12,6 +13,15 @@ import {
   InputGroupButton,
   InputGroupInput,
 } from '@/components/ui/input-group'
+
+/**
+ * Whether this is being read on a phone.
+ *
+ * Not a style detail: at 390px the composer's box measured 90 pixels wide with
+ * Remark, Ask and Cancel beside it, which is not a field anyone can write a
+ * remark in. Below this width the buttons go under the box instead.
+ */
+const narrow = useMediaQuery('(max-width: 639px)')
 
 const props = defineProps<{
   attention: Attention | null
@@ -139,6 +149,27 @@ function reading(id: string): string {
 function positionOf(id: string): { at: number; of: number } {
   const files = diffs.value[id]?.files ?? []
   return { at: files.findIndex((f) => f.path === reading(id)) + 1, of: files.length }
+}
+
+/**
+ * Read a file the listing left alone.
+ *
+ * A large change lists every file and reads the first thirty, because a
+ * hundred-file diff otherwise loads every file before anyone has opened one.
+ * The rest arrive when they are looked at.
+ */
+async function loadOne(id: string, path: string) {
+  const at = diffs.value[id]
+  if (!at) return
+  try {
+    const file = await api.approvalFile(id, path)
+    diffs.value = {
+      ...diffs.value,
+      [id]: { ...at, files: at.files.map((f) => (f.path === path ? file : f)) },
+    }
+  } catch (e) {
+    reviewError.value = e instanceof Error ? e.message : String(e)
+  }
 }
 
 async function setSeen(id: string, path: string, seen: boolean) {
@@ -552,7 +583,7 @@ function empty(a: Attention | null): boolean {
         <button
           v-if="diffs[a.id]?.files.length"
           type="button"
-          class="text-muted-foreground hover:text-foreground mb-1.5 flex items-center gap-1 text-[11px]"
+          class="text-muted-foreground hover:text-foreground mb-1.5 flex min-h-8 items-center gap-1 text-[11px] sm:min-h-0"
           @click="toggleDiff(a.id)"
         >
           <ChevronRight
@@ -597,24 +628,28 @@ function empty(a: Attention | null): boolean {
             </span>
             <span v-else class="text-[var(--status-good)]">· all read</span>
             <span class="ml-auto flex items-center gap-1">
-              <Button size="xs" variant="ghost" class="h-5 px-1.5 text-[10px]" @click="step(a.id, -1)">
+              <Button size="xs"
+                variant="ghost"
+                class="h-7 px-2 text-[11px] sm:h-5 sm:px-1.5 sm:text-[10px]" @click="step(a.id, -1)">
                 previous
               </Button>
-              <Button size="xs" variant="ghost" class="h-5 px-1.5 text-[10px]" @click="step(a.id, 1)">
+              <Button size="xs"
+                variant="ghost"
+                class="h-7 px-2 text-[11px] sm:h-5 sm:px-1.5 sm:text-[10px]" @click="step(a.id, 1)">
                 next
               </Button>
               <Button
                 v-if="unread(a.id)"
                 size="xs"
                 variant="outline"
-                class="h-5 px-1.5 text-[10px]"
+                class="h-7 px-2 text-[11px] sm:h-5 sm:px-1.5 sm:text-[10px]"
                 title="The next file you have not read (j)"
                 @click="nextUnread(a.id)"
               >
                 next unread
               </Button>
             </span>
-            <span class="text-muted-foreground/60 w-full">
+            <span class="text-muted-foreground/60 hidden w-full sm:block">
               j and k move, and mark what you leave as read
             </span>
           </div>
@@ -634,7 +669,7 @@ function empty(a: Attention | null): boolean {
             <button
               type="button"
               class="hairline-b hover:bg-muted focus-visible:outline-ring flex w-full items-center gap-2 px-2 py-1 text-left focus-visible:outline-2 focus-visible:-outline-offset-2"
-              @click="toggleFile(a, f)"
+              @click="toggleFile(a, f), f.deferred && loadOne(a.id, f.path)"
             >
               <ChevronRight
                 :size="12"
@@ -661,11 +696,11 @@ function empty(a: Attention | null): boolean {
                  and a review that decides that for you is worse than one that
                  keeps asking. -->
             <label
-              class="hairline-b text-muted-foreground flex items-center gap-1.5 px-2 py-1 text-[10px]"
+              class="hairline-b text-muted-foreground flex items-center gap-2 px-2 py-2 text-[11px] sm:gap-1.5 sm:py-1 sm:text-[10px]"
             >
               <input
                 type="checkbox"
-                class="size-3"
+                class="size-4 sm:size-3"
                 :checked="isSeen(a.id, f.path)"
                 :aria-label="`Mark ${f.path} read`"
                 @change="setSeen(a.id, f.path, ($event.target as HTMLInputElement).checked)"
@@ -680,6 +715,27 @@ function empty(a: Attention | null): boolean {
               class="md max-h-[26rem] min-w-0 overflow-auto px-3 py-2 text-xs leading-relaxed"
               v-html="renderMarkdown(f.content ?? '')"
             />
+            <!-- What was not read, and why. A file with no diff is otherwise
+                 indistinguishable from a file that did not change. -->
+            <p
+              v-else-if="defaultOpen(a, f) && f.binary"
+              class="text-muted-foreground px-2 py-1.5 text-[11px]"
+            >
+              Binary file, {{ f.status === 'D' ? 'removed' : 'changed' }}. Nothing to read here.
+            </p>
+            <p
+              v-else-if="defaultOpen(a, f) && f.tooLarge"
+              class="text-muted-foreground px-2 py-1.5 text-[11px]"
+            >
+              Too large to show: {{ f.added }} added, {{ f.removed }} removed. Read it in the
+              repository.
+            </p>
+            <p
+              v-else-if="defaultOpen(a, f) && f.deferred"
+              class="text-muted-foreground px-2 py-1.5 text-[11px]"
+            >
+              Loading…
+            </p>
             <div v-else-if="defaultOpen(a, f)" class="max-h-96 overflow-y-auto py-1">
               <DiffView
                 v-if="f.diff"
@@ -716,7 +772,7 @@ function empty(a: Attention | null): boolean {
                   <button
                     v-if="t.kind === 'question'"
                     type="button"
-                    class="hover:text-foreground focus-visible:outline-ring ml-auto underline-offset-2 hover:underline focus-visible:outline-2"
+                    class="hover:text-foreground focus-visible:outline-ring ml-auto -my-1.5 inline-flex min-h-8 items-center px-1 underline-offset-2 hover:underline focus-visible:outline-2 sm:my-0 sm:min-h-0 sm:px-0"
                     title="Make this a remark, which has to be settled before the work lands"
                     @click="raise(a.taskId, t.id)"
                   >
@@ -725,7 +781,7 @@ function empty(a: Attention | null): boolean {
                   <button
                     v-else
                     type="button"
-                    class="hover:text-foreground focus-visible:outline-ring ml-auto underline-offset-2 hover:underline focus-visible:outline-2"
+                    class="hover:text-foreground focus-visible:outline-ring ml-auto -my-1.5 inline-flex min-h-8 items-center px-1 underline-offset-2 hover:underline focus-visible:outline-2 sm:my-0 sm:min-h-0 sm:px-0"
                     @click="settle(a.taskId, t)"
                   >
                     {{ t.state === 'open' ? 'settle' : 'reopen' }}
@@ -769,7 +825,7 @@ function empty(a: Attention | null): boolean {
                     autofocus
                     @keyup.enter="startThread(a)"
                   />
-                  <InputGroupAddon align="inline-end">
+                  <InputGroupAddon :align="narrow ? 'block-end' : 'inline-end'">
                     <InputGroupButton size="sm" :disabled="!draft.trim()" @click="startThread(a)">
                       Remark
                     </InputGroupButton>
@@ -794,7 +850,7 @@ function empty(a: Attention | null): boolean {
                     v-for="q in PROMPTS"
                     :key="q"
                     type="button"
-                    class="text-muted-foreground hover:text-foreground focus-visible:outline-ring border px-1.5 py-0.5 text-[10px] focus-visible:outline-2"
+                    class="text-muted-foreground hover:text-foreground focus-visible:outline-ring border px-2 py-1.5 text-[11px] focus-visible:outline-2 sm:px-1.5 sm:py-0.5 sm:text-[10px]"
                     @click="draft = q"
                   >
                     {{ q }}
@@ -808,7 +864,7 @@ function empty(a: Attention | null): boolean {
             <button
               v-if="defaultOpen(a, f) && !composingHere(a.taskId, f.path)"
               type="button"
-              class="text-muted-foreground hover:text-foreground focus-visible:outline-ring hairline-t w-full px-2 py-1 text-left text-[10px] focus-visible:outline-2"
+              class="text-muted-foreground hover:text-foreground focus-visible:outline-ring hairline-t w-full px-2 py-2.5 text-left text-[11px] focus-visible:outline-2 sm:py-1 sm:text-[10px]"
               @click="compose(a.taskId, f.path, 0)"
             >
               comment on this file
@@ -865,7 +921,7 @@ function empty(a: Attention | null): boolean {
           v-model="notes[a.id]"
           placeholder="reason, if rejecting"
         />
-        <InputGroupAddon align="inline-end">
+        <InputGroupAddon :align="narrow ? 'block-end' : 'inline-end'">
           <InputGroupButton
             variant="default"
             size="sm"

@@ -11,7 +11,7 @@
  * at rather than described — "the third line of the second block" is not a
  * useful thing to say to anyone.
  */
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 
 const props = defineProps<{
   diff: string
@@ -90,6 +90,68 @@ const rows = computed<Row[]>(() => {
   return out
 })
 
+/**
+ * Hunks whose change is only whitespace, folded away.
+ *
+ * A reformat that touches four hundred lines and changes nothing is the most
+ * common way a diff becomes unreadable: the change worth reading is somewhere
+ * in it, and finding it means checking every line to see whether anything moved
+ * but the indentation. Compared with whitespace stripped, in order, so a hunk
+ * that only re-indents is one line saying so.
+ */
+const hunks = computed(() => {
+  const out: { start: number; end: number; whitespaceOnly: boolean }[] = []
+  let start = -1
+  const close = (end: number) => {
+    if (start < 0) return
+    const slice = rows.value.slice(start, end)
+    const added = slice.filter((r) => r.kind === 'add').map((r) => r.text.replace(/\s+/g, ''))
+    const removed = slice.filter((r) => r.kind === 'del').map((r) => r.text.replace(/\s+/g, ''))
+    out.push({
+      start,
+      end,
+      whitespaceOnly:
+        added.length > 0 &&
+        added.length === removed.length &&
+        added.every((line, i) => line === removed[i]),
+    })
+    start = -1
+  }
+  rows.value.forEach((r, i) => {
+    if (r.kind === 'hunk') {
+      close(i)
+      start = i
+    }
+  })
+  close(rows.value.length)
+  return out
+})
+
+/** Which hunk a row belongs to, and whether that hunk is only whitespace. */
+function hunkOf(index: number) {
+  return hunks.value.find((h) => index >= h.start && index < h.end)
+}
+
+const unfolded = ref<Set<number>>(new Set())
+
+function hidden(index: number): boolean {
+  const h = hunkOf(index)
+  if (!h?.whitespaceOnly || unfolded.value.has(h.start)) return false
+  // The header stays: it is the line that says what was folded and offers to
+  // show it.
+  return index !== h.start
+}
+
+function foldedCount(index: number): number {
+  const h = hunkOf(index)
+  return h?.whitespaceOnly && !unfolded.value.has(h.start) ? h.end - h.start - 1 : 0
+}
+
+function unfold(index: number) {
+  const h = hunkOf(index)
+  if (h) unfolded.value = new Set(unfolded.value).add(h.start)
+}
+
 /** Added and removed counts, which is the shape of a change at a glance. */
 const stat = computed(() => ({
   added: rows.value.filter((r) => r.kind === 'add').length,
@@ -107,6 +169,7 @@ const stat = computed(() => ({
     <div class="overflow-x-auto">
       <div
         v-for="(r, i) in rows"
+        v-show="!hidden(i)"
         :key="i"
         :class="[
           'flex gap-2 px-2 whitespace-pre',
@@ -148,6 +211,15 @@ const stat = computed(() => ({
           {{ r.kind === 'add' ? '+' : r.kind === 'del' ? '−' : '' }}
         </span>
         <span class="min-w-0">{{ r.text }}</span>
+        <!-- A reformat says so in one line rather than in four hundred. -->
+        <button
+          v-if="foldedCount(i)"
+          type="button"
+          class="text-muted-foreground hover:text-foreground focus-visible:outline-ring ml-2 shrink-0 underline-offset-2 hover:underline focus-visible:outline-2"
+          @click="unfold(i)"
+        >
+          whitespace only, {{ foldedCount(i) }} lines hidden
+        </button>
       </div>
     </div>
   </div>
