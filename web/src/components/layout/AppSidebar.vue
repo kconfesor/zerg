@@ -15,6 +15,7 @@ import {
   GripVertical,
   Plus,
   Receipt,
+  ScrollText,
   Settings as SettingsIcon,
   Users,
   X,
@@ -324,6 +325,9 @@ const nav = computed(() => [
   { key: 'projects' as const, label: 'Projects', icon: FolderGit2, count: props.projectCount },
   { key: 'team' as const, label: 'Team', icon: Users, count: 0 },
   { key: 'chat' as const, label: 'Chat', icon: MessageSquare, count: 0 },
+  // After Chat rather than beside the board: what happened is read now and
+  // then, and the destinations you use while work is running come first.
+  { key: 'history' as const, label: 'History', icon: ScrollText, count: 0 },
   { key: 'spend' as const, label: 'Spend', icon: Receipt, count: 0 },
   { key: 'activity' as const, label: 'Activity', icon: ActivityIcon, count: 0 },
   { key: 'settings' as const, label: 'Settings', icon: SettingsIcon, count: 0 },

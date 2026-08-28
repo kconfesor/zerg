@@ -26,6 +26,7 @@ import Chat from '@/components/Chat.vue'
 import MarkdownEditor from '@/components/MarkdownEditor.vue'
 import Projects from '@/components/Projects.vue'
 import ProjectPathField from '@/components/ProjectPathField.vue'
+import History from '@/components/History.vue'
 import TaskDetail from '@/components/TaskDetail.vue'
 import Settings from '@/components/Settings.vue'
 import ReadinessPanel from '@/components/Readiness.vue'
@@ -915,6 +916,23 @@ watch(current, () => (banner.value = null))
                 @readiness="checkReadiness"
                 @roles-changed="reloadLibrary"
               />
+            </div>
+          </template>
+
+          <!-- History -->
+          <template v-else-if="view === 'history'">
+            <PageHeader
+              title="History"
+              subtitle="What this project has worked on, what became of it, and what it cost. Wall time is what you waited; working time is what the agents ran for."
+            />
+            <div class="pt-4">
+              <History
+                v-if="current"
+                :project-id="current.id"
+                :roles="team.map((r) => r.name)"
+                @open="(t) => (openTask = t)"
+              />
+              <p v-else class="text-muted-foreground text-sm">Choose a project to read its history.</p>
             </div>
           </template>
 

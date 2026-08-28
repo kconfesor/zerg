@@ -11,6 +11,8 @@ import (
 	"github.com/kconfesor/zerg/internal/hatchery"
 	"github.com/kconfesor/zerg/internal/store"
 	"github.com/kconfesor/zerg/internal/tailnet"
+	"strconv"
+	"time"
 )
 
 // settingsResponse is the settings form plus the facts it needs to be filled
@@ -175,7 +177,7 @@ type taskDetail struct {
 }
 
 type taskStep struct {
-	store.Handoff
+	store.TrailStep
 	// Subject is the commit's first line. The body says what a role decided;
 	// the subject says what it committed, and the two are rarely the same
 	// sentence.
@@ -191,7 +193,7 @@ func (s *Server) taskDetail(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	history, err := s.db.TaskHistory(r.Context(), id)
+	history, err := s.db.TaskTrail(r.Context(), id)
 	if err != nil {
 		s.fail(w, r, err)
 		return
@@ -211,7 +213,7 @@ func (s *Server) taskDetail(w http.ResponseWriter, r *http.Request) {
 
 	steps := make([]taskStep, 0, len(history))
 	for _, h := range history {
-		step := taskStep{Handoff: h}
+		step := taskStep{TrailStep: h}
 		if hat != nil && h.Commit != "" {
 			step.Subject = hat.Subject(r.Context(), h.Commit)
 		}
@@ -219,6 +221,70 @@ func (s *Server) taskDetail(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, taskDetail{Task: task, History: steps, Usage: usage})
+}
+
+// taskEvents is one step's transcript: what a role actually did while it held
+// the work.
+//
+// Bounded by the window the trail gives it rather than returning a card's whole
+// history, because that is the question being asked. Events are the tier that
+// ages out (ARCHITECTURE §12.1), so an empty answer is an ordinary one and the
+// caller says so rather than showing an empty box.
+func (s *Server) taskEvents(w http.ResponseWriter, r *http.Request) {
+	task, err := s.db.GetTask(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	q := r.URL.Query()
+	from, err := optionalTime(q.Get("from"))
+	if err != nil {
+		badRequest(w, "from is not a time: "+q.Get("from"))
+		return
+	}
+	until, err := optionalTime(q.Get("until"))
+	if err != nil {
+		badRequest(w, "until is not a time: "+q.Get("until"))
+		return
+	}
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	if limit <= 0 {
+		limit = stepTranscriptLimit
+	}
+	// One more than asked for, so a full page can be told from a page that
+	// happens to end. A transcript cut at five hundred rows reads exactly like
+	// a step that made five hundred calls and stopped.
+	events, err := s.db.ListEvents(r.Context(), store.EventQuery{
+		ProjectID: task.ProjectID,
+		Task:      task.ID,
+		Role:      q.Get("role"),
+		From:      from,
+		Until:     until,
+		Limit:     limit + 1,
+	})
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	truncated := len(events) > limit
+	if truncated {
+		events = events[:limit]
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"events":    orEmpty(events),
+		"truncated": truncated,
+	})
+}
+
+// stepTranscriptLimit bounds one step's transcript. A step is minutes of one
+// role's work, so this is generous; the flag beside it is what matters.
+const stepTranscriptLimit = 500
+
+func optionalTime(v string) (time.Time, error) {
+	if v == "" {
+		return time.Time{}, nil
+	}
+	return time.Parse(time.RFC3339Nano, v)
 }
 
 type integrationRequest struct {
@@ -395,6 +461,28 @@ func (s *Server) setTaskHidden(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.db.SetTaskHidden(r.Context(), r.PathValue("id"), req.Hidden); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	task, err := s.db.GetTask(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, task)
+}
+
+// setTaskPinned keeps a card's transcript past the retention window, or hands
+// it back to the sweep.
+func (s *Server) setTaskPinned(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Pinned bool `json:"pinned"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.fail(w, r, fmt.Errorf("reading request: %w", err))
+		return
+	}
+	if err := s.db.SetTaskPinned(r.Context(), r.PathValue("id"), req.Pinned); err != nil {
 		s.fail(w, r, err)
 		return
 	}

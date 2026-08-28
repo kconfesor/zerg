@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -145,6 +146,7 @@ func (s *Server) Routes() http.Handler {
 
 	// The board and what needs a human.
 	mux.HandleFunc("GET /api/projects/{id}/tasks", s.listTasks)
+	mux.HandleFunc("GET /api/projects/{id}/history", s.listHistory)
 	mux.HandleFunc("POST /api/projects/{id}/tasks", s.newTask)
 	mux.HandleFunc("GET /api/projects/{id}/attention", s.attention)
 	mux.HandleFunc("GET /api/projects/{id}/usage", s.usage)
@@ -152,7 +154,9 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/projects/{id}/stream", s.stream)
 	mux.HandleFunc("GET /api/tasks/{id}", s.taskDetail)
 	mux.HandleFunc("GET /api/tasks/{id}/usage", s.taskUsage)
+	mux.HandleFunc("GET /api/tasks/{id}/events", s.taskEvents)
 	mux.HandleFunc("PUT /api/tasks/{id}/hidden", s.setTaskHidden)
+	mux.HandleFunc("PUT /api/tasks/{id}/pinned", s.setTaskPinned)
 	mux.HandleFunc("POST /api/tasks/{id}/stop", s.stopTask)
 	mux.HandleFunc("DELETE /api/tasks/{id}", s.deleteTask)
 	mux.HandleFunc("GET /api/approvals/{id}/diff", s.approvalDiff)
@@ -443,6 +447,32 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// listHistory answers "what has this project worked on", newest first.
+//
+// Paged on a cursor rather than an offset: a page taken while a task finishes
+// would repeat a row or skip one, and history is read while work continues.
+// `next` is empty on the last page, which is how the caller knows to stop.
+func (s *Server) listHistory(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	limit, err := strconv.Atoi(q.Get("limit"))
+	if q.Get("limit") != "" && (err != nil || limit < 1) {
+		badRequest(w, "limit must be a positive whole number")
+		return
+	}
+	entries, next, err := s.db.ListHistory(r.Context(), r.PathValue("id"), store.HistoryFilter{
+		Outcome: q.Get("outcome"),
+		Role:    q.Get("role"),
+		Query:   q.Get("q"),
+		Before:  q.Get("before"),
+		Limit:   limit,
+	})
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"entries": orEmpty(entries), "next": next})
 }
 
 // ── team ──────────────────────────────────────────────────────────────────

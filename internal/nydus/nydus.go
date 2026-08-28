@@ -43,7 +43,10 @@ type Integrator interface {
 	// actually completed: the commit already contained in the base branch, or
 	// the pull request already open. It is what lets a crash mid-integration be
 	// reconciled from the repository rather than guessed at.
-	Landed(ctx context.Context, repoPath, base, commit, title, mode string) (bool, error)
+	// Landed says whether the work is already integrated and where it went.
+	// The second answer matters for a gated pull request: its note was written
+	// before anyone approved it, so the URL exists only here.
+	Landed(ctx context.Context, repoPath, base, commit, title, mode string) (string, bool, error)
 
 	// Resolve turns a commit-ish into the absolute sha it names in the tree at
 	// path. Every commit that enters the system goes through this.
@@ -487,6 +490,10 @@ func (n *Nydus) complete(ctx context.Context, projectID string, sender store.Res
 	// How to integrate is the project's decision, not the role's: only the
 	// terminal role gets here, and which role that is changes when the team
 	// does.
+	// What happened to the work, recorded with the card rather than left to be
+	// reconstructed later from the project's setting as it stands then, or from
+	// the sentence appended to the note below.
+	outcome, outcomeRef := "", ""
 	var published string
 	if n.integrator != nil {
 		project, err := n.db.GetProject(ctx, projectID)
@@ -497,6 +504,7 @@ func (n *Nydus) complete(ctx context.Context, projectID string, sender store.Res
 		case store.IntegrateBranch:
 			// Nothing to do. The work is committed on the role's branch and
 			// landing it is someone else's decision.
+			outcome, outcomeRef = store.OutcomeBranch, req.Commit
 
 		case store.IntegratePR:
 			// The handoff note becomes the description — it is already an
@@ -508,11 +516,13 @@ func (n *Nydus) complete(ctx context.Context, projectID string, sender store.Res
 				return nil, fmt.Errorf("opening a pull request for %s: %w", task.Name, err)
 			}
 			published = url
+			outcome, outcomeRef = store.OutcomePR, url
 
 		default:
 			if err := n.integrator.Merge(ctx, project.Path, project.BaseBranch, req.Commit); err != nil {
 				return nil, fmt.Errorf("merging %s into %s: %w", req.Commit, project.BaseBranch, err)
 			}
+			outcome, outcomeRef = store.OutcomeMerged, req.Commit
 		}
 	}
 
@@ -552,9 +562,10 @@ func (n *Nydus) complete(ctx context.Context, projectID string, sender store.Res
 		return nil, err
 	}
 	res, err := tx.ExecContext(ctx,
-		`UPDATE tasks SET lane = ?, state = ?, completed_at = ?
+		`UPDATE tasks SET lane = ?, state = ?, completed_at = ?, outcome = ?, outcome_ref = ?
 		  WHERE id = ? AND project_id = ?`,
-		store.LaneDone, store.TaskDone, now.Format(time.RFC3339Nano), task.ID, projectID)
+		store.LaneDone, store.TaskDone, now.Format(time.RFC3339Nano), outcome, outcomeRef,
+		task.ID, projectID)
 	if err != nil {
 		return nil, fmt.Errorf("closing card: %w", err)
 	}
@@ -1061,7 +1072,7 @@ func (n *Nydus) decide(ctx context.Context, approvalID, decision, note string) e
 	//
 	// The transaction is not holding anything yet that this needs, and a git
 	// subprocess must never run while it holds the single write lock.
-	var landed string
+	var landed, outcome, outcomeRef string
 	if decision == store.ApprovalApproved && terminal != 0 && taskID.Valid {
 		// Claim it before doing anything irreversible.
 		//
@@ -1085,7 +1096,7 @@ func (n *Nydus) decide(ctx context.Context, approvalID, decision, note string) e
 			return fmt.Errorf("claiming approval: %w", err)
 		}
 
-		if landed, err = n.landApproved(ctx, projectID, taskID.String, commit.String, body); err != nil {
+		if landed, outcome, outcomeRef, err = n.landApproved(ctx, projectID, taskID.String, commit.String, body); err != nil {
 			// Hand it back, or a failed merge would leave the card stuck
 			// mid-decision with no way to retry.
 			if _, rerr := n.db.SQL().ExecContext(ctx,
@@ -1130,8 +1141,9 @@ func (n *Nydus) decide(ctx context.Context, approvalID, decision, note string) e
 		// A completion has no routes to release; approving it finishes the task.
 		if taskID.Valid {
 			if _, err := tx.ExecContext(ctx,
-				`UPDATE tasks SET lane = ?, state = ?, completed_at = ? WHERE id = ?`,
-				store.LaneDone, store.TaskDone, now, taskID.String); err != nil {
+				`UPDATE tasks SET lane = ?, state = ?, completed_at = ?, outcome = ?, outcome_ref = ?
+				  WHERE id = ?`,
+				store.LaneDone, store.TaskDone, now, outcome, outcomeRef, taskID.String); err != nil {
 				return fmt.Errorf("closing card: %w", err)
 			}
 		}
@@ -1302,6 +1314,7 @@ func (n *Nydus) ReconcileIntegrating(ctx context.Context) (settled, released int
 
 	for _, a := range pending {
 		landed := false
+		outcome, outcomeRef := "", ""
 		if n.integrator != nil && a.taskID.Valid {
 			project, err := n.db.GetProject(ctx, a.projectID)
 			if err != nil {
@@ -1311,8 +1324,21 @@ func (n *Nydus) ReconcileIntegrating(ctx context.Context) (settled, released int
 			if err != nil {
 				return settled, released, err
 			}
-			landed, err = n.integrator.Landed(ctx, project.Path, project.BaseBranch,
+			var where string
+			where, landed, err = n.integrator.Landed(ctx, project.Path, project.BaseBranch,
 				a.commit.String, task.Name, project.Integration)
+			// The mode this was integrated under is the one being asked about
+			// right here, which is the only moment it can be recorded honestly,
+			// and git is the only thing that still knows where the work went:
+			// a gated completion's note was written before it was published.
+			switch project.Integration {
+			case store.IntegrateBranch:
+				outcome, outcomeRef = store.OutcomeBranch, a.commit.String
+			case store.IntegratePR:
+				outcome, outcomeRef = store.OutcomePR, where
+			default:
+				outcome, outcomeRef = store.OutcomeMerged, a.commit.String
+			}
 			if err != nil {
 				// Unanswerable is not the same as no. Leave it claimed rather
 				// than releasing an approval whose merge may have happened, and
@@ -1331,7 +1357,7 @@ func (n *Nydus) ReconcileIntegrating(ctx context.Context) (settled, released int
 			released++
 			continue
 		}
-		if err := n.finishIntegrated(ctx, a.id, a.taskID.String); err != nil {
+		if err := n.finishIntegrated(ctx, a.id, a.taskID.String, outcome, outcomeRef); err != nil {
 			return settled, released, err
 		}
 		settled++
@@ -1341,7 +1367,7 @@ func (n *Nydus) ReconcileIntegrating(ctx context.Context) (settled, released int
 
 // finishIntegrated records the approval and closes the card for work that is
 // already in the base branch.
-func (n *Nydus) finishIntegrated(ctx context.Context, approvalID, taskID string) error {
+func (n *Nydus) finishIntegrated(ctx context.Context, approvalID, taskID, outcome, outcomeRef string) error {
 	now := n.now().Format(time.RFC3339Nano)
 	tx, err := n.db.SQL().BeginTx(ctx, nil)
 	if err != nil {
@@ -1362,8 +1388,9 @@ func (n *Nydus) finishIntegrated(ctx context.Context, approvalID, taskID string)
 	}
 	if taskID != "" {
 		if _, err := tx.ExecContext(ctx,
-			`UPDATE tasks SET lane = ?, state = ?, completed_at = COALESCE(completed_at, ?) WHERE id = ?`,
-			store.LaneDone, store.TaskDone, now, taskID); err != nil {
+			`UPDATE tasks SET lane = ?, state = ?, completed_at = COALESCE(completed_at, ?),
+			   outcome = ?, outcome_ref = ? WHERE id = ?`,
+			store.LaneDone, store.TaskDone, now, outcome, outcomeRef, taskID); err != nil {
 			return fmt.Errorf("closing card: %w", err)
 		}
 	}
@@ -1559,28 +1586,36 @@ func (n *Nydus) holdCompletion(ctx context.Context, projectID string, sender sto
 // written, the approval is still pending, and the operator can fix the cause
 // and approve again. The alternative records a decision over a branch that
 // never moved.
-func (n *Nydus) landApproved(ctx context.Context, projectID, taskID, commit, body string) (string, error) {
+// landApproved integrates an approved completion and says how it went: the
+// outcome, and where the work ended up. Both are recorded with the card, since
+// the project's integration setting is a live value and answers a different
+// question tomorrow than it did at the moment a task ended.
+func (n *Nydus) landApproved(ctx context.Context, projectID, taskID, commit, body string) (url, outcome, ref string, err error) {
 	if n.integrator == nil {
-		return "", nil
+		return "", "", "", nil
 	}
 	project, err := n.db.GetProject(ctx, projectID)
 	if err != nil {
-		return "", err
+		return "", "", "", err
 	}
 	task, err := n.db.GetTask(ctx, taskID)
 	if err != nil {
-		return "", err
+		return "", "", "", err
 	}
 
 	switch project.Integration {
 	case store.IntegrateBranch:
-		return "", nil
+		return "", store.OutcomeBranch, commit, nil
 	case store.IntegratePR:
-		return n.integrator.Publish(ctx, project.Path, project.BaseBranch, commit, task.Name, body, project.PRDraft)
+		url, err := n.integrator.Publish(ctx, project.Path, project.BaseBranch, commit, task.Name, body, project.PRDraft)
+		if err != nil {
+			return "", "", "", err
+		}
+		return url, store.OutcomePR, url, nil
 	default:
 		if err := n.integrator.Merge(ctx, project.Path, project.BaseBranch, commit); err != nil {
-			return "", fmt.Errorf("merging %s into %s: %w", commit, project.BaseBranch, err)
+			return "", "", "", fmt.Errorf("merging %s into %s: %w", commit, project.BaseBranch, err)
 		}
-		return "", nil
+		return "", store.OutcomeMerged, commit, nil
 	}
 }

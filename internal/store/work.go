@@ -26,6 +26,23 @@ const (
 	// apart, and it answers "when" as well.
 )
 
+// What happened to the work when a task finished. Empty on a card that has not
+// ended, and on one that ended before schema 19 recorded this.
+const (
+	// OutcomeMerged: the commit is in the base branch.
+	OutcomeMerged = "merged"
+	// OutcomePR: a pull request was opened, and OutcomeRef is its URL.
+	OutcomePR = "pr"
+	// OutcomeBranch: the work is committed on the role's branch and landing it
+	// is someone else's decision.
+	OutcomeBranch = "branch"
+)
+
+// OperatorRole is the sender of the message that opens a card. It is a person,
+// not an agent, and it is on every task, so the history lists the roles that
+// worked on a card without it.
+const OperatorRole = "operator"
+
 // LaneDone is the well a finished card lands in.
 const LaneDone = "done"
 
@@ -80,6 +97,20 @@ type Task struct {
 	// StoppedAt is set when a person parked this card, which is a different
 	// event from a role rejecting it even though both leave State "rejected".
 	StoppedAt *time.Time `json:"stoppedAt,omitempty"`
+
+	// Outcome is what happened to the work when the last role finished, and
+	// OutcomeRef is where it went: the commit that was merged, or the pull
+	// request's URL. Recorded at the moment it happens, because the project's
+	// integration setting is what it is *now* and a task ended under whatever
+	// it was then.
+	Outcome    string `json:"outcome,omitempty"`
+	OutcomeRef string `json:"outcomeRef,omitempty"`
+
+	// Pinned keeps this card's transcript past the retention window. Events are
+	// swept because they are the expensive tier (ARCHITECTURE §12.1); the card
+	// worth reading in six months is usually the one that went wrong, and this
+	// is how it is kept.
+	Pinned bool `json:"pinned"`
 
 	// Tokens and CostUSD are what this card has cost across every role and
 	// every lap. A board that shows only a lane says nothing about the price
@@ -184,14 +215,15 @@ func (db *DB) CreateTask(ctx context.Context, projectID, name, body, lane string
 }
 
 const taskCols = `id, project_id, session_id, name, body, lane, state,
-	created_at, first_claimed_at, completed_at, active_ms, rework_count, hidden, stopped_at`
+	created_at, first_claimed_at, completed_at, active_ms, rework_count, hidden, stopped_at,
+	outcome, outcome_ref, pinned`
 
 // taskColsT is the same list qualified to the tasks table, for the queries that
 // join. Unqualified names resolve today and would become ambiguous the moment a
 // joined table gained a column of the same name.
 const taskColsT = `t.id, t.project_id, t.session_id, t.name, t.body, t.lane, t.state,
 	t.created_at, t.first_claimed_at, t.completed_at, t.active_ms, t.rework_count, t.hidden,
-	t.stopped_at`
+	t.stopped_at, t.outcome, t.outcome_ref, t.pinned`
 
 // GetTaskIn resolves a task that must belong to this project.
 //
@@ -278,6 +310,7 @@ func scanTaskWithSummary(s scanner) (*Task, error) {
 	)
 	if err := s.Scan(&t.ID, &t.ProjectID, &sessionID, &t.Name, &t.Body, &t.Lane, &t.State,
 		&created, &firstClaim, &completedAt, &t.ActiveMS, &t.ReworkCount, &t.Hidden, &stoppedAt,
+		&t.Outcome, &t.OutcomeRef, &t.Pinned,
 		&t.Tokens, &t.CostUSD, &t.Doing); err != nil {
 		return nil, err
 	}
@@ -298,7 +331,7 @@ func scanTask(s scanner) (*Task, error) {
 	)
 	if err := s.Scan(&t.ID, &t.ProjectID, &sessionID, &t.Name, &t.Body, &t.Lane, &t.State,
 		&created, &firstClaim, &completedAt, &t.ActiveMS, &t.ReworkCount, &t.Hidden,
-		&stoppedAt); err != nil {
+		&stoppedAt, &t.Outcome, &t.OutcomeRef, &t.Pinned); err != nil {
 		return nil, err
 	}
 	if err := fillTaskTimes(&t, sessionID, created, firstClaim, completedAt, stoppedAt); err != nil {
@@ -541,6 +574,28 @@ func (db *DB) GetClarification(ctx context.Context, id string) (*Clarification, 
 	return c, err
 }
 
+// ClarificationsForTask returns every question raised on a task, answered or
+// not, oldest first. The trail reads these; Attention reads the open ones.
+func (db *DB) ClarificationsForTask(ctx context.Context, taskID string) ([]Clarification, error) {
+	rows, err := db.read.QueryContext(ctx,
+		`SELECT id, project_id, task_id, role, question, answer, state, created_at, answered_at
+		 FROM clarifications WHERE task_id = ? ORDER BY created_at`, taskID)
+	if err != nil {
+		return nil, fmt.Errorf("listing a task's clarifications: %w", err)
+	}
+	defer rows.Close()
+
+	out := []Clarification{}
+	for rows.Next() {
+		c, err := scanClarification(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *c)
+	}
+	return out, rows.Err()
+}
+
 // ListOpenClarifications returns what Attention must show.
 func (db *DB) ListOpenClarifications(ctx context.Context, projectID string) ([]Clarification, error) {
 	rows, err := db.read.QueryContext(ctx,
@@ -762,6 +817,18 @@ func (db *DB) GetApproval(ctx context.Context, id string) (*Approval, error) {
 // finished, and unhiding must return it exactly as it was. Only tasks that
 // have actually finished can be hidden — putting away something still moving
 // through the pipeline would hide the work, not the record of it.
+// SetTaskPinned keeps a task's transcript, or lets the sweep have it.
+//
+// Any task, not only a finished one: a card being worked on is exactly when
+// somebody decides it is the one they will want to read later.
+func (db *DB) SetTaskPinned(ctx context.Context, id string, pinned bool) error {
+	res, err := db.sql.ExecContext(ctx, `UPDATE tasks SET pinned = ? WHERE id = ?`, pinned, id)
+	if err != nil {
+		return fmt.Errorf("pinning %s: %w", id, err)
+	}
+	return mustAffect(res, fmt.Sprintf("task %s", id))
+}
+
 func (db *DB) SetTaskHidden(ctx context.Context, id string, hidden bool) error {
 	res, err := db.sql.ExecContext(ctx,
 		`UPDATE tasks SET hidden = ? WHERE id = ? AND state = 'done'`, hidden, id)
@@ -884,4 +951,428 @@ func (db *DB) DeleteTask(ctx context.Context, projectID, taskID string) error {
 		return ErrNotFound
 	}
 	return tx.Commit()
+}
+
+// ── history ───────────────────────────────────────────────────────────────
+
+// HistoryEntry is one worked task as the history screen reads it: the card,
+// what it cost, and which roles touched it.
+type HistoryEntry struct {
+	Task
+	// Roles that sent at least one handoff on this task, in the order they
+	// first did. Which agents worked on it is the question a list of names
+	// answers and a lane does not.
+	Roles []string `json:"roles"`
+
+	// HasTranscript is whether this card's events are still here, asked of the
+	// table rather than worked out from the retention window: a sweep that has
+	// not run yet and a window that was lengthened afterwards both make that
+	// arithmetic wrong, and the answer decides whether a step can be opened.
+	HasTranscript bool `json:"hasTranscript"`
+}
+
+// HistoryFilter narrows the list. Zero values mean no narrowing.
+type HistoryFilter struct {
+	Outcome string // merged, pr, branch, or "none" for a card that ended without one
+	Role    string // touched by this role
+	Query   string // matches the task name
+	// Before is the cursor from a previous page: everything strictly older
+	// than this position. Empty starts at the newest.
+	Before string
+	Limit  int
+}
+
+// ListHistory returns worked tasks newest first, a page at a time.
+//
+// Not ListTasks with a filter. That query carries a per-card subquery for what
+// each agent is doing right now, which the board polls every two seconds and
+// history has no use for, and it returns every card a project has ever had in
+// one answer. This one is ordered by when work ended, pages on a cursor, and
+// includes the cards a person has put away, which are exactly the ones history
+// is for.
+func (db *DB) ListHistory(ctx context.Context, projectID string, f HistoryFilter) ([]HistoryEntry, string, error) {
+	limit := f.Limit
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+
+	where := []string{"t.project_id = ?"}
+	// The operator is the sender of the message that opens every card, so it is
+	// on every row and says nothing about who worked on it. The trail still
+	// shows that first message; this is the list of agents.
+	args := []any{OperatorRole, projectID}
+	switch {
+	case f.Outcome == "none":
+		where = append(where, "t.outcome = ''")
+	case f.Outcome != "":
+		where = append(where, "t.outcome = ?")
+		args = append(args, f.Outcome)
+	}
+	if f.Role != "" {
+		where = append(where, `EXISTS (SELECT 1 FROM messages r WHERE r.task_id = t.id AND r.from_role = ?)`)
+		args = append(args, f.Role)
+	}
+	if q := strings.TrimSpace(f.Query); q != "" {
+		where = append(where, "t.name LIKE ? ESCAPE '\\'")
+		args = append(args, "%"+likeEscape(q)+"%")
+	}
+	// The cursor is a position, not an offset: a page taken while a task
+	// finishes would otherwise repeat a row or skip one. Row values compare
+	// left to right, so the id breaks ties between two cards that ended in the
+	// same nanosecond.
+	//
+	// Unfinished cards sort first as a group, and the rest by when they ended,
+	// which is a key that never changes once written. Ordering everything by
+	// "completed, or else created" made the key of a running card move the
+	// moment it finished: a card below the cursor jumped above it and no later
+	// page could return it. What is left of that is a card still running while
+	// you page past the first fifty, which is a queue nobody is watching.
+	if at, id, ok := splitCursor(f.Before); ok {
+		where = append(where, "(t.completed_at IS NOT NULL) AND (COALESCE(t.completed_at, t.created_at), t.id) < (?, ?)")
+		args = append(args, at, id)
+	}
+
+	args = append(args, limit+1) // one extra says whether there is another page
+	rows, err := db.read.QueryContext(ctx,
+		`SELECT `+taskColsT+`,
+		        COALESCE(u.tokens, 0), COALESCE(u.cost, 0),
+		        EXISTS (SELECT 1 FROM events e WHERE e.task_id = t.id),
+		        COALESCE((SELECT group_concat(role, char(10)) FROM (
+		            SELECT m.from_role AS role, MIN(m.created_at) AS first
+		              FROM messages m
+		             WHERE m.task_id = t.id AND m.from_role <> '' AND m.from_role <> ?
+		             GROUP BY m.from_role ORDER BY first)), '')
+		   FROM tasks t
+		   LEFT JOIN (
+		       SELECT task_id,
+		              SUM(input_tokens + cache_read_tokens + cache_write_tokens + output_tokens) AS tokens,
+		              SUM(cost_usd) AS cost
+		         FROM usage_turns GROUP BY task_id
+		   ) u ON u.task_id = t.id
+		  WHERE `+strings.Join(where, " AND ")+`
+		  ORDER BY (t.completed_at IS NULL) DESC,
+		           COALESCE(t.completed_at, t.created_at) DESC, t.id DESC
+		  LIMIT ?`, args...)
+	if err != nil {
+		return nil, "", fmt.Errorf("reading history: %w", err)
+	}
+	defer rows.Close()
+
+	out := []HistoryEntry{}
+	for rows.Next() {
+		var (
+			e           HistoryEntry
+			sessionID   sql.NullString
+			created     string
+			firstClaim  sql.NullString
+			completedAt sql.NullString
+			stoppedAt   sql.NullString
+			roles       string
+		)
+		if err := rows.Scan(&e.ID, &e.ProjectID, &sessionID, &e.Name, &e.Body, &e.Lane, &e.State,
+			&created, &firstClaim, &completedAt, &e.ActiveMS, &e.ReworkCount, &e.Hidden,
+			&stoppedAt, &e.Outcome, &e.OutcomeRef, &e.Pinned,
+			&e.Tokens, &e.CostUSD, &e.HasTranscript, &roles); err != nil {
+			return nil, "", err
+		}
+		if err := fillTaskTimes(&e.Task, sessionID, created, firstClaim, completedAt, stoppedAt); err != nil {
+			return nil, "", err
+		}
+		e.Roles = []string{}
+		if roles != "" {
+			e.Roles = strings.Split(roles, "\n")
+		}
+		out = append(out, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", err
+	}
+
+	next := ""
+	if len(out) > limit {
+		out = out[:limit]
+		last := out[len(out)-1]
+		at := last.CreatedAt
+		if last.CompletedAt != nil {
+			at = *last.CompletedAt
+		}
+		next = at.Format(time.RFC3339Nano) + " " + last.ID
+	}
+	return out, next, nil
+}
+
+// splitCursor reads a cursor back into the position it names.
+func splitCursor(cursor string) (at, id string, ok bool) {
+	at, id, ok = strings.Cut(cursor, " ")
+	if !ok || at == "" || id == "" {
+		return "", "", false
+	}
+	return at, id, true
+}
+
+// likeEscape keeps a search for "100%" from matching everything.
+func likeEscape(s string) string {
+	r := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	return r.Replace(s)
+}
+
+// ── the trail ─────────────────────────────────────────────────────────────
+
+// TrailStep is one hop with everything that happened around it: how long the
+// role held the work, what those turns cost, and whatever stopped it there.
+type TrailStep struct {
+	Handoff
+
+	// StartedAt is when the role took the work, from the lease the handoff was
+	// produced under. Absent for a step with no lease behind it, which is what
+	// the operator's own first message is.
+	StartedAt *time.Time `json:"startedAt,omitempty"`
+
+	// DurationMS is how long that role held it: the handoff, less the lease.
+	// Zero when there is no lease to measure from, which is not the same as a
+	// step that took no time and is why the field is separate from StartedAt.
+	DurationMS int64 `json:"durationMs"`
+
+	// WindowStart and WindowEnd are what this step's turns were summed over,
+	// handed out so that anything else reading the step reads the same span.
+	// The transcript did not: it stopped at the handoff plus a guessed half
+	// minute, so a closing turn that ran longer was missing from what a step
+	// "did" while its cost was counted, and a quick second lap by the same role
+	// leaked into the step before it. End is exclusive and absent on a role's
+	// last step, which runs to the end of the card.
+	WindowStart *time.Time `json:"windowStart,omitempty"`
+	WindowEnd   *time.Time `json:"windowEnd,omitempty"`
+
+	// What the turns inside that window cost. Per step rather than per task,
+	// because "this pipeline cost four dollars" does not say which role spent
+	// it or on which lap.
+	Tokens  int64   `json:"tokens"`
+	CostUSD float64 `json:"costUsd"`
+
+	// Gate is the approval this handoff waited on, if it had one.
+	Gate *TrailGate `json:"gate,omitempty"`
+
+	// Clarifications the role raised while it held the work. A question asked
+	// mid-step is most of the gap between a step's duration and its turns.
+	Clarifications []Clarification `json:"clarifications,omitempty"`
+}
+
+// TrailGate is an approval as the trail reads it: what was decided, and how
+// long the work sat waiting for a person to decide it.
+type TrailGate struct {
+	ID        string     `json:"id"`
+	State     string     `json:"state"`
+	Note      string     `json:"note,omitempty"`
+	CreatedAt time.Time  `json:"createdAt"`
+	DecidedAt *time.Time `json:"decidedAt,omitempty"`
+	// WaitedMS is how long it was pending. This is where wall time goes when
+	// active time is short, and it is invisible in any per-task total.
+	WaitedMS int64 `json:"waitedMs"`
+}
+
+// TaskTrail is every step a task took, with the numbers that belong to each.
+//
+// Three queries rather than one per step: a task with twenty hops would
+// otherwise make sixty round trips to answer one screen, which is the pattern
+// ResolveTeam was rewritten to stop doing.
+func (db *DB) TaskTrail(ctx context.Context, taskID string) ([]TrailStep, error) {
+	rows, err := db.read.QueryContext(ctx,
+		`SELECT m.from_role, COALESCE(r.to_role, ''), m.kind,
+		        COALESCE(m.commit_sha, ''), m.body, m.created_at, m.terminal,
+		        l.granted_at,
+		        a.id, a.state, a.note, a.created_at, a.decided_at
+		   FROM messages m
+		   LEFT JOIN routes r ON r.message_id = m.id
+		   LEFT JOIN leases l ON l.id = m.source_lease_id
+		   LEFT JOIN approvals a ON a.message_id = m.id
+		  WHERE m.task_id = ?
+		  ORDER BY m.created_at ASC`, taskID)
+	if err != nil {
+		return nil, fmt.Errorf("reading the task trail: %w", err)
+	}
+	defer rows.Close()
+
+	steps := []TrailStep{}
+	for rows.Next() {
+		var (
+			s                           TrailStep
+			granted                     sql.NullString
+			final                       int
+			gateID, gateState, gateNote sql.NullString
+			gateCreated, gateDecided    sql.NullString
+			createdAt                   string
+		)
+		if err := rows.Scan(&s.From, &s.To, &s.Kind, &s.Commit, &s.Body, &createdAt, &final,
+			&granted, &gateID, &gateState, &gateNote, &gateCreated, &gateDecided); err != nil {
+			return nil, err
+		}
+		if s.At, err = time.Parse(time.RFC3339Nano, createdAt); err != nil {
+			return nil, fmt.Errorf("handoff has an unreadable timestamp %q: %w", createdAt, err)
+		}
+		s.Final = final != 0
+		if s.StartedAt, err = nullTime(granted); err != nil {
+			return nil, err
+		}
+		if s.StartedAt != nil {
+			s.DurationMS = s.At.Sub(*s.StartedAt).Milliseconds()
+			if s.DurationMS < 0 {
+				s.DurationMS = 0
+			}
+		}
+		if gateID.Valid {
+			gate := TrailGate{ID: gateID.String, State: gateState.String, Note: gateNote.String}
+			if gate.CreatedAt, err = time.Parse(time.RFC3339Nano, gateCreated.String); err != nil {
+				return nil, fmt.Errorf("approval has an unreadable timestamp: %w", err)
+			}
+			if gate.DecidedAt, err = nullTime(gateDecided); err != nil {
+				return nil, err
+			}
+			// Still pending: the wait is running, and reporting zero would say
+			// a gate nobody has answered cost nothing.
+			end := time.Now().UTC()
+			if gate.DecidedAt != nil {
+				end = *gate.DecidedAt
+			}
+			gate.WaitedMS = end.Sub(gate.CreatedAt).Milliseconds()
+			s.Gate = &gate
+		}
+		steps = append(steps, s)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(steps) == 0 {
+		return steps, nil
+	}
+
+	if err := db.attachTurns(ctx, taskID, steps); err != nil {
+		return nil, err
+	}
+	// The same windows the turns were bucketed into, so a reader of one step
+	// asks for exactly what that step was charged for.
+	for _, w := range windowsFor(steps) {
+		from := w.from
+		steps[w.step].WindowStart = &from
+		if !w.until.IsZero() {
+			until := w.until
+			steps[w.step].WindowEnd = &until
+		}
+	}
+	return steps, db.attachClarifications(ctx, taskID, steps)
+}
+
+// attachTurns puts each turn's cost on the step it was spent during.
+//
+// A turn belongs to the step whose role held the work when it happened, and
+// that window runs from one of the role's leases to its next, not to the
+// handoff in between. The turn that ends a step is recorded *after* the handoff
+// it produced: the agent calls `zerg send`, which writes the message, and the
+// turn carrying that call only finishes afterwards. Closing the window at the
+// handoff put the largest turn of every step outside it, which showed up
+// against real data as a card totalling $1.61 whose steps totalled $0.23.
+//
+// Turns before a role's first lease belong to no step and are left where they
+// are rather than folded into a neighbour, which would move money between
+// roles.
+func (db *DB) attachTurns(ctx context.Context, taskID string, steps []TrailStep) error {
+	rows, err := db.read.QueryContext(ctx,
+		`SELECT role, ts, input_tokens + cache_read_tokens + cache_write_tokens + output_tokens, cost_usd
+		   FROM usage_turns WHERE task_id = ? ORDER BY ts`, taskID)
+	if err != nil {
+		return fmt.Errorf("reading the trail's turns: %w", err)
+	}
+	defer rows.Close()
+
+	windows := windowsFor(steps)
+	for rows.Next() {
+		var (
+			role, ts string
+			tokens   int64
+			cost     float64
+		)
+		if err := rows.Scan(&role, &ts, &tokens, &cost); err != nil {
+			return err
+		}
+		at, err := time.Parse(time.RFC3339Nano, ts)
+		if err != nil {
+			return fmt.Errorf("a turn has an unreadable timestamp %q: %w", ts, err)
+		}
+		if i, ok := stepAt(windows, role, at); ok {
+			steps[i].Tokens += tokens
+			steps[i].CostUSD += cost
+		}
+	}
+	return rows.Err()
+}
+
+// stepWindow is when one role held the work, so a turn or a question can be
+// placed on the step it happened during.
+type stepWindow struct {
+	role string
+	from time.Time
+	// until is zero for a role's last step, which runs on: the turn that ends
+	// a step lands after the handoff that closed it.
+	until time.Time
+	step  int
+}
+
+func windowsFor(steps []TrailStep) []stepWindow {
+	out := []stepWindow{}
+	for i, s := range steps {
+		from := s.StartedAt
+		if from == nil {
+			// No lease to measure from. Messages carried none before schema 11,
+			// and those cards are most of what a history screen has to show, so
+			// the work is placed between the handoff that gave it to this role
+			// and whatever this role did next. Weaker than a lease, and the
+			// alternative is a card whose steps all read $0 while the card
+			// itself reads $2.74.
+			if i == 0 {
+				continue // nothing preceded the first message
+			}
+			from = &steps[i-1].At
+		}
+		out = append(out, stepWindow{role: s.From, from: *from, step: i})
+	}
+	// A role's window ends where that role's next one begins: a second lap
+	// closes the first, and nothing else does.
+	for i := range out {
+		for j := i + 1; j < len(out); j++ {
+			if out[j].role == out[i].role {
+				out[i].until = out[j].from
+				break
+			}
+		}
+	}
+	return out
+}
+
+// stepAt is the step a role was on at that moment, if it was on one.
+func stepAt(windows []stepWindow, role string, at time.Time) (int, bool) {
+	for _, window := range windows {
+		if window.role != role || at.Before(window.from) {
+			continue
+		}
+		if !window.until.IsZero() && !at.Before(window.until) {
+			continue
+		}
+		return window.step, true
+	}
+	return 0, false
+}
+
+// attachClarifications hangs each question on the step it was asked during,
+// by the same windows the turns use.
+func (db *DB) attachClarifications(ctx context.Context, taskID string, steps []TrailStep) error {
+	asked, err := db.ClarificationsForTask(ctx, taskID)
+	if err != nil {
+		return err
+	}
+	windows := windowsFor(steps)
+	for _, c := range asked {
+		if i, ok := stepAt(windows, c.Role, c.CreatedAt); ok {
+			steps[i].Clarifications = append(steps[i].Clarifications, c)
+		}
+	}
+	return nil
 }

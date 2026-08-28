@@ -21,6 +21,7 @@ export const VIEWS = [
   'activity',
   'spend',
   'chat',
+  'history',
   'team',
   'settings',
 ] as const

@@ -209,6 +209,32 @@ export interface Task {
   doing?: string
   /** Put away by a person. Finished work that is still finished. */
   hidden?: boolean
+  /** Kept past the retention window: events are swept because they are the
+   *  expensive tier, and the card worth reading in six months is usually the
+   *  one that went wrong. */
+  pinned?: boolean
+  /** What happened to the work when the last role finished: it was merged, a
+   *  pull request was opened, or it was left on its branch. Empty on a card
+   *  still being worked, and on one that ended before the daemon recorded
+   *  this. `outcomeRef` is the commit or the pull request's URL. */
+  outcome?: 'merged' | 'pr' | 'branch'
+  outcomeRef?: string
+}
+
+/** One worked task as the history screen reads it. */
+export interface HistoryEntry extends Task {
+  /** The roles that sent a handoff on this task, in the order they first did. */
+  roles: string[]
+  /** Whether this card's events are still here. Asked of the table rather than
+   *  worked out from the retention window, which a sweep that has not run yet
+   *  makes wrong. */
+  hasTranscript: boolean
+}
+
+export interface HistoryPage {
+  entries: HistoryEntry[]
+  /** A position to ask for the next page with, empty on the last one. */
+  next: string
 }
 
 export interface CheckResult {
@@ -428,6 +454,18 @@ export const api = {
   stop: (id: string) => call<{ status: string }>(`/projects/${id}/stop`, { method: 'POST' }),
 
   tasks: (id: string) => call<Task[]>(`/projects/${id}/tasks`),
+  /** Worked tasks, newest first. `before` is the `next` of the page before. */
+  history: (
+    id: string,
+    opts: { before?: string; outcome?: string; role?: string; q?: string; limit?: number } = {},
+  ) => {
+    const query = new URLSearchParams()
+    for (const [key, value] of Object.entries(opts)) {
+      if (value) query.set(key, String(value))
+    }
+    const suffix = query.toString()
+    return call<HistoryPage>(`/projects/${id}/history${suffix ? '?' + suffix : ''}`)
+  },
   newTask: (id: string, name: string, body: string) =>
     call<Task>(`/projects/${id}/tasks`, { method: 'POST', body: JSON.stringify({ name, body }) }),
 
@@ -445,6 +483,26 @@ export const api = {
     }),
 
   taskDetail: (id: string) => call<TaskDetail>(`/tasks/${id}`),
+  /**
+   * One step's transcript: what a role did while it held the work.
+   *
+   * Bounded by that step's window rather than the card's whole history, which
+   * is the question being asked. Events are the tier that ages out, so an
+   * empty answer is ordinary and means the transcript is no longer kept.
+   */
+  taskEvents: (
+    id: string,
+    opts: { role?: string; from?: string; until?: string; limit?: number } = {},
+  ) => {
+    const query = new URLSearchParams()
+    for (const [key, value] of Object.entries(opts)) {
+      if (value) query.set(key, String(value))
+    }
+    const suffix = query.toString()
+    return call<{ events: ActivityEvent[]; truncated: boolean }>(
+      `/tasks/${id}/events${suffix ? '?' + suffix : ''}`,
+    )
+  },
   workspace: (projectId: string) => call<Workspace>(`/projects/${projectId}/workspace`),
   resetChat: (projectId: string) =>
     call<void>(`/projects/${projectId}/chat`, { method: 'DELETE' }),
@@ -457,6 +515,9 @@ export const api = {
   deleteTask: (id: string) => call<void>(`/tasks/${id}`, { method: 'DELETE' }),
   setTaskHidden: (id: string, hidden: boolean) =>
     call<Task>(`/tasks/${id}/hidden`, { method: 'PUT', body: JSON.stringify({ hidden }) }),
+  /** Keep this card's transcript past the retention window, or let it go. */
+  setTaskPinned: (id: string, pinned: boolean) =>
+    call<Task>(`/tasks/${id}/pinned`, { method: 'PUT', body: JSON.stringify({ pinned }) }),
   approvalDiff: (id: string) =>
     call<{ files: ChangedFile[]; range: boolean; base: string }>(`/approvals/${id}/diff`),
   spend: (id: string, range: SpendRange) =>
@@ -707,7 +768,10 @@ export interface SettingsResponse {
 
 // ── task detail ─────────────────────────────────────────────────────────────
 
-/** One step of a task's history: who handed what to whom, and what they said. */
+/**
+ * One step of a task's history: who handed what to whom, what they said, and
+ * the numbers belonging to that step rather than to the whole card.
+ */
 export interface TaskStep {
   from: string
   to?: string
@@ -718,6 +782,35 @@ export interface TaskStep {
   final?: boolean
   /** First line of the commit message. */
   subject?: string
+  /** When the role took the work. Absent for a step with no lease behind it,
+   *  which is what the operator's own first message is. */
+  startedAt?: string
+  /** The span this step's turns were summed over, so anything else reading the
+   *  step reads the same one. `windowEnd` is exclusive and absent on a role's
+   *  last step, which runs to the end of the card. */
+  windowStart?: string
+  windowEnd?: string
+  /** How long that role held it. Zero when there is nothing to measure from. */
+  durationMs: number
+  tokens: number
+  costUsd: number
+  /** The approval this handoff waited on, if it had one. */
+  gate?: TaskGate
+  /** Questions the role raised while it held the work. */
+  clarifications?: Clarification[]
+}
+
+/** An approval as the trail reads it: what was decided, and how long the work
+ *  sat waiting for a person to decide it. */
+export interface TaskGate {
+  id: string
+  state: 'pending' | 'approved' | 'rejected' | string
+  note?: string
+  createdAt: string
+  decidedAt?: string
+  /** How long it was pending. This is where wall time goes when active time is
+   *  short, and no per-task total shows it. */
+  waitedMs: number
 }
 
 export interface TaskDetail {
