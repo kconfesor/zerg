@@ -308,7 +308,7 @@ func (m *Manager) Stop(ctx context.Context, projectID string) {
 
 	// Whatever it registered is gone with its process: the agent is the parent
 	// of the server it started.
-	if _, err := m.db.StopServices(ctx, projectID, store.OwnerAgent); err != nil {
+	if _, err := m.db.StopServices(ctx, projectID, store.OwnerDaemon); err != nil {
 		m.log.Warn("could not mark the preview stopped", "project", projectID, "err", err)
 	}
 	m.log.Info("runner stopped", "project", projectID)

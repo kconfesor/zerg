@@ -45,6 +45,14 @@ type Identity struct {
 	// the moment it started the agent, so the token carries it.
 	TaskID string
 
+	// Owner says whose processes these are: the swarm's, or the daemon's.
+	//
+	// A pipeline role's dev server dies when the swarm stops, because the
+	// agent that started it is part of the swarm. A runner is not: the daemon
+	// spawned it and it outlives Start and Stop, so the swarm going down must
+	// leave its preview alone rather than marking a running service dead.
+	Owner string
+
 	// Can is what this token is allowed to call. Empty means everything, which
 	// is what a pipeline role gets.
 	//
@@ -133,32 +141,49 @@ func NewServer(db *store.DB, nyd *nydus.Nydus, blobs *artifact.Store, log *slog.
 // Tokens are per-spawn and role-scoped, so an agent cannot claim work for
 // another role or send as one. Reading the sender from an environment variable
 // lets any agent set it to any value.
-// Mint issues a token for a pipeline role, which may call everything.
+// Mint issues a token for a pipeline role: every verb, and whatever it starts
+// belongs to the swarm.
 func (s *Server) Mint(projectID, role string) string {
-	return s.MintScoped(projectID, role)
+	return s.mint(Identity{ProjectID: projectID, Role: role})
 }
 
-// MintScoped issues a token for an agent that is not a pipeline role, limited
-// to the verbs named. Naming none is the same as Mint.
+// MintScoped issues a token limited to the verbs named.
 func (s *Server) MintScoped(projectID, role string, can ...string) string {
-	return s.MintFor(projectID, role, "", can...)
+	return s.mint(Identity{ProjectID: projectID, Role: role, Can: verbs(can)})
 }
 
-// MintFor issues a scoped token for an agent spawned to work on one card, so
-// what it produces attaches to that card without the agent having to say.
+// MintFor issues a scoped token for an agent the daemon spawned to work on one
+// card.
+//
+// Two things follow from being spawned rather than sent. What it produces
+// attaches to that card, because it holds no lease to find one through. And
+// what it starts belongs to the daemon rather than the swarm: Start and Stop
+// are about the pipeline, and a preview somebody is looking at is not part of
+// it.
 func (s *Server) MintFor(projectID, role, taskID string, can ...string) string {
+	return s.mint(Identity{
+		ProjectID: projectID, Role: role, TaskID: taskID,
+		Owner: store.OwnerDaemon, Can: verbs(can),
+	})
+}
+
+func (s *Server) mint(id Identity) string {
 	token := store.NewID()
-	id := Identity{ProjectID: projectID, Role: role, TaskID: taskID}
-	if len(can) > 0 {
-		id.Can = make(map[string]bool, len(can))
-		for _, verb := range can {
-			id.Can[verb] = true
-		}
-	}
 	s.mu.Lock()
 	s.tokens[token] = id
 	s.mu.Unlock()
 	return token
+}
+
+func verbs(can []string) map[string]bool {
+	if len(can) == 0 {
+		return nil
+	}
+	out := make(map[string]bool, len(can))
+	for _, verb := range can {
+		out[verb] = true
+	}
+	return out
 }
 
 // Revoke invalidates a token, used when a role stops.

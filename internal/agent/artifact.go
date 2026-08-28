@@ -56,6 +56,9 @@ func (s *Server) artifact(w http.ResponseWriter, r *http.Request) {
 		ProjectID: id.ProjectID,
 		Role:      id.Role,
 		Label:     strings.TrimSpace(req.Label),
+		// Whose process this is, which decides what stops it. Empty means the
+		// swarm's, which is what a pipeline role's token carries.
+		Owner: id.Owner,
 	}
 
 	// The card this belongs to, resolved the way a question's is: named if the
