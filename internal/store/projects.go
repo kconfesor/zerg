@@ -339,11 +339,11 @@ func (db *DB) SelectDefaultTeam(ctx context.Context, projectID string) error {
 // ResolveTeam returns the project's pipeline in order with overrides applied —
 // what a cerebrate is actually asked to run.
 //
-// Terminal comes from the team's flag. It was computed here as "the last
-// enabled role", which held until a role was added to the end: the job of
-// integrating moved to it silently, away from the role that had been doing it.
-// Deciding terminality from position in a config file has the same failure,
-// which is what the flag replaced rather than repeated.
+// Terminal is the last *enabled* role, so parking the final role promotes the
+// one before it with no edit anywhere else. What keeps a role added later from
+// taking that job is RoleTemplate.Finisher: a role that ends pipelines is
+// placed at the end when it joins one, and roles that do not are placed in
+// front of it.
 func (db *DB) ResolveTeam(ctx context.Context, projectID string) ([]ResolvedRole, error) {
 	p, err := db.GetProject(ctx, projectID)
 	if err != nil {
@@ -469,24 +469,20 @@ func (db *DB) resolveLayeredTeam(ctx context.Context, p *Project) ([]ResolvedRol
 		if err := t.Validate(); err != nil {
 			invalidRoles = append(invalidRoles, fmt.Sprintf("%s: %v", t.Name, err))
 		}
-		r := ResolvedRole{RoleTemplate: *t, Position: i, Enabled: membership.Enabled,
-			Terminal: membership.Terminal && membership.Enabled, RoleOverrides: o}
+		r := ResolvedRole{RoleTemplate: *t, Position: i, Enabled: membership.Enabled, RoleOverrides: o}
 		r.Overridden = t.Harness != baseline.Harness || t.Model != baseline.Model || !slices.Equal(t.Args, baseline.Args) ||
 			t.Receive != baseline.Receive || t.BatchMaxItems != baseline.BatchMaxItems || t.BatchMaxAgeSec != baseline.BatchMaxAgeSec ||
 			t.Prompt != baseline.Prompt || t.Gate != baseline.Gate
 		out = append(out, r)
 	}
-	// Terminality is the team's flag, not a count of positions. It used to be
-	// "the last enabled role", so adding a role to the end of a pipeline moved
-	// the job of integrating to it, silently, from the role that had been doing
-	// it. The fallback is kept for a team written without one, which normalising
-	// prevents but a hand-edited row could still produce.
-	if !slices.ContainsFunc(out, func(r ResolvedRole) bool { return r.Terminal }) {
-		for i := len(out) - 1; i >= 0; i-- {
-			if out[i].Enabled {
-				out[i].Terminal = true
-				break
-			}
+	// The last enabled role finishes the task. What stops a role added later
+	// from taking that job is where it is added: a role marked Finisher goes to
+	// the end of a pipeline and the ones added after it go in front, so the
+	// pipeline keeps delivering through the same role as it grows.
+	for i := len(out) - 1; i >= 0; i-- {
+		if out[i].Enabled {
+			out[i].Terminal = true
+			break
 		}
 	}
 

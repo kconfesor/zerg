@@ -12,7 +12,7 @@
  * than having it threaded down through the shell.
  */
 import { computed, onMounted, ref, useId } from 'vue'
-import { Plus, Trash2 } from '@lucide/vue'
+import { Flag, Plus, Trash2 } from '@lucide/vue'
 import { api, type Model, type RoleTemplate, type TeamPreset } from '@/lib/api'
 import { latest } from '@/lib/latest'
 import { usePending } from '@/lib/pending'
@@ -21,6 +21,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
 import {
   Dialog,
@@ -72,6 +73,7 @@ const harnessId = useId()
 const thinkingId = useId()
 const receiveId = useId()
 const gateId = useId()
+const finisherId = useId()
 const batchId = useId()
 const promptId = useId()
 
@@ -138,6 +140,7 @@ function create() {
     batchMaxAgeSec: 300,
     prompt: '',
     gate: 'none',
+    finisher: false,
     builtin: false,
   } as RoleTemplate
   open.value = true
@@ -221,6 +224,10 @@ async function remove(tpl: RoleTemplate) {
           <span class="flex items-center gap-2">
             <span class="truncate text-xs font-medium">{{ tpl.name }}</span>
             <Badge v-if="tpl.builtin" variant="outline" class="text-[9px]">built-in</Badge>
+            <Badge v-if="tpl.finisher" variant="secondary" class="gap-1 text-[9px]">
+              <Flag :size="9" aria-hidden="true" />
+              ends a pipeline
+            </Badge>
             <Badge v-if="tpl.gate === 'approval'" variant="secondary" class="text-[9px]">
               approval gate
             </Badge>
@@ -359,6 +366,26 @@ async function remove(tpl: RoleTemplate) {
             <span class="text-muted-foreground text-[11px]">
               An approval gate holds this role's handoffs for a human.
             </span>
+          </div>
+
+          <!-- Where this role belongs in a pipeline, which is a fact about the
+               role rather than about any one team: a reviewer or a cleaner ends
+               the work wherever it appears, and a planner never does. -->
+          <div class="flex flex-col gap-1.5">
+            <Label :for="finisherId">Ends a pipeline</Label>
+            <label class="flex items-start gap-2.5 text-xs">
+              <Switch
+                :id="finisherId"
+                :model-value="editing.finisher"
+                aria-label="This role ends a pipeline"
+                class="mt-0.5"
+                @update:model-value="(v: boolean) => editing && (editing.finisher = v)"
+              />
+              <span class="text-muted-foreground">
+                Added to a team it goes last, where it finishes the task and the work is integrated.
+                Roles added after it go in front, so the pipeline keeps ending here as it grows.
+              </span>
+            </label>
           </div>
 
           <div v-if="editing.receive === 'batch'" class="flex flex-col gap-1.5">

@@ -15,7 +15,7 @@ import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { cloneOverrides, followPreset, hasRoleOverrides } from '@/lib/team'
+import { cloneOverrides, followPreset, hasRoleOverrides, placeInPipeline } from '@/lib/team'
 import RoleOverrideDialog from '@/components/RoleOverrideDialog.vue'
 import {
   Dialog,
@@ -143,35 +143,14 @@ const projectRunsItsOwn = computed(
   () => !props.projectTeam.presetId && props.projectTeam.roles.length > 0,
 )
 /**
- * Choosing the role that finishes.
+ * Which role finishes this pipeline: the last one that runs.
  *
- * The daemon keeps it last and clears the old one, so this only has to say
- * which. Sending the whole team as usual: a flag and a reorder are the same
- * write, and this is where the reorder becomes visible.
- */
-function makeTerminal(templateId: string) {
-  const preset = activePreset.value
-  if (!preset) return
-  saveRoles(
-    preset.roles.map((role) => ({
-      ...role,
-      ...cloneOverrides(role),
-      terminal: role.templateId === templateId,
-    })),
-  )
-}
-
-/**
- * Which role finishes, read off the flag rather than counted off the end.
- *
- * The fallback is for a team stored before the flag existed, and for one whose
- * flagged role has since been parked: the daemon normalises both away on the
- * next write, and until then the badge should still say something true.
+ * Nothing here chooses it. A role that ends pipelines carries that on itself
+ * and is placed at the end when it joins one, so the answer stays the same as
+ * the team grows without a control in this column saying so.
  */
 const terminalTemplateId = computed(() => {
   const roles = activePreset.value?.roles ?? []
-  const flagged = roles.find((role) => role.terminal && role.enabled)
-  if (flagged) return flagged.templateId
   for (let i = roles.length - 1; i >= 0; i--) {
     if (roles[i].enabled) return roles[i].templateId
   }
@@ -241,19 +220,17 @@ function toggleRole(template: RoleTemplate) {
     )
     return
   }
-  saveRoles([
-    ...roles,
-    {
-      templateId: template.id,
-      position: roles.length,
-      // Not the finisher: the daemon moves the role that is back to the end,
-      // so a role added here lands in front of it rather than taking over
-      // integrating, which is what used to happen.
-      terminal: false,
-      enabled: true,
-      ...cloneOverrides({}),
-    },
-  ])
+  // In front of the roles that end pipelines, or at the end if this is one of
+  // them. Appending blindly is what used to hand the job of integrating to
+  // whatever was added last.
+  const joined = [...roles]
+  joined.splice(placeInPipeline(joined.map((r) => ({ id: r.templateId })), template, props.library), 0, {
+    templateId: template.id,
+    position: 0,
+    enabled: true,
+    ...cloneOverrides({}),
+  })
+  saveRoles(joined)
 }
 
 /**
@@ -716,18 +693,6 @@ function cloneTeam() {
               {{ effectiveRole(role)?.harness }} · {{ effectiveRole(role)?.model || 'default model' }}
             </p>
           </div>
-          <Button
-            v-if="role.enabled && role.templateId !== terminalTemplateId"
-            size="xs"
-            variant="outline"
-            class="h-6 shrink-0 gap-1 px-1.5 text-[10px]"
-            :title="`Finish tasks at ${libraryById.get(role.templateId)?.name}, which moves it to the end of the pipeline`"
-            :aria-label="`Make ${libraryById.get(role.templateId)?.name} the finishing role`"
-            @click="makeTerminal(role.templateId)"
-          >
-            <Flag :size="10" aria-hidden="true" />
-            finish here
-          </Button>
           <Switch
             :model-value="role.enabled"
             :aria-label="`${libraryById.get(role.templateId)?.name ?? role.templateId} runs`"

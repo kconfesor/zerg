@@ -81,7 +81,6 @@ func (db *DB) CreateTeamPreset(ctx context.Context, p *TeamPreset) (*TeamPreset,
 	if p.Name == "" {
 		return nil, invalid("a team preset needs a name")
 	}
-	p.Roles = normaliseTerminal(p.Roles)
 	if err := db.validatePresetRoles(ctx, p.Roles); err != nil {
 		return nil, err
 	}
@@ -118,7 +117,6 @@ func (db *DB) UpdateTeamPreset(ctx context.Context, p *TeamPreset) error {
 	if _, err := db.GetTeamPreset(ctx, p.ID); err != nil {
 		return err
 	}
-	p.Roles = normaliseTerminal(p.Roles)
 	if err := db.validatePresetRoles(ctx, p.Roles); err != nil {
 		return err
 	}
@@ -360,7 +358,7 @@ func scanPreset(s scanner) (*TeamPreset, error) {
 }
 
 func (db *DB) listPresetRoles(ctx context.Context, id string) ([]TeamPresetRole, error) {
-	rows, err := db.read.QueryContext(ctx, `SELECT template_id,position,enabled,terminal,`+roleOverrideCols+
+	rows, err := db.read.QueryContext(ctx, `SELECT template_id,position,enabled,`+roleOverrideCols+
 		` FROM team_preset_roles WHERE preset_id=? ORDER BY position`, id)
 	if err != nil {
 		return nil, err
@@ -374,15 +372,14 @@ func (db *DB) listPresetRoles(ctx context.Context, id string) ([]TeamPresetRole,
 	out := []TeamPresetRole{}
 	for rows.Next() {
 		var r TeamPresetRole
-		var enabled, terminal int
+		var enabled int
 		var h, m, a, recv, prompt, gate, thinking sql.NullString
 		var items, age sql.NullInt64
-		if err := rows.Scan(&r.TemplateID, &r.Position, &enabled, &terminal,
+		if err := rows.Scan(&r.TemplateID, &r.Position, &enabled,
 			&h, &m, &a, &recv, &items, &age, &prompt, &gate, &thinking); err != nil {
 			return nil, err
 		}
 		r.Enabled = enabled != 0
-		r.Terminal = terminal != 0
 		if err := decodeOverrides(&r.RoleOverrides, h, m, a, recv, items, age, prompt, gate, thinking); err != nil {
 			return nil, err
 		}
@@ -460,65 +457,6 @@ func (db *DB) validatePresetProjectOverrides(ctx context.Context, p *TeamPreset)
 	return nil
 }
 
-// normaliseTerminal keeps the rule the pipeline depends on: exactly one enabled
-// role finishes the task, and it is the last one.
-//
-// Applied on the way in rather than checked, because every writer would
-// otherwise have to reimplement it: the rail, the team editor, SetTeam, and the
-// copy the rail makes of a shared team. Appending a role and letting this move
-// the finisher back to the end is why "add a role" does not have to know about
-// terminality at all.
-//
-// A flag on a role that is turned off is not a finisher; the last enabled role
-// takes it instead, since a pipeline whose only terminal role is parked has
-// nowhere to deliver. When several are flagged, the last of them wins, which is
-// what a caller flagging a new one without clearing the old one means.
-func normaliseTerminal(roles []TeamPresetRole) []TeamPresetRole {
-	out := make([]TeamPresetRole, len(roles))
-	copy(out, roles)
-
-	chosen := -1
-	for i, r := range out {
-		if r.Enabled && r.Terminal {
-			chosen = i
-		}
-	}
-	if chosen == -1 {
-		for i, r := range out {
-			if r.Enabled {
-				chosen = i
-			}
-		}
-	}
-	for i := range out {
-		out[i].Terminal = false
-	}
-	if chosen == -1 {
-		return out // nothing enabled: nothing finishes, and nothing can start
-	}
-	out[chosen].Terminal = true
-
-	// Last of the roles that run, so the list reads in the order work travels.
-	// Not the very last: a role that is parked keeps the place it was parked in
-	// rather than being shuffled ahead of the finisher, and it receives nothing
-	// either way.
-	last := chosen
-	for i, r := range out {
-		if r.Enabled {
-			last = i
-		}
-	}
-	if last > chosen {
-		terminal := out[chosen]
-		copy(out[chosen:last], out[chosen+1:last+1])
-		out[last] = terminal
-	}
-	for i := range out {
-		out[i].Position = i
-	}
-	return out
-}
-
 func insertPresetRoles(ctx context.Context, tx *sql.Tx, id string, roles []TeamPresetRole) error {
 	for i, r := range roles {
 		args, err := marshalOverrideArgs(r.ArgsOverride)
@@ -526,9 +464,9 @@ func insertPresetRoles(ctx context.Context, tx *sql.Tx, id string, roles []TeamP
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO team_preset_roles
-			(preset_id,template_id,position,enabled,terminal,`+roleOverrideCols+`)
-			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-			id, r.TemplateID, i, r.Enabled, r.Terminal, r.HarnessOverride, r.ModelOverride, args,
+			(preset_id,template_id,position,enabled,`+roleOverrideCols+`)
+			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			id, r.TemplateID, i, r.Enabled, r.HarnessOverride, r.ModelOverride, args,
 			r.ReceiveOverride, r.BatchMaxItemsOverride, r.BatchMaxAgeSecOverride,
 			r.PromptOverride, r.GateOverride, r.ThinkingOverride); err != nil {
 			return fmt.Errorf("adding role to team preset: %w", err)

@@ -92,6 +92,9 @@ type seedRole struct {
 	receive string
 	gate    string
 	prompt  string
+	// finisher marks a role that ends a pipeline wherever it appears, so that
+	// adding one puts it at the end and adding anything else puts it in front.
+	finisher bool
 }
 
 // builtinRoles is the library that ships. Nine templates cover every team shape
@@ -136,7 +139,7 @@ underspecified in a way that does not, pick the simpler option and note it in
 the commit message.`,
 	},
 	{
-		name: "reviewer", model: "opus", receive: ReceiveBatch, gate: GateNone,
+		name: "reviewer", model: "opus", receive: ReceiveBatch, gate: GateNone, finisher: true,
 		prompt: `You are the last gate before this work reaches the base branch.
 
 Read the change against what was asked for. Run the tests yourself; do not take
@@ -153,7 +156,7 @@ wrong. "Looks good" and "needs work" are both useless.
 Do not rewrite the change yourself. Reviewing and authoring are different jobs.`,
 	},
 	{
-		name: "cleaner", model: "sonnet", receive: ReceiveBatch, gate: GateNone,
+		name: "cleaner", model: "sonnet", receive: ReceiveBatch, gate: GateNone, finisher: true,
 		prompt: `You improve the code without changing what it does.
 
 Duplication, dead code, names that mislead, functions doing three things. The
@@ -262,6 +265,7 @@ func Seed(ctx context.Context, db *DB, harness string) error {
 			BatchMaxAgeSec: 300,
 			Prompt:         r.prompt,
 			Gate:           r.gate,
+			Finisher:       r.finisher,
 			Builtin:        true,
 		}
 		if _, err := db.CreateTemplate(ctx, t); err != nil {

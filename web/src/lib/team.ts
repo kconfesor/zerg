@@ -9,6 +9,7 @@
  */
 import type {
   ProjectTeamUpdate,
+  RoleTemplate,
   ResolvedRole,
   RoleOverrides,
   TeamPreset,
@@ -62,10 +63,6 @@ export function presetRoles(pipeline: ResolvedRole[], source: TeamPreset | null)
     templateId: role.id,
     position,
     enabled: role.enabled,
-    // Which role finishes travels with the copy. Left off, the daemon would
-    // fall back to whichever role happened to be last, which is the guessing
-    // the flag exists to end.
-    terminal: role.terminal,
     ...cloneOverrides(overrides.get(role.id) ?? {}),
   }))
 }
@@ -88,4 +85,28 @@ export function followPreset(preset: TeamPreset, team: ResolvedRole[]): ProjectT
       .filter((role) => inPreset.has(role.id) && hasRoleOverrides(role))
       .map((role) => ({ templateId: role.id, ...cloneOverrides(role) })),
   }
+}
+
+/**
+ * Where a role goes when it joins a pipeline.
+ *
+ * Work ends at the last enabled role, so appending blindly hands the job of
+ * integrating to whatever was added most recently, taking it from the role that
+ * had been doing it. A role that ends pipelines says so about itself
+ * (`finisher`), so a reviewer or a cleaner goes to the end and anything else
+ * goes in front of the ones already there. Nothing about this is a control the
+ * pipeline has to carry.
+ *
+ * Returns the index to insert at.
+ */
+export function placeInPipeline(
+  pipeline: { id: string }[],
+  joining: RoleTemplate,
+  library: RoleTemplate[],
+): number {
+  if (joining.finisher) return pipeline.length
+  const finishers = new Set(library.filter((t) => t.finisher).map((t) => t.id))
+  let at = pipeline.length
+  while (at > 0 && finishers.has(pipeline[at - 1].id)) at--
+  return at
 }

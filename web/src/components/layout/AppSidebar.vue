@@ -30,7 +30,7 @@ import type {
   TeamPresetRole,
 } from '@/lib/api'
 import { landing } from '@/lib/utils'
-import { presetRoles } from '@/lib/team'
+import { placeInPipeline, presetRoles } from '@/lib/team'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -275,13 +275,19 @@ function addRole(id: unknown) {
   const tpl = props.library.find((t) => t.id === id)
   if (!tpl) return
   adding.value = false
-  // At the end, which is where the work ends up: the last enabled role is the
-  // terminal one, so the new role takes over integrating and the landing line
-  // under the list moves with it rather than reporting something else.
-  apply([
-    ...pipeline.value,
-    { ...tpl, position: pipeline.value.length, enabled: true, overridden: false, terminal: false, argsOverride: null },
-  ])
+  // In front of the roles that end pipelines, or at the end if this is one of
+  // them. Appending blindly handed the job of integrating to whatever was
+  // added last, which is what the landing line under this list then reported.
+  const roles = [...pipeline.value]
+  roles.splice(placeInPipeline(roles, tpl, props.library), 0, {
+    ...tpl,
+    position: 0,
+    enabled: true,
+    overridden: false,
+    terminal: false,
+    argsOverride: null,
+  })
+  apply(roles)
 }
 
 function pick(id: unknown) {

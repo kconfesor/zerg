@@ -20,6 +20,12 @@ export interface RoleTemplate {
   batchMaxAgeSec: number
   prompt: string
   gate: 'none' | 'approval'
+  /** A role that ends a pipeline wherever it appears, like a reviewer or a
+   *  cleaner. Added to a team it goes last, and roles added after it go in
+   *  front, so the pipeline keeps delivering through the same role as it
+   *  grows. Not the same as ResolvedRole.terminal, which is the role that is
+   *  finishing this particular pipeline. */
+  finisher: boolean
   builtin: boolean
 }
 
@@ -53,10 +59,6 @@ export interface TeamPresetRole extends RoleOverrides {
   templateId: string
   position: number
   enabled: boolean
-  /** The role that finishes a task rather than handing it on, which is what
-   *  integrates the work. Exactly one enabled role carries it, and the daemon
-   *  keeps that role last, so adding a role never takes the job over. */
-  terminal: boolean
 }
 
 export interface TeamPreset {

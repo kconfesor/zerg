@@ -39,6 +39,7 @@ function role(name: string, over: Partial<ResolvedRole> = {}): ResolvedRole {
     batchMaxAgeSec: 300,
     prompt: '',
     gate: 'none',
+    finisher: false,
     builtin: true,
     position: 0,
     enabled: true,
@@ -54,9 +55,9 @@ function live(name: string, state: string): RoleStatus {
 }
 
 function template(name: string): RoleTemplate {
-  const { id, harness, model, args, thinking, receive, batchMaxItems, batchMaxAgeSec, prompt, gate, builtin } =
+  const { id, harness, model, args, thinking, receive, batchMaxItems, batchMaxAgeSec, prompt, gate, finisher, builtin } =
     role(name)
-  return { id, name, harness, model, args, thinking, receive, batchMaxItems, batchMaxAgeSec, prompt, gate, builtin }
+  return { id, name, harness, model, args, thinking, receive, batchMaxItems, batchMaxAgeSec, prompt, gate, finisher, builtin }
 }
 
 /** A team made of the roles named, in that order. Shared unless owned. */
@@ -70,7 +71,6 @@ function preset(id: string, name: string, names: string[], owner: string | null 
       templateId: `tpl-${n}`,
       position,
       enabled: true,
-      terminal: position === names.length - 1,
       argsOverride: null,
     })),
     createdAt: '2026-01-01T00:00:00Z',

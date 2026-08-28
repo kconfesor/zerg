@@ -15,6 +15,7 @@ const coder: RoleTemplate = {
   batchMaxAgeSec: 300,
   prompt: 'code',
   gate: 'none',
+  finisher: false,
   builtin: true,
 }
 
@@ -37,8 +38,8 @@ const defaultTeam: TeamPreset = {
   createdAt: '2026-01-01T00:00:00Z',
   updatedAt: '2026-01-01T00:00:00Z',
   roles: [
-    { templateId: 'coder', position: 0, enabled: true, terminal: false, argsOverride: null },
-    { templateId: 'reviewer', position: 1, enabled: true, terminal: true, argsOverride: null },
+    { templateId: 'coder', position: 0, enabled: true, argsOverride: null },
+    { templateId: 'reviewer', position: 1, enabled: true, argsOverride: null },
   ],
 }
 
@@ -47,7 +48,7 @@ const docsTeam: TeamPreset = {
   id: 'docs-team',
   name: 'Docs team',
   builtin: false,
-  roles: [{ templateId: 'reviewer', position: 0, enabled: true, terminal: true, argsOverride: null }],
+  roles: [{ templateId: 'reviewer', position: 0, enabled: true, argsOverride: null }],
 }
 
 const resolved: ResolvedRole[] = [
@@ -118,32 +119,37 @@ describe('TeamEditor', () => {
     expect(w.findAll('[aria-label="Use this team"]')).toHaveLength(1)
   })
 
-  it('chooses which role finishes rather than counting off the end', async () => {
-    // Terminality was whichever enabled role sat last, so adding a role to the
-    // end took the job of integrating from the role that had been doing it.
+  it('says which role finishes without offering a control for it', async () => {
+    // The pipeline used to carry a "finish here" button on every row, which is
+    // a control most pipelines never need: a reviewer or a cleaner ends the
+    // work wherever it appears, and the role is what knows that.
     const w = editor({ presetId: defaultTeam.id, roles: resolved })
-    // The row that finishes says so in words, not in the protocol's noun.
     expect(w.text()).toContain('finishes the task')
-
-    await w.get('[aria-label="Make coder the finishing role"]').trigger('click')
-    const saved = w.emitted('savePreset')!.at(-1)![0] as TeamPreset
-    expect(saved.roles.filter((r) => r.terminal).map((r) => r.templateId)).toEqual(['coder'])
-    // The daemon is what moves it to the end and clears the old one, so the
-    // team goes out saying only which role it is.
-    expect(saved.roles.map((r) => r.templateId)).toEqual(['coder', 'reviewer'])
+    expect(w.findAll('[aria-label*="finishing role"]')).toHaveLength(0)
   })
 
-  it('adds a role without handing it the job of finishing', async () => {
-    // Docs team runs the reviewer only, so adding the coder to it appends one.
-    // The new role must not be the finisher: that is the whole bug the flag
-    // replaced, where the role added last quietly took over integrating.
-    const w = editor({ presetId: docsTeam.id, roles: resolved }, [docsTeam])
+  it('adds a role in front of the one that ends the pipeline', async () => {
+    // Appending is what handed the job of integrating to whatever was added
+    // last. The reviewer here ends pipelines, so the coder joins in front.
+    const finishing: RoleTemplate = { ...reviewer, finisher: true }
+    const w = mount(TeamEditor, {
+      props: {
+        library: [coder, finishing],
+        presets: [docsTeam],
+        projectId: project.id,
+        projectName: project.name,
+        projectTeam: { presetId: docsTeam.id, roles: resolved },
+        harnesses: ['claude'],
+        models: {},
+        thinking: { claude: [] },
+        running: false,
+      },
+      global: { stubs: { RoleOverrideDialog: true } },
+    })
     await w.get('[aria-label="coder in Docs team"]').trigger('click')
 
     const saved = w.emitted('savePreset')!.at(-1)![0] as TeamPreset
-    expect(saved.roles.map((r) => r.templateId)).toEqual(['reviewer', 'coder'])
-    expect(saved.roles.find((r) => r.templateId === 'coder')!.terminal).toBe(false)
-    expect(saved.roles.find((r) => r.templateId === 'reviewer')!.terminal).toBe(true)
+    expect(saved.roles.map((r) => r.templateId)).toEqual(['coder', 'reviewer'])
   })
 
   it('keeps rename and delete on every row, and off the built-in', () => {

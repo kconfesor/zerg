@@ -955,95 +955,48 @@ func TestOwnershipIsEnforcedByTheWriteItself(t *testing.T) {
 	}
 }
 
-// The finisher is chosen and stays chosen.
+// A role that ends pipelines is seeded knowing it, and the ones that do not are
+// seeded knowing that too.
 //
-// It used to be whichever enabled role sat last, so adding a role to the end of
-// a pipeline handed the job of integrating to it, silently, taking it from the
-// role that had been doing it.
-func TestTheTerminalRoleIsAFlagAndStaysLast(t *testing.T) {
+// Terminality is the last enabled role, which held until somebody added a role:
+// the job of integrating moved to it, silently, away from the role that had
+// been doing it. What stops that is placement at the moment a role joins a
+// team, and what decides placement is this flag.
+func TestFinishingRolesAreSeededAsSuch(t *testing.T) {
 	ctx := context.Background()
 	db := newTestDB(t)
 	if err := Seed(ctx, db, "claude"); err != nil {
 		t.Fatal(err)
 	}
-	coder, reviewer, docs := templateID(t, db, "coder"), templateID(t, db, "reviewer"), templateID(t, db, "docs")
-
-	preset, err := db.CreateTeamPreset(ctx, &TeamPreset{Name: "Pipeline", Roles: []TeamPresetRole{
-		{TemplateID: coder, Enabled: true},
-		{TemplateID: reviewer, Enabled: true, Terminal: true},
-	}})
-	if err != nil {
-		t.Fatal(err)
+	want := map[string]bool{
+		"reviewer": true, "cleaner": true,
+		"coder": false, "planner": false, "docs": false,
+		"debugger": false, "architect": false, "hardener": false, "security": false,
 	}
-
-	// Appending a role does not take terminality with it: the finisher moves
-	// back to the end, and the new role lands in front of it. This is why
-	// adding a role does not have to know anything about terminality.
-	preset.Roles = append(preset.Roles, TeamPresetRole{TemplateID: docs, Enabled: true})
-	if err := db.UpdateTeamPreset(ctx, preset); err != nil {
-		t.Fatal(err)
-	}
-	after, err := db.GetTeamPreset(ctx, preset.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := roleOrder(t, db, ctx, after); got != "coder,docs,reviewer*" {
-		t.Errorf("pipeline is %s, want the finisher still last", got)
-	}
-
-	// Flagging another role moves that one to the end instead, and the old
-	// finisher keeps its place in the order.
-	for i := range after.Roles {
-		after.Roles[i].Terminal = after.Roles[i].TemplateID == docs
-	}
-	if err := db.UpdateTeamPreset(ctx, after); err != nil {
-		t.Fatal(err)
-	}
-	after, err = db.GetTeamPreset(ctx, preset.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := roleOrder(t, db, ctx, after); got != "coder,reviewer,docs*" {
-		t.Errorf("pipeline is %s, want docs finishing", got)
-	}
-
-	// Parking the finisher hands the job to the last role still running,
-	// because a pipeline whose only finisher is off has nowhere to deliver.
-	for i := range after.Roles {
-		if after.Roles[i].TemplateID == docs {
-			after.Roles[i].Enabled = false
-		}
-	}
-	if err := db.UpdateTeamPreset(ctx, after); err != nil {
-		t.Fatal(err)
-	}
-	after, err = db.GetTeamPreset(ctx, preset.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := roleOrder(t, db, ctx, after); got != "coder,reviewer*,docs(off)" {
-		t.Errorf("pipeline is %s, want reviewer finishing and docs parked where it was", got)
-	}
-}
-
-// roleOrder renders a team as "a,b*,c(off)": order, the finisher starred, and
-// what is parked.
-func roleOrder(t *testing.T, db *DB, ctx context.Context, preset *TeamPreset) string {
-	t.Helper()
-	var parts []string
-	for _, r := range preset.Roles {
-		tpl, err := db.GetTemplate(ctx, r.TemplateID)
+	for name, finisher := range want {
+		tpl, err := db.GetTemplateByName(ctx, name)
 		if err != nil {
-			t.Fatal(err)
+			t.Fatalf("%s: %v", name, err)
 		}
-		s := tpl.Name
-		if r.Terminal {
-			s += "*"
+		if tpl.Finisher != finisher {
+			t.Errorf("%s finisher = %v, want %v", name, tpl.Finisher, finisher)
 		}
-		if !r.Enabled {
-			s += "(off)"
-		}
-		parts = append(parts, s)
 	}
-	return strings.Join(parts, ",")
+
+	// And it is the role's own field, so a role somebody writes can carry it.
+	mine, err := db.CreateTemplate(ctx, &RoleTemplate{
+		Name: "shipper", Harness: "claude", Model: "sonnet", Args: []string{},
+		Receive: ReceiveTask, BatchMaxItems: 8, BatchMaxAgeSec: 300,
+		Prompt: "ship it", Gate: GateNone, Finisher: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	back, err := db.GetTemplate(ctx, mine.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !back.Finisher {
+		t.Error("a role written as a finisher came back as an ordinary one")
+	}
 }

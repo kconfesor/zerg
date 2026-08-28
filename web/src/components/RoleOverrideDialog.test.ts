@@ -20,6 +20,7 @@ const inherited: RoleTemplate = {
   batchMaxAgeSec: 300,
   prompt: 'default prompt',
   gate: 'none',
+  finisher: false,
   builtin: true,
 }
 

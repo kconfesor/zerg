@@ -30,6 +30,13 @@ type RoleTemplate struct {
 	Harness string   `json:"harness"`
 	Model   string   `json:"model"`
 	Args    []string `json:"args"`
+	// Finisher marks a role that ends a pipeline: a reviewer or a cleaner is
+	// the last step wherever it appears, and a planner never is. Added to a
+	// team, such a role goes to the end and the roles added after it go in
+	// front, which is how the pipeline keeps delivering through the same role
+	// as it grows. It is not the same field as ResolvedRole.Terminal, which is
+	// which role is finishing *this* pipeline.
+	Finisher bool `json:"finisher"`
 	// Thinking is how hard the harness reasons before answering, in that
 	// harness's own vocabulary: claude spends it as --effort, pi as --thinking,
 	// and their level sets are not the same. Empty leaves the harness's default
@@ -126,13 +133,6 @@ type TeamPresetRole struct {
 	TemplateID string `json:"templateId"`
 	Position   int    `json:"position"`
 	Enabled    bool   `json:"enabled"`
-	// Terminal marks the role that finishes a task instead of handing it on,
-	// which is what integrates the work (§9.2). Chosen rather than computed:
-	// it used to be whichever enabled role happened to be last, so adding a
-	// role to the end quietly moved the job of merging to a role that had never
-	// done it. Writes normalise this, so exactly one enabled role carries it and
-	// that role is last.
-	Terminal bool `json:"terminal"`
 	RoleOverrides
 }
 

@@ -14,7 +14,7 @@ import (
 var ErrNotFound = errors.New("not found")
 
 const templateCols = `id, name, harness, model, args, thinking, receive, batch_max_items,
-	batch_max_age_sec, prompt, gate, builtin, created_at, updated_at`
+	batch_max_age_sec, prompt, gate, finisher, builtin, created_at, updated_at`
 
 // CreateTemplate adds a role to the library.
 func (db *DB) CreateTemplate(ctx context.Context, t *RoleTemplate) (*RoleTemplate, error) {
@@ -32,9 +32,9 @@ func (db *DB) CreateTemplate(ctx context.Context, t *RoleTemplate) (*RoleTemplat
 
 	_, err = db.sql.ExecContext(ctx,
 		`INSERT INTO role_templates (`+templateCols+`)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		t.ID, t.Name, t.Harness, t.Model, args, t.Thinking, t.Receive, t.BatchMaxItems,
-		t.BatchMaxAgeSec, t.Prompt, t.Gate, t.Builtin,
+		t.BatchMaxAgeSec, t.Prompt, t.Gate, t.Finisher, t.Builtin,
 		now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
 	if err != nil {
 		return nil, fmt.Errorf("creating role %q: %w", t.Name, err)
@@ -142,10 +142,10 @@ func (db *DB) UpdateTemplate(ctx context.Context, t *RoleTemplate) error {
 
 	res, err := db.sql.ExecContext(ctx,
 		`UPDATE role_templates SET name=?, harness=?, model=?, args=?, thinking=?, receive=?,
-		   batch_max_items=?, batch_max_age_sec=?, prompt=?, gate=?, updated_at=?
+		   batch_max_items=?, batch_max_age_sec=?, prompt=?, gate=?, finisher=?, updated_at=?
 		 WHERE id=?`,
 		t.Name, t.Harness, t.Model, args, t.Thinking, t.Receive, t.BatchMaxItems,
-		t.BatchMaxAgeSec, t.Prompt, t.Gate, t.UpdatedAt.Format(time.RFC3339Nano), t.ID)
+		t.BatchMaxAgeSec, t.Prompt, t.Gate, t.Finisher, t.UpdatedAt.Format(time.RFC3339Nano), t.ID)
 	if err != nil {
 		return fmt.Errorf("updating role %q: %w", t.Name, err)
 	}
@@ -168,18 +168,20 @@ type scanner interface{ Scan(dest ...any) error }
 
 func scanTemplate(s scanner) (*RoleTemplate, error) {
 	var (
-		t          RoleTemplate
-		args       string
-		created    string
-		updated    string
-		builtinInt int
+		t           RoleTemplate
+		args        string
+		created     string
+		updated     string
+		builtinInt  int
+		finisherInt int
 	)
 	if err := s.Scan(&t.ID, &t.Name, &t.Harness, &t.Model, &args, &t.Thinking, &t.Receive,
-		&t.BatchMaxItems, &t.BatchMaxAgeSec, &t.Prompt, &t.Gate, &builtinInt,
+		&t.BatchMaxItems, &t.BatchMaxAgeSec, &t.Prompt, &t.Gate, &finisherInt, &builtinInt,
 		&created, &updated); err != nil {
 		return nil, err
 	}
 	t.Builtin = builtinInt != 0
+	t.Finisher = finisherInt != 0
 	var err error
 	if t.Args, err = unmarshalArgs(args); err != nil {
 		return nil, err
