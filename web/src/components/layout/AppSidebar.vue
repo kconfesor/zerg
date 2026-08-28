@@ -322,12 +322,12 @@ const nav = computed(() => [
   // runs on, then what it costs, then how it is configured. Readiness is not
   // here — it is a setup step, and it lives in Settings with the rest of them.
   { key: 'board' as const, label: 'Board', icon: Columns3, count: props.taskCount },
-  // Beside the board it is the past of, rather than at the end with the
-  // configuration: what happened is read as often as what is happening.
-  { key: 'history' as const, label: 'History', icon: ScrollText, count: 0 },
   { key: 'projects' as const, label: 'Projects', icon: FolderGit2, count: props.projectCount },
   { key: 'team' as const, label: 'Team', icon: Users, count: 0 },
   { key: 'chat' as const, label: 'Chat', icon: MessageSquare, count: 0 },
+  // After Chat rather than beside the board: what happened is read now and
+  // then, and the destinations you use while work is running come first.
+  { key: 'history' as const, label: 'History', icon: ScrollText, count: 0 },
   { key: 'spend' as const, label: 'Spend', icon: Receipt, count: 0 },
   { key: 'activity' as const, label: 'Activity', icon: ActivityIcon, count: 0 },
   { key: 'settings' as const, label: 'Settings', icon: SettingsIcon, count: 0 },
