@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, useId, watch } from 'vue'
+import { computed, defineAsyncComponent, onMounted, onUnmounted, ref, useId, watch } from 'vue'
 import {
   ApiError,
   api,
@@ -19,18 +19,33 @@ import {
 } from '@/lib/api'
 import { followPreset } from '@/lib/team'
 import Attention from '@/components/Attention.vue'
-import Activity from '@/components/Activity.vue'
-import Spend from '@/components/Spend.vue'
 import Board from '@/components/Board.vue'
-import Chat from '@/components/Chat.vue'
-import MarkdownEditor from '@/components/MarkdownEditor.vue'
-import Projects from '@/components/Projects.vue'
 import ProjectPathField from '@/components/ProjectPathField.vue'
-import History from '@/components/History.vue'
-import TaskDetail from '@/components/TaskDetail.vue'
-import Settings from '@/components/Settings.vue'
-import ReadinessPanel from '@/components/Readiness.vue'
-import TeamEditor from '@/components/TeamEditor.vue'
+
+/**
+ * Everything that is not the board, loaded when it is opened.
+ *
+ * The cockpit shipped as one file: a megabyte of JavaScript, of which
+ * Lighthouse measured 71% unused on the board, because the rich-text editor,
+ * the settings screens, the charts and every other view were parsed and
+ * evaluated before the first card appeared. They are behind a v-if that is
+ * false on load, so nothing here changes what renders, only when it is
+ * fetched.
+ *
+ * The board and the attention panel stay eager. The board is what a reload
+ * lands on, and the panel is what interrupts it; a spinner in front of either
+ * would be a regression to pay for a smaller first byte.
+ */
+const Activity = defineAsyncComponent(() => import('@/components/Activity.vue'))
+const Spend = defineAsyncComponent(() => import('@/components/Spend.vue'))
+const Chat = defineAsyncComponent(() => import('@/components/Chat.vue'))
+const MarkdownEditor = defineAsyncComponent(() => import('@/components/MarkdownEditor.vue'))
+const Projects = defineAsyncComponent(() => import('@/components/Projects.vue'))
+const History = defineAsyncComponent(() => import('@/components/History.vue'))
+const TaskDetail = defineAsyncComponent(() => import('@/components/TaskDetail.vue'))
+const Settings = defineAsyncComponent(() => import('@/components/Settings.vue'))
+const ReadinessPanel = defineAsyncComponent(() => import('@/components/Readiness.vue'))
+const TeamEditor = defineAsyncComponent(() => import('@/components/TeamEditor.vue'))
 import AppSidebar from '@/components/layout/AppSidebar.vue'
 import { useRoute, useRouter } from 'vue-router'
 import { viewOf, viewPath, type View } from '@/router'

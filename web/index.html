@@ -24,12 +24,16 @@
     <meta name="twitter:description" content="Supervise autonomous AI agent swarms in isolated git worktrees. Configured entirely in the UI." />
     <meta name="twitter:image" content="/og-image.png" />
 
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      rel="stylesheet"
-      href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap"
-    />
+    <!-- No webfont.
+         This asked Google for JetBrains Mono on every load, and nothing ever
+         used it: the stylesheet names the family "JetBrains Mono Variable",
+         which is fontsource's name for it and not the one Google serves, so
+         every face stayed unloaded and the cockpit has always rendered in the
+         system monospace. Lighthouse measured the request blocking render for
+         870ms, and it is a request to a third party from a daemon that is
+         meant to work on a machine with no route to the internet. Removing it
+         changes nothing on screen. To actually get the typeface, self-host the
+         woff2 and match the family name; do not put the CDN back. -->
   </head>
   <body>
     <div id="app"></div>

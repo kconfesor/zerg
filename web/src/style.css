@@ -1,5 +1,4 @@
 
-@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap');
 
 @import "tailwindcss";
 @import "tw-animate-css";
@@ -346,4 +345,23 @@
   float: left;
   height: 0;
   pointer-events: none;
+}
+
+/* A floor on type size where the screen is a phone.
+ *
+ * The cockpit is dense on purpose: ten and eleven pixel labels are what let a
+ * board, a diff and a review fit on one screen at a desk. In a hand they are
+ * not readable, and Lighthouse says so plainly -- it scored 48% of the text
+ * illegible under mobile emulation.
+ *
+ * Raised here rather than in every component, because the density is the
+ * desktop design and this is the exception to it: one place to find, one place
+ * to change. Unlayered, so it wins against Tailwind's utility layer wherever
+ * the utility is what set the size.
+ */
+@media (max-width: 640px) {
+  .text-\[10px\],
+  .text-\[11px\] {
+    font-size: 12px;
+  }
 }

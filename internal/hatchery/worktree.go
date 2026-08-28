@@ -499,7 +499,14 @@ func (h *Hatchery) resolves(ctx context.Context, ref string) (bool, error) {
 
 // load fills in one file's content and diff, or says why it did not.
 func (h *Hatchery) load(ctx context.Context, f *ChangedFile, sha, base string, maxBytes int) {
-	if f.Status != "D" {
+	// Only for the files the cockpit renders as documents.
+	//
+	// It used to read every file's full content as well as its diff, which is
+	// two git processes per file: a thirty-file listing spawned sixty of them
+	// and measured 840ms to answer, for 1.4KB of JSON. Nothing ever displayed
+	// the content of a .rs or a .go -- those are read as diffs -- so the bytes
+	// were fetched, serialised, sent, and dropped.
+	if f.Status != "D" && isDoc(f.Path) {
 		if body, err := git(ctx, h.repoPath, "show", sha+":"+f.Path); err == nil {
 			if maxBytes <= 0 || len(body) <= maxBytes {
 				f.Content = body
@@ -525,6 +532,65 @@ func (h *Hatchery) load(ctx context.Context, f *ChangedFile, sha, base string, m
 		return
 	}
 	f.TooLarge = true
+}
+
+// isDoc reports whether a file is one the cockpit renders as a document
+// rather than as a diff. It mirrors the same test in Attention.vue: a spec is
+// the deliverable at a planner's gate, and its diff is the document with a
+// plus in front of every line.
+func isDoc(path string) bool {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".md", ".markdown", ".txt":
+		return true
+	}
+	return false
+}
+
+// patches asks git for the diff of many files at once.
+//
+// One process rather than one per file. Answering a thirty-file listing took
+// 840ms, nearly all of it spent starting git over and over; batched, the same
+// answer is one invocation.
+//
+// The sections are matched to the paths by order rather than by parsing the
+// "diff --git a/x b/x" line, because that line quotes and escapes anything
+// unusual in a path and re-parsing it is how the listing got a file called
+// "b.txt" out of "a b.txt". Git emits sections in the order it was given, which
+// is the order this list already has. If the counts disagree, the caller is
+// told nothing came back and falls back to reading each file on its own: a
+// slower answer is better than a diff shown against the wrong name.
+func (h *Hatchery) patches(ctx context.Context, sha, base string, paths []string) map[string]string {
+	if len(paths) == 0 {
+		return nil
+	}
+	args := []string{"diff", base + "..." + sha, "--"}
+	if base == "" {
+		args = []string{"show", "--format=", "--patch", sha, "--"}
+	}
+	out, err := git(ctx, h.repoPath, append(args, paths...)...)
+	if err != nil {
+		return nil
+	}
+
+	const marker = "diff --git "
+	var sections []string
+	for _, chunk := range strings.Split(out, "\n"+marker) {
+		if chunk == "" {
+			continue
+		}
+		if !strings.HasPrefix(chunk, marker) {
+			chunk = marker + chunk
+		}
+		sections = append(sections, chunk)
+	}
+	if len(sections) != len(paths) {
+		return nil
+	}
+	by := make(map[string]string, len(paths))
+	for i, p := range paths {
+		by[p] = strings.TrimRight(sections[i], "\n") + "\n"
+	}
+	return by
 }
 
 // LoadFile reads one file of a change, for the ones a listing left alone.
@@ -588,6 +654,7 @@ func (h *Hatchery) changed(ctx context.Context, sha, base string, maxBytes, eage
 	}
 
 	var files []ChangedFile
+	var read []int // the ones to fill in, by index
 	for _, rec := range nameStatus(out) {
 		f := ChangedFile{Status: rec.status, Path: rec.path}
 		if st, ok := stats[f.Path]; ok {
@@ -603,13 +670,37 @@ func (h *Hatchery) changed(ctx context.Context, sha, base string, maxBytes, eage
 		// Past the eager limit the file is listed and left to be opened. A
 		// hundred-file change otherwise reads every file, and its diff, before
 		// anyone has looked at the first one.
-		if eager >= 0 && len(files) >= eager {
+		if eager >= 0 && len(read) >= eager {
 			f.Deferred = true
 			files = append(files, f)
 			continue
 		}
-		h.load(ctx, &f, sha, base, maxBytes)
+		read = append(read, len(files))
 		files = append(files, f)
+	}
+
+	paths := make([]string, len(read))
+	for i, idx := range read {
+		paths[i] = files[idx].Path
+	}
+	batch := h.patches(ctx, sha, base, paths)
+	for _, idx := range read {
+		f := &files[idx]
+		d, ok := batch[f.Path]
+		if !ok {
+			// The batch could not be matched to its paths; read this one on
+			// its own rather than show it as unchanged.
+			h.load(ctx, f, sha, base, maxBytes)
+			continue
+		}
+		if maxBytes > 0 && len(d) > maxBytes {
+			f.TooLarge = true
+		} else {
+			f.Diff = d
+		}
+		if isDoc(f.Path) && f.Status != "D" && !f.TooLarge {
+			h.load(ctx, f, sha, base, maxBytes)
+		}
 	}
 	return files, nil
 }

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useMediaQuery } from '@vueuse/core'
 import type { Attention } from '@/lib/api'
 import {
@@ -150,8 +150,14 @@ function seenFiles(id: string): string[] {
   return diffs.value[id]?.seen ?? []
 }
 
+const seenSets = computed(() => {
+  const out: Record<string, Set<string>> = {}
+  for (const [id, d] of Object.entries(diffs.value)) out[id] = new Set(d.seen ?? [])
+  return out
+})
+
 function isSeen(id: string, path: string): boolean {
-  return seenFiles(id).includes(path)
+  return seenSets.value[id]?.has(path) ?? false
 }
 
 function unread(id: string): number {
@@ -411,8 +417,36 @@ async function loadThreads(taskId: string) {
   }
 }
 
+/**
+ * Threads by the file they point at, built once per change to them.
+ *
+ * Not filtered per call. These are read from the template, which runs them on
+ * every render of the card: three lookups and a line list for each of
+ * forty-nine files, each one scanning every thread. Worse than the scanning,
+ * a filter returns a *new array* each time, and a new array is a new prop --
+ * so every DiffView on the card re-rendered whenever anything on it changed,
+ * to move one border. Built as a map, the arrays keep their identity and Vue
+ * skips the subtrees whose input did not move.
+ */
+const byFile = computed(() => {
+  const out: Record<string, { threads: ReviewThread[]; lines: number[] }> = {}
+  for (const [taskId, list] of Object.entries(threads.value)) {
+    for (const t of list) {
+      const at = (out[`${taskId}::${t.file ?? ''}`] ??= { threads: [], lines: [] })
+      at.threads.push(t)
+      // The lines the gutter marks: a remark still open, or any question.
+      if (t.line > 0 && (t.state === 'open' || t.kind === 'question')) at.lines.push(t.line)
+    }
+  }
+  return out
+})
+
+/** Shared empties, so "nothing here" is also the same value every time. */
+const NO_THREADS: ReviewThread[] = []
+const NO_LINES: number[] = []
+
 function threadsFor(taskId: string | undefined, file: string): ReviewThread[] {
-  return (threads.value[taskId ?? ''] ?? []).filter((t) => (t.file ?? '') === file)
+  return byFile.value[`${taskId ?? ''}::${file}`]?.threads ?? NO_THREADS
 }
 
 /**
@@ -432,9 +466,7 @@ function orphanThreads(taskId: string | undefined, approvalID: string): ReviewTh
 /** Lines already carrying a thread, so the gutter can show where the
  *  conversation is without opening anything. */
 function discussed(taskId: string | undefined, file: string): number[] {
-  return threadsFor(taskId, file)
-    .filter((t) => t.line > 0 && (t.state === 'open' || t.kind === 'question'))
-    .map((t) => t.line)
+  return byFile.value[`${taskId ?? ''}::${file}`]?.lines ?? NO_LINES
 }
 
 /** What holds the gate: remarks the reader has not settled. A question never
@@ -1144,8 +1176,8 @@ function empty(a: Attention | null): boolean {
                 class="hover:bg-muted focus-visible:outline-ring flex flex-1 items-center justify-end gap-1.5 px-2 py-2.5 text-right text-[11px] font-medium focus-visible:outline-2 focus-visible:-outline-offset-2 sm:py-1.5"
                 @click="compose(a.taskId, f.path, 0, '', 'remark')"
               >
-                <MessageSquare :size="12" aria-hidden="true" class="text-[var(--status-warning)] shrink-0" />
                 Remark on this file
+                <MessageSquare :size="12" aria-hidden="true" class="text-[var(--status-warning)] shrink-0" />
               </button>
             </div>
           </div>

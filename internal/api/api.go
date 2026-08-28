@@ -210,7 +210,9 @@ func (s *Server) Routes() http.Handler {
 		mux.Handle("/", ui)
 	}
 
-	return s.guard(s.withLogging(mux))
+	// Compression inside the guard: the guard rejects a request before anything
+	// is written, and there is nothing to compress about a rejection.
+	return s.guard(s.withLogging(compressed(mux)))
 }
 
 // ── health ────────────────────────────────────────────────────────────────
