@@ -965,7 +965,6 @@ watch(current, () => (banner.value = null))
             <div class="pt-4">
               <Settings
                 :checking="busy.is('readiness')"
-                :project-id="current?.id ?? null"
                 @readiness="checkReadiness"
                 @roles-changed="reloadLibrary"
               />

@@ -516,32 +516,38 @@ export const api = {
   taskDetail: (id: string) => call<TaskDetail>(`/tasks/${id}`),
   /** What a task produced: files to look at, and services to open. */
   taskArtifacts: (id: string) => call<Artifact[]>(`/tasks/${id}/artifacts`),
-  /** Where this project's work can be run or sent. */
-  targets: (projectId: string) => call<DeployTarget[]>(`/projects/${projectId}/targets`),
-  saveTarget: (projectId: string, t: Partial<DeployTarget>) =>
-    call<DeployTarget>(`/projects/${projectId}/targets`, {
-      method: 'POST',
-      body: JSON.stringify(t),
-    }),
-  deleteTarget: (projectId: string, targetId: string) =>
-    call<void>(`/projects/${projectId}/targets/${targetId}`, { method: 'DELETE' }),
   /**
-   * Run a commit here and wait for it to answer.
-   *
-   * Slow on purpose: a build is a build, and the two outcomes worth reporting
-   * (it is up, or it failed and here is the output) are both only known at the
-   * end of one.
+   * The state of this project's runner: what it is doing, and what it has
+   * learned about running the project.
    */
-  runPreview: (projectId: string, body: { targetId?: string; commit: string; taskId?: string }) =>
-    call<Artifact>(`/projects/${projectId}/preview`, {
+  runState: (projectId: string) => call<RunState>(`/projects/${projectId}/run`),
+  /** Ask the runner to serve a commit. Returns as soon as the agent is
+   *  started; the state says what happens next. */
+  startRun: (projectId: string, body: { commit: string; taskId?: string }) =>
+    call<RunState>(`/projects/${projectId}/run`, { method: 'POST', body: JSON.stringify(body) }),
+  /** Tell the running agent something: which app, which compose file, what it
+   *  got wrong. It still has the context of what it just tried. */
+  guideRun: (projectId: string, text: string) =>
+    call<RunState>(`/projects/${projectId}/run/guide`, {
       method: 'POST',
-      body: JSON.stringify(body),
+      body: JSON.stringify({ text }),
     }),
-  /** What the running preview has printed so far. */
-  previewLog: (projectId: string) =>
-    call<{ log: string }>(`/projects/${projectId}/preview/log`),
-  stopPreview: (projectId: string) =>
-    call<void>(`/projects/${projectId}/preview`, { method: 'DELETE' }),
+  stopRun: (projectId: string) => call<void>(`/projects/${projectId}/run`, { method: 'DELETE' }),
+  /** Say somebody is still looking, which is what the idle timer measures. */
+  touchRun: (projectId: string) =>
+    call<void>(`/projects/${projectId}/run/touch`, { method: 'POST' }),
+  /** Correct what the agent believes about running this project. */
+  saveRunNote: (projectId: string, note: string) =>
+    call<void>(`/projects/${projectId}/run/note`, {
+      method: 'PUT',
+      body: JSON.stringify({ note }),
+    }),
+  /** Whether finishing a task starts a preview of it. */
+  setAutoRun: (projectId: string, autoRun: boolean) =>
+    call<void>(`/projects/${projectId}/auto-run`, {
+      method: 'PUT',
+      body: JSON.stringify({ autoRun }),
+    }),
 
   /** Keep an artifact after its task's transcript ages out. */
   pinArtifact: (id: string, pinned: boolean) =>
@@ -1023,23 +1029,24 @@ export interface Artifact {
   url?: string
 }
 
-/** Somewhere a project's work can be run or sent. */
-export interface DeployTarget {
-  id: string
-  projectId: string
-  name: string
-  kind: 'local' | 'remote'
-  /** What to run, in the checkout, with $PORT set for a local target. */
-  command: string
-  /** What undoes it, when killing the process group is not enough: compose
-   *  interrupted leaves its containers exited. */
-  stopCommand?: string
-  /** Paths git does not track, copied from the operator's checkout into the
-   *  preview's. One per line. */
-  copyFiles?: string
-  cwd?: string
-  readySecs: number
-  createdAt: string
+/**
+ * What the runner is doing, and what it knows.
+ *
+ * `working` it is reading the repository and trying things; `asking` it put a
+ * question in Attention and is waiting; `serving` a port is registered and the
+ * frame works; `gave up` the turn ended without anything serving.
+ */
+export interface RunState {
+  state: 'idle' | 'working' | 'asking' | 'serving' | 'gave up'
+  commit?: string
+  taskId?: string
+  message?: string
+  since?: string
+  /** What has been learned about running this project. Prose, written by the
+   *  runner or corrected by the operator. */
+  note?: string
+  noteAuthor?: string
+  autoRun: boolean
 }
 
 /** Where the bytes of a file artifact live. */

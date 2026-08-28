@@ -17,6 +17,7 @@ import { renderMarkdown } from '@/lib/markdown'
 import DiffView from '@/components/DiffView.vue'
 import ReviewThreadView from '@/components/ReviewThread.vue'
 import Artifacts from '@/components/Artifacts.vue'
+import RunPanel from '@/components/RunPanel.vue'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -329,6 +330,9 @@ function focusFile(path: string) {
 
 /** The panel's root, so the scroll tracking can find what scrolls it. */
 const root = ref<HTMLElement | null>(null)
+
+/** The artifact list, so a preview that starts can make it look again. */
+const artifacts = ref<{ load: (taskId: string | undefined) => void } | null>(null)
 
 /**
  * Where the bar sits, and the line it reads the current file from.
@@ -821,12 +825,18 @@ function empty(a: Attention | null): boolean {
       <!-- What this produced, at the moment somebody is deciding about it.
            For anything with a screen, "what does it look like" is the question
            that comes before "what changed". -->
-      <Artifacts
-        :task-id="a.taskId"
+      <!-- Running the commit being decided about, which for anything with a
+           screen is the question that comes before "what changed". An agent
+           does it: the daemon has no idea how this project serves itself, and
+           it should not be the operator's job to write that down. -->
+      <RunPanel
         :project-id="props.projectId ?? undefined"
         :commit="a.commit"
+        :task-id="a.taskId"
         class="mb-2.5"
+        @served="artifacts?.load(a.taskId)"
       />
+      <Artifacts ref="artifacts" :task-id="a.taskId" class="mb-2.5" />
 
       <!-- And what it actually wrote. Deciding from a description of a change
            rather than the change is approving blind, and for a planner's spec

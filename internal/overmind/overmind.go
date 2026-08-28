@@ -941,6 +941,15 @@ func composePrompt(shared, role string) string {
 // directory, from anywhere not already on PATH — and when it does not resolve
 // the agent simply cannot do what it was asked, with no way to report why. A
 // symlink under the state directory makes the name true regardless.
+// AgentBin stages the zerg binary agents are told to run and returns the
+// directory holding it.
+//
+// Exported because agents outside the pipeline need it too: a runner is
+// spawned without a swarm and must still be able to call `zerg artifact
+// serve`. Without it the first real session spent part of its turn hunting for
+// the binary.
+func (o *Overmind) AgentBin() (string, error) { return o.ensureAgentBin() }
+
 func (o *Overmind) ensureAgentBin() (string, error) {
 	self, err := os.Executable()
 	if err != nil {

@@ -35,6 +35,16 @@ type Identity struct {
 	ProjectID string
 	Role      string
 
+	// TaskID is the card this agent was spawned for, when it was spawned for
+	// one rather than sent to claim work.
+	//
+	// A pipeline role finds its card through the lease it holds. An agent
+	// given a job holds no lease, so what it produces had nowhere to attach:
+	// a runner's service was recorded against the project and the card that
+	// asked for it showed nothing. The daemon knew which card it was for at
+	// the moment it started the agent, so the token carries it.
+	TaskID string
+
 	// Can is what this token is allowed to call. Empty means everything, which
 	// is what a pipeline role gets.
 	//
@@ -131,8 +141,14 @@ func (s *Server) Mint(projectID, role string) string {
 // MintScoped issues a token for an agent that is not a pipeline role, limited
 // to the verbs named. Naming none is the same as Mint.
 func (s *Server) MintScoped(projectID, role string, can ...string) string {
+	return s.MintFor(projectID, role, "", can...)
+}
+
+// MintFor issues a scoped token for an agent spawned to work on one card, so
+// what it produces attaches to that card without the agent having to say.
+func (s *Server) MintFor(projectID, role, taskID string, can ...string) string {
 	token := store.NewID()
-	id := Identity{ProjectID: projectID, Role: role}
+	id := Identity{ProjectID: projectID, Role: role, TaskID: taskID}
 	if len(can) > 0 {
 		id.Can = make(map[string]bool, len(can))
 		for _, verb := range can {
@@ -520,7 +536,7 @@ func (s *Server) ask(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		taskID = &resolved
-	} else if held, err := s.db.CurrentTaskFor(r.Context(), id.ProjectID, id.Role); err == nil {
+	} else if held, err := s.db.CurrentTaskFor(r.Context(), id.ProjectID, id.Role); err == nil && held != nil {
 		// No --task given: use the card this role is holding a lease on.
 		//
 		// The daemon knows which one that is, and the agent has to remember to
@@ -530,6 +546,12 @@ func (s *Server) ask(w http.ResponseWriter, r *http.Request) {
 		// it here is the same principle as resolving a commit in the sender's
 		// worktree rather than trusting what was passed.
 		taskID = held
+	} else if id.TaskID != "" {
+		// Spawned for a card rather than sent to claim one: the token carries
+		// it, so a runner's question reaches the card that asked for the run
+		// instead of the bell with nothing behind it.
+		task := id.TaskID
+		taskID = &task
 	}
 	c, err := s.db.AskClarification(r.Context(), id.ProjectID, id.Role, req.Question, taskID)
 	if err != nil {

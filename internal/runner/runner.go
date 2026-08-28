@@ -109,6 +109,15 @@ type Manager struct {
 	agents   *agent.Server
 	log      *slog.Logger
 
+	// binDir holds the zerg the agent is told to run, prepended to its PATH.
+	//
+	// Without it the runner cannot find its own CLI: the first real session
+	// spent part of a turn hunting for the binary and wrote "zerg CLI binary
+	// path not on PATH -- found at ~/.zerg/state/bin/zerg" into its note,
+	// which is a fact about this daemon's wiring leaking into what it learned
+	// about the project.
+	binDir string
+
 	mu       sync.Mutex
 	sessions map[string]*session
 }
@@ -128,14 +137,42 @@ type session struct {
 }
 
 func NewManager(db *store.DB, reg *adapter.Registry, bus *event.Bus, agents *agent.Server,
-	log *slog.Logger) *Manager {
+	binDir string, log *slog.Logger) *Manager {
 	if log == nil {
 		log = slog.Default()
 	}
-	m := &Manager{db: db, registry: reg, bus: bus, agents: agents, log: log,
+	m := &Manager{db: db, registry: reg, bus: bus, agents: agents, binDir: binDir, log: log,
 		sessions: map[string]*session{}}
 	go m.reapIdle()
+	go m.watchTurns()
 	return m
+}
+
+// watchTurns settles the state when the agent stops talking.
+//
+// Nothing else can. A turn that ends having registered a service is serving; a
+// turn that ends without one has given up, and saying so is the difference
+// between a panel that reports a failure and one that shows "working" until
+// the idle timer collects it half an hour later.
+func (m *Manager) watchTurns() {
+	events, cancel := m.bus.Subscribe(256)
+	defer cancel()
+	for ev := range events {
+		if ev.Role != Role || ev.Kind != adapter.EventTurnEnd {
+			continue
+		}
+		live, err := m.db.LiveServices(context.Background(), ev.ProjectID)
+		if err != nil {
+			m.log.Warn("could not read the project's services", "project", ev.ProjectID, "err", err)
+			continue
+		}
+		if len(live) > 0 {
+			m.setState(ev.ProjectID, StateServing, "")
+			continue
+		}
+		m.setState(ev.ProjectID, StateGaveUp,
+			"the agent finished without starting anything; read what it said, or tell it something")
+	}
 }
 
 // Run starts, or restarts, a project's preview at a commit.
@@ -176,7 +213,7 @@ func (m *Manager) Run(ctx context.Context, projectID, commit, taskID string) err
 	// Three verbs and no more. It registers what it started, asks when it is
 	// stuck, and writes down what it learned. It cannot claim work or hand any
 	// on -- which matters most when it starts on its own, after a task lands.
-	token := m.agents.MintScoped(projectID, Role,
+	token := m.agents.MintFor(projectID, Role, taskID,
 		agent.CanArtifact, agent.CanAsk, agent.CanRemember)
 
 	// The port is the daemon's to choose, not the project's. Two projects that
@@ -197,6 +234,7 @@ func (m *Manager) Run(ctx context.Context, projectID, commit, taskID string) err
 		Worktree:  worktree,
 		Socket:    m.agents.Path(),
 		Token:     token,
+		BinDir:    m.binDir,
 		Env: []string{
 			fmt.Sprintf("PORT=%d", port),
 			fmt.Sprintf("ZERG_COMMIT=%s", commit),

@@ -68,8 +68,14 @@ func (s *Server) artifact(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		a.TaskID = &resolved
-	} else if held, err := s.db.CurrentTaskFor(r.Context(), id.ProjectID, id.Role); err == nil {
+	} else if held, err := s.db.CurrentTaskFor(r.Context(), id.ProjectID, id.Role); err == nil && held != nil {
 		a.TaskID = held
+	} else if id.TaskID != "" {
+		// An agent spawned for one card rather than sent to claim work holds no
+		// lease, so there is nothing to infer from. The token knows, because
+		// the daemon knew when it started it.
+		task := id.TaskID
+		a.TaskID = &task
 	}
 
 	switch req.Kind {

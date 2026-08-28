@@ -389,7 +389,13 @@ func runUp(args []string) error {
 	// Starting a project so somebody can look at it. An agent does the work:
 	// the daemon spawns it with a commit checked out and three verbs, and it
 	// reads the repository to find out how this project serves itself.
-	runners = runner.NewManager(db, registry, bus, agents, log)
+	// The same staged binary a pipeline role is given. A runner is spawned
+	// without a swarm, so nothing else has put it there.
+	agentBin, err := over.AgentBin()
+	if err != nil {
+		log.Warn("agents may not find the zerg command", "err", err)
+	}
+	runners = runner.NewManager(db, registry, bus, agents, agentBin, log)
 	agents.Watch(runners)
 	// Its sessions are children of this process, and the servers they started
 	// are children of those.
