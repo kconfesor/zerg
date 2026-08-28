@@ -18,6 +18,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import DeployTargets from '@/components/DeployTargets.vue'
 import RoleLibrary from '@/components/RoleLibrary.vue'
 import {
   Select,
@@ -90,9 +91,11 @@ async function saveInstructions() {
  * drifted immediately — the ref said "project" while the component opened on
  * "network", so the state the button read was never the tab on screen.
  */
-defineProps<{
+const props = defineProps<{
   /** Whether a readiness probe is in flight, so the button can say so. */
   checking?: boolean
+  /** The project whose run targets are edited here; they belong to one. */
+  projectId?: string | null
 }>()
 const emit = defineEmits<{
   readiness: []
@@ -288,6 +291,7 @@ const loopback = computed(() => {
           <TabsTrigger value="network">Network</TabsTrigger>
           <TabsTrigger value="roles">Roles</TabsTrigger>
           <TabsTrigger value="disk">Disk</TabsTrigger>
+          <TabsTrigger value="run">Run</TabsTrigger>
           <TabsTrigger value="harness">Harness</TabsTrigger>
           <TabsTrigger value="instructions">Instructions</TabsTrigger>
         </TabsList>
@@ -484,6 +488,12 @@ const loopback = computed(() => {
 
 
       <!-- ── Harness ──────────────────────────────────────────────────── -->
+      <!-- What to run to see this project's work, which belongs to the
+           project rather than to the daemon. -->
+      <TabsContent value="run" class="pt-4">
+        <DeployTargets :project-id="props.projectId ?? null" />
+      </TabsContent>
+
       <TabsContent value="harness" class="flex flex-col gap-4 pt-4">
         <Card v-for="h in harnessNames" :key="h">
           <CardHeader>

@@ -37,6 +37,9 @@ const narrow = useMediaQuery('(max-width: 639px)')
 
 const props = defineProps<{
   attention: Attention | null
+  /** The project these approvals belong to, so the gate can offer to run the
+   *  commit it is deciding about. */
+  projectId?: string | null
   compact?: boolean
   /**
    * Whether an operation is in flight, asked by key. A decision runs a merge or
@@ -818,7 +821,12 @@ function empty(a: Attention | null): boolean {
       <!-- What this produced, at the moment somebody is deciding about it.
            For anything with a screen, "what does it look like" is the question
            that comes before "what changed". -->
-      <Artifacts :task-id="a.taskId" class="mb-2.5" />
+      <Artifacts
+        :task-id="a.taskId"
+        :project-id="props.projectId ?? undefined"
+        :commit="a.commit"
+        class="mb-2.5"
+      />
 
       <!-- And what it actually wrote. Deciding from a description of a change
            rather than the change is approving blind, and for a planner's spec

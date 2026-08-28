@@ -516,6 +516,30 @@ export const api = {
   taskDetail: (id: string) => call<TaskDetail>(`/tasks/${id}`),
   /** What a task produced: files to look at, and services to open. */
   taskArtifacts: (id: string) => call<Artifact[]>(`/tasks/${id}/artifacts`),
+  /** Where this project's work can be run or sent. */
+  targets: (projectId: string) => call<DeployTarget[]>(`/projects/${projectId}/targets`),
+  saveTarget: (projectId: string, t: Partial<DeployTarget>) =>
+    call<DeployTarget>(`/projects/${projectId}/targets`, {
+      method: 'POST',
+      body: JSON.stringify(t),
+    }),
+  deleteTarget: (projectId: string, targetId: string) =>
+    call<void>(`/projects/${projectId}/targets/${targetId}`, { method: 'DELETE' }),
+  /**
+   * Run a commit here and wait for it to answer.
+   *
+   * Slow on purpose: a build is a build, and the two outcomes worth reporting
+   * (it is up, or it failed and here is the output) are both only known at the
+   * end of one.
+   */
+  runPreview: (projectId: string, body: { targetId?: string; commit: string; taskId?: string }) =>
+    call<Artifact>(`/projects/${projectId}/preview`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  stopPreview: (projectId: string) =>
+    call<void>(`/projects/${projectId}/preview`, { method: 'DELETE' }),
+
   /** Keep an artifact after its task's transcript ages out. */
   pinArtifact: (id: string, pinned: boolean) =>
     call<Artifact>(`/artifacts/${id}/pinned`, {
@@ -994,6 +1018,22 @@ export interface Artifact {
   pinned: boolean
   /** Where a running service can be opened, on the proxy's own origin. */
   url?: string
+}
+
+/** Somewhere a project's work can be run or sent. */
+export interface DeployTarget {
+  id: string
+  projectId: string
+  name: string
+  kind: 'local' | 'remote'
+  /** What to run, in the checkout, with $PORT set for a local target. */
+  command: string
+  /** What undoes it, when killing the process group is not enough: compose
+   *  interrupted leaves its containers exited. */
+  stopCommand?: string
+  cwd?: string
+  readySecs: number
+  createdAt: string
 }
 
 /** Where the bytes of a file artifact live. */

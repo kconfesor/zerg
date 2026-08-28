@@ -87,7 +87,7 @@ func TestAStoppedServiceIsNotProxied(t *testing.T) {
 	p, f, a, closeUp := serviceFixture(t)
 	defer closeUp()
 
-	if _, err := f.db.StopServices(context.Background(), f.project.ID); err != nil {
+	if _, err := f.db.StopServices(context.Background(), f.project.ID, ""); err != nil {
 		t.Fatal(err)
 	}
 	rec := httptest.NewRecorder()

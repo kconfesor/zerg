@@ -22,6 +22,14 @@ const (
 	ArtifactService = "service"
 )
 
+// Who started a service, which decides what stops it. An agent's dev server
+// is a child of the swarm; a preview the daemon started outlives it, because
+// the reason to run one is to click around after the pipeline finished.
+const (
+	OwnerAgent  = "agent"
+	OwnerDaemon = "daemon"
+)
+
 // Artifact is one produced thing.
 type Artifact struct {
 	ID        string  `json:"id"`
@@ -40,6 +48,8 @@ type Artifact struct {
 	// A service's port, and when it stopped being one.
 	Port      int        `json:"port,omitempty"`
 	StoppedAt *time.Time `json:"stoppedAt,omitempty"`
+	// Owner is agent or daemon; see the constants above.
+	Owner string `json:"owner,omitempty"`
 
 	CreatedAt time.Time `json:"createdAt"`
 	Pinned    bool      `json:"pinned"`
@@ -71,13 +81,16 @@ func (db *DB) AddArtifact(ctx context.Context, a *Artifact) (*Artifact, error) {
 
 	a.ID = NewID()
 	a.CreatedAt = time.Now().UTC()
+	if a.Owner == "" {
+		a.Owner = OwnerAgent
+	}
 	if _, err := db.sql.ExecContext(ctx,
 		`INSERT INTO artifacts (id, project_id, task_id, role, kind, label,
-		   sha256, mime, bytes, name, port, created_at, pinned)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		   sha256, mime, bytes, name, port, created_at, pinned, owner)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		a.ID, a.ProjectID, a.TaskID, a.Role, a.Kind, a.Label,
 		a.SHA256, a.MIME, a.Bytes, a.Name, a.Port,
-		a.CreatedAt.Format(time.RFC3339Nano), boolInt(a.Pinned)); err != nil {
+		a.CreatedAt.Format(time.RFC3339Nano), boolInt(a.Pinned), a.Owner); err != nil {
 		return nil, fmt.Errorf("recording the artifact: %w", err)
 	}
 	return a, nil
@@ -137,20 +150,27 @@ func (db *DB) LiveServices(ctx context.Context, projectID string) ([]Artifact, e
 	return out, rows.Err()
 }
 
-// StopServices marks a project's services stopped.
+// StopServices marks services stopped.
 //
-// Called when the swarm goes down, because that is when the processes holding
-// those ports die: the row outlives them and would otherwise offer a link to
-// whatever binds that port next, which is the worst kind of wrong answer.
-// Passing an empty project stops every one of them, which is what a daemon
-// shutting down means.
-func (db *DB) StopServices(ctx context.Context, projectID string) (int, error) {
+// Called when the processes holding those ports die: the row outlives them and
+// would otherwise offer a link to whatever binds that port next, which is the
+// worst kind of wrong answer. Passing an empty project means every project,
+// which is what a daemon shutting down means.
+//
+// owner selects whose services: the swarm going down takes the agents' dev
+// servers with it and must leave a preview the daemon is still running alone.
+// An empty owner means both, for shutdown.
+func (db *DB) StopServices(ctx context.Context, projectID, owner string) (int, error) {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	q := `UPDATE artifacts SET stopped_at = ? WHERE kind = ? AND stopped_at IS NULL`
 	args := []any{now, ArtifactService}
 	if projectID != "" {
 		q += ` AND project_id = ?`
 		args = append(args, projectID)
+	}
+	if owner != "" {
+		q += ` AND owner = ?`
+		args = append(args, owner)
 	}
 	res, err := db.sql.ExecContext(ctx, q, args...)
 	if err != nil {
@@ -171,7 +191,7 @@ func (db *DB) SetArtifactPinned(ctx context.Context, id string, pinned bool) err
 }
 
 const artifactCols = `id, project_id, task_id, role, kind, label, sha256, mime, bytes, name,
-	port, stopped_at, created_at, pinned`
+	port, stopped_at, created_at, pinned, owner`
 
 func scanArtifact(s scanner) (*Artifact, error) {
 	var (
@@ -182,7 +202,8 @@ func scanArtifact(s scanner) (*Artifact, error) {
 		pinned    int
 	)
 	if err := s.Scan(&a.ID, &a.ProjectID, &taskID, &a.Role, &a.Kind, &a.Label,
-		&a.SHA256, &a.MIME, &a.Bytes, &a.Name, &a.Port, &stoppedAt, &createdAt, &pinned); err != nil {
+		&a.SHA256, &a.MIME, &a.Bytes, &a.Name, &a.Port, &stoppedAt, &createdAt, &pinned,
+		&a.Owner); err != nil {
 		return nil, err
 	}
 	if taskID.Valid {

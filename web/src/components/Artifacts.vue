@@ -8,8 +8,8 @@
  * branch and running it. These are the answers an agent left behind -- a
  * screenshot, a report, or a dev server it started and registered.
  */
-import { ref, watch } from 'vue'
-import { Box, ExternalLink, FileText, Image as ImageIcon, Monitor, Pin } from '@lucide/vue'
+import { computed, ref, watch } from 'vue'
+import { Box, ExternalLink, FileText, Image as ImageIcon, Monitor, Pin, Play, Square } from '@lucide/vue'
 import { api, artifactBytes, type Artifact } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 
@@ -17,6 +17,15 @@ const props = defineProps<{
   taskId: string | undefined
   /** Compact drops the service viewer, for the places that are already dense. */
   compact?: boolean
+  /**
+   * The project and commit to offer to run.
+   *
+   * Present at the approval gate, where the commit being decided about has not
+   * merged and running it is the only way to see it. Absent elsewhere, and the
+   * offer is absent with it.
+   */
+  projectId?: string
+  commit?: string
 }>()
 
 const items = ref<Artifact[]>([])
@@ -39,6 +48,58 @@ async function load(taskId: string | undefined) {
 }
 
 watch(() => props.taskId, load, { immediate: true })
+
+/**
+ * Running the change here.
+ *
+ * Synchronous, because a build is a build: the request returns when the thing
+ * is serving or when it failed, and the failure carries the output, which is
+ * the only place the reason exists.
+ */
+const running = ref(false)
+const runError = ref('')
+const runLog = ref('')
+
+async function run() {
+  if (!props.projectId || !props.commit) return
+  running.value = true
+  runError.value = ''
+  runLog.value = ''
+  try {
+    await api.runPreview(props.projectId, {
+      commit: props.commit,
+      taskId: props.taskId,
+    })
+    await load(props.taskId)
+    // Opened straight away: pressing run and then having to find the thing you
+    // ran is a step that exists for no reason.
+    const started = items.value.find((a) => a.kind === 'service' && a.url)
+    if (started) open.value = started.id
+  } catch (e) {
+    runError.value = e instanceof Error ? e.message : String(e)
+    // The daemon sends the command's output with the failure; ApiError carries
+    // the body it came in.
+    const body = (e as { body?: { log?: string } })?.body
+    if (body?.log) runLog.value = body.log
+  } finally {
+    running.value = false
+  }
+}
+
+async function stop() {
+  if (!props.projectId) return
+  try {
+    await api.stopPreview(props.projectId)
+    await load(props.taskId)
+  } catch (e) {
+    runError.value = e instanceof Error ? e.message : String(e)
+  }
+}
+
+/** Whether a preview of this change is already up. */
+const preview = computed(() =>
+  items.value.find((a) => a.kind === 'service' && a.role === 'preview' && a.url),
+)
 
 async function pin(a: Artifact) {
   try {
@@ -64,8 +125,50 @@ defineExpose({ load })
 </script>
 
 <template>
-  <div v-if="items.length" class="flex flex-col gap-2">
-    <p class="text-muted-foreground flex items-center gap-1.5 text-[11px]">
+  <div v-if="items.length || (projectId && commit)" class="flex flex-col gap-2">
+    <!-- Run the change here.
+         At the gate this is the only way to see a commit that has not merged:
+         the daemon checks it out into its own worktree, runs the project's
+         command on a port it picks, and proxies it. -->
+    <div v-if="projectId && commit" class="flex flex-wrap items-center gap-2">
+      <Button
+        v-if="!preview"
+        size="xs"
+        variant="outline"
+        class="h-7 gap-1.5 px-2 text-[11px]"
+        :disabled="running"
+        @click="run"
+      >
+        <Play :size="12" aria-hidden="true" />
+        {{ running ? 'building…' : 'Run this change' }}
+      </Button>
+      <Button
+        v-else
+        size="xs"
+        variant="ghost"
+        class="h-7 gap-1.5 px-2 text-[11px]"
+        @click="stop"
+      >
+        <Square :size="12" aria-hidden="true" />
+        stop it
+      </Button>
+      <span v-if="running" class="text-muted-foreground text-[10px] italic">
+        checking the commit out and starting it; this takes as long as the build does
+      </span>
+    </div>
+
+    <div v-if="runError" class="border-destructive/40 border p-2">
+      <p class="text-destructive text-[11px]">{{ runError }}</p>
+      <!-- The command's own output. Whoever wrote the command is the only
+           person who can fix it, and this is what they need to read. -->
+      <pre
+        v-if="runLog"
+        class="text-muted-foreground mt-1 max-h-40 overflow-auto font-mono text-[10px] whitespace-pre-wrap"
+        >{{ runLog }}</pre
+      >
+    </div>
+
+    <p v-if="items.length" class="text-muted-foreground flex items-center gap-1.5 text-[11px]">
       <Box :size="12" aria-hidden="true" class="shrink-0" />
       what this produced
     </p>

@@ -720,7 +720,11 @@ func (o *Overmind) stop(ctx context.Context, projectID, reason string) error {
 	// processes, and a port that is free again is a port something else can
 	// take: a link to a stopped dev server that silently reaches whatever
 	// bound 5173 afterwards is worse than a link that says it is gone.
-	if n, err := o.db.StopServices(ctx, projectID); err != nil {
+	//
+	// The agents' only. A preview the daemon is running belongs to whoever
+	// wanted to click the app, and the pipeline finishing is when they want to
+	// click it.
+	if n, err := o.db.StopServices(ctx, projectID, store.OwnerAgent); err != nil {
 		o.log.Warn("could not mark this project's services stopped", "project", projectID, "err", err)
 	} else if n > 0 {
 		o.log.Info("services stopped with the swarm", "project", projectID, "services", n)

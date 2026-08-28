@@ -192,7 +192,7 @@ func TestRegisteringAServiceChecksSomethingIsThere(t *testing.T) {
 	// The swarm going down takes the service with it: the process holding the
 	// port is gone, and the row must stop offering a link to whatever binds
 	// that port next.
-	if n, err := f.db.StopServices(ctx, f.project.ID); err != nil || n != 1 {
+	if n, err := f.db.StopServices(ctx, f.project.ID, store.OwnerAgent); err != nil || n != 1 {
 		t.Errorf("StopServices stopped %d (%v), want 1", n, err)
 	}
 	after, err := f.db.GetArtifact(ctx, made.ID)

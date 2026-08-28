@@ -35,6 +35,7 @@ import (
 	"github.com/kconfesor/zerg/internal/nydus"
 	"github.com/kconfesor/zerg/internal/overmind"
 	"github.com/kconfesor/zerg/internal/preflight"
+	"github.com/kconfesor/zerg/internal/preview"
 	"github.com/kconfesor/zerg/internal/store"
 	"github.com/kconfesor/zerg/internal/tailnet"
 )
@@ -377,11 +378,19 @@ func runUp(args []string) error {
 	proxyPort, serveProxy, closeProxy := listenProxy(db, log)
 	defer closeProxy()
 
+	// Running the project's own code, at a commit somebody chose. Its
+	// processes are this daemon's children and do not survive it, which is
+	// what the deferred stop is for: a compose stack left running after the
+	// daemon exits is a port nobody owns and nothing will clean up.
+	previews := preview.NewManager(db, log, stateDir)
+	defer previews.StopAll(context.Background())
+
 	srv := &http.Server{
 		Handler: api.New(api.Deps{
 			DB: db, Log: log, Registry: registry,
 			Overmind: over, Nydus: nyd, Bus: bus, Recorder: recorder, Applied: cfg.Listener(), Chat: chatMgr,
 			TailnetHost: tailnetHost, UI: ui, Blobs: blobs, ProxyPort: proxyPort,
+			Preview: previews,
 		}).Routes(),
 		ReadHeaderTimeout: 10 * time.Second,
 		// A body that arrives a byte at a time holds a connection open
@@ -477,7 +486,7 @@ func runUp(args []string) error {
 		log.Info("shutting down")
 		// Every service belonged to a process this daemon owned, so none of
 		// them survives it.
-		if n, err := db.StopServices(context.Background(), ""); err != nil {
+		if n, err := db.StopServices(context.Background(), "", ""); err != nil {
 			log.Warn("could not mark services stopped", "err", err)
 		} else if n > 0 {
 			log.Info("services stopped with the daemon", "services", n)
