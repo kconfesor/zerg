@@ -5,10 +5,12 @@ import type { Attention } from '@/lib/api'
 import {
   AlertTriangle,
   BookOpen,
+  Check,
   ChevronRight,
   GitMerge,
   HelpCircle,
   MessageSquare,
+  X,
 } from '@lucide/vue'
 import { api, type ChangedFile, type Mergeable, type ReviewThread } from '@/lib/api'
 import { renderMarkdown } from '@/lib/markdown'
@@ -1196,7 +1198,7 @@ function empty(a: Attention | null): boolean {
            the decision could be carried out. -->
       <p
         v-if="a.commit && (mergeState(a.id) || mergeError(a.id))"
-        class="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px]"
+        class="mt-1 mb-2.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px]"
       >
         <template v-if="mergeState(a.id)?.clean">
           <GitMerge :size="12" class="text-[var(--status-good)] shrink-0" aria-hidden="true" />
@@ -1208,13 +1210,13 @@ function empty(a: Attention | null): boolean {
              conflict. -->
         <template v-else-if="mergeState(a.id)?.diverged">
           <AlertTriangle :size="12" class="text-[var(--status-warning)] shrink-0" aria-hidden="true" />
-          <span class="text-[var(--status-warning)]">
+          <span class="text-[var(--status-warning)] min-w-0 flex-1">
             will not fast-forward: this is behind {{ base(a.id) }} and has to be rebased on it
           </span>
         </template>
         <template v-else-if="mergeState(a.id)">
           <AlertTriangle :size="12" class="text-[var(--status-warning)] shrink-0" aria-hidden="true" />
-          <span class="text-[var(--status-warning)]">
+          <span class="text-[var(--status-warning)] min-w-0 flex-1">
             conflicts with {{ base(a.id) }} in
             {{ (mergeState(a.id)?.conflicts ?? []).join(', ') }}
           </span>
@@ -1231,27 +1233,40 @@ function empty(a: Attention | null): boolean {
       <!-- The note and the two decisions are one control: the text only means
            anything to Reject, and a field floating beside two buttons did not
            say which. -->
-      <InputGroup>
+      <InputGroup class="h-11 has-[>[data-align=block-end]]:h-auto">
         <InputGroupInput
           v-model="notes[a.id]"
+          class="h-11 text-sm md:text-sm"
           placeholder="reason, if rejecting"
         />
-        <InputGroupAddon :align="narrow ? 'block-end' : 'inline-end'">
+        <InputGroupAddon :align="narrow ? 'block-end' : 'inline-end'" class="gap-1.5">
+          <!-- The mark rather than the word. Two buttons whose text differs by
+               one syllable are read by shape long before they are read by
+               letter, and the shapes here should be as different as the two
+               outcomes are: a tick that lands the work, a cross that sends it
+               back. Both keep their name for anyone hovering, tabbing or
+               listening, since an icon alone tells a screen reader nothing. -->
           <InputGroupButton
             variant="default"
             size="sm"
+            class="h-9 w-11 [&>svg]:size-4.5"
             :disabled="deciding(a.id)"
+            title="Approve: land this work"
+            aria-label="Approve"
             @click="emit('approve', a.id)"
           >
-            Approve
+            <Check aria-hidden="true" />
           </InputGroupButton>
           <InputGroupButton
             variant="destructive"
             size="sm"
+            class="h-9 w-11 [&>svg]:size-4.5"
             :disabled="deciding(a.id)"
+            title="Reject: send it back to whoever wrote it, with the review"
+            aria-label="Reject"
             @click="emit('reject', a.id, notes[a.id] ?? '')"
           >
-            Reject
+            <X aria-hidden="true" />
           </InputGroupButton>
         </InputGroupAddon>
       </InputGroup>
