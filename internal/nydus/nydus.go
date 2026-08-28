@@ -1127,7 +1127,8 @@ func (n *Nydus) decide(ctx context.Context, approvalID, decision, note string) e
 	}
 	_ = landed
 
-	now := n.now().Format(time.RFC3339Nano)
+	at := n.now()
+	now := at.Format(time.RFC3339Nano)
 	var notePtr *string
 	if note != "" {
 		notePtr = &note
@@ -1186,16 +1187,102 @@ func (n *Nydus) decide(ctx context.Context, approvalID, decision, note string) e
 			store.RouteRejected, messageID, store.RouteHeld); err != nil {
 			return fmt.Errorf("rejecting handoff: %w", err)
 		}
-		// The card goes back to whoever wrote it, with the note attached.
+		// The card goes back to whoever wrote it, with the reason attached and
+		// claimable.
+		//
+		// Moving the lane was not enough and nothing said so. A role is given
+		// work by a message with a route; a card whose lane changed and whose
+		// only queued route was the one just rejected left the author with
+		// nothing to claim, so a rejected card sat in their column and no agent
+		// ever picked it up again. The reason lived on the approval row, which
+		// no agent reads.
 		if taskID.Valid {
-			if _, err := tx.ExecContext(ctx, `UPDATE tasks SET lane = ?, state = ? WHERE id = ?`,
-				fromRole, store.TaskQueued, taskID.String); err != nil {
-				return fmt.Errorf("returning card: %w", err)
+			feedback, err := rejectionNote(ctx, tx, note, taskID.String)
+			if err != nil {
+				return err
+			}
+			msg := &store.Message{
+				ID: store.NewID(), ProjectID: projectID, TaskID: &taskID.String,
+				FromRole: store.OperatorRole, Kind: store.KindNote, Priority: 50,
+				Body: feedback, CreatedAt: at,
+			}
+			// sendIn moves the card as it routes, which is the same lane change
+			// this used to do by hand.
+			if err := n.sendIn(ctx, tx, msg, sendReq{
+				ProjectID: projectID,
+				TaskID:    &taskID.String,
+				FromRole:  store.OperatorRole,
+				ToRoles:   []string{fromRole},
+				Kind:      store.KindNote,
+				Priority:  50,
+				Body:      feedback,
+				gate:      store.GateNone, // a rejection is not itself gated
+			}, at); err != nil {
+				return fmt.Errorf("returning the card to %s: %w", fromRole, err)
 			}
 		}
 	}
 
 	return tx.Commit()
+}
+
+// rejectionNote is what the author is told: the reason, and every remark still
+// open on the card.
+//
+// The remarks are the review. Left in the database they were visible to the
+// person who wrote them and to nobody else, so rejecting with an empty reason
+// -- which is what happens when the reasons are already written on the lines
+// they belong to -- sent the work back with no feedback at all.
+//
+// Anchors included, because "this needs a test" means nothing without the file
+// and the line it was said about.
+func rejectionNote(ctx context.Context, tx *sql.Tx, note, taskID string) (string, error) {
+	var b strings.Builder
+	if strings.TrimSpace(note) != "" {
+		b.WriteString(strings.TrimSpace(note))
+	} else {
+		b.WriteString("This was rejected at the approval gate.")
+	}
+
+	rows, err := tx.QueryContext(ctx,
+		`SELECT t.id, t.file, t.line, c.author, c.body
+		   FROM review_threads t JOIN review_comments c ON c.thread_id = t.id
+		  WHERE t.task_id = ? AND t.state = ? AND t.kind = ?
+		  ORDER BY t.file, t.line, t.id, c.created_at, c.id`,
+		taskID, store.ThreadOpen, store.ThreadRemark)
+	if err != nil {
+		return "", fmt.Errorf("reading the review: %w", err)
+	}
+	defer rows.Close()
+
+	lastThread := ""
+	for rows.Next() {
+		var id, file, author, text string
+		var line int
+		if err := rows.Scan(&id, &file, &line, &author, &text); err != nil {
+			return "", fmt.Errorf("reading the review: %w", err)
+		}
+		if id != lastThread {
+			if lastThread == "" {
+				b.WriteString("\n\nUnsettled remarks from the review:")
+			}
+			b.WriteString("\n\n")
+			switch {
+			case file != "" && line > 0:
+				fmt.Fprintf(&b, "%s:%d", file, line)
+			case file != "":
+				b.WriteString(file)
+			default:
+				b.WriteString("on this change")
+			}
+			lastThread = id
+		}
+		fmt.Fprintf(&b, "\n  %s: %s", author, text)
+	}
+	if err := rows.Err(); err != nil {
+		return "", fmt.Errorf("reading the review: %w", err)
+	}
+	return b.String(), nil
 }
 
 // ── ownership and idempotency ─────────────────────────────────────────────

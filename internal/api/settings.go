@@ -164,6 +164,14 @@ func (s *Server) askChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.chatMgr.Ask(r.Context(), r.PathValue("id"), strings.TrimSpace(req.Message)); err != nil {
+		// One session answers both this screen and the questions asked from a
+		// review, and its output carries nobody's name, so the two take turns.
+		// Being second is not a fault and is over in a moment: say so rather
+		// than reporting an internal error.
+		if errors.Is(err, chat.ErrBusy) {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
 		s.fail(w, r, err)
 		return
 	}
@@ -532,7 +540,13 @@ func (s *Server) approvalMergeable(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, "this approval carries no commit, so there is nothing to merge")
 		return
 	}
-	answer, err := hatchery.New(project.Path).MergeCheck(r.Context(), project.BaseBranch, approval.Commit)
+	// The check has to ask what the landing will ask. Merge mode fast-forwards,
+	// so a commit that has fallen behind the base does not land however clean
+	// the merge would be; a pull request is merged by the forge, and branch
+	// mode lands nothing.
+	answer, err := hatchery.New(project.Path).MergeCheck(
+		r.Context(), project.BaseBranch, approval.Commit,
+		project.Integration == store.IntegrateMerge)
 	if err != nil {
 		// A ref this repository does not have is the operator's problem: a
 		// branch deleted, a worktree pruned, a clone that never had it. Every
@@ -724,7 +738,15 @@ func (s *Server) answerInThread(threadID, projectID, prompt string) {
 	if err != nil && answer == "" {
 		answer = "I could not answer that: " + err.Error()
 	}
-	if _, err := s.db.AddReviewComment(ctx, threadID, chat.Role, answer); err != nil {
+
+	// A context of its own for the write. The one above is what bounds the
+	// agent, and on a timeout it is already cancelled: writing through it threw
+	// away both the partial answer and the sentence explaining what happened,
+	// so a question that timed out left a thread that had never been answered
+	// and no record of why.
+	write, cancelWrite := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelWrite()
+	if _, err := s.db.AddReviewComment(write, threadID, chat.Role, answer); err != nil {
 		s.log.Error("review: the answer could not be recorded", "thread", threadID, "err", err)
 	}
 }

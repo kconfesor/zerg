@@ -1,7 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { enableAutoUnmount, flushPromises, mount } from '@vue/test-utils'
 import Attention from './Attention.vue'
-import { api, type Attention as AttentionData, type ChangedFile } from '@/lib/api'
+import {
+  api,
+  type Attention as AttentionData,
+  type ChangedFile,
+  type ReviewThread,
+} from '@/lib/api'
 
 vi.mock('@/lib/api', () => ({
   api: {
@@ -10,6 +15,7 @@ vi.mock('@/lib/api', () => ({
     approvalMergeable: vi.fn(),
     markFileSeen: vi.fn(),
     review: vi.fn(),
+    resolveReviewThread: vi.fn(),
   },
 }))
 enableAutoUnmount(afterEach)
@@ -24,10 +30,10 @@ function file(path: string, over: Partial<ChangedFile> = {}): ChangedFile {
   return { path, status: 'M', added: 3, removed: 1, ...over }
 }
 
-const attention = (files: ChangedFile[]): AttentionData => {
+const attention = (files: ChangedFile[], threads: ReviewThread[] = []): AttentionData => {
   diff.mockResolvedValue({ files, range: true, base: 'main', seen: [] })
   mergeable.mockResolvedValue({ clean: true, conflicts: [], baseAhead: 0 })
-  review.mockResolvedValue([])
+  review.mockResolvedValue(threads)
   seen.mockResolvedValue({ seen: [] })
   return {
     approvals: [
@@ -47,8 +53,12 @@ const attention = (files: ChangedFile[]): AttentionData => {
   }
 }
 
-async function open(files: ChangedFile[], opts: Record<string, unknown> = {}) {
-  const w = mount(Attention, { props: { attention: attention(files) }, ...opts })
+async function open(
+  files: ChangedFile[],
+  opts: Record<string, unknown> = {},
+  threads: ReviewThread[] = [],
+) {
+  const w = mount(Attention, { props: { attention: attention(files, threads) }, ...opts })
   await flushPromises()
   // The panel opens the diff itself at a terminal gate; only click if it did not.
   const toggle = w.findAll('button').find((b) => /^Show\b/.test(b.text()))
@@ -156,6 +166,70 @@ describe('a change too large to send in one piece', () => {
 
     expect((w.find('[data-composer]').element as HTMLInputElement).value).toBe('Why is it done this way?')
     expect(w.findAll('[data-slot=input-group] button').map((b) => b.text())).toContain('Ask')
+  })
+
+  // Two files loading at once, which is what walking j through a change does.
+  // Written back from a snapshot taken before the request, whichever response
+  // landed last undid the other.
+  it('keeps both files when two are fetched at once', async () => {
+    const gate: Record<string, (f: ChangedFile) => void> = {}
+    one.mockImplementation(
+      (_id: string, path: string) =>
+        new Promise<ChangedFile>((resolve) => {
+          gate[path] = resolve
+        }),
+    )
+    const w = await open([
+      file('a.rs', { deferred: true }),
+      file('b.rs', { deferred: true }),
+    ])
+
+    await w.find('[data-file="a.rs"] button').trigger('click')
+    await w.find('[data-file="b.rs"] button').trigger('click')
+
+    // Out of order, which is the case a snapshot cannot survive.
+    gate['b.rs']!(file('b.rs', { diff: '@@ -0,0 +1 @@\n+fn b() {}\n' }))
+    await flushPromises()
+    gate['a.rs']!(file('a.rs', { diff: '@@ -0,0 +1 @@\n+fn a() {}\n' }))
+    await flushPromises()
+
+    expect(row(w, 'a.rs')).toContain('fn a()')
+    expect(row(w, 'b.rs')).toContain('fn b()')
+  })
+
+  // A thread outlives the diff it was written on: reject a card and the next
+  // revision can rename or delete the file a remark points at. Rendered only
+  // under the files of the current listing, that remark was on screen nowhere
+  // while it still held the merge.
+  it('shows a remark whose file is no longer in the change', async () => {
+    const w = await open([file('a.rs', { diff: '@@ -1 +1 @@\n-x\n+y\n' })], {}, [
+      {
+        id: 'th1',
+        projectId: 'p',
+        taskId: 't1',
+        file: 'gone.rs',
+        line: 12,
+        kind: 'remark',
+        state: 'open',
+        createdAt: '2026-01-01T00:00:00Z',
+        comments: [
+          {
+            id: 'c1',
+            threadId: 'th1',
+            author: 'operator',
+            body: 'this caller was left behind',
+            createdAt: '2026-01-01T00:00:00Z',
+          },
+        ],
+      },
+    ])
+
+    const text = w.text().replace(/\s+/g, ' ')
+    expect(text).toContain('From an earlier revision')
+    expect(text).toContain('gone.rs:12')
+    expect(text).toContain('this caller was left behind')
+    // And it can be settled from there, which is the whole point.
+    expect(w.findAll('button').some((b) => b.text() === 'settle')).toBe(true)
   })
 
   // A binary file and a file that did not change look identical when both

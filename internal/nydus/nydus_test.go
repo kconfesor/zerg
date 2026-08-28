@@ -1604,3 +1604,63 @@ func TestRejectingIsAllowedWithThreadsOpen(t *testing.T) {
 		t.Errorf("%d open threads after rejecting, want the one that caused it", n)
 	}
 }
+
+// A rejection has to reach the role that has to act on it.
+//
+// It did not. The reason was written on the approval row, which no agent
+// reads, the remarks stayed in the review tables, and the card's lane changed
+// with nothing queued behind it -- so the author had nothing to claim and a
+// rejected card sat in their column for ever.
+func TestRejectingHandsTheReviewBackToTheAuthor(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	task := f.task(t, "Calculator")
+
+	lease, err := f.n.Claim(ctx, f.project.ID, "planner")
+	if err != nil || lease == nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	if _, err := f.n.Send(ctx, f.project.ID, "planner", SendRequest{
+		TaskID: task.ID, To: "coder", Commit: "aaaaaaaaaa", Body: "handed on"}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if err := f.n.Ack(ctx, lease.ID); err != nil {
+		t.Fatalf("Ack: %v", err)
+	}
+	pending, _ := f.db.ListPendingApprovals(ctx, f.project.ID)
+
+	thread, err := f.db.OpenReviewThread(ctx, &store.ReviewThread{
+		ProjectID: f.project.ID, TaskID: task.ID, ApprovalID: &pending[0].ID,
+		File: "src/parse.rs", Line: 41,
+	}, store.OperatorRole, "this needs a test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.AddReviewComment(ctx, thread.ID, "coder", "which case?"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Rejecting with nothing typed: the reasons are already on the lines they
+	// belong to, which is the whole point of remarking there.
+	if err := f.n.Reject(ctx, pending[0].ID, ""); err != nil {
+		t.Fatalf("Reject: %v", err)
+	}
+
+	back, err := f.n.Claim(ctx, f.project.ID, "planner")
+	if err != nil {
+		t.Fatalf("author Claim: %v", err)
+	}
+	if back == nil || len(back.Items) == 0 {
+		t.Fatal("the author has nothing to claim after a rejection")
+	}
+	got := back.Items[0].Body
+	for _, want := range []string{"src/parse.rs:41", "this needs a test", "coder: which case?"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the returned card does not carry %q:\n%s", want, got)
+		}
+	}
+	// And it is still the same card, not a new one.
+	if back.Items[0].TaskID == nil || *back.Items[0].TaskID != task.ID {
+		t.Errorf("the rejection came back on %v, want task %s", back.Items[0].TaskID, task.ID)
+	}
+}

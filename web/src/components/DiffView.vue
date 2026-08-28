@@ -79,6 +79,18 @@ const rows = computed<Row[]>(() => {
       out.push({ kind: 'meta', text: line })
       continue
     }
+    // "\ No newline at end of file" is git's note about the line above, not a
+    // line of the file. Counted as context it advanced both numbers, so every
+    // line after it in that file was numbered one too high and a remark left
+    // on one pointed at the wrong place.
+    if (line.startsWith('\\')) {
+      out.push({ kind: 'meta', text: line })
+      continue
+    }
+    // The split leaves an empty tail after the final newline. Rendered as
+    // context it is a blank row at the end of every diff; git writes a blank
+    // context line as a single space, so nothing real is lost by skipping it.
+    if (line === '') continue
     if (line.startsWith('+')) {
       out.push({ kind: 'add', text: line.slice(1), newNo: newNo++ })
     } else if (line.startsWith('-')) {
@@ -91,22 +103,29 @@ const rows = computed<Row[]>(() => {
 })
 
 /**
- * Hunks whose change is only whitespace, folded away.
+ * Hunks whose change is only whitespace.
  *
  * A reformat that touches four hundred lines and changes nothing is the most
  * common way a diff becomes unreadable: the change worth reading is somewhere
  * in it, and finding it means checking every line to see whether anything moved
- * but the indentation. Compared with whitespace stripped, in order, so a hunk
- * that only re-indents is one line saying so.
+ * but the indentation.
+ *
+ * Runs of whitespace collapsed to one space, not stripped. Stripped, "admin
+ * user" and "adminuser" compare equal and a semantic change is labelled
+ * whitespace; collapsed, only spacing differences match, which is what the
+ * word is supposed to mean. Indentation still folds, which is the case this is
+ * for -- including a Python re-indent, which is why the reader asks for the
+ * fold rather than arriving to find it already done.
  */
+const space = (text: string) => text.replace(/\s+/g, ' ').trim()
 const hunks = computed(() => {
   const out: { start: number; end: number; whitespaceOnly: boolean }[] = []
   let start = -1
   const close = (end: number) => {
     if (start < 0) return
     const slice = rows.value.slice(start, end)
-    const added = slice.filter((r) => r.kind === 'add').map((r) => r.text.replace(/\s+/g, ''))
-    const removed = slice.filter((r) => r.kind === 'del').map((r) => r.text.replace(/\s+/g, ''))
+    const added = slice.filter((r) => r.kind === 'add').map((r) => space(r.text))
+    const removed = slice.filter((r) => r.kind === 'del').map((r) => space(r.text))
     out.push({
       start,
       end,
@@ -134,7 +153,22 @@ function hunkOf(index: number) {
 
 const unfolded = ref<Set<number>>(new Set())
 
+/**
+ * Whether whitespace-only hunks are folded, which starts false.
+ *
+ * Hiding part of a change by default is the panel deciding what the reader
+ * does not need to see, which is the one thing a review must not do -- and the
+ * detection is a guess about meaning: whitespace is syntax in Python, in YAML,
+ * and in any string literal. Offered, counted, and left to the reader, the
+ * same way scrolling past a file is not the same as reading it.
+ */
+const folding = ref(false)
+
+/** How many hunks the fold would take out, for the offer to be specific. */
+const whitespaceHunks = computed(() => hunks.value.filter((h) => h.whitespaceOnly).length)
+
 function hidden(index: number): boolean {
+  if (!folding.value) return false
   const h = hunkOf(index)
   if (!h?.whitespaceOnly || unfolded.value.has(h.start)) return false
   // The header stays: it is the line that says what was folded and offers to
@@ -143,6 +177,7 @@ function hidden(index: number): boolean {
 }
 
 function foldedCount(index: number): number {
+  if (!folding.value) return 0
   const h = hunkOf(index)
   return h?.whitespaceOnly && !unfolded.value.has(h.start) ? h.end - h.start - 1 : 0
 }
@@ -161,9 +196,23 @@ const stat = computed(() => ({
 
 <template>
   <div class="font-mono text-[10px] leading-relaxed">
-    <p class="text-muted-foreground mb-1 px-2 tabular-nums">
-      <span class="text-[var(--status-good)]">+{{ stat.added }}</span>
-      <span class="text-destructive ml-1.5">−{{ stat.removed }}</span>
+    <p class="text-muted-foreground mb-1 flex items-center gap-2 px-2">
+      <span class="tabular-nums">
+        <span class="text-[var(--status-good)]">+{{ stat.added }}</span>
+        <span class="text-destructive ml-1.5">−{{ stat.removed }}</span>
+      </span>
+      <!-- Offered rather than done: what counts as "only whitespace" is a guess
+           about meaning, and it is wrong in Python, in YAML and in any string
+           with a space in it. -->
+      <button
+        v-if="whitespaceHunks"
+        type="button"
+        class="hover:text-foreground focus-visible:outline-ring ml-auto underline-offset-2 hover:underline focus-visible:outline-2"
+        @click="folding = !folding"
+      >
+        {{ folding ? 'show' : 'hide' }} {{ whitespaceHunks }} whitespace-only
+        {{ whitespaceHunks === 1 ? 'hunk' : 'hunks' }}
+      </button>
     </p>
 
     <div class="overflow-x-auto">

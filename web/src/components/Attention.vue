@@ -6,6 +6,7 @@ import { AlertTriangle, ChevronRight, GitMerge, HelpCircle, MessageSquare } from
 import { api, type ChangedFile, type Mergeable, type ReviewThread } from '@/lib/api'
 import { renderMarkdown } from '@/lib/markdown'
 import DiffView from '@/components/DiffView.vue'
+import ReviewThreadView from '@/components/ReviewThread.vue'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -173,14 +174,19 @@ function positionOf(id: string): { at: number; of: number } {
 const loading = ref(new Set<string>())
 
 async function loadOne(id: string, path: string) {
-  const at = diffs.value[id]
-  if (!at) return
+  if (!diffs.value[id]) return
   loading.value = new Set(loading.value).add(path)
   try {
     const file = await api.approvalFile(id, path)
+    // Merged into the state as it is now, not as it was before the request.
+    // Walking j through a change starts one of these per file, and a read mark
+    // lands in the same object: written back from a snapshot taken before the
+    // await, whichever response came last undid the others.
+    const now = diffs.value[id]
+    if (!now) return
     diffs.value = {
       ...diffs.value,
-      [id]: { ...at, files: at.files.map((f) => (f.path === path ? file : f)) },
+      [id]: { ...now, files: now.files.map((f) => (f.path === path ? file : f)) },
     }
   } catch (e) {
     reviewError.value = e instanceof Error ? e.message : String(e)
@@ -398,6 +404,20 @@ async function loadThreads(taskId: string) {
 
 function threadsFor(taskId: string | undefined, file: string): ReviewThread[] {
   return (threads.value[taskId ?? ''] ?? []).filter((t) => (t.file ?? '') === file)
+}
+
+/**
+ * Threads pointing at nothing in this revision.
+ *
+ * A thread outlives the diff it was written on: reject a card and the next
+ * revision can rename or delete the file a remark was left on. Rendered only
+ * under the files of the current listing, that remark appeared nowhere while
+ * still holding the merge -- the daemon refused to approve, named a count, and
+ * the panel offered nothing to settle.
+ */
+function orphanThreads(taskId: string | undefined, approvalID: string): ReviewThread[] {
+  const here = new Set((diffs.value[approvalID]?.files ?? []).map((f) => f.path))
+  return (threads.value[taskId ?? ''] ?? []).filter((t) => !here.has(t.file ?? ''))
 }
 
 /** Lines already carrying a thread, so the gutter can show where the
@@ -891,65 +911,17 @@ function empty(a: Attention | null): boolean {
               v-if="defaultOpen(a, f) && (threadsFor(a.taskId, f.path).length || composingHere(a.taskId, f.path))"
               class="hairline-t flex flex-col gap-2 px-2 py-2"
             >
-              <div
+              <ReviewThreadView
                 v-for="t in threadsFor(a.taskId, f.path)"
                 :key="t.id"
-                :class="[
-                  'border-l-2 pl-2',
-                  t.state === 'open' ? 'border-l-[var(--status-warning)]' : 'border-l-border',
-                ]"
-              >
-                <div class="text-muted-foreground mb-1 flex items-center gap-1.5 text-[10px]">
-                  <component :is="t.kind === 'question' ? HelpCircle : MessageSquare" :size="10" aria-hidden="true" />
-                  <span v-if="t.line">line {{ t.line }}</span>
-                  <span v-else>this file</span>
-                  <span v-if="t.kind === 'question'">· asked</span>
-                  <span v-else-if="t.state === 'resolved'">· settled</span>
-                  <!-- A question holds nothing, so what it offers is a way to
-                       make it matter rather than a way to dismiss it. -->
-                  <button
-                    v-if="t.kind === 'question'"
-                    type="button"
-                    class="hover:text-foreground focus-visible:outline-ring ml-auto -my-1.5 inline-flex min-h-8 items-center px-1 underline-offset-2 hover:underline focus-visible:outline-2 sm:my-0 sm:min-h-0 sm:px-0"
-                    title="Make this a remark, which has to be settled before the work lands"
-                    @click="raise(a.taskId, t.id)"
-                  >
-                    raise it
-                  </button>
-                  <button
-                    v-else
-                    type="button"
-                    class="hover:text-foreground focus-visible:outline-ring ml-auto -my-1.5 inline-flex min-h-8 items-center px-1 underline-offset-2 hover:underline focus-visible:outline-2 sm:my-0 sm:min-h-0 sm:px-0"
-                    @click="settle(a.taskId, t)"
-                  >
-                    {{ t.state === 'open' ? 'settle' : 'reopen' }}
-                  </button>
-                </div>
-                <p v-for="c in t.comments" :key="c.id" class="mb-1 text-[11px] leading-relaxed">
-                  <span class="text-muted-foreground font-semibold">{{ c.author }}</span>
-                  <span class="ml-1.5">{{ c.body }}</span>
-                </p>
-                <p v-if="awaiting.has(t.id)" class="text-muted-foreground mb-1 text-[10px] italic">
-                  asking the agent…
-                </p>
-                <InputGroup>
-                  <InputGroupInput
-                    v-model="replies[t.id]"
-                    :placeholder="t.kind === 'question' ? 'ask a follow-up' : 'reply'"
-                    @keyup.enter="t.kind === 'question' ? askAgain(a, a.taskId, t) : reply(a.taskId, t.id)"
-                  />
-                  <InputGroupAddon align="inline-end">
-                    <InputGroupButton
-                      v-if="t.kind === 'question'"
-                      size="sm"
-                      @click="askAgain(a, a.taskId, t)"
-                    >
-                      Ask
-                    </InputGroupButton>
-                    <InputGroupButton v-else size="sm" @click="reply(a.taskId, t.id)">Send</InputGroupButton>
-                  </InputGroupAddon>
-                </InputGroup>
-              </div>
+                v-model:reply="replies[t.id]"
+                :thread="t"
+                :awaiting="awaiting.has(t.id)"
+                @settle="settle(a.taskId, t)"
+                @raise="raise(a.taskId, t.id)"
+                @send="reply(a.taskId, t.id)"
+                @ask="askAgain(a, a.taskId, t)"
+              />
 
               <div v-if="composingHere(a.taskId, f.path)" class="flex flex-col gap-1">
                 <p class="text-muted-foreground text-[10px]">
@@ -1066,6 +1038,34 @@ function empty(a: Attention | null): boolean {
               </button>
             </div>
           </div>
+
+          <!-- Threads whose file is not in this revision. They still hold the
+               merge, and under the old shape they were on screen nowhere: the
+               daemon refused to approve, named a count, and there was nothing
+               to settle. -->
+          <div
+            v-if="orphanThreads(a.taskId, a.id).length"
+            class="mt-3 border border-dashed p-2"
+          >
+            <p class="text-muted-foreground mb-2 text-[10px]">
+              From an earlier revision. These files are not in the change as it stands now, and
+              these remarks still have to be settled.
+            </p>
+            <div class="flex flex-col gap-2">
+              <ReviewThreadView
+                v-for="t in orphanThreads(a.taskId, a.id)"
+                :key="t.id"
+                v-model:reply="replies[t.id]"
+                :thread="t"
+                :awaiting="awaiting.has(t.id)"
+                anchored
+                @settle="settle(a.taskId, t)"
+                @raise="raise(a.taskId, t.id)"
+                @send="reply(a.taskId, t.id)"
+                @ask="askAgain(a, a.taskId, t)"
+              />
+            </div>
+          </div>
         </div>
       </div>
 
@@ -1092,6 +1092,16 @@ function empty(a: Attention | null): boolean {
         <template v-if="mergeState(a.id)?.clean">
           <GitMerge :size="12" class="text-[var(--status-good)] shrink-0" aria-hidden="true" />
           <span class="text-muted-foreground">merges cleanly</span>
+        </template>
+        <!-- Diverged rather than conflicted: the merge itself is fine and the
+             landing still refuses, because this project fast-forwards. What
+             fixes it is a rebase, not a resolution, so it does not read as a
+             conflict. -->
+        <template v-else-if="mergeState(a.id)?.diverged">
+          <AlertTriangle :size="12" class="text-[var(--status-warning)] shrink-0" aria-hidden="true" />
+          <span class="text-[var(--status-warning)]">
+            will not fast-forward: this is behind {{ base(a.id) }} and has to be rebased on it
+          </span>
         </template>
         <template v-else-if="mergeState(a.id)">
           <AlertTriangle :size="12" class="text-[var(--status-warning)] shrink-0" aria-hidden="true" />

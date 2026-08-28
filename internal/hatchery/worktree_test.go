@@ -548,7 +548,7 @@ func TestMergeCheckAnswersBeforeAnythingIsMerged(t *testing.T) {
 	}
 
 	// Nothing has moved, so it lands.
-	clean, err := h.MergeCheck(ctx, "main", work)
+	clean, err := h.MergeCheck(ctx, "main", work, false)
 	if err != nil {
 		t.Fatalf("MergeCheck: %v", err)
 	}
@@ -559,7 +559,7 @@ func TestMergeCheckAnswersBeforeAnythingIsMerged(t *testing.T) {
 	// The base takes a commit on the same lines, which is the ordinary way an
 	// approval that looked clean fails at the merge.
 	write(t, "f.txt", "uno\ntwo\nthree\n", "the base moves")
-	conflicted, err := h.MergeCheck(ctx, "main", work)
+	conflicted, err := h.MergeCheck(ctx, "main", work, false)
 	if err != nil {
 		t.Fatalf("MergeCheck after the base moved: %v", err)
 	}
@@ -582,7 +582,7 @@ func TestMergeCheckAnswersBeforeAnythingIsMerged(t *testing.T) {
 
 	// A ref this repository does not have is the operator's problem, and is
 	// answerable as one rather than as a fault.
-	if _, err := h.MergeCheck(ctx, "main", "0000000000000000000000000000000000000000"); !errors.Is(err, ErrNoSuchRevision) {
+	if _, err := h.MergeCheck(ctx, "main", "0000000000000000000000000000000000000000", false); !errors.Is(err, ErrNoSuchRevision) {
 		t.Errorf("an unknown commit gave %v, want ErrNoSuchRevision", err)
 	}
 }
@@ -719,5 +719,175 @@ func TestAnOversizedFileSaysSo(t *testing.T) {
 	}
 	if !files[0].TooLarge {
 		t.Errorf("a file over the cap came back as %+v, which reads as a file that did not change", files[0])
+	}
+}
+
+// A path with a space in it, and a rename.
+//
+// Both were parsed by splitting on whitespace: "M\tsrc/a b.txt" produced the
+// path "b.txt", which no lookup matched and no reader could open, and a rename
+// in --numstat is written "old => new", so every renamed file reported no
+// lines changed at all.
+func TestPathsWithSpacesAndRenamesSurviveParsing(t *testing.T) {
+	h, dir := newProject(t)
+	ctx := context.Background()
+
+	if err := os.WriteFile(filepath.Join(dir, "old name.txt"), []byte("one\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git(ctx, dir, "add", "."); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git(ctx, dir, "commit", "-m", "a file with a space"); err != nil {
+		t.Fatal(err)
+	}
+	base, err := git(ctx, dir, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := git(ctx, dir, "checkout", "-b", "work"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git(ctx, dir, "mv", "old name.txt", "new name.txt"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "new name.txt"), []byte("one\ntwo\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "another file.txt"), []byte("x\ny\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git(ctx, dir, "add", "."); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git(ctx, dir, "commit", "-m", "rename and add"); err != nil {
+		t.Fatal(err)
+	}
+	head, err := git(ctx, dir, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	files, err := h.RangeFiles(ctx, base, head, 64*1024, -1)
+	if err != nil {
+		t.Fatalf("RangeFiles: %v", err)
+	}
+	by := map[string]ChangedFile{}
+	for _, f := range files {
+		by[f.Path] = f
+	}
+	if _, ok := by["b.txt"]; ok {
+		t.Error("a path was cut at its space")
+	}
+	added, ok := by["another file.txt"]
+	if !ok {
+		t.Fatalf("the added file is missing: %+v", files)
+	}
+	if added.Added != 2 || added.Diff == "" {
+		t.Errorf("another file.txt: %d added, diff %q; want its counts and its diff",
+			added.Added, added.Diff)
+	}
+	// The new name is the one that exists and the only one a reader can open.
+	renamed, ok := by["new name.txt"]
+	if !ok {
+		t.Fatalf("the renamed file is missing: %+v", files)
+	}
+	if renamed.Added != 1 {
+		t.Errorf("the renamed file reports %d added, want the line the rename added", renamed.Added)
+	}
+
+	// And it can be opened on its own, which is the path the listing hands to
+	// the browser for anything past the eager limit.
+	one, err := h.LoadFile(ctx, base, head, "new name.txt", 64*1024)
+	if err != nil {
+		t.Fatalf("LoadFile: %v", err)
+	}
+	if one.Diff == "" && one.Content == "" {
+		t.Error("opening a path with a space in it read nothing")
+	}
+}
+
+// The check has to answer the question the landing asks.
+//
+// merge mode runs `git merge --ff-only`, which refuses a commit that is no
+// longer on top of the base however cleanly it would merge. Answered with a
+// three-way merge test, the card said "merges cleanly" and approving it then
+// failed with "cannot fast-forward": the reader was told the wrong thing at
+// the one moment the answer mattered.
+func TestAFastForwardLandingSaysWhenTheWorkHasFallenBehind(t *testing.T) {
+	h, dir := newProject(t)
+	ctx := context.Background()
+
+	if _, err := git(ctx, dir, "checkout", "-b", "work"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "theirs.txt"), []byte("work\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git(ctx, dir, "add", "."); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git(ctx, dir, "commit", "-m", "the work"); err != nil {
+		t.Fatal(err)
+	}
+	work, err := git(ctx, dir, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The base moves underneath, on a file the work never touched: no conflict,
+	// but no fast-forward either.
+	if _, err := git(ctx, dir, "checkout", "main"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "ours.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git(ctx, dir, "add", "."); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git(ctx, dir, "commit", "-m", "the base moved"); err != nil {
+		t.Fatal(err)
+	}
+
+	// As a three-way merge, which is what a pull request gets: fine.
+	merged, err := h.MergeCheck(ctx, "main", work, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !merged.Clean || merged.Diverged {
+		t.Errorf("a three-way merge of a diverged but non-conflicting commit: %+v", merged)
+	}
+
+	// As the fast-forward the merge mode actually performs: it will not land.
+	ff, err := h.MergeCheck(ctx, "main", work, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ff.Clean || !ff.Diverged {
+		t.Errorf("fast-forward check says %+v, want not clean and diverged", ff)
+	}
+	if ff.BaseAhead != 1 {
+		t.Errorf("base is %d commits ahead, want 1", ff.BaseAhead)
+	}
+
+	// Work still on top of the base fast-forwards, and says so.
+	if _, err := git(ctx, dir, "checkout", "work"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git(ctx, dir, "merge", "--no-edit", "main"); err != nil {
+		t.Fatal(err)
+	}
+	ahead, err := git(ctx, dir, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ok, err := h.MergeCheck(ctx, "main", ahead, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok.Clean || ok.Diverged {
+		t.Errorf("work that contains the base reports %+v, want clean", ok)
 	}
 }

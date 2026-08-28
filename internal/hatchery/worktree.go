@@ -408,9 +408,9 @@ func (h *Hatchery) lineStats(ctx context.Context, sha, base string) (map[string]
 	var out string
 	var err error
 	if base != "" {
-		out, err = git(ctx, h.repoPath, "diff", "--numstat", base+"..."+sha)
+		out, err = git(ctx, h.repoPath, "diff", "--numstat", "-z", base+"..."+sha)
 	} else {
-		out, err = git(ctx, h.repoPath, "show", "--format=", "--numstat", sha)
+		out, err = git(ctx, h.repoPath, "show", "--format=", "--numstat", "-z", sha)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("counting what %s changed: %w", sha, err)
@@ -419,12 +419,26 @@ func (h *Hatchery) lineStats(ctx context.Context, sha, base string) (map[string]
 		added, removed int
 		binary         bool
 	}{}
-	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
-		parts := strings.Split(line, "\t")
+	// -z for the same reason as the listing: a path with a space in it, and a
+	// rename, which the line format writes as "old => new" and no lookup ever
+	// matched, so every renamed file reported no lines changed.
+	//
+	// The record is "added\tremoved\tpath" in one NUL-terminated field, except
+	// for a rename, where the path is empty and the old and new names follow as
+	// two fields of their own.
+	for i, fields := 0, strings.Split(out, "\x00"); i < len(fields); i++ {
+		parts := strings.SplitN(fields[i], "\t", 3)
 		if len(parts) < 3 {
 			continue
 		}
-		path := parts[len(parts)-1]
+		path := parts[2]
+		if path == "" {
+			if i+2 >= len(fields) {
+				break
+			}
+			path = fields[i+2]
+			i += 2
+		}
 		if parts[0] == "-" && parts[1] == "-" {
 			stats[path] = struct {
 				added, removed int
@@ -560,9 +574,9 @@ func (h *Hatchery) changed(ctx context.Context, sha, base string, maxBytes, eage
 	var out string
 	var err error
 	if base != "" {
-		out, err = git(ctx, h.repoPath, "diff", "--name-status", base+"..."+sha)
+		out, err = git(ctx, h.repoPath, "diff", "--name-status", "-z", base+"..."+sha)
 	} else {
-		out, err = git(ctx, h.repoPath, "show", "--format=", "--name-status", sha)
+		out, err = git(ctx, h.repoPath, "show", "--format=", "--name-status", "-z", sha)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("listing what %s changed: %w", sha, err)
@@ -574,12 +588,8 @@ func (h *Hatchery) changed(ctx context.Context, sha, base string, maxBytes, eage
 	}
 
 	var files []ChangedFile
-	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
-		parts := strings.Fields(line)
-		if len(parts) < 2 {
-			continue
-		}
-		f := ChangedFile{Status: parts[0][:1], Path: parts[len(parts)-1]}
+	for _, rec := range nameStatus(out) {
+		f := ChangedFile{Status: rec.status, Path: rec.path}
 		if st, ok := stats[f.Path]; ok {
 			f.Added, f.Removed, f.Binary = st.added, st.removed, st.binary
 		}
@@ -602,6 +612,38 @@ func (h *Hatchery) changed(ctx context.Context, sha, base string, maxBytes, eage
 		files = append(files, f)
 	}
 	return files, nil
+}
+
+// nameStatus reads `git diff --name-status -z` into a status and a path each.
+//
+// -z rather than the default line format, and not whitespace-delimited. Split
+// on whitespace, "M\tsrc/a b.txt" gave the path "b.txt": a name no file has, so
+// its counts were missing, its content never loaded, and opening it asked the
+// daemon for a path that does not exist. The default output also C-quotes any
+// path holding a byte outside ASCII, so café.txt arrived as "caf\303\251.txt".
+// With -z git separates every field with a NUL and quotes nothing.
+//
+// A rename or a copy carries two paths, old then new. The new one is the file
+// that exists now and the only one a reader can open, so that is the one kept.
+func nameStatus(out string) []struct{ status, path string } {
+	fields := strings.Split(out, "\x00")
+	var recs []struct{ status, path string }
+	for i := 0; i < len(fields); i++ {
+		st := fields[i]
+		if st == "" {
+			continue
+		}
+		paths := 1
+		if st[0] == 'R' || st[0] == 'C' {
+			paths = 2
+		}
+		if i+paths >= len(fields) {
+			break
+		}
+		recs = append(recs, struct{ status, path string }{st[:1], fields[i+paths]})
+		i += paths
+	}
+	return recs
 }
 
 // Workspace is what the worktrees cost, for a header that would otherwise be
@@ -653,6 +695,13 @@ type Mergeable struct {
 	// diverged from it. A diff that was right against yesterday's base is the
 	// usual reason an approval that looked clean fails at the merge.
 	BaseAhead int `json:"baseAhead"`
+	// Diverged is set when the landing is a fast-forward and this commit is no
+	// longer on top of the base. The merge itself may be perfectly clean and
+	// the integration will still refuse: `git merge --ff-only` is what runs,
+	// and it declines anything that is not already ahead. Reported separately
+	// from a conflict because what fixes it is different: rebase the work, not
+	// resolve a file.
+	Diverged bool `json:"diverged,omitempty"`
 }
 
 // MergeCheck asks whether a commit still merges into the base branch.
@@ -666,7 +715,11 @@ type Mergeable struct {
 // Verified against a repository with a base that had moved underneath: clean
 // returns a tree id alone, conflicting returns the tree, three staged entries
 // for the one file, then git's own account of what it could not merge.
-func (h *Hatchery) MergeCheck(ctx context.Context, base, commit string) (*Mergeable, error) {
+// ffOnly says the landing is `git merge --ff-only`, which is what the merge
+// integration mode runs. A pull request is merged by the forge with an
+// ordinary three-way merge, and branch mode lands nothing at all, so both of
+// those are answered by the merge test alone.
+func (h *Hatchery) MergeCheck(ctx context.Context, base, commit string, ffOnly bool) (*Mergeable, error) {
 	for _, ref := range []string{base, commit} {
 		ok, err := h.resolves(ctx, ref)
 		if err != nil {
@@ -684,6 +737,20 @@ func (h *Hatchery) MergeCheck(ctx context.Context, base, commit string) (*Mergea
 	// will land and reviewing what was written.
 	if ahead, err := git(ctx, h.repoPath, "rev-list", "--count", commit+".."+base); err == nil {
 		out.BaseAhead, _ = strconv.Atoi(ahead)
+	}
+
+	// Answering the question the integration will actually ask. merge-tree
+	// performs a three-way merge, so a commit that had diverged from a base it
+	// did not conflict with was reported as "merges cleanly" and then refused
+	// at the gate with "cannot fast-forward": the check and the landing
+	// disagreed, and the reader was told the wrong one.
+	if ffOnly {
+		if _, err := git(ctx, h.repoPath, "merge-base", "--is-ancestor", base, commit); err != nil {
+			out.Diverged = true
+			return out, nil
+		}
+		out.Clean = true
+		return out, nil
 	}
 
 	cmd := exec.CommandContext(ctx, "git", "merge-tree", "--write-tree", base, commit)

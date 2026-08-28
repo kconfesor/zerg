@@ -912,6 +912,10 @@ export interface Mergeable {
   /** Commits the base has taken since this work left it. A diff read against a
    *  base that has moved is not a diff of what will land. */
   baseAhead: number
+  /** The landing fast-forwards and this commit is no longer on top of the base,
+   *  so it will not land however clean the merge would be. A rebase fixes it,
+   *  not a resolution. */
+  diverged?: boolean
 }
 
 /** One file a commit touched, with both its content and its diff. */

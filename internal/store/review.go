@@ -91,6 +91,31 @@ func (db *DB) OpenReviewThread(ctx context.Context, t *ReviewThread, author, bod
 	}
 	defer tx.Rollback()
 
+	// The gate the remark is anchored to has to be this card's, and still
+	// waiting. The foreign key only asks that the approval exists, so a stale
+	// tab could anchor a remark to another task's gate, or to one already
+	// decided -- which for a remark means one that will hold a merge that has
+	// already happened. Checked inside the transaction that inserts, so a
+	// decision landing at the same moment cannot slip between the two.
+	if t.ApprovalID != nil && *t.ApprovalID != "" {
+		var state, taskID string
+		err := tx.QueryRowContext(ctx,
+			`SELECT a.state, COALESCE(m.task_id, '')
+			   FROM approvals a JOIN messages m ON m.id = a.message_id
+			  WHERE a.id = ?`, *t.ApprovalID).Scan(&state, &taskID)
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			return nil, invalid("no approval %s", *t.ApprovalID)
+		case err != nil:
+			return nil, fmt.Errorf("reading the approval a remark points at: %w", err)
+		case taskID != t.TaskID:
+			return nil, invalid("approval %s belongs to another card", *t.ApprovalID)
+		case state != ApprovalPending && state != ApprovalIntegrating:
+			return nil, invalid(
+				"this approval was already %s; reload the card before adding to the review", state)
+		}
+	}
+
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO review_threads (id,project_id,task_id,approval_id,commit_sha,file,line,kind,state,created_at)
 		 VALUES (?,?,?,?,?,?,?,?,?,?)`,
