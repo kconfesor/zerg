@@ -250,9 +250,11 @@ describe('TeamEditor', () => {
     expect(w.emitted('setTeam')?.at(-1)?.[0]).toEqual({ presetId: docsTeam.id, roles: [] })
   })
 
-  it('reorders the selected team in the pipeline', async () => {
+  it('reorders the selected team from the keyboard as well as by dragging', async () => {
+    // A drag is unreachable from a keyboard, and this column is the only place
+    // a pipeline can be ordered, so the handle takes arrow keys too.
     const w = editor({ presetId: defaultTeam.id, roles: resolved })
-    await w.get('[aria-label="Move coder down"]').trigger('click')
+    await w.get('[aria-label="Reorder coder"]').trigger('keydown.down')
     const updated = w.emitted('savePreset')?.at(-1)?.[0] as TeamPreset
     expect(updated.roles.map((role) => role.templateId)).toEqual(['reviewer', 'coder'])
   })

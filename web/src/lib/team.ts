@@ -112,3 +112,20 @@ export function placeInPipeline(
   while (at > 0 && finishers.has(pipeline[at - 1].id)) at--
   return at
 }
+
+/**
+ * One role moved to another place in the pipeline.
+ *
+ * Its own function because dragging computes the same thing on every pointer
+ * move, and because "to" from a drop indicator counts positions in the list as
+ * it was before the role left it: dropping at index 3 while dragging item 1
+ * lands at 2, and getting that off by one is the difference between a list that
+ * follows the pointer and one that fights it.
+ */
+export function moveWithin<T>(list: T[], from: number, to: number): T[] {
+  if (from === to || from < 0 || from >= list.length) return list
+  const out = [...list]
+  const [moved] = out.splice(from, 1)
+  out.splice(to > from ? to - 1 : to, 0, moved)
+  return out
+}

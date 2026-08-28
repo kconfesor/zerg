@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { cloneOverrides, followPreset, hasRoleOverrides, presetRoles } from '@/lib/team'
-import { placeInPipeline } from '@/lib/team'
+import { moveWithin, placeInPipeline } from '@/lib/team'
 import type { ResolvedRole, RoleTemplate, TeamPreset } from '@/lib/api'
 
 function role(id: string, finisher = false): RoleTemplate {
@@ -103,5 +103,27 @@ describe('what survives a write', () => {
     }
     const rows = presetRoles([resolved({})], source)
     expect(rows[0].thinkingOverride).toBe('high')
+  })
+})
+
+describe('moving a role within a pipeline', () => {
+  const list = ['a', 'b', 'c', 'd']
+
+  it('drops between the two rows the pointer is between', () => {
+    // "to" counts gaps in the list as it stands, so dropping item 0 into the
+    // gap before c is index 2, and it lands second.
+    expect(moveWithin(list, 0, 2)).toEqual(['b', 'a', 'c', 'd'])
+    expect(moveWithin(list, 3, 1)).toEqual(['a', 'd', 'b', 'c'])
+  })
+
+  it('moves to either end', () => {
+    expect(moveWithin(list, 2, 0)).toEqual(['c', 'a', 'b', 'd'])
+    expect(moveWithin(list, 0, 4)).toEqual(['b', 'c', 'd', 'a'])
+  })
+
+  it('leaves the list alone when nothing moved', () => {
+    expect(moveWithin(list, 1, 1)).toEqual(list)
+    // The gap after itself is where it already is.
+    expect(moveWithin(list, 1, 2)).toEqual(list)
   })
 })

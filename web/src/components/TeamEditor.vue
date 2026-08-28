@@ -1,6 +1,16 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { CircleCheck, Copy, Flag, FolderGit2, Globe, Pencil, SlidersHorizontal, Trash2 } from '@lucide/vue'
+import {
+  CircleCheck,
+  Copy,
+  Flag,
+  FolderGit2,
+  Globe,
+  GripVertical,
+  Pencil,
+  SlidersHorizontal,
+  Trash2,
+} from '@lucide/vue'
 import type {
   Model,
   ProjectTeam,
@@ -15,7 +25,7 @@ import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { cloneOverrides, followPreset, hasRoleOverrides, placeInPipeline } from '@/lib/team'
+import { cloneOverrides, followPreset, hasRoleOverrides, moveWithin, placeInPipeline } from '@/lib/team'
 import RoleOverrideDialog from '@/components/RoleOverrideDialog.vue'
 import {
   Dialog,
@@ -142,6 +152,62 @@ const editingSomethingElse = computed(
 const projectRunsItsOwn = computed(
   () => !props.projectTeam.presetId && props.projectTeam.roles.length > 0,
 )
+/**
+ * Dragging a role to another place in the pipeline.
+ *
+ * Two arrow buttons per row were the whole reordering interface: eight pixels
+ * of target each, four of them on a three-role team, and nothing at all on a
+ * phone, where a tap on the wrong one silently reorders the pipeline. This is a
+ * pointer-event drag rather than HTML5 drag-and-drop, because that has no touch
+ * support at all, and rather than a library, because it is sixty lines and the
+ * two it would replace are already written.
+ *
+ * The list does not reorder while the pointer moves. A line marks where the
+ * role will land and the row being carried dims, so the thing under the pointer
+ * stays the thing you grabbed, and nothing shuffles out from under it.
+ */
+const pipelineList = ref<HTMLElement | null>(null)
+const drag = ref<{ from: number; to: number } | null>(null)
+let rowMidpoints: number[] = []
+
+function grab(event: PointerEvent, index: number) {
+  const rows = [...(pipelineList.value?.querySelectorAll('[data-role-row]') ?? [])]
+  rowMidpoints = rows.map((row) => {
+    const box = row.getBoundingClientRect()
+    return box.top + box.height / 2
+  })
+  drag.value = { from: index, to: index }
+  ;(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId)
+  // Touch scrolls the page otherwise, and the row goes nowhere while the list
+  // slides past under it.
+  event.preventDefault()
+}
+
+function dragTo(event: PointerEvent) {
+  if (!drag.value) return
+  let to = rowMidpoints.findIndex((mid) => event.clientY < mid)
+  if (to === -1) to = rowMidpoints.length
+  drag.value = { ...drag.value, to }
+}
+
+function drop() {
+  const move = drag.value
+  drag.value = null
+  if (!move || !activePreset.value) return
+  const roles = moveWithin(activePreset.value.roles, move.from, move.to)
+  if (roles === activePreset.value.roles) return
+  saveRoles(roles.map((role) => ({ ...role, ...cloneOverrides(role) })))
+}
+
+/** Where the line goes: before this row, or after the last one. */
+function dropsBefore(index: number): boolean {
+  return !!drag.value && drag.value.to === index && drag.value.from !== index && drag.value.from !== index - 1
+}
+function dropsLast(index: number): boolean {
+  const roles = activePreset.value?.roles ?? []
+  return !!drag.value && index === roles.length - 1 && drag.value.to === roles.length && drag.value.from !== index
+}
+
 /**
  * Which role finishes this pipeline: the last one that runs.
  *
@@ -647,12 +713,14 @@ function cloneTeam() {
         </p>
       </div>
 
-      <ol v-if="activePreset" class="divide-y">
+      <ol v-if="activePreset" ref="pipelineList" class="divide-y">
         <li
           v-for="(role, index) in activePreset.roles"
           :key="role.templateId"
+          data-role-row
           :class="[
-            'flex items-center gap-3 py-3 pr-4 pl-3',
+            'relative flex items-center gap-3 py-3 pr-4 pl-3',
+            drag?.from === index && 'opacity-40',
             role.enabled ? '' : 'opacity-55',
             // The end of the pipeline, marked on the row rather than by a word
             // inside it: this is the role that merges, opens the pull request
@@ -662,6 +730,16 @@ function cloneTeam() {
               : 'border-l-2 border-l-transparent',
           ]"
         >
+          <span
+            v-if="dropsBefore(index)"
+            class="bg-primary pointer-events-none absolute inset-x-0 -top-px z-10 h-0.5"
+            aria-hidden="true"
+          />
+          <span
+            v-if="dropsLast(index)"
+            class="bg-primary pointer-events-none absolute inset-x-0 -bottom-px z-10 h-0.5"
+            aria-hidden="true"
+          />
           <span
             :class="[
               'grid size-6 shrink-0 place-items-center border text-[11px]',
@@ -701,24 +779,23 @@ function cloneTeam() {
             @update:model-value="(v: boolean) => setEnabled(role.templateId, v)"
           />
           <div class="flex">
-            <Button
-              size="icon-sm"
-              variant="ghost"
-              :disabled="index === 0"
-              :aria-label="`Move ${libraryById.get(role.templateId)?.name} up`"
-              @click="moveRole(index, -1)"
+            <!-- Drag to reorder, arrow keys when it has focus. The keys are not
+                 a leftover: a drag is unreachable from a keyboard, and this
+                 column is the only place a pipeline can be ordered. -->
+            <button
+              type="button"
+              class="text-muted-foreground/60 hover:text-foreground focus-visible:outline-ring flex size-8 shrink-0 cursor-grab touch-none items-center justify-center focus-visible:outline-2 active:cursor-grabbing"
+              :aria-label="`Reorder ${libraryById.get(role.templateId)?.name}`"
+              :title="`Drag to reorder ${libraryById.get(role.templateId)?.name}, or use the arrow keys`"
+              @pointerdown="grab($event, index)"
+              @pointermove="dragTo"
+              @pointerup="drop"
+              @pointercancel="drop"
+              @keydown.up.prevent="moveRole(index, -1)"
+              @keydown.down.prevent="moveRole(index, 1)"
             >
-              ↑
-            </Button>
-            <Button
-              size="icon-sm"
-              variant="ghost"
-              :disabled="index === activePreset.roles.length - 1"
-              :aria-label="`Move ${libraryById.get(role.templateId)?.name} down`"
-              @click="moveRole(index, 1)"
-            >
-              ↓
-            </Button>
+              <GripVertical :size="15" aria-hidden="true" />
+            </button>
           </div>
         </li>
         <li v-if="!activePreset.roles.length" class="px-6 py-14 text-center">
