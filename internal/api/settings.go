@@ -175,7 +175,7 @@ type taskDetail struct {
 }
 
 type taskStep struct {
-	store.Handoff
+	store.TrailStep
 	// Subject is the commit's first line. The body says what a role decided;
 	// the subject says what it committed, and the two are rarely the same
 	// sentence.
@@ -191,7 +191,7 @@ func (s *Server) taskDetail(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	history, err := s.db.TaskHistory(r.Context(), id)
+	history, err := s.db.TaskTrail(r.Context(), id)
 	if err != nil {
 		s.fail(w, r, err)
 		return
@@ -211,7 +211,7 @@ func (s *Server) taskDetail(w http.ResponseWriter, r *http.Request) {
 
 	steps := make([]taskStep, 0, len(history))
 	for _, h := range history {
-		step := taskStep{Handoff: h}
+		step := taskStep{TrailStep: h}
 		if hat != nil && h.Commit != "" {
 			step.Subject = hat.Subject(r.Context(), h.Commit)
 		}

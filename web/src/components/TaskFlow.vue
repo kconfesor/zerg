@@ -21,7 +21,7 @@
 import { computed } from 'vue'
 import { ChevronLeft, ChevronRight } from '@lucide/vue'
 import type { Project, TaskStep } from '@/lib/api'
-import { landing } from '@/lib/utils'
+import { duration, landing, money } from '@/lib/utils'
 
 const props = defineProps<{
   steps: TaskStep[]
@@ -194,6 +194,32 @@ function label(name: string): string {
                 </span>
                 <span v-if="a.step.subject" class="text-muted-foreground ml-1.5">
                   {{ a.step.subject }}
+                </span>
+              </p>
+              <!-- What this step cost and how long it took, which is where a
+                   card's hours go. Per step rather than per card: a total says
+                   the pipeline cost four dollars and not which role spent it,
+                   nor which lap. -->
+              <p
+                v-if="a.step.durationMs || a.step.costUsd || a.step.gate || a.step.clarifications?.length"
+                class="text-muted-foreground/80 mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px]"
+              >
+                <span v-if="a.step.durationMs" class="tabular">{{ duration(a.step.durationMs) }}</span>
+                <span v-if="a.step.costUsd" class="tabular">{{ money(a.step.costUsd) }}</span>
+                <!-- A gate is not a delay in the pipeline, it is a wait on a
+                     person, and it is invisible in any per-card total. -->
+                <span
+                  v-if="a.step.gate"
+                  :class="a.step.gate.state === 'pending' ? 'text-[var(--status-warning)]' : ''"
+                >
+                  {{ a.step.gate.state === 'pending' ? 'waiting for a decision' : a.step.gate.state }}
+                  <template v-if="a.step.gate.waitedMs >= 60_000">
+                    after {{ duration(a.step.gate.waitedMs) }}
+                  </template>
+                </span>
+                <span v-if="a.step.clarifications?.length">
+                  {{ a.step.clarifications.length }}
+                  question{{ a.step.clarifications.length === 1 ? '' : 's' }} asked
                 </span>
               </p>
               <slot name="note" :step="a.step" />

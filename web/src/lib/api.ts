@@ -737,7 +737,10 @@ export interface SettingsResponse {
 
 // ── task detail ─────────────────────────────────────────────────────────────
 
-/** One step of a task's history: who handed what to whom, and what they said. */
+/**
+ * One step of a task's history: who handed what to whom, what they said, and
+ * the numbers belonging to that step rather than to the whole card.
+ */
 export interface TaskStep {
   from: string
   to?: string
@@ -748,6 +751,30 @@ export interface TaskStep {
   final?: boolean
   /** First line of the commit message. */
   subject?: string
+  /** When the role took the work. Absent for a step with no lease behind it,
+   *  which is what the operator's own first message is. */
+  startedAt?: string
+  /** How long that role held it. Zero when there is nothing to measure from. */
+  durationMs: number
+  tokens: number
+  costUsd: number
+  /** The approval this handoff waited on, if it had one. */
+  gate?: TaskGate
+  /** Questions the role raised while it held the work. */
+  clarifications?: Clarification[]
+}
+
+/** An approval as the trail reads it: what was decided, and how long the work
+ *  sat waiting for a person to decide it. */
+export interface TaskGate {
+  id: string
+  state: 'pending' | 'approved' | 'rejected' | string
+  note?: string
+  createdAt: string
+  decidedAt?: string
+  /** How long it was pending. This is where wall time goes when active time is
+   *  short, and no per-task total shows it. */
+  waitedMs: number
 }
 
 export interface TaskDetail {

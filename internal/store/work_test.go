@@ -375,3 +375,162 @@ func TestListHistoryPagesAndFilters(t *testing.T) {
 		t.Errorf("searching for a literal %% matched %d cards, want the one named that", len(hits))
 	}
 }
+
+// The trail is the handoffs with the numbers that belong to each: how long the
+// role held the work, what those turns cost, what stopped it there.
+//
+// Per step rather than per task, because "this pipeline cost four dollars" does
+// not say which role spent it, and a card whose wall time is hours and whose
+// active time is minutes has that gap somewhere specific.
+func TestTaskTrailCarriesEachStepsTimeAndCost(t *testing.T) {
+	ctx := context.Background()
+	db, p := seeded(t)
+	if err := db.SelectDefaultTeam(ctx, p.ID); err != nil {
+		t.Fatal(err)
+	}
+	task, err := db.CreateTask(ctx, p.ID, "Factorial", "body", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	at := func(min int) string {
+		return time.Date(2026, 1, 1, 9, min, 0, 0, time.UTC).Format(time.RFC3339Nano)
+	}
+	// The coder holds it for ten minutes and hands off, having spent two turns
+	// and asked one question along the way.
+	lease := NewID()
+	if _, err := db.SQL().ExecContext(ctx,
+		`INSERT INTO leases (id,project_id,role,granted_at,expires_at) VALUES (?,?,'coder',?,?)`,
+		lease, p.ID, at(0), at(30)); err != nil {
+		t.Fatal(err)
+	}
+	handoff := NewID()
+	if _, err := db.SQL().ExecContext(ctx,
+		`INSERT INTO messages (id,project_id,task_id,from_role,kind,priority,body,terminal,created_at,source_lease_id)
+		 VALUES (?,?,?,'coder','handoff',50,'did it',0,?,?)`,
+		handoff, p.ID, task.ID, at(10), lease); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SQL().ExecContext(ctx,
+		`INSERT INTO routes (message_id,to_role,state,enqueued_at) VALUES (?,'reviewer','queued',?)`,
+		handoff, at(10)); err != nil {
+		t.Fatal(err)
+	}
+	for i, turn := range []struct {
+		role   string
+		minute int
+		cost   float64
+	}{
+		{"coder", 3, 0.10},
+		// The turn that ends a step lands after the handoff it produced: the
+		// agent calls `zerg send`, the message is written, and only then does
+		// the turn carrying that call finish. Closing the window at the handoff
+		// dropped the largest turn of every step.
+		{"coder", 11, 0.15},
+		{"coder", 40, 0.99}, // a second lap, which its own lease claims below
+	} {
+		if _, err := db.SQL().ExecContext(ctx,
+			`INSERT INTO usage_turns (id,project_id,task_id,role,ts,output_tokens,cost_usd)
+			 VALUES (?,?,?,?,?,?,?)`,
+			NewID(), p.ID, task.ID, turn.role, at(turn.minute), 100*(i+1), turn.cost); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.SQL().ExecContext(ctx,
+		`INSERT INTO clarifications (id,project_id,task_id,role,question,state,created_at)
+		 VALUES (?,?,?,'coder','which base?','open',?)`,
+		NewID(), p.ID, task.ID, at(5)); err != nil {
+		t.Fatal(err)
+	}
+
+	// The coder gets the work back and takes another lap. Its first window
+	// closes here and not before, which is what keeps the two laps apart.
+	secondLease := NewID()
+	if _, err := db.SQL().ExecContext(ctx,
+		`INSERT INTO leases (id,project_id,role,granted_at,expires_at) VALUES (?,?,'coder',?,?)`,
+		secondLease, p.ID, at(38), at(60)); err != nil {
+		t.Fatal(err)
+	}
+	lap := NewID()
+	if _, err := db.SQL().ExecContext(ctx,
+		`INSERT INTO messages (id,project_id,task_id,from_role,kind,priority,body,terminal,created_at,source_lease_id)
+		 VALUES (?,?,?,'coder','handoff',50,'fixed it',0,?,?)`,
+		lap, p.ID, task.ID, at(42), secondLease); err != nil {
+		t.Fatal(err)
+	}
+
+	// The reviewer finishes it behind a gate that a person took an hour to
+	// answer: the wait is where this card's wall time went.
+	reviewLease := NewID()
+	if _, err := db.SQL().ExecContext(ctx,
+		`INSERT INTO leases (id,project_id,role,granted_at,expires_at) VALUES (?,?,'reviewer',?,?)`,
+		reviewLease, p.ID, at(45), at(90)); err != nil {
+		t.Fatal(err)
+	}
+	final := NewID()
+	if _, err := db.SQL().ExecContext(ctx,
+		`INSERT INTO messages (id,project_id,task_id,from_role,kind,priority,body,terminal,created_at,source_lease_id)
+		 VALUES (?,?,?,'reviewer','handoff',50,'approved',1,?,?)`,
+		final, p.ID, task.ID, at(50), reviewLease); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SQL().ExecContext(ctx,
+		`INSERT INTO approvals (id,project_id,message_id,state,created_at,decided_at)
+		 VALUES (?,?,?,'approved',?,?)`,
+		NewID(), p.ID, final, at(50), at(110)); err != nil {
+		t.Fatal(err)
+	}
+
+	trail, err := db.TaskTrail(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("TaskTrail: %v", err)
+	}
+	if len(trail) != 3 {
+		t.Fatalf("trail has %d steps, want 3: %+v", len(trail), trail)
+	}
+
+	coder := trail[0]
+	if coder.From != "coder" || coder.To != "reviewer" {
+		t.Errorf("first step is %s to %s", coder.From, coder.To)
+	}
+	if coder.DurationMS != 10*60_000 {
+		t.Errorf("the coder held it for %dms, want ten minutes", coder.DurationMS)
+	}
+	// The turns of that lap, including the one recorded just after the handoff,
+	// and not the one from the lap the coder took later.
+	if coder.CostUSD < 0.249 || coder.CostUSD > 0.251 {
+		t.Errorf("the first lap cost %v, want the two turns it spent", coder.CostUSD)
+	}
+	if coder.Tokens != 300 {
+		t.Errorf("the first lap used %d tokens, want 300", coder.Tokens)
+	}
+	if len(coder.Clarifications) != 1 || coder.Clarifications[0].Question != "which base?" {
+		t.Errorf("the question asked mid-step is not on it: %+v", coder.Clarifications)
+	}
+	if coder.Gate != nil {
+		t.Errorf("an ungated handoff came back with a gate: %+v", coder.Gate)
+	}
+
+	// The second lap is its own step, with its own spend. Two visits by one
+	// role are the thing rework is, and a total that merged them would hide it.
+	lapStep := trail[1]
+	if lapStep.From != "coder" || lapStep.CostUSD < 0.98 || lapStep.CostUSD > 1.0 {
+		t.Errorf("the second lap is %s costing %v, want the coder spending 0.99", lapStep.From, lapStep.CostUSD)
+	}
+
+	reviewer := trail[2]
+	if !reviewer.Final || reviewer.To != "" {
+		t.Errorf("the last step should finish the task: %+v", reviewer.Handoff)
+	}
+	if reviewer.Gate == nil {
+		t.Fatal("the gated handoff has no gate")
+	}
+	// An hour of a card's life spent waiting for a person, which no per-task
+	// total distinguishes from an hour of work.
+	if reviewer.Gate.WaitedMS != 60*60_000 {
+		t.Errorf("the gate waited %dms, want an hour", reviewer.Gate.WaitedMS)
+	}
+	if reviewer.Gate.State != "approved" {
+		t.Errorf("gate state is %q", reviewer.Gate.State)
+	}
+}

@@ -563,6 +563,28 @@ func (db *DB) GetClarification(ctx context.Context, id string) (*Clarification, 
 	return c, err
 }
 
+// ClarificationsForTask returns every question raised on a task, answered or
+// not, oldest first. The trail reads these; Attention reads the open ones.
+func (db *DB) ClarificationsForTask(ctx context.Context, taskID string) ([]Clarification, error) {
+	rows, err := db.read.QueryContext(ctx,
+		`SELECT id, project_id, task_id, role, question, answer, state, created_at, answered_at
+		 FROM clarifications WHERE task_id = ? ORDER BY created_at`, taskID)
+	if err != nil {
+		return nil, fmt.Errorf("listing a task's clarifications: %w", err)
+	}
+	defer rows.Close()
+
+	out := []Clarification{}
+	for rows.Next() {
+		c, err := scanClarification(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *c)
+	}
+	return out, rows.Err()
+}
+
 // ListOpenClarifications returns what Attention must show.
 func (db *DB) ListOpenClarifications(ctx context.Context, projectID string) ([]Clarification, error) {
 	rows, err := db.read.QueryContext(ctx,
@@ -1049,4 +1071,245 @@ func splitCursor(cursor string) (at, id string, ok bool) {
 func likeEscape(s string) string {
 	r := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
 	return r.Replace(s)
+}
+
+// ── the trail ─────────────────────────────────────────────────────────────
+
+// TrailStep is one hop with everything that happened around it: how long the
+// role held the work, what those turns cost, and whatever stopped it there.
+type TrailStep struct {
+	Handoff
+
+	// StartedAt is when the role took the work, from the lease the handoff was
+	// produced under. Absent for a step with no lease behind it, which is what
+	// the operator's own first message is.
+	StartedAt *time.Time `json:"startedAt,omitempty"`
+
+	// DurationMS is how long that role held it: the handoff, less the lease.
+	// Zero when there is no lease to measure from, which is not the same as a
+	// step that took no time and is why the field is separate from StartedAt.
+	DurationMS int64 `json:"durationMs"`
+
+	// What the turns inside that window cost. Per step rather than per task,
+	// because "this pipeline cost four dollars" does not say which role spent
+	// it or on which lap.
+	Tokens  int64   `json:"tokens"`
+	CostUSD float64 `json:"costUsd"`
+
+	// Gate is the approval this handoff waited on, if it had one.
+	Gate *TrailGate `json:"gate,omitempty"`
+
+	// Clarifications the role raised while it held the work. A question asked
+	// mid-step is most of the gap between a step's duration and its turns.
+	Clarifications []Clarification `json:"clarifications,omitempty"`
+}
+
+// TrailGate is an approval as the trail reads it: what was decided, and how
+// long the work sat waiting for a person to decide it.
+type TrailGate struct {
+	ID        string     `json:"id"`
+	State     string     `json:"state"`
+	Note      string     `json:"note,omitempty"`
+	CreatedAt time.Time  `json:"createdAt"`
+	DecidedAt *time.Time `json:"decidedAt,omitempty"`
+	// WaitedMS is how long it was pending. This is where wall time goes when
+	// active time is short, and it is invisible in any per-task total.
+	WaitedMS int64 `json:"waitedMs"`
+}
+
+// TaskTrail is every step a task took, with the numbers that belong to each.
+//
+// Three queries rather than one per step: a task with twenty hops would
+// otherwise make sixty round trips to answer one screen, which is the pattern
+// ResolveTeam was rewritten to stop doing.
+func (db *DB) TaskTrail(ctx context.Context, taskID string) ([]TrailStep, error) {
+	rows, err := db.read.QueryContext(ctx,
+		`SELECT m.from_role, COALESCE(r.to_role, ''), m.kind,
+		        COALESCE(m.commit_sha, ''), m.body, m.created_at, m.terminal,
+		        l.granted_at,
+		        a.id, a.state, a.note, a.created_at, a.decided_at
+		   FROM messages m
+		   LEFT JOIN routes r ON r.message_id = m.id
+		   LEFT JOIN leases l ON l.id = m.source_lease_id
+		   LEFT JOIN approvals a ON a.message_id = m.id
+		  WHERE m.task_id = ?
+		  ORDER BY m.created_at ASC`, taskID)
+	if err != nil {
+		return nil, fmt.Errorf("reading the task trail: %w", err)
+	}
+	defer rows.Close()
+
+	steps := []TrailStep{}
+	for rows.Next() {
+		var (
+			s                           TrailStep
+			granted                     sql.NullString
+			final                       int
+			gateID, gateState, gateNote sql.NullString
+			gateCreated, gateDecided    sql.NullString
+			createdAt                   string
+		)
+		if err := rows.Scan(&s.From, &s.To, &s.Kind, &s.Commit, &s.Body, &createdAt, &final,
+			&granted, &gateID, &gateState, &gateNote, &gateCreated, &gateDecided); err != nil {
+			return nil, err
+		}
+		if s.At, err = time.Parse(time.RFC3339Nano, createdAt); err != nil {
+			return nil, fmt.Errorf("handoff has an unreadable timestamp %q: %w", createdAt, err)
+		}
+		s.Final = final != 0
+		if s.StartedAt, err = nullTime(granted); err != nil {
+			return nil, err
+		}
+		if s.StartedAt != nil {
+			s.DurationMS = s.At.Sub(*s.StartedAt).Milliseconds()
+			if s.DurationMS < 0 {
+				s.DurationMS = 0
+			}
+		}
+		if gateID.Valid {
+			gate := TrailGate{ID: gateID.String, State: gateState.String, Note: gateNote.String}
+			if gate.CreatedAt, err = time.Parse(time.RFC3339Nano, gateCreated.String); err != nil {
+				return nil, fmt.Errorf("approval has an unreadable timestamp: %w", err)
+			}
+			if gate.DecidedAt, err = nullTime(gateDecided); err != nil {
+				return nil, err
+			}
+			// Still pending: the wait is running, and reporting zero would say
+			// a gate nobody has answered cost nothing.
+			end := time.Now().UTC()
+			if gate.DecidedAt != nil {
+				end = *gate.DecidedAt
+			}
+			gate.WaitedMS = end.Sub(gate.CreatedAt).Milliseconds()
+			s.Gate = &gate
+		}
+		steps = append(steps, s)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(steps) == 0 {
+		return steps, nil
+	}
+
+	if err := db.attachTurns(ctx, taskID, steps); err != nil {
+		return nil, err
+	}
+	return steps, db.attachClarifications(ctx, taskID, steps)
+}
+
+// attachTurns puts each turn's cost on the step it was spent during.
+//
+// A turn belongs to the step whose role held the work when it happened, and
+// that window runs from one of the role's leases to its next, not to the
+// handoff in between. The turn that ends a step is recorded *after* the handoff
+// it produced: the agent calls `zerg send`, which writes the message, and the
+// turn carrying that call only finishes afterwards. Closing the window at the
+// handoff put the largest turn of every step outside it, which showed up
+// against real data as a card totalling $1.61 whose steps totalled $0.23.
+//
+// Turns before a role's first lease belong to no step and are left where they
+// are rather than folded into a neighbour, which would move money between
+// roles.
+func (db *DB) attachTurns(ctx context.Context, taskID string, steps []TrailStep) error {
+	rows, err := db.read.QueryContext(ctx,
+		`SELECT role, ts, input_tokens + cache_read_tokens + cache_write_tokens + output_tokens, cost_usd
+		   FROM usage_turns WHERE task_id = ? ORDER BY ts`, taskID)
+	if err != nil {
+		return fmt.Errorf("reading the trail's turns: %w", err)
+	}
+	defer rows.Close()
+
+	windows := windowsFor(steps)
+	for rows.Next() {
+		var (
+			role, ts string
+			tokens   int64
+			cost     float64
+		)
+		if err := rows.Scan(&role, &ts, &tokens, &cost); err != nil {
+			return err
+		}
+		at, err := time.Parse(time.RFC3339Nano, ts)
+		if err != nil {
+			return fmt.Errorf("a turn has an unreadable timestamp %q: %w", ts, err)
+		}
+		if i, ok := stepAt(windows, role, at); ok {
+			steps[i].Tokens += tokens
+			steps[i].CostUSD += cost
+		}
+	}
+	return rows.Err()
+}
+
+// stepWindow is when one role held the work, so a turn or a question can be
+// placed on the step it happened during.
+type stepWindow struct {
+	role string
+	from time.Time
+	// until is zero for a role's last step, which runs on: the turn that ends
+	// a step lands after the handoff that closed it.
+	until time.Time
+	step  int
+}
+
+func windowsFor(steps []TrailStep) []stepWindow {
+	out := []stepWindow{}
+	for i, s := range steps {
+		from := s.StartedAt
+		if from == nil {
+			// No lease to measure from. Messages carried none before schema 11,
+			// and those cards are most of what a history screen has to show, so
+			// the work is placed between the handoff that gave it to this role
+			// and whatever this role did next. Weaker than a lease, and the
+			// alternative is a card whose steps all read $0 while the card
+			// itself reads $2.74.
+			if i == 0 {
+				continue // nothing preceded the first message
+			}
+			from = &steps[i-1].At
+		}
+		out = append(out, stepWindow{role: s.From, from: *from, step: i})
+	}
+	// A role's window ends where that role's next one begins: a second lap
+	// closes the first, and nothing else does.
+	for i := range out {
+		for j := i + 1; j < len(out); j++ {
+			if out[j].role == out[i].role {
+				out[i].until = out[j].from
+				break
+			}
+		}
+	}
+	return out
+}
+
+// stepAt is the step a role was on at that moment, if it was on one.
+func stepAt(windows []stepWindow, role string, at time.Time) (int, bool) {
+	for _, window := range windows {
+		if window.role != role || at.Before(window.from) {
+			continue
+		}
+		if !window.until.IsZero() && !at.Before(window.until) {
+			continue
+		}
+		return window.step, true
+	}
+	return 0, false
+}
+
+// attachClarifications hangs each question on the step it was asked during,
+// by the same windows the turns use.
+func (db *DB) attachClarifications(ctx context.Context, taskID string, steps []TrailStep) error {
+	asked, err := db.ClarificationsForTask(ctx, taskID)
+	if err != nil {
+		return err
+	}
+	windows := windowsFor(steps)
+	for _, c := range asked {
+		if i, ok := stepAt(windows, c.Role, c.CreatedAt); ok {
+			steps[i].Clarifications = append(steps[i].Clarifications, c)
+		}
+	}
+	return nil
 }
