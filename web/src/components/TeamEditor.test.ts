@@ -96,8 +96,7 @@ describe('TeamEditor', () => {
     // Which team is in use is said in words, not with a marker beside the name.
     expect(w.text()).toContain('in use')
     expect(w.findAll('[aria-label="Use this team"]')).toHaveLength(1)
-    // The row that finishes says so in words, not in the protocol's noun.
-    expect(w.text()).toContain('finishes the task')
+    expect(w.text()).toContain('finisher')
   })
 
   it('offers no adopt button for the team already in use, and one for every other', () => {
@@ -124,7 +123,7 @@ describe('TeamEditor', () => {
     // a control most pipelines never need: a reviewer or a cleaner ends the
     // work wherever it appears, and the role is what knows that.
     const w = editor({ presetId: defaultTeam.id, roles: resolved })
-    expect(w.text()).toContain('finishes the task')
+    expect(w.text()).toContain('finisher')
     expect(w.findAll('[aria-label*="finishing role"]')).toHaveLength(0)
   })
 

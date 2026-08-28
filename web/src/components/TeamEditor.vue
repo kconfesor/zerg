@@ -642,7 +642,7 @@ function cloneTeam() {
           <template v-if="running">
             Agents are running, so changes apply immediately, to every project on this team
           </template>
-          <template v-else>Work flows from top to bottom, and ends at the role marked finishes</template>
+          <template v-else>Work flows from top to bottom, and ends at the finisher</template>
         </p>
       </div>
 
@@ -683,7 +683,7 @@ function cloneTeam() {
                    pressed. -->
               <Badge v-if="role.templateId === terminalTemplateId" class="gap-1">
                 <Flag :size="10" aria-hidden="true" />
-                finishes the task
+                finisher
               </Badge>
               <!-- A parked role keeps its place and its settings; it just does
                    not run, and work routes past it. -->
