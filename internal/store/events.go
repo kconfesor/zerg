@@ -198,9 +198,17 @@ func (db *DB) ListEvents(ctx context.Context, q EventQuery) ([]Event, error) {
 //
 // The count is returned rather than swallowed so the caller can say what was
 // dropped. Silent truncation reads exactly like complete history.
+//
+// A pinned task is exempt, however old. That is what pinning is for: the card
+// worth reading in six months is usually the one that went wrong, and the
+// window that is right for a project's ordinary work is wrong for that one.
 func (db *DB) PruneEvents(ctx context.Context, before time.Time) (int64, error) {
 	res, err := db.sql.ExecContext(ctx,
-		`DELETE FROM events WHERE ts < ?`, before.UTC().Format(time.RFC3339Nano))
+		`DELETE FROM events
+		  WHERE ts < ?
+		    AND (task_id IS NULL
+		         OR NOT EXISTS (SELECT 1 FROM tasks t WHERE t.id = events.task_id AND t.pinned = 1))`,
+		before.UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return 0, fmt.Errorf("pruning events: %w", err)
 	}

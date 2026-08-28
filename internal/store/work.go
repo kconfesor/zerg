@@ -101,6 +101,12 @@ type Task struct {
 	Outcome    string `json:"outcome,omitempty"`
 	OutcomeRef string `json:"outcomeRef,omitempty"`
 
+	// Pinned keeps this card's transcript past the retention window. Events are
+	// swept because they are the expensive tier (ARCHITECTURE §12.1); the card
+	// worth reading in six months is usually the one that went wrong, and this
+	// is how it is kept.
+	Pinned bool `json:"pinned"`
+
 	// Tokens and CostUSD are what this card has cost across every role and
 	// every lap. A board that shows only a lane says nothing about the price
 	// of what it is showing.
@@ -205,14 +211,14 @@ func (db *DB) CreateTask(ctx context.Context, projectID, name, body, lane string
 
 const taskCols = `id, project_id, session_id, name, body, lane, state,
 	created_at, first_claimed_at, completed_at, active_ms, rework_count, hidden, stopped_at,
-	outcome, outcome_ref`
+	outcome, outcome_ref, pinned`
 
 // taskColsT is the same list qualified to the tasks table, for the queries that
 // join. Unqualified names resolve today and would become ambiguous the moment a
 // joined table gained a column of the same name.
 const taskColsT = `t.id, t.project_id, t.session_id, t.name, t.body, t.lane, t.state,
 	t.created_at, t.first_claimed_at, t.completed_at, t.active_ms, t.rework_count, t.hidden,
-	t.stopped_at, t.outcome, t.outcome_ref`
+	t.stopped_at, t.outcome, t.outcome_ref, t.pinned`
 
 // GetTaskIn resolves a task that must belong to this project.
 //
@@ -299,7 +305,7 @@ func scanTaskWithSummary(s scanner) (*Task, error) {
 	)
 	if err := s.Scan(&t.ID, &t.ProjectID, &sessionID, &t.Name, &t.Body, &t.Lane, &t.State,
 		&created, &firstClaim, &completedAt, &t.ActiveMS, &t.ReworkCount, &t.Hidden, &stoppedAt,
-		&t.Outcome, &t.OutcomeRef,
+		&t.Outcome, &t.OutcomeRef, &t.Pinned,
 		&t.Tokens, &t.CostUSD, &t.Doing); err != nil {
 		return nil, err
 	}
@@ -320,7 +326,7 @@ func scanTask(s scanner) (*Task, error) {
 	)
 	if err := s.Scan(&t.ID, &t.ProjectID, &sessionID, &t.Name, &t.Body, &t.Lane, &t.State,
 		&created, &firstClaim, &completedAt, &t.ActiveMS, &t.ReworkCount, &t.Hidden,
-		&stoppedAt, &t.Outcome, &t.OutcomeRef); err != nil {
+		&stoppedAt, &t.Outcome, &t.OutcomeRef, &t.Pinned); err != nil {
 		return nil, err
 	}
 	if err := fillTaskTimes(&t, sessionID, created, firstClaim, completedAt, stoppedAt); err != nil {
@@ -806,6 +812,18 @@ func (db *DB) GetApproval(ctx context.Context, id string) (*Approval, error) {
 // finished, and unhiding must return it exactly as it was. Only tasks that
 // have actually finished can be hidden — putting away something still moving
 // through the pipeline would hide the work, not the record of it.
+// SetTaskPinned keeps a task's transcript, or lets the sweep have it.
+//
+// Any task, not only a finished one: a card being worked on is exactly when
+// somebody decides it is the one they will want to read later.
+func (db *DB) SetTaskPinned(ctx context.Context, id string, pinned bool) error {
+	res, err := db.sql.ExecContext(ctx, `UPDATE tasks SET pinned = ? WHERE id = ?`, pinned, id)
+	if err != nil {
+		return fmt.Errorf("pinning %s: %w", id, err)
+	}
+	return mustAffect(res, fmt.Sprintf("task %s", id))
+}
+
 func (db *DB) SetTaskHidden(ctx context.Context, id string, hidden bool) error {
 	res, err := db.sql.ExecContext(ctx,
 		`UPDATE tasks SET hidden = ? WHERE id = ? AND state = 'done'`, hidden, id)
@@ -940,6 +958,12 @@ type HistoryEntry struct {
 	// first did. Which agents worked on it is the question a list of names
 	// answers and a lane does not.
 	Roles []string `json:"roles"`
+
+	// HasTranscript is whether this card's events are still here, asked of the
+	// table rather than worked out from the retention window: a sweep that has
+	// not run yet and a window that was lengthened afterwards both make that
+	// arithmetic wrong, and the answer decides whether a step can be opened.
+	HasTranscript bool `json:"hasTranscript"`
 }
 
 // HistoryFilter narrows the list. Zero values mean no narrowing.
@@ -997,6 +1021,7 @@ func (db *DB) ListHistory(ctx context.Context, projectID string, f HistoryFilter
 	rows, err := db.read.QueryContext(ctx,
 		`SELECT `+taskColsT+`,
 		        COALESCE(u.tokens, 0), COALESCE(u.cost, 0),
+		        EXISTS (SELECT 1 FROM events e WHERE e.task_id = t.id),
 		        COALESCE((SELECT group_concat(role, char(10)) FROM (
 		            SELECT m.from_role AS role, MIN(m.created_at) AS first
 		              FROM messages m WHERE m.task_id = t.id AND m.from_role <> ''
@@ -1029,7 +1054,8 @@ func (db *DB) ListHistory(ctx context.Context, projectID string, f HistoryFilter
 		)
 		if err := rows.Scan(&e.ID, &e.ProjectID, &sessionID, &e.Name, &e.Body, &e.Lane, &e.State,
 			&created, &firstClaim, &completedAt, &e.ActiveMS, &e.ReworkCount, &e.Hidden,
-			&stoppedAt, &e.Outcome, &e.OutcomeRef, &e.Tokens, &e.CostUSD, &roles); err != nil {
+			&stoppedAt, &e.Outcome, &e.OutcomeRef, &e.Pinned,
+			&e.Tokens, &e.CostUSD, &e.HasTranscript, &roles); err != nil {
 			return nil, "", err
 		}
 		if err := fillTaskTimes(&e.Task, sessionID, created, firstClaim, completedAt, stoppedAt); err != nil {

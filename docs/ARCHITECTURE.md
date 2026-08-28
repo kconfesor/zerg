@@ -912,13 +912,11 @@ useless as an invoice. Tokens are always real; dollars sometimes are not.
 ## 12. History and metrics
 
 > **Status: partly built.** `usage_turns` exists and is what the cost panel
-> reads, and §12.3 is built: the History screen, a task's trail, and the slice of
-> transcript behind each step. `daily_rollup`, the price table, the charts in
-> §12.4 and task pinning are described below as the design they will follow and
-> are **not implemented**. §9 lists the tables that actually exist. The retention
-> arithmetic in §12.1 is the reasoning for the tiering, not a description of a
-> running sweep, so nothing ages out yet and a step's transcript is there because
-> nothing has removed it.
+> reads, §12.1's sweep runs on a timer against a configurable window, and §12.3
+> is built: the History screen, a task's trail, the slice of transcript behind
+> each step, and a pin that exempts a card from the sweep. `daily_rollup`, the
+> price table and the charts in §12.4 are described below as the design they will
+> follow and are **not implemented**. §9 lists the tables that actually exist.
 
 The database makes history nearly free, but only if the three kinds of record are kept on different
 terms. Treating them alike is how a local SQLite file becomes a 14 GB liability.
@@ -939,6 +937,13 @@ replay and debug *recent* work.
 The honest consequence, stated plainly in the UI: recent work replays in full; older work keeps its
 metrics, its costs and its outcome, but not its complete transcript. The window is configurable, and
 a task can be pinned to exempt it.
+
+Both halves of that are built. History says which cards still have a transcript, asked of the events
+table rather than worked out from the window, because a sweep that has not run yet and a window that
+was lengthened afterwards both make that arithmetic wrong. Pinning holds on the delete itself rather
+than in a caller. Demonstrated against a copy of a real database with the window set to a day: 812
+events swept, the pinned card keeping all 166 of its own, and every card keeping its cost, its
+outcome and its four-step trail.
 
 Rollups are computed on session end and on a daily timer, so a twelve-month chart reads a few
 thousand tiny rows instead of scanning millions of turns.

@@ -455,6 +455,28 @@ func (s *Server) setTaskHidden(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, task)
 }
 
+// setTaskPinned keeps a card's transcript past the retention window, or hands
+// it back to the sweep.
+func (s *Server) setTaskPinned(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Pinned bool `json:"pinned"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.fail(w, r, fmt.Errorf("reading request: %w", err))
+		return
+	}
+	if err := s.db.SetTaskPinned(r.Context(), r.PathValue("id"), req.Pinned); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	task, err := s.db.GetTask(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, task)
+}
+
 // stopTask parks a card so nothing picks it up again.
 func (s *Server) stopTask(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")

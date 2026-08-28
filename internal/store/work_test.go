@@ -291,6 +291,18 @@ func TestListHistoryPagesAndFilters(t *testing.T) {
 			NewID(), p.ID, task.ID, tc.role, at); err != nil {
 			t.Fatal(err)
 		}
+		if _, err := db.SQL().ExecContext(ctx,
+			`INSERT INTO usage_turns (id,project_id,task_id,role,ts,output_tokens,cost_usd)
+			 VALUES (?,?,?,?,?,?,?)`,
+			NewID(), p.ID, task.ID, tc.role, at, 1_500_000, 2.5); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.SQL().ExecContext(ctx,
+			`INSERT INTO events (id,project_id,task_id,role,kind,ts,text,tool,fatal)
+			 VALUES (?,?,?,?,'message',?,'did it','',0)`,
+			NewID(), p.ID, task.ID, tc.role, at); err != nil {
+			t.Fatal(err)
+		}
 		if tc.finished {
 			if _, err := db.SQL().ExecContext(ctx,
 				`UPDATE tasks SET state='done', lane='done', completed_at=?, outcome=?, created_at=? WHERE id=?`,
@@ -337,7 +349,17 @@ func TestListHistoryPagesAndFilters(t *testing.T) {
 		t.Errorf("cursor %q on the last page, which has nothing after it", last)
 	}
 
-	// What each card cost and who touched it come back with it.
+	// What each card cost and who touched it come back with it. Asserted with
+	// real numbers rather than zeros: every column of this row is read
+	// positionally, and a fixture of zeros converts into whatever type the scan
+	// happens to offer. Adding a column put tokens where a boolean was expected
+	// and this test stayed green while the endpoint returned 500.
+	if page[3].Tokens != 1_500_000 || page[3].CostUSD != 2.5 {
+		t.Errorf("Readme came back with %d tokens and %v, want what it spent", page[3].Tokens, page[3].CostUSD)
+	}
+	if !page[3].HasTranscript {
+		t.Error("Readme has events, so its transcript is still readable")
+	}
 	if len(page[3].Roles) != 1 || page[3].Roles[0] != "docs" {
 		t.Errorf("Readme was worked by %v, want docs", page[3].Roles)
 	}
@@ -532,5 +554,53 @@ func TestTaskTrailCarriesEachStepsTimeAndCost(t *testing.T) {
 	}
 	if reviewer.Gate.State != "approved" {
 		t.Errorf("gate state is %q", reviewer.Gate.State)
+	}
+}
+
+// The board's own query, with a card that has spent something.
+//
+// It reads the task columns positionally and adds three of its own, so a column
+// added to the list without a destination in the scanner takes the board down
+// with "expected 20 destination arguments in Scan, not 19" and nothing else
+// notices. Twice now: once for the outcome, once for the pin.
+func TestListTasksReadsEveryColumnItSelects(t *testing.T) {
+	ctx := context.Background()
+	db, p := seeded(t)
+	task, err := db.CreateTask(ctx, p.ID, "Factorial", "body", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetTaskPinned(ctx, task.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SQL().ExecContext(ctx,
+		`INSERT INTO usage_turns (id,project_id,task_id,role,ts,output_tokens,cost_usd)
+		 VALUES (?,?,?,'coder',?,?,?)`,
+		NewID(), p.ID, task.ID, time.Now().UTC().Format(time.RFC3339Nano), 4_000, 1.25); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RecordEvent(ctx, &Event{
+		ID: NewID(), ProjectID: p.ID, TaskID: &task.ID,
+		Role: "coder", Kind: "tool_call", At: time.Now().UTC(), Tool: "Bash",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	tasks, err := db.ListTasks(ctx, p.ID)
+	if err != nil {
+		t.Fatalf("ListTasks: %v", err)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("got %d cards, want 1", len(tasks))
+	}
+	got := tasks[0]
+	if !got.Pinned {
+		t.Error("the board lost the pin")
+	}
+	if got.Tokens != 4_000 || got.CostUSD != 1.25 {
+		t.Errorf("the board reports %d tokens and %v, want what the card spent", got.Tokens, got.CostUSD)
+	}
+	if got.Doing != "Bash" {
+		t.Errorf("the board reports %q as the last thing done, want the tool", got.Doing)
 	}
 }

@@ -12,7 +12,7 @@
  * refresh would give one of them the wrong behaviour.
  */
 import { computed, ref, watch } from 'vue'
-import { GitBranch, GitMerge, GitPullRequest, RotateCcw, Search } from '@lucide/vue'
+import { GitBranch, GitMerge, GitPullRequest, Pin, RotateCcw, Search } from '@lucide/vue'
 import { api, type HistoryEntry, type Task } from '@/lib/api'
 import { duration, money, taskState } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
@@ -96,6 +96,23 @@ function ending(task: HistoryEntry): { label: string; icon: unknown; tone: strin
   return null
 }
 
+/**
+ * Keeping a card's transcript, or handing it back to the sweep.
+ *
+ * Events are the expensive tier and are swept past the retention window, so the
+ * card somebody will want to read in six months has to be marked before then.
+ * The row updates in place rather than reloading the page: a list that jumps
+ * back to the top when you pin something is a list you cannot pin twice.
+ */
+async function pin(task: HistoryEntry) {
+  try {
+    const updated = await api.setTaskPinned(task.id, !task.pinned)
+    entries.value = entries.value.map((e) => (e.id === task.id ? { ...e, pinned: updated.pinned } : e))
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : String(e)
+  }
+}
+
 const empty = computed(() => !loading.value && !entries.value.length)
 const filtered = computed(() => outcome.value !== ANY || role.value !== ANY || !!query.value.trim())
 </script>
@@ -168,6 +185,16 @@ const filtered = computed(() => outcome.value !== ANY || role.value !== ANY || !
                 {{ task.reworkCount }}
               </span>
               <span v-if="task.hidden" class="text-muted-foreground/70 text-[10px]">put away</span>
+              <!-- Said rather than discovered on opening it: the transcript is
+                   the tier that ages out, and a card that has lost it still has
+                   its outcome, its cost and its trail. -->
+              <span
+                v-if="!task.hasTranscript"
+                class="text-muted-foreground/60 text-[10px]"
+                title="Its events have been swept. The trail, the cost and the outcome are still here."
+              >
+                transcript aged out
+              </span>
             </div>
 
             <div class="text-muted-foreground flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px]">
@@ -186,6 +213,28 @@ const filtered = computed(() => outcome.value !== ANY || role.value !== ANY || !
               <span v-if="task.roles.length" class="truncate">{{ task.roles.join(' → ') }}</span>
             </div>
           </button>
+          <!-- Outside the row's button, because a button inside a button is
+               not a thing a browser will render. -->
+          <div class="flex items-center gap-1 px-2 pb-2">
+            <Button
+              size="xs"
+              variant="ghost"
+              class="h-6 gap-1 px-1.5 text-[10px]"
+              :class="task.pinned ? 'text-[var(--primary)]' : 'text-muted-foreground'"
+              :aria-label="task.pinned ? `Stop keeping ${task.name}'s transcript` : `Keep ${task.name}'s transcript`"
+              :title="
+                task.pinned
+                  ? 'Kept past the retention window. Press to let the sweep have it.'
+                  : 'Keep this transcript past the retention window.'
+              "
+              @click="pin(task)"
+            >
+              <!-- One icon, coloured. A crossed-out pin on the row you have
+                   not pinned reads as "cannot be pinned". -->
+              <Pin :size="11" aria-hidden="true" />
+              {{ task.pinned ? 'kept' : 'keep' }}
+            </Button>
+          </div>
         </li>
       </ul>
 

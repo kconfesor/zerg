@@ -209,6 +209,10 @@ export interface Task {
   doing?: string
   /** Put away by a person. Finished work that is still finished. */
   hidden?: boolean
+  /** Kept past the retention window: events are swept because they are the
+   *  expensive tier, and the card worth reading in six months is usually the
+   *  one that went wrong. */
+  pinned?: boolean
   /** What happened to the work when the last role finished: it was merged, a
    *  pull request was opened, or it was left on its branch. Empty on a card
    *  still being worked, and on one that ended before the daemon recorded
@@ -221,6 +225,10 @@ export interface Task {
 export interface HistoryEntry extends Task {
   /** The roles that sent a handoff on this task, in the order they first did. */
   roles: string[]
+  /** Whether this card's events are still here. Asked of the table rather than
+   *  worked out from the retention window, which a sweep that has not run yet
+   *  makes wrong. */
+  hasTranscript: boolean
 }
 
 export interface HistoryPage {
@@ -505,6 +513,9 @@ export const api = {
   deleteTask: (id: string) => call<void>(`/tasks/${id}`, { method: 'DELETE' }),
   setTaskHidden: (id: string, hidden: boolean) =>
     call<Task>(`/tasks/${id}/hidden`, { method: 'PUT', body: JSON.stringify({ hidden }) }),
+  /** Keep this card's transcript past the retention window, or let it go. */
+  setTaskPinned: (id: string, pinned: boolean) =>
+    call<Task>(`/tasks/${id}/pinned`, { method: 'PUT', body: JSON.stringify({ pinned }) }),
   approvalDiff: (id: string) =>
     call<{ files: ChangedFile[]; range: boolean; base: string }>(`/approvals/${id}/diff`),
   spend: (id: string, range: SpendRange) =>

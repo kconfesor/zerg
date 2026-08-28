@@ -3,7 +3,7 @@ import { enableAutoUnmount, flushPromises, mount } from '@vue/test-utils'
 import History from './History.vue'
 import { api, type HistoryEntry } from '@/lib/api'
 
-vi.mock('@/lib/api', () => ({ api: { history: vi.fn() } }))
+vi.mock('@/lib/api', () => ({ api: { history: vi.fn(), setTaskPinned: vi.fn() } }))
 enableAutoUnmount(afterEach)
 
 function entry(name: string, over: Partial<HistoryEntry> = {}): HistoryEntry {
@@ -21,17 +21,20 @@ function entry(name: string, over: Partial<HistoryEntry> = {}): HistoryEntry {
     tokens: 100,
     costUsd: 0.42,
     roles: ['coder', 'reviewer'],
+    hasTranscript: true,
     ...over,
   }
 }
 
 const history = vi.mocked(api.history)
+const setPinned = vi.mocked(api.setTaskPinned)
 
 function screen() {
   return mount(History, { props: { projectId: 'p', roles: ['coder', 'reviewer'] } })
 }
 
 beforeEach(() => {
+  setPinned.mockReset()
   history.mockReset()
   history.mockResolvedValue({ entries: [entry('Factorial')], next: '' })
 })
@@ -89,6 +92,34 @@ describe('History', () => {
     expect(w.text()).toContain('Older')
     // And the cursor is spent: nothing offers a page that does not exist.
     expect(w.findAll('button').some((b) => b.text() === 'Older')).toBe(false)
+  })
+
+  it('keeps a transcript without losing your place in the list', async () => {
+    // The sweep takes events past the retention window, so the card somebody
+    // will want in six months has to be marked before then. Reloading the list
+    // to show that would send it back to the top, which is a list you cannot
+    // pin twice.
+    history.mockResolvedValue({ entries: [entry('Factorial'), entry('Power')], next: 'cursor' })
+    setPinned.mockResolvedValue({ ...entry('Factorial'), pinned: true })
+    const w = screen()
+    await flushPromises()
+
+    const before = history.mock.calls.length
+    await w.get('[aria-label="Keep Factorial\'s transcript"]').trigger('click')
+    await flushPromises()
+
+    expect(setPinned).toHaveBeenCalledWith('Factorial', true)
+    expect(history.mock.calls).toHaveLength(before)
+    expect(w.find('[aria-label="Stop keeping Factorial\'s transcript"]').exists()).toBe(true)
+  })
+
+  it('says when a card has lost its transcript, rather than leaving it to be found', async () => {
+    history.mockResolvedValue({ entries: [entry('Old one', { hasTranscript: false })], next: '' })
+    const w = screen()
+    await flushPromises()
+    expect(w.text()).toContain('transcript aged out')
+    // What survives the sweep is still there to read.
+    expect(w.text()).toContain('$0.42')
   })
 
   it('says the difference between an empty project and an empty search', async () => {
