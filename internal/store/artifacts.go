@@ -170,48 +170,6 @@ func (db *DB) SetArtifactPinned(ctx context.Context, id string, pinned bool) err
 	return mustAffect(res, fmt.Sprintf("artifact %s", id))
 }
 
-// UnreferencedBlobs returns digests no row names any more, so the bytes on
-// disk can go with them.
-//
-// Content addressing is what makes this necessary: two rows can share one
-// file, so deleting a row is not permission to delete what it pointed at.
-func (db *DB) UnreferencedBlobs(ctx context.Context, digests []string) ([]string, error) {
-	if len(digests) == 0 {
-		return nil, nil
-	}
-	holes := strings.TrimSuffix(strings.Repeat("?,", len(digests)), ",")
-	args := make([]any, len(digests))
-	for i, d := range digests {
-		args[i] = d
-	}
-	rows, err := db.read.QueryContext(ctx,
-		`SELECT DISTINCT sha256 FROM artifacts WHERE sha256 IN (`+holes+`)`, args...)
-	if err != nil {
-		return nil, fmt.Errorf("checking which artifacts are still referenced: %w", err)
-	}
-	defer rows.Close()
-
-	referenced := map[string]bool{}
-	for rows.Next() {
-		var d string
-		if err := rows.Scan(&d); err != nil {
-			return nil, err
-		}
-		referenced[d] = true
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
-	var orphans []string
-	for _, d := range digests {
-		if !referenced[d] {
-			orphans = append(orphans, d)
-		}
-	}
-	return orphans, nil
-}
-
 const artifactCols = `id, project_id, task_id, role, kind, label, sha256, mime, bytes, name,
 	port, stopped_at, created_at, pinned`
 
@@ -245,4 +203,113 @@ func boolInt(b bool) int {
 		return 1
 	}
 	return 0
+}
+
+// PruneArtifacts drops artifacts of tasks that have aged out, and reports the
+// digests whose bytes are now unreferenced.
+//
+// The same window as events (§13.5), and the same exemptions with one more:
+// a pinned artifact survives, and so does one whose task is pinned. The card
+// worth keeping is usually the one that went wrong, and its screenshot is
+// most of why it is worth keeping.
+//
+// Services are dropped on age like anything else; their rows carry no bytes,
+// and one still marked live after the retention window belongs to a daemon
+// that stopped without saying so.
+//
+// The digests come back rather than the files being deleted here, because two
+// rows can name the same bytes: what is safe to remove is a question about the
+// whole table, and the caller owns the directory.
+func (db *DB) PruneArtifacts(ctx context.Context, before time.Time) (int, []string, error) {
+	cut := before.UTC().Format(time.RFC3339Nano)
+
+	// Read the digests first: after the delete there is nothing to read them
+	// from, and doing it in one transaction keeps a concurrent insert from
+	// slipping between the two.
+	tx, err := db.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, nil, fmt.Errorf("pruning artifacts: %w", err)
+	}
+	defer tx.Rollback()
+
+	const doomed = `SELECT id, sha256 FROM artifacts
+	                 WHERE created_at < ? AND pinned = 0
+	                   AND (task_id IS NULL
+	                        OR NOT EXISTS (SELECT 1 FROM tasks t
+	                                        WHERE t.id = artifacts.task_id AND t.pinned = 1))`
+	rows, err := tx.QueryContext(ctx, doomed, cut)
+	if err != nil {
+		return 0, nil, fmt.Errorf("pruning artifacts: %w", err)
+	}
+	var ids, digests []string
+	for rows.Next() {
+		var id, digest string
+		if err := rows.Scan(&id, &digest); err != nil {
+			rows.Close()
+			return 0, nil, err
+		}
+		ids = append(ids, id)
+		if digest != "" {
+			digests = append(digests, digest)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, nil, err
+	}
+	if len(ids) == 0 {
+		return 0, nil, nil
+	}
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM artifacts WHERE id IN (`+holes(len(ids))+`)`,
+		anySlice(ids)...); err != nil {
+		return 0, nil, fmt.Errorf("pruning artifacts: %w", err)
+	}
+
+	// Which of those digests nothing names any more, asked inside the same
+	// transaction so a row added meanwhile is seen.
+	kept := map[string]bool{}
+	if len(digests) > 0 {
+		q, err := tx.QueryContext(ctx,
+			`SELECT DISTINCT sha256 FROM artifacts WHERE sha256 IN (`+holes(len(digests))+`)`,
+			anySlice(digests)...)
+		if err != nil {
+			return 0, nil, err
+		}
+		for q.Next() {
+			var d string
+			if err := q.Scan(&d); err != nil {
+				q.Close()
+				return 0, nil, err
+			}
+			kept[d] = true
+		}
+		q.Close()
+		if err := q.Err(); err != nil {
+			return 0, nil, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, nil, err
+	}
+
+	var orphans []string
+	seen := map[string]bool{}
+	for _, d := range digests {
+		if !kept[d] && !seen[d] {
+			seen[d] = true
+			orphans = append(orphans, d)
+		}
+	}
+	return len(ids), orphans, nil
+}
+
+func holes(n int) string { return strings.TrimSuffix(strings.Repeat("?,", n), ",") }
+
+func anySlice(ss []string) []any {
+	out := make([]any, len(ss))
+	for i, s := range ss {
+		out[i] = s
+	}
+	return out
 }

@@ -18,7 +18,10 @@ vi.mock('@/lib/api', () => ({
     resolveReviewThread: vi.fn(),
     approvalGuide: vi.fn(),
     requestGuide: vi.fn(),
+    taskArtifacts: vi.fn(),
+    pinArtifact: vi.fn(),
   },
+  artifactBytes: (id: string) => `/api/artifacts/${id}/bytes`,
 }))
 enableAutoUnmount(afterEach)
 
@@ -38,6 +41,7 @@ const attention = (files: ChangedFile[], threads: ReviewThread[] = []): Attentio
   diff.mockResolvedValue({ files, range: true, base: 'main', seen: [] })
   mergeable.mockResolvedValue({ clean: true, conflicts: [], baseAhead: 0 })
   review.mockResolvedValue(threads)
+  vi.mocked(api.taskArtifacts).mockResolvedValue([])
   seen.mockResolvedValue({ seen: [] })
   return {
     approvals: [

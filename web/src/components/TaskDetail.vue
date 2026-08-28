@@ -14,6 +14,7 @@ import { renderMarkdown } from '@/lib/markdown'
 import { duration, taskState } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import TaskFlow from '@/components/TaskFlow.vue'
+import Artifacts from '@/components/Artifacts.vue'
 import {
   Dialog,
   DialogBody,
@@ -106,6 +107,11 @@ function tokensOf(u: TaskDetail['usage']): number {
       </DialogHeader>
 
       <DialogBody>
+        <!-- What the work produced, above the account of how it happened: on a
+             finished card this is the answer to the question people actually
+             open it with. -->
+        <Artifacts :task-id="task?.id" class="mb-4" />
+
         <p v-if="failed" class="text-destructive text-xs">{{ failed }}</p>
         <p v-else-if="!detail" class="text-muted-foreground text-xs">Reading the history…</p>
 

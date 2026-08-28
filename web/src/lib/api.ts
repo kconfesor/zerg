@@ -514,6 +514,14 @@ export const api = {
     }),
 
   taskDetail: (id: string) => call<TaskDetail>(`/tasks/${id}`),
+  /** What a task produced: files to look at, and services to open. */
+  taskArtifacts: (id: string) => call<Artifact[]>(`/tasks/${id}/artifacts`),
+  /** Keep an artifact after its task's transcript ages out. */
+  pinArtifact: (id: string, pinned: boolean) =>
+    call<Artifact>(`/artifacts/${id}/pinned`, {
+      method: 'PUT',
+      body: JSON.stringify({ pinned }),
+    }),
   /**
    * One step's transcript: what a role did while it held the work.
    *
@@ -961,6 +969,35 @@ export interface ReviewGuide {
   body: string
   createdAt: string
 }
+
+/**
+ * Something an agent produced for a person to look at.
+ *
+ * A file is bytes the daemon kept; a service is a port a process was listening
+ * on, which is only true while that process is alive, so `url` is present only
+ * while it is.
+ */
+export interface Artifact {
+  id: string
+  projectId: string
+  taskId?: string
+  role?: string
+  kind: 'file' | 'image' | 'service'
+  label?: string
+  sha256?: string
+  mime?: string
+  bytes?: number
+  name?: string
+  port?: number
+  stoppedAt?: string
+  createdAt: string
+  pinned: boolean
+  /** Where a running service can be opened, on the proxy's own origin. */
+  url?: string
+}
+
+/** Where the bytes of a file artifact live. */
+export const artifactBytes = (id: string) => `/api/artifacts/${id}/bytes`
 
 /** One file a commit touched, with both its content and its diff. */
 export interface ChangedFile {

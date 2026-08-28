@@ -16,6 +16,7 @@ import { api, type ChangedFile, type Mergeable, type ReviewThread } from '@/lib/
 import { renderMarkdown } from '@/lib/markdown'
 import DiffView from '@/components/DiffView.vue'
 import ReviewThreadView from '@/components/ReviewThread.vue'
+import Artifacts from '@/components/Artifacts.vue'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -813,6 +814,11 @@ function empty(a: Attention | null): boolean {
           {{ notesOpen[a.id] ? 'Less' : 'More' }}
         </button>
       </div>
+
+      <!-- What this produced, at the moment somebody is deciding about it.
+           For anything with a screen, "what does it look like" is the question
+           that comes before "what changed". -->
+      <Artifacts :task-id="a.taskId" class="mb-2.5" />
 
       <!-- And what it actually wrote. Deciding from a description of a change
            rather than the change is approving blind, and for a planner's spec

@@ -282,7 +282,11 @@ func runUp(args []string) error {
 	// age out. Costs and outcomes live elsewhere and do not. The window is read
 	// on each sweep, so changing it in Settings takes effect without a restart —
 	// which is what Settings has always said it does.
-	api.PruneEvents(ctx, db, log, retentionSweep)
+	// Beside the database rather than inside it: a screenshot in a SQLite row
+	// is read into memory to be served and competes for the write lock the
+	// whole daemon shares (internal/artifact).
+	blobs := artifact.New(filepath.Join(filepath.Dir(*dbPath), "artifacts"))
+	api.PruneEvents(ctx, db, blobs, log, retentionSweep)
 
 	// Agents are children of this process, so any lease still open belongs to a
 	// process that no longer exists. Requeue it now rather than letting the
@@ -310,10 +314,6 @@ func runUp(args []string) error {
 	chatMgr := chat.NewManager(db, registry, bus, log, stateDir)
 	defer chatMgr.StopAll()
 
-	// Beside the database rather than inside it: a screenshot in a SQLite row
-	// is read into memory to be served and competes for the write lock the
-	// whole daemon shares (internal/artifact).
-	blobs := artifact.New(filepath.Join(filepath.Dir(*dbPath), "artifacts"))
 	agents := agent.NewServer(db, nyd, blobs, log)
 	socket := filepath.Join(stateDir, "agent.sock")
 	if err := agents.Listen(socket); err != nil {

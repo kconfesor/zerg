@@ -9,6 +9,7 @@ import (
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
 
+	"github.com/kconfesor/zerg/internal/artifact"
 	"github.com/kconfesor/zerg/internal/event"
 	"github.com/kconfesor/zerg/internal/store"
 )
@@ -243,7 +244,7 @@ func liveEvent(ev event.Event) store.Event {
 // What was dropped is logged. A retention policy that trims silently is
 // indistinguishable, to whoever reads the transcript later, from a complete
 // record that happens to start on a Tuesday.
-func PruneEvents(ctx context.Context, db *store.DB, log *slog.Logger, every time.Duration) {
+func PruneEvents(ctx context.Context, db *store.DB, blobs *artifact.Store, log *slog.Logger, every time.Duration) {
 	sweep := func() {
 		// Read the window per sweep, not once at startup. Settings say
 		// retention applies immediately, and it did not: the duration was
@@ -267,6 +268,27 @@ func PruneEvents(ctx context.Context, db *store.DB, log *slog.Logger, every time
 		}
 		if n > 0 {
 			log.Info("events: pruned", "rows", n, "older_than", window.String())
+		}
+
+		// Artifacts age with the transcripts they belong to (§13.5), and are
+		// the largest tier by bytes. Content addressing is what makes the
+		// second step necessary: two rows can name one file, so a deleted row
+		// is not permission to delete what it pointed at.
+		dropped, orphans, err := db.PruneArtifacts(ctx, time.Now().Add(-window))
+		if err != nil {
+			log.Error("artifacts: retention sweep failed", "err", err)
+			return
+		}
+		if blobs != nil {
+			for _, digest := range orphans {
+				if err := blobs.Remove(digest); err != nil {
+					log.Warn("artifacts: could not remove the bytes", "sha256", digest, "err", err)
+				}
+			}
+		}
+		if dropped > 0 {
+			log.Info("artifacts: pruned", "rows", dropped, "files", len(orphans),
+				"older_than", window.String())
 		}
 	}
 
