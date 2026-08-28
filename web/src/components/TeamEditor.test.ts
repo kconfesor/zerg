@@ -9,11 +9,13 @@ const coder: RoleTemplate = {
   harness: 'claude',
   model: 'sonnet',
   args: [],
+  thinking: '',
   receive: 'task',
   batchMaxItems: 8,
   batchMaxAgeSec: 300,
   prompt: 'code',
   gate: 'none',
+  finisher: false,
   builtin: true,
 }
 
@@ -78,6 +80,7 @@ function editor(team: ProjectTeam, presets: TeamPreset[] = [defaultTeam, docsTea
       projectTeam: team,
       harnesses: ['claude'],
       models: {},
+      thinking: { claude: ['low', 'medium', 'high', 'xhigh', 'max'] },
       running: false,
     },
     global: { stubs: { RoleOverrideDialog: true } },
@@ -93,7 +96,7 @@ describe('TeamEditor', () => {
     // Which team is in use is said in words, not with a marker beside the name.
     expect(w.text()).toContain('in use')
     expect(w.findAll('[aria-label="Use this team"]')).toHaveLength(1)
-    expect(w.text()).toContain('terminal')
+    expect(w.text()).toContain('finisher')
   })
 
   it('offers no adopt button for the team already in use, and one for every other', () => {
@@ -113,6 +116,39 @@ describe('TeamEditor', () => {
     expect(w.text()).toContain('in use')
     expect(w.find('[aria-label="Follow this pipeline again"]').exists()).toBe(false)
     expect(w.findAll('[aria-label="Use this team"]')).toHaveLength(1)
+  })
+
+  it('says which role finishes without offering a control for it', async () => {
+    // The pipeline used to carry a "finish here" button on every row, which is
+    // a control most pipelines never need: a reviewer or a cleaner ends the
+    // work wherever it appears, and the role is what knows that.
+    const w = editor({ presetId: defaultTeam.id, roles: resolved })
+    expect(w.text()).toContain('finisher')
+    expect(w.findAll('[aria-label*="finishing role"]')).toHaveLength(0)
+  })
+
+  it('adds a role in front of the one that ends the pipeline', async () => {
+    // Appending is what handed the job of integrating to whatever was added
+    // last. The reviewer here ends pipelines, so the coder joins in front.
+    const finishing: RoleTemplate = { ...reviewer, finisher: true }
+    const w = mount(TeamEditor, {
+      props: {
+        library: [coder, finishing],
+        presets: [docsTeam],
+        projectId: project.id,
+        projectName: project.name,
+        projectTeam: { presetId: docsTeam.id, roles: resolved },
+        harnesses: ['claude'],
+        models: {},
+        thinking: { claude: [] },
+        running: false,
+      },
+      global: { stubs: { RoleOverrideDialog: true } },
+    })
+    await w.get('[aria-label="coder in Docs team"]').trigger('click')
+
+    const saved = w.emitted('savePreset')!.at(-1)![0] as TeamPreset
+    expect(saved.roles.map((r) => r.templateId)).toEqual(['coder', 'reviewer'])
   })
 
   it('keeps rename and delete on every row, and off the built-in', () => {
@@ -186,6 +222,7 @@ describe('TeamEditor', () => {
         projectTeam: { presetId: defaultTeam.id, roles: resolved },
         harnesses: ['claude'],
         models: {},
+        thinking: { claude: ['low', 'medium', 'high', 'xhigh', 'max'] },
         running: true,
       },
       global: { stubs: { RoleOverrideDialog: true } },
@@ -213,9 +250,11 @@ describe('TeamEditor', () => {
     expect(w.emitted('setTeam')?.at(-1)?.[0]).toEqual({ presetId: docsTeam.id, roles: [] })
   })
 
-  it('reorders the selected team in the pipeline', async () => {
+  it('reorders the selected team from the keyboard as well as by dragging', async () => {
+    // A drag is unreachable from a keyboard, and this column is the only place
+    // a pipeline can be ordered, so the handle takes arrow keys too.
     const w = editor({ presetId: defaultTeam.id, roles: resolved })
-    await w.get('[aria-label="Move coder down"]').trigger('click')
+    await w.get('[aria-label="Reorder coder"]').trigger('keydown.down')
     const updated = w.emitted('savePreset')?.at(-1)?.[0] as TeamPreset
     expect(updated.roles.map((role) => role.templateId)).toEqual(['reviewer', 'coder'])
   })

@@ -18,6 +18,7 @@ import (
 func (a *Adapter) Checks() []adapter.Check {
 	return []adapter.Check{
 		adapter.BinaryPresent(binary),
+		adapter.ThinkingSupported(a.Capabilities().Thinking),
 		a.versionCheck(),
 		a.configParsesCheck(),
 		a.workspaceTrustedCheck(),

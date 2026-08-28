@@ -33,11 +33,13 @@ function role(name: string, over: Partial<ResolvedRole> = {}): ResolvedRole {
     harness: 'claude',
     model: 'sonnet',
     args: [],
+    thinking: '',
     receive: 'task',
     batchMaxItems: 8,
     batchMaxAgeSec: 300,
     prompt: '',
     gate: 'none',
+    finisher: false,
     builtin: true,
     position: 0,
     enabled: true,
@@ -53,9 +55,9 @@ function live(name: string, state: string): RoleStatus {
 }
 
 function template(name: string): RoleTemplate {
-  const { id, harness, model, args, receive, batchMaxItems, batchMaxAgeSec, prompt, gate, builtin } =
+  const { id, harness, model, args, thinking, receive, batchMaxItems, batchMaxAgeSec, prompt, gate, finisher, builtin } =
     role(name)
-  return { id, name, harness, model, args, receive, batchMaxItems, batchMaxAgeSec, prompt, gate, builtin }
+  return { id, name, harness, model, args, thinking, receive, batchMaxItems, batchMaxAgeSec, prompt, gate, finisher, builtin }
 }
 
 /** A team made of the roles named, in that order. Shared unless owned. */
@@ -222,7 +224,7 @@ describe('AppSidebar', () => {
     )
     expect(w.text()).not.toContain('is shared with every project')
 
-    await w.get('[aria-label="Move reviewer earlier"]').trigger('click')
+    await w.get('[aria-label="Reorder reviewer"]').trigger('keydown.up')
     expect(w.emitted('forkTeam')).toBeUndefined()
     expect(document.body.textContent).not.toContain("Name this project's team")
     expect(saved(w).roles.map((r) => r.templateId)).toEqual(['tpl-reviewer', 'tpl-coder'])
@@ -275,7 +277,7 @@ describe('AppSidebar', () => {
         { preset: shared },
       ),
     )
-    await w.get('[aria-label="Move reviewer earlier"]').trigger('click')
+    await w.get('[aria-label="Reorder reviewer"]').trigger('keydown.up')
     dialogButton('Create team').click()
     await w.vm.$nextTick()
 
@@ -296,7 +298,7 @@ describe('AppSidebar', () => {
         { preset: shared, presets: [shared, taken], forkError: 'a team called CalcRust team already exists' },
       ),
     )
-    await w.get('[aria-label="Move reviewer earlier"]').trigger('click')
+    await w.get('[aria-label="Reorder reviewer"]').trigger('keydown.up')
 
     const field = document.body.querySelector('#fork-team-name') as HTMLInputElement
     expect(field.value).toBe('CalcRust team 2')
@@ -318,14 +320,14 @@ describe('AppSidebar', () => {
         { preset: shared, forkError: 'a team called CalcRust team already exists' },
       ),
     )
-    await w.get('[aria-label="Move reviewer earlier"]').trigger('click')
+    await w.get('[aria-label="Reorder reviewer"]').trigger('keydown.up')
     dialogButton('Cancel').click()
     await w.vm.$nextTick()
     expect(w.emitted('clearForkError')).toBeTruthy()
 
     // Opening clears it too, so a refusal cannot precede the attempt it is
     // about: three in all, for the first open, the cancel, and this open.
-    await w.get('[aria-label="Move reviewer earlier"]').trigger('click')
+    await w.get('[aria-label="Reorder reviewer"]').trigger('keydown.up')
     expect(w.emitted('clearForkError')).toHaveLength(3)
     // And while one is showing it is announced, not only coloured.
     expect(document.body.querySelector('[role="alert"]')?.textContent).toContain('already exists')
@@ -370,7 +372,7 @@ describe('AppSidebar', () => {
     )
 
     // Nothing updates the props in between, which is the case being tested.
-    await w.get('[aria-label="Move docs earlier"]').trigger('click')
+    await w.get('[aria-label="Reorder docs"]').trigger('keydown.up')
     await w.get('[title="Turn coder off for this project"]').trigger('click')
 
     const team = saved(w)
@@ -404,7 +406,7 @@ describe('AppSidebar', () => {
         { preset: mine },
       ),
     )
-    await w.get('[aria-label="Move reviewer earlier"]').trigger('click')
+    await w.get('[aria-label="Reorder reviewer"]').trigger('keydown.up')
     expect(saved(w).roles.map((r) => r.templateId)).toEqual(['tpl-reviewer', 'tpl-coder'])
 
     await w.get('[aria-label="Remove reviewer from this pipeline"]').trigger('click')

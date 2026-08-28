@@ -1,6 +1,16 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { CircleCheck, Copy, FolderGit2, Globe, Pencil, SlidersHorizontal, Trash2 } from '@lucide/vue'
+import {
+  CircleCheck,
+  Copy,
+  Flag,
+  FolderGit2,
+  Globe,
+  GripVertical,
+  Pencil,
+  SlidersHorizontal,
+  Trash2,
+} from '@lucide/vue'
 import type {
   Model,
   ProjectTeam,
@@ -15,7 +25,8 @@ import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { cloneOverrides, followPreset, hasRoleOverrides } from '@/lib/team'
+import { cloneOverrides, followPreset, hasRoleOverrides, moveWithin, placeInPipeline } from '@/lib/team'
+import { useRowDrag } from '@/lib/row-drag'
 import RoleOverrideDialog from '@/components/RoleOverrideDialog.vue'
 import {
   Dialog,
@@ -36,6 +47,8 @@ const props = defineProps<{
   projectTeam: ProjectTeam
   harnesses: string[]
   models: Record<string, Model[]>
+  /** Reasoning levels per harness, for the role editor this opens. */
+  thinking: Record<string, string[]>
   running: boolean
   /** Why the last team action was refused, if it was. Rendered where it was
    *  pressed: the page banner behind this dialog is not visible on a phone. */
@@ -140,6 +153,34 @@ const editingSomethingElse = computed(
 const projectRunsItsOwn = computed(
   () => !props.projectTeam.presetId && props.projectTeam.roles.length > 0,
 )
+/**
+ * Dragging a role to another place in the pipeline.
+ *
+ * Two arrow buttons per row were the whole reordering interface: eight pixels
+ * of target each, and nothing at all on a phone, where a tap on the wrong one
+ * silently reorders the pipeline. The pointer handling is shared with the rail,
+ * which reorders the same pipelines in a narrower shape.
+ */
+const pipelineList = ref<HTMLElement | null>(null)
+const { drag, grab, dragTo, drop, dropsBefore, dropsLast } = useRowDrag({
+  container: pipelineList,
+  count: () => activePreset.value?.roles.length ?? 0,
+  onDrop(from, to) {
+    const preset = activePreset.value
+    if (!preset) return
+    const roles = moveWithin(preset.roles, from, to)
+    if (roles === preset.roles) return
+    saveRoles(roles.map((role) => ({ ...role, ...cloneOverrides(role) })))
+  },
+})
+
+/**
+ * Which role finishes this pipeline: the last one that runs.
+ *
+ * Nothing here chooses it. A role that ends pipelines carries that on itself
+ * and is placed at the end when it joins one, so the answer stays the same as
+ * the team grows without a control in this column saying so.
+ */
 const terminalTemplateId = computed(() => {
   const roles = activePreset.value?.roles ?? []
   for (let i = roles.length - 1; i >= 0; i--) {
@@ -154,6 +195,7 @@ function apply(base: RoleTemplate, overrides: Partial<RoleOverrides>): RoleTempl
     harness: overrides.harnessOverride ?? base.harness,
     model: overrides.modelOverride ?? base.model,
     args: overrides.argsOverride == null ? [...base.args] : [...overrides.argsOverride],
+    thinking: overrides.thinkingOverride ?? base.thinking,
     receive: overrides.receiveOverride ?? base.receive,
     batchMaxItems: overrides.batchMaxItemsOverride ?? base.batchMaxItems,
     batchMaxAgeSec: overrides.batchMaxAgeSecOverride ?? base.batchMaxAgeSec,
@@ -211,15 +253,17 @@ function toggleRole(template: RoleTemplate) {
     )
     return
   }
-  saveRoles([
-    ...roles,
-    {
-      templateId: template.id,
-      position: roles.length,
-      enabled: true,
-      ...cloneOverrides({}),
-    },
-  ])
+  // In front of the roles that end pipelines, or at the end if this is one of
+  // them. Appending blindly is what used to hand the job of integrating to
+  // whatever was added last.
+  const joined = [...roles]
+  joined.splice(placeInPipeline(joined.map((r) => ({ id: r.templateId })), template, props.library), 0, {
+    templateId: template.id,
+    position: 0,
+    enabled: true,
+    ...cloneOverrides({}),
+  })
+  saveRoles(joined)
 }
 
 /**
@@ -631,20 +675,45 @@ function cloneTeam() {
           <template v-if="running">
             Agents are running, so changes apply immediately, to every project on this team
           </template>
-          <template v-else>Work flows from top to bottom</template>
+          <template v-else>Work flows from top to bottom, and ends at the finisher</template>
         </p>
       </div>
 
-      <ol v-if="activePreset" class="divide-y">
+      <ol v-if="activePreset" ref="pipelineList" class="divide-y">
         <li
           v-for="(role, index) in activePreset.roles"
           :key="role.templateId"
+          data-role-row
           :class="[
-            'flex items-center gap-3 px-4 py-3',
+            'relative flex items-center gap-3 py-3 pr-4 pl-3',
+            drag?.from === index && 'opacity-40',
             role.enabled ? '' : 'opacity-55',
+            // The end of the pipeline, marked on the row rather than by a word
+            // inside it: this is the role that merges, opens the pull request
+            // or leaves the branch, and it was taking a second look to find.
+            role.templateId === terminalTemplateId
+              ? 'border-l-2 border-l-[var(--primary)] bg-primary/[0.06]'
+              : 'border-l-2 border-l-transparent',
           ]"
         >
-          <span class="text-muted-foreground grid size-6 shrink-0 place-items-center border text-[11px]">
+          <span
+            v-if="dropsBefore(index)"
+            class="bg-primary pointer-events-none absolute inset-x-0 -top-px z-10 h-0.5"
+            aria-hidden="true"
+          />
+          <span
+            v-if="dropsLast(index)"
+            class="bg-primary pointer-events-none absolute inset-x-0 -bottom-px z-10 h-0.5"
+            aria-hidden="true"
+          />
+          <span
+            :class="[
+              'grid size-6 shrink-0 place-items-center border text-[11px]',
+              role.templateId === terminalTemplateId
+                ? 'border-[var(--primary)] text-[var(--primary)] font-semibold'
+                : 'text-muted-foreground',
+            ]"
+          >
             {{ index + 1 }}
           </span>
           <div class="min-w-0 flex-1">
@@ -652,7 +721,15 @@ function cloneTeam() {
               <span class="truncate text-xs font-medium">
                 {{ libraryById.get(role.templateId)?.name ?? role.templateId }}
               </span>
-              <Badge v-if="role.templateId === terminalTemplateId">terminal</Badge>
+              <!-- Which role finishes, and the way to change it. The badge
+                   said "terminal", which is the word the protocol uses and not
+                   one that says what the role does; and the control beside it
+                   was 10px of muted text with nothing to say it could be
+                   pressed. -->
+              <Badge v-if="role.templateId === terminalTemplateId" class="gap-1">
+                <Flag :size="10" aria-hidden="true" />
+                finisher
+              </Badge>
               <!-- A parked role keeps its place and its settings; it just does
                    not run, and work routes past it. -->
               <Badge v-if="!role.enabled" variant="outline">off</Badge>
@@ -668,24 +745,23 @@ function cloneTeam() {
             @update:model-value="(v: boolean) => setEnabled(role.templateId, v)"
           />
           <div class="flex">
-            <Button
-              size="icon-sm"
-              variant="ghost"
-              :disabled="index === 0"
-              :aria-label="`Move ${libraryById.get(role.templateId)?.name} up`"
-              @click="moveRole(index, -1)"
+            <!-- Drag to reorder, arrow keys when it has focus. The keys are not
+                 a leftover: a drag is unreachable from a keyboard, and this
+                 column is the only place a pipeline can be ordered. -->
+            <button
+              type="button"
+              class="text-muted-foreground/60 hover:text-foreground focus-visible:outline-ring flex size-8 shrink-0 cursor-grab touch-none items-center justify-center focus-visible:outline-2 active:cursor-grabbing"
+              :aria-label="`Reorder ${libraryById.get(role.templateId)?.name}`"
+              :title="`Drag to reorder ${libraryById.get(role.templateId)?.name}, or use the arrow keys`"
+              @pointerdown="grab($event, index)"
+              @pointermove="dragTo"
+              @pointerup="drop"
+              @pointercancel="drop"
+              @keydown.up.prevent="moveRole(index, -1)"
+              @keydown.down.prevent="moveRole(index, 1)"
             >
-              ↑
-            </Button>
-            <Button
-              size="icon-sm"
-              variant="ghost"
-              :disabled="index === activePreset.roles.length - 1"
-              :aria-label="`Move ${libraryById.get(role.templateId)?.name} down`"
-              @click="moveRole(index, 1)"
-            >
-              ↓
-            </Button>
+              <GripVertical :size="15" aria-hidden="true" />
+            </button>
           </div>
         </li>
         <li v-if="!activePreset.roles.length" class="px-6 py-14 text-center">
@@ -733,6 +809,7 @@ function cloneTeam() {
     :scope="`${activePreset?.name ?? 'Team'} role settings`"
     :harnesses="harnesses"
     :models="models"
+    :thinking="thinking"
     @save="saveRoleSettings"
   />
 

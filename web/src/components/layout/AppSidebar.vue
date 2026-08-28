@@ -3,7 +3,6 @@ import { computed, ref, watch } from 'vue'
 import {
   Activity as ActivityIcon,
   ChevronDown,
-  ChevronUp,
   Check,
   Columns3,
   GitMerge,
@@ -13,6 +12,7 @@ import {
   GitBranch,
   MessageSquare,
   Pencil,
+  GripVertical,
   Plus,
   Receipt,
   Settings as SettingsIcon,
@@ -30,7 +30,8 @@ import type {
   TeamPresetRole,
 } from '@/lib/api'
 import { landing } from '@/lib/utils'
-import { presetRoles } from '@/lib/team'
+import { moveWithin, placeInPipeline, presetRoles } from '@/lib/team'
+import { useRowDrag } from '@/lib/row-drag'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -257,6 +258,23 @@ function toggleRole(role: ResolvedRole) {
   apply(pipeline.value.map((r) => (r.id === role.id ? { ...r, enabled: !r.enabled } : r)))
 }
 
+/**
+ * Dragging a role to another place, in 240px.
+ *
+ * The same pointer handling the Team screen uses. Two chevrons per row were
+ * eleven pixels of target each at this width, stacked next to a remove button,
+ * so a misclick either reordered the pipeline or dropped a role from it.
+ */
+const railPipeline = ref<HTMLElement | null>(null)
+const { drag, grab, dragTo, drop, dropsBefore, dropsLast } = useRowDrag({
+  container: railPipeline,
+  count: () => pipeline.value.length,
+  onDrop(from, to) {
+    const roles = moveWithin(pipeline.value, from, to)
+    if (roles !== pipeline.value) apply(roles)
+  },
+})
+
 function moveRole(index: number, by: number) {
   const to = index + by
   if (to < 0 || to >= pipeline.value.length) return
@@ -275,13 +293,19 @@ function addRole(id: unknown) {
   const tpl = props.library.find((t) => t.id === id)
   if (!tpl) return
   adding.value = false
-  // At the end, which is where the work ends up: the last enabled role is the
-  // terminal one, so the new role takes over integrating and the landing line
-  // under the list moves with it rather than reporting something else.
-  apply([
-    ...pipeline.value,
-    { ...tpl, position: pipeline.value.length, enabled: true, overridden: false, terminal: false, argsOverride: null },
-  ])
+  // In front of the roles that end pipelines, or at the end if this is one of
+  // them. Appending blindly handed the job of integrating to whatever was
+  // added last, which is what the landing line under this list then reported.
+  const roles = [...pipeline.value]
+  roles.splice(placeInPipeline(roles, tpl, props.library), 0, {
+    ...tpl,
+    position: 0,
+    enabled: true,
+    overridden: false,
+    terminal: false,
+    argsOverride: null,
+  })
+  apply(roles)
 }
 
 function pick(id: unknown) {
@@ -516,8 +540,26 @@ function live(r: RoleStatus): boolean {
           Agents are running. A role turned off stops within a second or so and whatever it was
           holding goes back to the queue.
         </p>
-        <ul>
-          <li v-for="(r, i) in editRows" :key="r.role.id" class="flex items-center gap-0.5 py-0.5">
+        <ul ref="railPipeline">
+          <li
+            v-for="(r, i) in editRows"
+            :key="r.role.id"
+            data-role-row
+            :class="[
+              'relative flex items-center gap-0.5 py-0.5',
+              drag?.from === i && 'opacity-40',
+            ]"
+          >
+            <span
+              v-if="dropsBefore(i)"
+              class="bg-primary pointer-events-none absolute inset-x-0 -top-px z-10 h-0.5"
+              aria-hidden="true"
+            />
+            <span
+              v-if="dropsLast(i)"
+              class="bg-primary pointer-events-none absolute inset-x-0 -bottom-px z-10 h-0.5"
+              aria-hidden="true"
+            />
             <button
               type="button"
               role="switch"
@@ -550,26 +592,23 @@ function live(r: RoleStatus): boolean {
                 {{ r.role.name }}
               </span>
             </button>
-            <!-- Order is the route work takes, so it is editable here too:
-                 a project with its own pipeline has nowhere else to reorder it,
-                 since the Team screen edits the shared team. -->
+            <!-- Order is the route work takes, so it is editable here too: a
+                 project's own team has nowhere else to be reordered from on a
+                 phone, where the Team screen's three columns are a scroll away
+                 from each other. Drag, or the arrow keys once it has focus. -->
             <button
               type="button"
-              class="text-muted-foreground/70 hover:text-foreground shrink-0 p-0.5 disabled:opacity-25"
-              :disabled="i === 0"
-              :aria-label="'Move ' + r.role.name + ' earlier'"
-              @click="moveRole(i, -1)"
+              class="text-muted-foreground/60 hover:text-foreground focus-visible:outline-ring flex size-6 shrink-0 cursor-grab touch-none items-center justify-center focus-visible:outline-2 active:cursor-grabbing"
+              :aria-label="'Reorder ' + r.role.name"
+              :title="'Drag to reorder ' + r.role.name + ', or use the arrow keys'"
+              @pointerdown="grab($event, i)"
+              @pointermove="dragTo"
+              @pointerup="drop"
+              @pointercancel="drop"
+              @keydown.up.prevent="moveRole(i, -1)"
+              @keydown.down.prevent="moveRole(i, 1)"
             >
-              <ChevronUp :size="11" aria-hidden="true" />
-            </button>
-            <button
-              type="button"
-              class="text-muted-foreground/70 hover:text-foreground shrink-0 p-0.5 disabled:opacity-25"
-              :disabled="i === editRows.length - 1"
-              :aria-label="'Move ' + r.role.name + ' later'"
-              @click="moveRole(i, 1)"
-            >
-              <ChevronDown :size="11" aria-hidden="true" />
+              <GripVertical :size="12" aria-hidden="true" />
             </button>
             <button
               type="button"

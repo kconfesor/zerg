@@ -9,6 +9,7 @@
  */
 import type {
   ProjectTeamUpdate,
+  RoleTemplate,
   ResolvedRole,
   RoleOverrides,
   TeamPreset,
@@ -26,6 +27,7 @@ export function cloneOverrides(source: Partial<RoleOverrides>): RoleOverrides {
     harnessOverride: source.harnessOverride ?? null,
     modelOverride: source.modelOverride ?? null,
     argsOverride: source.argsOverride == null ? null : [...source.argsOverride],
+    thinkingOverride: source.thinkingOverride ?? null,
     receiveOverride: source.receiveOverride ?? null,
     batchMaxItemsOverride: source.batchMaxItemsOverride ?? null,
     batchMaxAgeSecOverride: source.batchMaxAgeSecOverride ?? null,
@@ -39,6 +41,7 @@ export function hasRoleOverrides(overrides: Partial<RoleOverrides>): boolean {
     overrides.harnessOverride != null ||
     overrides.modelOverride != null ||
     overrides.argsOverride != null ||
+    overrides.thinkingOverride != null ||
     overrides.receiveOverride != null ||
     overrides.batchMaxItemsOverride != null ||
     overrides.batchMaxAgeSecOverride != null ||
@@ -84,4 +87,45 @@ export function followPreset(preset: TeamPreset, team: ResolvedRole[]): ProjectT
       .filter((role) => inPreset.has(role.id) && hasRoleOverrides(role))
       .map((role) => ({ templateId: role.id, ...cloneOverrides(role) })),
   }
+}
+
+/**
+ * Where a role goes when it joins a pipeline.
+ *
+ * Work ends at the last enabled role, so appending blindly hands the job of
+ * integrating to whatever was added most recently, taking it from the role that
+ * had been doing it. A role that ends pipelines says so about itself
+ * (`finisher`), so a reviewer or a cleaner goes to the end and anything else
+ * goes in front of the ones already there. Nothing about this is a control the
+ * pipeline has to carry.
+ *
+ * Returns the index to insert at.
+ */
+export function placeInPipeline(
+  pipeline: { id: string }[],
+  joining: RoleTemplate,
+  library: RoleTemplate[],
+): number {
+  if (joining.finisher) return pipeline.length
+  const finishers = new Set(library.filter((t) => t.finisher).map((t) => t.id))
+  let at = pipeline.length
+  while (at > 0 && finishers.has(pipeline[at - 1].id)) at--
+  return at
+}
+
+/**
+ * One role moved to another place in the pipeline.
+ *
+ * Its own function because dragging computes the same thing on every pointer
+ * move, and because "to" from a drop indicator counts positions in the list as
+ * it was before the role left it: dropping at index 3 while dragging item 1
+ * lands at 2, and getting that off by one is the difference between a list that
+ * follows the pointer and one that fights it.
+ */
+export function moveWithin<T>(list: T[], from: number, to: number): T[] {
+  if (from === to || from < 0 || from >= list.length) return list
+  const out = [...list]
+  const [moved] = out.splice(from, 1)
+  out.splice(to > from ? to - 1 : to, 0, moved)
+  return out
 }

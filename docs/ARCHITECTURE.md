@@ -147,11 +147,19 @@ Everything below is a form field in the UI. There is no other way to set any of 
 | name | text | also names the worktree: `.worktrees/<name>` |
 | harness | select | populated from the adapter registry: `claude`, `pi` |
 | model | combobox | options fetched live from the harness (§4.3); free text accepted |
+| thinking | select | how hard the harness reasons, in its own levels; empty leaves its default |
 | args | tag input | extra CLI flags, e.g. `--no-extensions` |
 | receive | select | `task` (one at a time) or `batch` |
 | batch policy | number + duration | `max_items`, `max_age`, only when receive is `batch` |
 | prompt | editor | this role's instructions |
 | gate | select | `none` or `approval`, to hold this role's handoffs for a human |
+
+**Thinking** is passed through rather than translated. The two shipped harnesses spell it
+differently and do not offer the same levels: claude takes `--effort` with low, medium, high, xhigh,
+max, while pi takes `--thinking` and starts two levels lower at off and minimal. The adapter reports
+its own list (`GET /api/harnesses/{name}/thinking`), the picker offers exactly that, and a harness
+reporting none has no field at all. It costs tokens and time, so it is worth raising for the roles
+that review and lowering for the ones that do not.
 
 A team role adds **position**, **enabled**, and nullable defaults for every field above. A project
 can override harness, model, args, receive/batch policy, prompt and gate, and only those: membership,
@@ -295,7 +303,7 @@ because the reasoning is easy to lose once the code looks obvious.
 | Check-then-move selection, no lock | Two concurrent claims create two batch dirs and split the queue; every later call errors `AMBIGUOUS_TASK_STATE` with **no recovery path** | Atomic claim: `UPDATE ... WHERE state='queued'` returning claimed rows |
 | Helpers resolve the inbox from process cwd | Run from a subdirectory → creates an empty queue there and reports `NO_TASK`. False negative *with* a side effect | Identity from a spawn-time token in env; no path inference anywhere |
 | Sender identity read from an environment variable, unvalidated | Any agent can export that variable as `architect` and send as the architect | Per-agent capability token minted at spawn |
-| Terminal role = last line of the config file | Reordering the file silently relocates the end of the pipeline | Last enabled role in the UI ordering, shown as a `terminal` badge |
+| Terminal role = last line of the config file | Reordering the file silently relocates the end of the pipeline | A flag on the team's role, kept last by the daemon, shown as a `terminal` badge |
 | Board lane moves at *enqueue* time | A card shows "in cleaner's lane" before cleaner has looked at it | Lane changes on **ack** |
 | Batch = every equal-priority item at an instant | Unbounded and unfair; a priority-00 item arriving 1ms late waits behind a 40-item batch | Batch policy (`max_items`, `max_age`) set per role in the UI; priority preemption at claim time |
 | Notes occupy the work queue | One 80-char informational note blocks a role's queue until an LLM turn consumes it | Two planes: work and control (§7.3) |
@@ -649,7 +657,7 @@ same `approvals` table and the same cockpit queue, but they hold different thing
 
 - **A routed handoff**: the sender is not terminal. The route is written `held` rather than
   `queued`, so the recipient never sees it. Approving flips it to `queued`.
-- **A terminal completion**: the sender is the last enabled role, and approving is what lands the
+- **A terminal completion**: the sender is the role flagged terminal, and approving is what lands the
   work. Integration runs *before* the decision is recorded, so a merge that fails leaves the
   approval open rather than marking a task done over a branch that never moved. §6.1 is the record
   of getting that backwards.

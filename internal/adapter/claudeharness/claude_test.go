@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -404,5 +405,39 @@ func TestEachSessionLatchesItsOwnModel(t *testing.T) {
 	}
 	if got := usage(b); got != "claude-sonnet-5" {
 		t.Errorf("session B attributed usage to %q, want claude-sonnet-5", got)
+	}
+}
+
+// The reasoning level reaches the CLI under the name that CLI uses.
+//
+// claude calls it --effort and pi calls it --thinking, and their level sets are
+// not the same, which is why the level travels as the harness's own word rather
+// than something translated in the middle.
+func TestEffortReachesTheCommand(t *testing.T) {
+	a := New()
+	dir := t.TempDir()
+	cmd, err := a.Command(context.Background(), adapter.Spec{Worktree: dir, Model: "opus", Thinking: "xhigh"})
+	if err != nil {
+		t.Fatalf("Command: %v", err)
+	}
+	if !slices.Contains(cmd.Args, "--effort") {
+		t.Fatalf("no --effort in %v", cmd.Args)
+	}
+	for i, a := range cmd.Args {
+		if a == "--effort" && cmd.Args[i+1] != "xhigh" {
+			t.Errorf("--effort %s, want xhigh", cmd.Args[i+1])
+		}
+	}
+
+	// And a role that says nothing about it leaves the harness's own default.
+	cmd, err = a.Command(context.Background(), adapter.Spec{Worktree: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(cmd.Args, "--effort") {
+		t.Errorf("--effort passed for a role that set no level: %v", cmd.Args)
+	}
+	if !slices.Contains(a.Capabilities().Thinking, "xhigh") {
+		t.Errorf("levels are %v, want the ones claude --help lists", a.Capabilities().Thinking)
 	}
 }

@@ -155,6 +155,7 @@ func (r *Runner) checkRole(ctx context.Context, project *store.Project, role sto
 		Role:      role.Name,
 		Worktree:  worktreePath(project.Path, role.Name),
 		Model:     role.Model,
+		Thinking:  role.Thinking,
 		ExtraArgs: role.Args,
 	}
 

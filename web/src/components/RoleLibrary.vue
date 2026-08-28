@@ -11,8 +11,8 @@
  * Self-contained, like the rest of Settings: it fetches what it needs rather
  * than having it threaded down through the shell.
  */
-import { computed, onMounted, ref, useId } from 'vue'
-import { Plus, Trash2 } from '@lucide/vue'
+import { computed, onMounted, ref, useId, watch } from 'vue'
+import { Flag, Plus, Trash2 } from '@lucide/vue'
 import { api, type Model, type RoleTemplate, type TeamPreset } from '@/lib/api'
 import { latest } from '@/lib/latest'
 import { usePending } from '@/lib/pending'
@@ -21,6 +21,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
 import {
   Dialog,
@@ -41,7 +42,48 @@ import {
 
 const library = ref<RoleTemplate[]>([])
 const harnesses = ref<string[]>([])
+/**
+ * The value that means "leave the harness alone".
+ *
+ * Not the empty string: reka's SelectItem refuses one, because Select uses ""
+ * to mean no selection at all, and an item carrying it throws on mount rather
+ * than rendering. A level is one word, so this cannot collide with a real one.
+ */
+const HARNESS_DEFAULT = 'harness default'
+
+/** Told to whoever else is holding a copy of the library. */
+const emit = defineEmits<{ changed: [] }>()
+
 const models = ref<Record<string, Model[]>>({})
+/** The reasoning levels each harness accepts. Read from the daemon, since only
+ *  the adapter knows what its CLI will take. */
+const thinking = ref<Record<string, string[]>>({})
+
+/**
+ * A level the new harness does not take is not a level.
+ *
+ * The field hides itself for a harness with no such control, and kept its old
+ * value while hidden, so a role moved from pi to claude went on asking for
+ * "off", which claude exits on rather than runs.
+ */
+watch(
+  () => editing.value?.harness,
+  (harness) => {
+    if (!editing.value || !harness) return
+    const levels = thinking.value[harness] ?? []
+    if (editing.value.thinking && !levels.includes(editing.value.thinking)) {
+      editing.value.thinking = ''
+    }
+  },
+)
+
+/** The select's value, which is the level or the sentinel above. */
+const thinkingChoice = computed({
+  get: () => editing.value?.thinking || HARNESS_DEFAULT,
+  set: (v: string) => {
+    if (editing.value) editing.value.thinking = v === HARNESS_DEFAULT ? '' : v
+  },
+})
 const presets = ref<TeamPreset[]>([])
 const note = ref<{ tone: 'ok' | 'bad'; text: string } | null>(null)
 const busy = usePending()
@@ -49,8 +91,10 @@ const newest = latest()
 
 const nameId = useId()
 const harnessId = useId()
+const thinkingId = useId()
 const receiveId = useId()
 const gateId = useId()
+const finisherId = useId()
 const batchId = useId()
 const promptId = useId()
 
@@ -64,6 +108,8 @@ async function load() {
     presets.value = ps
     // The catalogs, so the model picker can narrow rather than constrain.
     const catalogs = await Promise.all(hs.map((h) => api.models(h).catch(() => [] as Model[])))
+    const levels = await Promise.all(hs.map((h) => api.thinking(h).catch(() => [] as string[])))
+    thinking.value = Object.fromEntries(hs.map((h, i) => [h, levels[i]]))
     if (!current()) return
     models.value = Object.fromEntries(hs.map((h, i) => [h, catalogs[i]]))
   } catch (e) {
@@ -108,12 +154,14 @@ function create() {
     name: '',
     harness: harnesses.value[0] ?? 'claude',
     model: '',
+    thinking: '',
     args: [],
     receive: 'task',
     batchMaxItems: 8,
     batchMaxAgeSec: 300,
     prompt: '',
     gate: 'none',
+    finisher: false,
     builtin: false,
   } as RoleTemplate
   open.value = true
@@ -132,6 +180,11 @@ async function save() {
       }
       open.value = false
       await load()
+      // The rest of the cockpit holds its own copy of the library, taken at
+      // startup. Without this, adding a role to a pipeline placed it by its old
+      // "ends a pipeline" setting, and a team editor open in another tab kept
+      // the old prompt and model.
+      emit('changed')
       // A running swarm already has its processes; the daemon reconciles the
       // ones whose harness changed, and the rest pick this up when they next
       // respawn. Saying which is better than implying a control that does not
@@ -155,6 +208,7 @@ async function remove(tpl: RoleTemplate) {
       await api.deleteRole(tpl.id)
       confirmDelete.value = null
       await load()
+      emit('changed')
       note.value = { tone: 'ok', text: `Removed ${tpl.name}.` }
     } catch (e) {
       note.value = { tone: 'bad', text: e instanceof Error ? e.message : String(e) }
@@ -197,6 +251,10 @@ async function remove(tpl: RoleTemplate) {
           <span class="flex items-center gap-2">
             <span class="truncate text-xs font-medium">{{ tpl.name }}</span>
             <Badge v-if="tpl.builtin" variant="outline" class="text-[9px]">built-in</Badge>
+            <Badge v-if="tpl.finisher" variant="secondary" class="gap-1 text-[9px]">
+              <Flag :size="9" aria-hidden="true" />
+              ends a pipeline
+            </Badge>
             <Badge v-if="tpl.gate === 'approval'" variant="secondary" class="text-[9px]">
               approval gate
             </Badge>
@@ -293,6 +351,25 @@ async function remove(tpl: RoleTemplate) {
             </span>
           </div>
 
+          <!-- Offered only where the harness has one, and with that harness's
+               own levels: claude takes low through max, pi starts at off. -->
+          <div v-if="(thinking[editing.harness] ?? []).length" class="flex flex-col gap-1.5">
+            <Label :for="thinkingId">Thinking</Label>
+            <Select v-model="thinkingChoice">
+              <SelectTrigger :id="thinkingId"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem :value="HARNESS_DEFAULT">{{ HARNESS_DEFAULT }}</SelectItem>
+                <SelectItem v-for="level in thinking[editing.harness] ?? []" :key="level" :value="level">
+                  {{ level }}
+                </SelectItem>
+              </SelectContent>
+            </Select>
+            <span class="text-muted-foreground text-[11px]">
+              How hard {{ editing.harness }} reasons before answering. It costs tokens and time, so
+              it is worth raising for the roles that review and lowering for the ones that do not.
+            </span>
+          </div>
+
           <div class="flex flex-col gap-1.5">
             <Label :for="receiveId">Receive</Label>
             <Select v-model="editing.receive">
@@ -316,6 +393,25 @@ async function remove(tpl: RoleTemplate) {
             <span class="text-muted-foreground text-[11px]">
               An approval gate holds this role's handoffs for a human.
             </span>
+          </div>
+
+          <!-- Where this role belongs in a pipeline, which is a fact about the
+               role rather than about any one team: a reviewer or a cleaner ends
+               the work wherever it appears, and a planner never does. -->
+          <div class="flex flex-col gap-1.5">
+            <Label :for="finisherId">Ends a pipeline</Label>
+            <label class="flex items-start gap-2.5 text-xs">
+              <Switch
+                :id="finisherId"
+                :model-value="editing.finisher"
+                aria-label="This role ends a pipeline"
+                class="mt-0.5"
+                @update:model-value="(v: boolean) => editing && (editing.finisher = v)"
+              />
+              <span class="text-muted-foreground">
+                Joins a team at the end and finishes the task there.
+              </span>
+            </label>
           </div>
 
           <div v-if="editing.receive === 'batch'" class="flex flex-col gap-1.5">

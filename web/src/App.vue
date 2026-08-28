@@ -263,6 +263,9 @@ function showReadiness() {
 const status = ref<SwarmStatus>({ running: false, roles: [] })
 const harnesses = ref<string[]>([])
 const models = ref<Record<string, Model[]>>({})
+/** What each harness will accept as a reasoning level, from the daemon: the
+ *  two shipped harnesses do not offer the same ones. */
+const thinking = ref<Record<string, string[]>>({})
 /** The team this project follows, when it follows one. */
 const currentPreset = computed(
   () => presets.value.find((preset) => preset.id === projectTeam.value.presetId) ?? null,
@@ -363,7 +366,25 @@ async function loadGlobals() {
       api.roles(),
       api.harnesses(),
     ])
-    for (const h of harnesses.value) models.value[h] = await api.models(h).catch(() => [])
+    for (const h of harnesses.value) {
+      models.value[h] = await api.models(h).catch(() => [])
+      thinking.value[h] = await api.thinking(h).catch(() => [])
+    }
+  } catch (err) {
+    fail(err)
+  }
+}
+
+/**
+ * The library, again, after Settings has edited it.
+ *
+ * It is loaded once at startup and read by the team editor and the rail, which
+ * place a role by whether it ends a pipeline. Without this, changing that
+ * setting and then adding the role put it where the old value said.
+ */
+async function reloadLibrary() {
+  try {
+    library.value = await api.roles()
   } catch (err) {
     fail(err)
   }
@@ -859,6 +880,7 @@ watch(current, () => (banner.value = null))
                 :project="current"
                 :harnesses="harnesses"
                 :models="models"
+                :thinking="thinking"
                 @updated="(p: Project) => (current = p)"
               />
             </div>
@@ -888,7 +910,11 @@ watch(current, () => (banner.value = null))
               subtitle="Everything a project is set up with: whether its team can work, what each role is, how the daemon serves the cockpit, and what it keeps on disk."
             />
             <div class="pt-4">
-              <Settings :checking="busy.is('readiness')" @readiness="checkReadiness" />
+              <Settings
+                :checking="busy.is('readiness')"
+                @readiness="checkReadiness"
+                @roles-changed="reloadLibrary"
+              />
             </div>
           </template>
 
@@ -931,6 +957,7 @@ watch(current, () => (banner.value = null))
                 :project-name="current?.name ?? ''"
                 :project-team="projectTeam"
                 :harnesses="harnesses"
+                :thinking="thinking"
                 :models="models"
                 :running="status.running"
                 @set-team="setTeam"

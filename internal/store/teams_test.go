@@ -954,3 +954,49 @@ func TestOwnershipIsEnforcedByTheWriteItself(t *testing.T) {
 		t.Errorf("X ended up on %v, want the team it was running", p.TeamPresetID)
 	}
 }
+
+// A role that ends pipelines is seeded knowing it, and the ones that do not are
+// seeded knowing that too.
+//
+// Terminality is the last enabled role, which held until somebody added a role:
+// the job of integrating moved to it, silently, away from the role that had
+// been doing it. What stops that is placement at the moment a role joins a
+// team, and what decides placement is this flag.
+func TestFinishingRolesAreSeededAsSuch(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	if err := Seed(ctx, db, "claude"); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]bool{
+		"reviewer": true, "cleaner": true,
+		"coder": false, "planner": false, "docs": false,
+		"debugger": false, "architect": false, "hardener": false, "security": false,
+	}
+	for name, finisher := range want {
+		tpl, err := db.GetTemplateByName(ctx, name)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if tpl.Finisher != finisher {
+			t.Errorf("%s finisher = %v, want %v", name, tpl.Finisher, finisher)
+		}
+	}
+
+	// And it is the role's own field, so a role somebody writes can carry it.
+	mine, err := db.CreateTemplate(ctx, &RoleTemplate{
+		Name: "shipper", Harness: "claude", Model: "sonnet", Args: []string{},
+		Receive: ReceiveTask, BatchMaxItems: 8, BatchMaxAgeSec: 300,
+		Prompt: "ship it", Gate: GateNone, Finisher: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	back, err := db.GetTemplate(ctx, mine.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !back.Finisher {
+		t.Error("a role written as a finisher came back as an ordinary one")
+	}
+}

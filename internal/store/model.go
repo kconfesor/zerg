@@ -25,11 +25,23 @@ const (
 // RoleTemplate is an entry in the global library — the idea of a role,
 // independent of any project. Projects select templates; see ProjectRole.
 type RoleTemplate struct {
-	ID             string    `json:"id"`
-	Name           string    `json:"name"`
-	Harness        string    `json:"harness"`
-	Model          string    `json:"model"`
-	Args           []string  `json:"args"`
+	ID      string   `json:"id"`
+	Name    string   `json:"name"`
+	Harness string   `json:"harness"`
+	Model   string   `json:"model"`
+	Args    []string `json:"args"`
+	// Finisher marks a role that ends a pipeline: a reviewer or a cleaner is
+	// the last step wherever it appears, and a planner never is. Added to a
+	// team, such a role goes to the end and the roles added after it go in
+	// front, which is how the pipeline keeps delivering through the same role
+	// as it grows. It is not the same field as ResolvedRole.Terminal, which is
+	// which role is finishing *this* pipeline.
+	Finisher bool `json:"finisher"`
+	// Thinking is how hard the harness reasons before answering, in that
+	// harness's own vocabulary: claude spends it as --effort, pi as --thinking,
+	// and their level sets are not the same. Empty leaves the harness's default
+	// alone, which is what every role had before this existed.
+	Thinking       string    `json:"thinking"`
 	Receive        string    `json:"receive"`
 	BatchMaxItems  int       `json:"batchMaxItems"`
 	BatchMaxAgeSec int       `json:"batchMaxAgeSec"`
@@ -80,6 +92,7 @@ type RoleOverrides struct {
 	HarnessOverride        *string  `json:"harnessOverride,omitempty"`
 	ModelOverride          *string  `json:"modelOverride,omitempty"`
 	ArgsOverride           []string `json:"argsOverride"`
+	ThinkingOverride       *string  `json:"thinkingOverride,omitempty"`
 	ReceiveOverride        *string  `json:"receiveOverride,omitempty"`
 	BatchMaxItemsOverride  *int     `json:"batchMaxItemsOverride,omitempty"`
 	BatchMaxAgeSecOverride *int     `json:"batchMaxAgeSecOverride,omitempty"`

@@ -33,6 +33,9 @@ const props = defineProps<{
   scope: string
   harnesses: string[]
   models: Record<string, Model[]>
+  /** Reasoning levels per harness, from the daemon: the two shipped harnesses
+   *  do not offer the same ones. */
+  thinking: Record<string, string[]>
 }>()
 const emit = defineEmits<{
   'update:open': [open: boolean]
@@ -46,10 +49,21 @@ const gateId = useId()
 const batchItemsId = useId()
 const batchAgeId = useId()
 const promptId = useId()
+const thinkingId = useId()
+
+/**
+ * The value that means "leave the harness alone".
+ *
+ * Not the empty string: reka's SelectItem refuses one, because Select uses ""
+ * to mean no selection at all, and an item carrying it throws on mount rather
+ * than rendering. A level is one word, so this cannot collide with a real one.
+ */
+const HARNESS_DEFAULT = 'harness default'
 
 const form = reactive({
   harness: '',
   model: '',
+  thinking: '',
   args: '',
   receive: 'task' as 'task' | 'batch',
   batchMaxItems: 8,
@@ -58,10 +72,35 @@ const form = reactive({
   gate: 'none' as 'none' | 'approval',
 })
 
+/**
+ * A level the new harness does not take is not a level.
+ *
+ * The field hides itself for a harness with no such control, and kept its old
+ * value while hidden, so a role moved from pi to claude went on asking for
+ * "off" and claude exits on its usage message. Readiness catches that now, but
+ * the value should not survive the switch that invalidated it.
+ */
+watch(
+  () => form.harness,
+  (harness) => {
+    const levels = props.thinking[harness] ?? []
+    if (form.thinking && !levels.includes(form.thinking)) form.thinking = ''
+  },
+)
+
+/** The select's value, which is the level or the sentinel above. */
+const thinkingChoice = computed({
+  get: () => form.thinking || HARNESS_DEFAULT,
+  set: (v: string) => {
+    form.thinking = v === HARNESS_DEFAULT ? '' : v
+  },
+})
+
 function load(role: RoleTemplate | null) {
   if (!role) return
   form.harness = role.harness
   form.model = role.model
+  form.thinking = role.thinking ?? ''
   form.args = joinArgs(role.args ?? [])
   form.receive = role.receive
   form.batchMaxItems = role.batchMaxItems
@@ -79,6 +118,7 @@ watch(
 type Field =
   | 'harness'
   | 'model'
+  | 'thinking'
   | 'args'
   | 'receive'
   | 'batchMaxItems'
@@ -105,7 +145,12 @@ function resetField(field: Field) {
 
 const overrideCount = computed(
   () =>
-    (['harness', 'model', 'args', 'receive', 'batchMaxItems', 'batchMaxAgeSec', 'prompt', 'gate'] as Field[])
+    (
+      [
+        'harness', 'model', 'thinking', 'args', 'receive',
+        'batchMaxItems', 'batchMaxAgeSec', 'prompt', 'gate',
+      ] as Field[]
+    )
       .filter(differs).length,
 )
 
@@ -130,6 +175,7 @@ function save() {
     ...role,
     harness: form.harness,
     model: form.model,
+    thinking: form.thinking,
     args: splitArgs(form.args),
     receive: form.receive,
     batchMaxItems: asCount(form.batchMaxItems, base.batchMaxItems),
@@ -199,6 +245,36 @@ function reset() {
             <Button v-if="differs('model')" size="xs" variant="ghost" class="ml-auto" @click="resetField('model')">
               Use default
             </Button>
+          </span>
+        </div>
+
+        <!-- Only for harnesses that have one. claude takes low through max and
+             pi starts two levels lower, so the options come from the daemon
+             rather than a list in here that would offer one of them levels it
+             refuses. -->
+        <div v-if="(thinking[form.harness] ?? []).length" class="flex flex-col gap-1.5">
+          <div class="flex items-center justify-between gap-2">
+            <Label :for="thinkingId">Thinking</Label>
+            <Button v-if="differs('thinking')" size="xs" variant="ghost" @click="resetField('thinking')">
+              Use default
+            </Button>
+          </div>
+          <Select v-model="thinkingChoice">
+            <SelectTrigger :id="thinkingId" class="w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem :value="HARNESS_DEFAULT">{{ HARNESS_DEFAULT }}</SelectItem>
+              <SelectItem v-for="level in thinking[form.harness] ?? []" :key="level" :value="level">
+                {{ level }}
+              </SelectItem>
+            </SelectContent>
+          </Select>
+          <span class="text-muted-foreground flex items-center gap-1.5 text-[11px]">
+            <Badge :variant="differs('thinking') ? 'secondary' : 'outline'">
+              {{ differs('thinking') ? 'overridden' : 'team default' }}
+            </Badge>
+            Default: {{ inherited.thinking || 'harness default' }}
           </span>
         </div>
 

@@ -13,7 +13,8 @@ import (
 const DefaultTeamPresetID = "builtin-default-team"
 
 const roleOverrideCols = `harness_override, model_override, args_override, receive_override,
-	batch_max_items_override, batch_max_age_sec_override, prompt_override, gate_override`
+	batch_max_items_override, batch_max_age_sec_override, prompt_override, gate_override,
+	thinking_override`
 
 // settingDefaultTeamSeeded records that the built-in team has been filled once.
 // Its absence, not the preset's emptiness, is what asks for seeding.
@@ -372,14 +373,14 @@ func (db *DB) listPresetRoles(ctx context.Context, id string) ([]TeamPresetRole,
 	for rows.Next() {
 		var r TeamPresetRole
 		var enabled int
-		var h, m, a, recv, prompt, gate sql.NullString
+		var h, m, a, recv, prompt, gate, thinking sql.NullString
 		var items, age sql.NullInt64
 		if err := rows.Scan(&r.TemplateID, &r.Position, &enabled,
-			&h, &m, &a, &recv, &items, &age, &prompt, &gate); err != nil {
+			&h, &m, &a, &recv, &items, &age, &prompt, &gate, &thinking); err != nil {
 			return nil, err
 		}
 		r.Enabled = enabled != 0
-		if err := decodeOverrides(&r.RoleOverrides, h, m, a, recv, items, age, prompt, gate); err != nil {
+		if err := decodeOverrides(&r.RoleOverrides, h, m, a, recv, items, age, prompt, gate, thinking); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -423,13 +424,13 @@ func (db *DB) validatePresetProjectOverrides(ctx context.Context, p *TeamPreset)
 	var entries []entry
 	for rows.Next() {
 		var e entry
-		var h, m, a, recv, prompt, gate sql.NullString
+		var h, m, a, recv, prompt, gate, thinking sql.NullString
 		var items, age sql.NullInt64
-		if err := rows.Scan(&e.id, &h, &m, &a, &recv, &items, &age, &prompt, &gate); err != nil {
+		if err := rows.Scan(&e.id, &h, &m, &a, &recv, &items, &age, &prompt, &gate, &thinking); err != nil {
 			rows.Close()
 			return err
 		}
-		if err := decodeOverrides(&e.o, h, m, a, recv, items, age, prompt, gate); err != nil {
+		if err := decodeOverrides(&e.o, h, m, a, recv, items, age, prompt, gate, thinking); err != nil {
 			rows.Close()
 			return err
 		}
@@ -463,10 +464,11 @@ func insertPresetRoles(ctx context.Context, tx *sql.Tx, id string, roles []TeamP
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO team_preset_roles
-			(preset_id,template_id,position,enabled,`+roleOverrideCols+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+			(preset_id,template_id,position,enabled,`+roleOverrideCols+`)
+			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			id, r.TemplateID, i, r.Enabled, r.HarnessOverride, r.ModelOverride, args,
 			r.ReceiveOverride, r.BatchMaxItemsOverride, r.BatchMaxAgeSecOverride,
-			r.PromptOverride, r.GateOverride); err != nil {
+			r.PromptOverride, r.GateOverride, r.ThinkingOverride); err != nil {
 			return fmt.Errorf("adding role to team preset: %w", err)
 		}
 	}
@@ -498,9 +500,12 @@ func applyOverrides(t *RoleTemplate, o RoleOverrides) {
 	if o.GateOverride != nil {
 		t.Gate = *o.GateOverride
 	}
+	if o.ThinkingOverride != nil {
+		t.Thinking = *o.ThinkingOverride
+	}
 }
 
-func decodeOverrides(o *RoleOverrides, h, m, a, recv sql.NullString, items, age sql.NullInt64, prompt, gate sql.NullString) error {
+func decodeOverrides(o *RoleOverrides, h, m, a, recv sql.NullString, items, age sql.NullInt64, prompt, gate, thinking sql.NullString) error {
 	if h.Valid {
 		v := h.String
 		o.HarnessOverride = &v
@@ -535,6 +540,10 @@ func decodeOverrides(o *RoleOverrides, h, m, a, recv sql.NullString, items, age 
 	if gate.Valid {
 		v := gate.String
 		o.GateOverride = &v
+	}
+	if thinking.Valid {
+		v := thinking.String
+		o.ThinkingOverride = &v
 	}
 	return nil
 }

@@ -469,6 +469,7 @@ func (c *Cerebrate) runOnce(ctx context.Context) (fatal bool, ranFor time.Durati
 		Role:     live.role.Name,
 		Worktree: c.cfg.Worktree,
 		Model:    live.role.Model,
+		Thinking: live.role.Thinking,
 		// Harness flags first, the role's own args after. Later wins in every
 		// CLI here, so the more specific statement is the one that takes
 		// effect: a role that sets --permission-mode overrides the default for
