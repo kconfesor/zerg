@@ -39,9 +39,8 @@ type ArtifactArgs struct {
 const dialTimeout = 300 * time.Millisecond
 
 func (s *Server) artifact(w http.ResponseWriter, r *http.Request) {
-	id, ok := s.identify(r)
+	id, ok := s.permit(w, r, CanArtifact)
 	if !ok {
-		writeError(w, http.StatusUnauthorized, "unrecognised token")
 		return
 	}
 	if s.blobs == nil {
@@ -97,7 +96,37 @@ func (s *Server) artifact(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
+	// A registered service is an agent saying it got there, which is what
+	// somebody watching a "working…" panel is waiting to see.
+	if saved.Kind == store.ArtifactService {
+		if wch := s.watcher(); wch != nil {
+			wch.Served(id.ProjectID, id.Role)
+		}
+	}
 	writeJSON(w, http.StatusCreated, saved)
+}
+
+// remember writes down what this agent learned about serving the project.
+//
+// The runner's memory, and the only reason a second preview is faster than the
+// first. Prose, because what is worth writing down is different for a compose
+// stack and a monorepo, and a schema here would be a guess about which.
+func (s *Server) remember(w http.ResponseWriter, r *http.Request) {
+	id, ok := s.permit(w, r, CanRemember)
+	if !ok {
+		return
+	}
+	var req struct {
+		Note string `json:"note"`
+	}
+	if !decode(w, r, &req) {
+		return
+	}
+	if err := s.db.SaveRunNote(r.Context(), id.ProjectID, req.Note, id.Role); err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "remembered"})
 }
 
 // registerService records a port, having checked something is on it.

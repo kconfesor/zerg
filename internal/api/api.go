@@ -23,7 +23,7 @@ import (
 	"github.com/kconfesor/zerg/internal/nydus"
 	"github.com/kconfesor/zerg/internal/overmind"
 	"github.com/kconfesor/zerg/internal/preflight"
-	"github.com/kconfesor/zerg/internal/preview"
+	"github.com/kconfesor/zerg/internal/runner"
 	"github.com/kconfesor/zerg/internal/store"
 )
 
@@ -59,8 +59,8 @@ type Server struct {
 	// proxyPort is the origin services are proxied on; see proxy.go.
 	proxyPort int
 
-	// preview runs local targets; see preview.go.
-	preview *preview.Manager
+	// runner starts previews; see run.go.
+	runner *runner.Manager
 }
 
 // Deps are what the API needs to serve the cockpit.
@@ -83,14 +83,14 @@ type Deps struct {
 	// them say so rather than failing on a nil.
 	Blobs *artifact.Store
 
+	// Runner starts a project so a person can look at it. Optional: without it
+	// those endpoints say so rather than failing on a nil.
+	Runner *runner.Manager
+
 	// ProxyPort is the port the service proxy listens on, so a link to a
 	// running service can be built for whoever is asking. Zero when no proxy
 	// is running, which makes those links absent rather than broken.
 	ProxyPort int
-
-	// Preview runs a project's own code so a person can click it. Optional:
-	// without it those endpoints say so rather than failing on a nil.
-	Preview *preview.Manager
 
 	// Applied is the listener configuration the daemon bound at startup.
 	Applied store.Listener
@@ -121,7 +121,7 @@ func New(d Deps) *Server {
 		db: d.DB, log: d.Log, registry: d.Registry,
 		preflt: pf, over: d.Overmind, nyd: d.Nydus, bus: d.Bus, applied: d.Applied, chatMgr: d.Chat,
 		recorder: d.Recorder, ui: d.UI, tailnetHost: d.TailnetHost,
-		catalog: newCatalog(), blobs: d.Blobs, proxyPort: d.ProxyPort, preview: d.Preview,
+		catalog: newCatalog(), blobs: d.Blobs, proxyPort: d.ProxyPort, runner: d.Runner,
 	}
 }
 
@@ -197,13 +197,15 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/approvals/{id}/mergeable", s.approvalMergeable)
 	mux.HandleFunc("GET /api/approvals/{id}/file", s.approvalFile)
 	// Artifacts: what a task produced, and its bytes. See §13.
-	// Somewhere to run the work, and the run itself.
-	mux.HandleFunc("GET /api/projects/{id}/targets", s.deployTargets)
-	mux.HandleFunc("POST /api/projects/{id}/targets", s.saveDeployTarget)
-	mux.HandleFunc("DELETE /api/projects/{id}/targets/{target}", s.deleteDeployTarget)
-	mux.HandleFunc("POST /api/projects/{id}/preview", s.startPreview)
-	mux.HandleFunc("DELETE /api/projects/{id}/preview", s.stopPreview)
-	mux.HandleFunc("GET /api/projects/{id}/preview/log", s.previewLog)
+	// Running a project so somebody can look at it. The daemon starts an agent;
+	// it does not run the project itself.
+	mux.HandleFunc("GET /api/projects/{id}/run", s.runState)
+	mux.HandleFunc("POST /api/projects/{id}/run", s.startRun)
+	mux.HandleFunc("POST /api/projects/{id}/run/guide", s.guideRun)
+	mux.HandleFunc("POST /api/projects/{id}/run/touch", s.touchRun)
+	mux.HandleFunc("DELETE /api/projects/{id}/run", s.stopRun)
+	mux.HandleFunc("PUT /api/projects/{id}/run/note", s.saveRunNote)
+	mux.HandleFunc("PUT /api/projects/{id}/auto-run", s.setAutoRun)
 
 	mux.HandleFunc("GET /api/tasks/{id}/artifacts", s.taskArtifacts)
 	mux.HandleFunc("GET /api/artifacts/{id}/bytes", s.artifactBytes)

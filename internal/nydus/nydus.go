@@ -58,7 +58,7 @@ type Integrator interface {
 type Nydus struct {
 	db         *store.DB
 	integrator Integrator
-	onTaskDone func(ctx context.Context, projectID, taskID string)
+	onTaskDone func(ctx context.Context, projectID, taskID, commit string)
 	leaseFor   time.Duration
 	now        func() time.Time
 }
@@ -81,7 +81,7 @@ func WithIntegrator(i Integrator) Option { return func(n *Nydus) { n.integrator 
 // half the system to move a message. It runs after the transaction commits and
 // its failure never affects the completion, because a task is finished whether
 // or not the tidying afterwards worked.
-func WithOnTaskDone(fn func(ctx context.Context, projectID, taskID string)) Option {
+func WithOnTaskDone(fn func(ctx context.Context, projectID, taskID, commit string)) Option {
 	return func(n *Nydus) { n.onTaskDone = fn }
 }
 
@@ -579,7 +579,11 @@ func (n *Nydus) complete(ctx context.Context, projectID string, sender store.Res
 		return nil, fmt.Errorf("committing completion: %w", err)
 	}
 	if n.onTaskDone != nil {
-		n.onTaskDone(ctx, projectID, task.ID)
+		var sha string
+		if msg.CommitSHA != nil {
+			sha = *msg.CommitSHA
+		}
+		n.onTaskDone(ctx, projectID, task.ID, sha)
 	}
 	return msg, nil
 }
@@ -1223,7 +1227,21 @@ func (n *Nydus) decide(ctx context.Context, approvalID, decision, note string) e
 		}
 	}
 
-	return tx.Commit()
+	// A gated completion lands here rather than in complete(), and this hook
+	// was only wired to the ungated one: on any project with an approval gate
+	// at the end -- which is the arrangement the gate exists for -- nothing
+	// that runs when a card lands ran at all. The disk sweep was the first
+	// casualty and nobody noticed, because a swarm that never reclaims looks
+	// exactly like a swarm that produces a lot of build output.
+	finished := decision == store.ApprovalApproved && terminal != 0 && taskID.Valid
+
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if finished && n.onTaskDone != nil {
+		n.onTaskDone(ctx, projectID, taskID.String, commit.String)
+	}
+	return nil
 }
 
 // rejectionNote is what the author is told: the reason, and every remark still

@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/kconfesor/zerg/internal/agent"
@@ -184,4 +185,30 @@ func runArtifact(args []string) error {
 		return err
 	}
 	return printJSON(made)
+}
+
+// runRemember writes down what this agent worked out about serving the project.
+//
+//	zerg remember "serves with: docker compose -f infra/dev/compose.yml up.
+//	               needs .env, which is not in the repository."
+//
+// Read back to the next runner before it starts, which is the whole reason a
+// second preview is faster than the first.
+func runRemember(args []string) error {
+	fs := flag.NewFlagSet("remember", flag.ContinueOnError)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	note := strings.TrimSpace(strings.Join(fs.Args(), " "))
+	if note == "" {
+		return errors.New(`remember needs the note: zerg remember "how this project serves itself"`)
+	}
+
+	client, err := agent.NewClientFromEnv()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return client.Remember(ctx, note)
 }

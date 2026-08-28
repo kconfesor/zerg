@@ -85,6 +85,15 @@ type Spec struct {
 	Thinking  string
 	ExtraArgs []string
 
+	// Env is extra variables this particular agent needs, as NAME=value.
+	//
+	// For the agents that are given a job rather than a queue: a runner is
+	// told which port to bind, because the daemon is proxying it and two
+	// projects both defaulting to 5173 would collide. Added after the
+	// allowlist, so it is what the caller asked for rather than what the
+	// daemon's own shell happened to hold.
+	Env []string
+
 	// SystemFile is composed fresh at every spawn from the shared instructions
 	// plus this role's prompt, both read from the database. Copying prompt files
 	// into each worktree at creation time means edits made afterward reach
@@ -199,6 +208,7 @@ func AgentEnv(spec Spec, extra ...string) []string {
 		"ZERG_TOKEN="+spec.Token,
 		"ZERG_ROLE="+spec.Role,
 	)
+	out = append(out, spec.Env...)
 	return append(out, extra...)
 }
 

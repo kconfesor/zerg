@@ -120,6 +120,13 @@ func (c *Client) Artifact(ctx context.Context, req ArtifactArgs) (*store.Artifac
 	return &out, nil
 }
 
+// Remember writes down what this agent learned about serving the project, for
+// the next one to read.
+func (c *Client) Remember(ctx context.Context, note string) error {
+	_, err := c.call(ctx, "/agent/remember", map[string]string{"note": note}, nil)
+	return err
+}
+
 func (c *Client) call(ctx context.Context, path string, body, out any) (int, error) {
 	payload, err := json.Marshal(body)
 	if err != nil {

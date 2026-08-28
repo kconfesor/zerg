@@ -83,6 +83,10 @@ type Project struct {
 	// when it is empty, so nothing has to be set for a project to be
 	// recognisable — this is for when the derived mark is not the one you want.
 	Icon string `json:"icon"`
+
+	// AutoRun starts a preview of a task when it finishes. Off by default,
+	// because every run is an agent turn and therefore money.
+	AutoRun bool `json:"autoRun"`
 }
 
 // RoleOverrides is the nullable layer shared by reusable-team roles and a

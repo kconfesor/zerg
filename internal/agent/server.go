@@ -34,6 +34,35 @@ const pollInterval = 250 * time.Millisecond
 type Identity struct {
 	ProjectID string
 	Role      string
+
+	// Can is what this token is allowed to call. Empty means everything, which
+	// is what a pipeline role gets.
+	//
+	// Scopes exist because not every agent is a pipeline role. A runner starts
+	// the project so somebody can look at it: it needs to register a service
+	// and to ask a question, and it must never be able to put work into the
+	// queue -- especially once it starts on its own when a task lands. A
+	// capability that is not needed and not granted cannot be misused by an
+	// agent that read the wrong file.
+	Can map[string]bool
+}
+
+// The verbs a token can carry. A pipeline role holds all of them; anything
+// spawned outside the pipeline holds the few it needs.
+const (
+	CanClaim    = "next"     // and done, which is the other half of holding a lease
+	CanSend     = "send"     // put work into the queue
+	CanAsk      = "ask"      // put a question to the operator
+	CanArtifact = "artifact" // register what it produced
+	CanRemember = "remember" // write down what it learned about this project
+)
+
+// allows reports whether this identity may call a verb.
+func (i Identity) allows(verb string) bool {
+	if len(i.Can) == 0 {
+		return true
+	}
+	return i.Can[verb]
 }
 
 // Server answers agent calls on a unix socket.
@@ -52,6 +81,34 @@ type Server struct {
 	listener net.Listener
 	http     *http.Server
 	path     string
+
+	// watch is told when an agent does something the cockpit's view of it
+	// depends on. Optional, and set by the daemon rather than passed in: the
+	// runner watches for its own agent registering a service or asking a
+	// question, and it cannot be a constructor argument because the runner is
+	// built on top of this package.
+	watch Watcher
+}
+
+// Watcher hears about the two things that change what a waiting person sees.
+type Watcher interface {
+	// Served: this role registered a running service.
+	Served(projectID, role string)
+	// Asked: this role put a question to the operator and is waiting.
+	Asked(projectID, role string)
+}
+
+// Watch sets the watcher. Called once, at startup.
+func (s *Server) Watch(w Watcher) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.watch = w
+}
+
+func (s *Server) watcher() Watcher {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.watch
 }
 
 func NewServer(db *store.DB, nyd *nydus.Nydus, blobs *artifact.Store, log *slog.Logger) *Server {
@@ -66,10 +123,24 @@ func NewServer(db *store.DB, nyd *nydus.Nydus, blobs *artifact.Store, log *slog.
 // Tokens are per-spawn and role-scoped, so an agent cannot claim work for
 // another role or send as one. Reading the sender from an environment variable
 // lets any agent set it to any value.
+// Mint issues a token for a pipeline role, which may call everything.
 func (s *Server) Mint(projectID, role string) string {
+	return s.MintScoped(projectID, role)
+}
+
+// MintScoped issues a token for an agent that is not a pipeline role, limited
+// to the verbs named. Naming none is the same as Mint.
+func (s *Server) MintScoped(projectID, role string, can ...string) string {
 	token := store.NewID()
+	id := Identity{ProjectID: projectID, Role: role}
+	if len(can) > 0 {
+		id.Can = make(map[string]bool, len(can))
+		for _, verb := range can {
+			id.Can[verb] = true
+		}
+	}
 	s.mu.Lock()
-	s.tokens[token] = Identity{ProjectID: projectID, Role: role}
+	s.tokens[token] = id
 	s.mu.Unlock()
 	return token
 }
@@ -90,6 +161,26 @@ func (s *Server) identify(r *http.Request) (Identity, bool) {
 	defer s.mu.RUnlock()
 	id, ok := s.tokens[token]
 	return id, ok
+}
+
+// permit identifies the caller and checks it may call this verb.
+//
+// The refusal names the verb rather than saying "forbidden", because the agent
+// reading it is deciding what to do next and "you cannot send work" is the
+// sentence that tells it.
+func (s *Server) permit(w http.ResponseWriter, r *http.Request, verb string) (Identity, bool) {
+	id, ok := s.identify(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unrecognised token")
+		return Identity{}, false
+	}
+	if !id.allows(verb) {
+		writeError(w, http.StatusForbidden,
+			fmt.Sprintf("%s cannot %s: this agent was started to do one thing and that is not it",
+				id.Role, verb))
+		return Identity{}, false
+	}
+	return id, true
 }
 
 // Listen starts the socket. path is removed first: a socket left by a previous
@@ -155,6 +246,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /agent/send", s.send)
 	mux.HandleFunc("POST /agent/ask", s.ask)
 	mux.HandleFunc("POST /agent/artifact", s.artifact)
+	mux.HandleFunc("POST /agent/remember", s.remember)
 	return mux
 }
 
@@ -203,9 +295,8 @@ type Item struct {
 
 // next claims work, waiting up to WaitSeconds for some to appear.
 func (s *Server) next(w http.ResponseWriter, r *http.Request) {
-	id, ok := s.identify(r)
+	id, ok := s.permit(w, r, CanClaim)
 	if !ok {
-		writeError(w, http.StatusUnauthorized, "unrecognised token")
 		return
 	}
 
@@ -298,9 +389,8 @@ type doneRequest struct {
 }
 
 func (s *Server) done(w http.ResponseWriter, r *http.Request) {
-	id, ok := s.identify(r)
+	id, ok := s.permit(w, r, CanClaim)
 	if !ok {
-		writeError(w, http.StatusUnauthorized, "unrecognised token")
 		return
 	}
 	var req doneRequest
@@ -334,9 +424,8 @@ type sendRequest struct {
 }
 
 func (s *Server) send(w http.ResponseWriter, r *http.Request) {
-	id, ok := s.identify(r)
+	id, ok := s.permit(w, r, CanSend)
 	if !ok {
-		writeError(w, http.StatusUnauthorized, "unrecognised token")
 		return
 	}
 	var req sendRequest
@@ -410,9 +499,8 @@ type askResponse struct {
 // Forbid asking in the pane, offer a helper instead, and an unanswered question
 // looks exactly like an agent that stopped for no reason.
 func (s *Server) ask(w http.ResponseWriter, r *http.Request) {
-	id, ok := s.identify(r)
+	id, ok := s.permit(w, r, CanAsk)
 	if !ok {
-		writeError(w, http.StatusUnauthorized, "unrecognised token")
 		return
 	}
 	var req askRequest
@@ -447,6 +535,11 @@ func (s *Server) ask(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.fail(w, err)
 		return
+	}
+	// Waiting on a person, which a panel showing "working…" would otherwise
+	// render as a build that has stalled.
+	if wch := s.watcher(); wch != nil {
+		wch.Asked(id.ProjectID, id.Role)
 	}
 
 	deadline := time.Now()

@@ -97,6 +97,9 @@ type Config struct {
 	// BinDir holds the zerg executable the agent is told to run.
 	BinDir string
 
+	// Env is extra variables for this agent, as NAME=value; see adapter.Spec.
+	Env []string
+
 	// HarnessFlags apply to every role on this harness, from settings.
 	HarnessFlags []string
 
@@ -479,6 +482,7 @@ func (c *Cerebrate) runOnce(ctx context.Context) (fatal bool, ranFor time.Durati
 		Socket:    c.cfg.Socket,
 		Token:     c.cfg.Token,
 		BinDir:    c.cfg.BinDir,
+		Env:       c.cfg.Env,
 	}
 
 	// Preflight runs before every spawn, not only at Start: a token expires, a

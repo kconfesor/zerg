@@ -35,7 +35,7 @@ import (
 	"github.com/kconfesor/zerg/internal/nydus"
 	"github.com/kconfesor/zerg/internal/overmind"
 	"github.com/kconfesor/zerg/internal/preflight"
-	"github.com/kconfesor/zerg/internal/preview"
+	"github.com/kconfesor/zerg/internal/runner"
 	"github.com/kconfesor/zerg/internal/store"
 	"github.com/kconfesor/zerg/internal/tailnet"
 )
@@ -78,6 +78,8 @@ func run(args []string) error {
 		return runSend(args[1:])
 	case "artifact":
 		return runArtifact(args[1:])
+	case "remember":
+		return runRemember(args[1:])
 	case "ask":
 		return runAsk(args[1:])
 	case "version", "--version", "-v":
@@ -156,6 +158,7 @@ Run by agents, not by you:
   zerg ask "<question>"               ask the operator
   zerg artifact add <path>            keep a file for a person to look at
   zerg artifact serve --port <n>      register a service you started
+  zerg remember "<what you learned>"  how this project runs, for next time
 
   zerg version                        what this binary was built from
 
@@ -191,6 +194,10 @@ func tailnetHostFor(cfg store.Config, probe func() tailnet.Status) (string, tail
 	}
 	return st.DNSName, st
 }
+
+// runners is the preview manager, held here because the completion hook that
+// starts an automatic preview is built before the manager exists.
+var runners *runner.Manager
 
 func runUp(args []string) error {
 	fs := flag.NewFlagSet("up", flag.ContinueOnError)
@@ -248,8 +255,9 @@ func runUp(args []string) error {
 		// Reclaiming disk when a card lands is the policy that keeps a long
 		// run bounded: build output is per role, and nothing needs it once the
 		// work is merged.
-		nydus.WithOnTaskDone(func(ctx context.Context, projectID, _ string) {
+		nydus.WithOnTaskDone(func(ctx context.Context, projectID, taskID, commit string) {
 			sweepOnDone(ctx, db, projectID, log)
+			autoRun(ctx, db, projectID, taskID, commit, log)
 		}))
 	bus := event.NewBus()
 
@@ -378,19 +386,21 @@ func runUp(args []string) error {
 	proxyPort, serveProxy, closeProxy := listenProxy(db, log)
 	defer closeProxy()
 
-	// Running the project's own code, at a commit somebody chose. Its
-	// processes are this daemon's children and do not survive it, which is
-	// what the deferred stop is for: a compose stack left running after the
-	// daemon exits is a port nobody owns and nothing will clean up.
-	previews := preview.NewManager(db, log, stateDir)
-	defer previews.StopAll(context.Background())
+	// Starting a project so somebody can look at it. An agent does the work:
+	// the daemon spawns it with a commit checked out and three verbs, and it
+	// reads the repository to find out how this project serves itself.
+	runners = runner.NewManager(db, registry, bus, agents, log)
+	agents.Watch(runners)
+	// Its sessions are children of this process, and the servers they started
+	// are children of those.
+	defer runners.StopAll(context.Background())
 
 	srv := &http.Server{
 		Handler: api.New(api.Deps{
 			DB: db, Log: log, Registry: registry,
 			Overmind: over, Nydus: nyd, Bus: bus, Recorder: recorder, Applied: cfg.Listener(), Chat: chatMgr,
 			TailnetHost: tailnetHost, UI: ui, Blobs: blobs, ProxyPort: proxyPort,
-			Preview: previews,
+			Runner: runners,
 		}).Routes(),
 		ReadHeaderTimeout: 10 * time.Second,
 		// A body that arrives a byte at a time holds a connection open
