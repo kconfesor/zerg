@@ -7,6 +7,7 @@ import { api, type ChangedFile, type Mergeable, type ReviewThread } from '@/lib/
 import { renderMarkdown } from '@/lib/markdown'
 import DiffView from '@/components/DiffView.vue'
 import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
 import {
   InputGroup,
   InputGroupAddon,
@@ -66,6 +67,11 @@ const key = (id: string, path: string) => `${id}::${path}`
 function defaultOpen(a: { id: string; terminal?: boolean }, f: ChangedFile): boolean {
   const k = key(a.id, f.path)
   if (k in fileOpen.value) return fileOpen.value[k]
+  // A deferred file has no content yet and does not fetch itself: opening by
+  // default would either read the whole change back (the thing the limit
+  // exists to stop) or show "Loading…" under every file past the thirtieth,
+  // for a request nobody made. It opens when the reader opens it.
+  if (f.deferred) return false
   return a.terminal ? !isDoc(f) : true
 }
 
@@ -74,12 +80,17 @@ function toggleFile(a: { id: string; terminal?: boolean }, f: ChangedFile) {
   fileOpen.value = { ...fileOpen.value, [k]: !defaultOpen(a, f) }
 }
 
-/** Added and removed counts, so a collapsed file still states its size. */
+/**
+ * Added and removed counts, so a collapsed file still states its size.
+ *
+ * From git's own numstat rather than by counting plus signs in the diff, which
+ * is what this did and got wrong the moment a diff was not sent: a 9000-line
+ * file left unread for being over the size cap, and every file past the eager
+ * limit, sat under a header reading "+0 −0". The number is the whole reason to
+ * open a file or leave it, so it cannot come from the text that was withheld.
+ */
 function stat(f: ChangedFile): string {
-  const lines = (f.diff ?? '').split('\n')
-  const add = lines.filter((l) => l.startsWith('+') && !l.startsWith('+++')).length
-  const del = lines.filter((l) => l.startsWith('-') && !l.startsWith('---')).length
-  return `+${add} −${del}`
+  return `+${f.added ?? 0} −${f.removed ?? 0}`
 }
 const diffs = ref<
   Record<
@@ -158,9 +169,13 @@ function positionOf(id: string): { at: number; of: number } {
  * hundred-file diff otherwise loads every file before anyone has opened one.
  * The rest arrive when they are looked at.
  */
+/** Files being fetched now, so an open one says which of the two it is. */
+const loading = ref(new Set<string>())
+
 async function loadOne(id: string, path: string) {
   const at = diffs.value[id]
   if (!at) return
+  loading.value = new Set(loading.value).add(path)
   try {
     const file = await api.approvalFile(id, path)
     diffs.value = {
@@ -169,6 +184,10 @@ async function loadOne(id: string, path: string) {
     }
   } catch (e) {
     reviewError.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    const rest = new Set(loading.value)
+    rest.delete(path)
+    loading.value = rest
   }
 }
 
@@ -204,8 +223,24 @@ function step(id: string, by: 1 | -1) {
   const here = files.findIndex((f) => f.path === reading(id))
   if (by === 1 && files[here]) void setSeen(id, files[here].path, true)
   const next = Math.min(files.length - 1, Math.max(0, here + by))
-  current.value = { ...current.value, [id]: files[next].path }
-  focusFile(files[next].path)
+  arriveAt(id, files[next])
+}
+
+/**
+ * Land on a file: make it current, open it, and fetch it if it was deferred.
+ *
+ * Moving to a file is the reader saying they want to read it, so the keyboard
+ * path has to load one the listing left alone. Without this, j through a
+ * forty-seven file change stopped at the thirty-first on "Not read yet" with
+ * no hint that the way forward was the mouse.
+ */
+function arriveAt(id: string, f: ChangedFile) {
+  current.value = { ...current.value, [id]: f.path }
+  if (f.deferred && !loading.value.has(f.path)) {
+    fileOpen.value = { ...fileOpen.value, [key(id, f.path)]: true }
+    void loadOne(id, f.path)
+  }
+  focusFile(f.path)
 }
 
 /** The next file that still wants reading, rather than the next in the list. */
@@ -216,8 +251,7 @@ function nextUnread(id: string) {
   const rest = [...files.slice(here + 1), ...files.slice(0, here)]
   const next = rest.find((f) => !isSeen(id, f.path))
   if (!next) return
-  current.value = { ...current.value, [id]: next.path }
-  focusFile(next.path)
+  arriveAt(id, next)
 }
 
 /**
@@ -734,7 +768,7 @@ function empty(a: Attention | null): boolean {
               v-else-if="defaultOpen(a, f) && f.deferred"
               class="text-muted-foreground px-2 py-1.5 text-[11px]"
             >
-              Loading…
+              {{ loading.has(f.path) ? 'Loading…' : 'Not read yet. Open it to load this file.' }}
             </p>
             <div v-else-if="defaultOpen(a, f)" class="max-h-96 overflow-y-auto py-1">
               <DiffView

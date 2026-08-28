@@ -1,0 +1,114 @@
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { enableAutoUnmount, flushPromises, mount } from '@vue/test-utils'
+import Attention from './Attention.vue'
+import { api, type Attention as AttentionData, type ChangedFile } from '@/lib/api'
+
+vi.mock('@/lib/api', () => ({
+  api: {
+    approvalDiff: vi.fn(),
+    approvalFile: vi.fn(),
+    approvalMergeable: vi.fn(),
+    markFileSeen: vi.fn(),
+    review: vi.fn(),
+  },
+}))
+enableAutoUnmount(afterEach)
+
+const diff = vi.mocked(api.approvalDiff)
+const one = vi.mocked(api.approvalFile)
+const mergeable = vi.mocked(api.approvalMergeable)
+const seen = vi.mocked(api.markFileSeen)
+const review = vi.mocked(api.review)
+
+function file(path: string, over: Partial<ChangedFile> = {}): ChangedFile {
+  return { path, status: 'M', added: 3, removed: 1, ...over }
+}
+
+const attention = (files: ChangedFile[]): AttentionData => {
+  diff.mockResolvedValue({ files, range: true, base: 'main', seen: [] })
+  mergeable.mockResolvedValue({ clean: true, conflicts: [], baseAhead: 0 })
+  review.mockResolvedValue([])
+  seen.mockResolvedValue({ seen: [] })
+  return {
+    approvals: [
+      {
+        id: 'a1',
+        messageId: 'm1',
+        state: 'pending',
+        taskId: 't1',
+        taskName: 'sweep',
+        commit: 'abc1234',
+        terminal: true,
+        createdAt: '2026-01-01T00:00:00Z',
+      },
+    ],
+    clarifications: [],
+    rework: { threshold: 3, tasks: [] },
+  }
+}
+
+async function open(files: ChangedFile[]) {
+  const w = mount(Attention, { props: { attention: attention(files) } })
+  await flushPromises()
+  // The panel opens the diff itself at a terminal gate; only click if it did not.
+  const toggle = w.findAll('button').find((b) => /^Show\b/.test(b.text()))
+  if (toggle) {
+    await toggle.trigger('click')
+    await flushPromises()
+  }
+  return w
+}
+
+const row = (w: ReturnType<typeof mount>, path: string) =>
+  w.find(`[data-file="${path}"]`).text().replace(/\s+/g, ' ')
+
+describe('a change too large to send in one piece', () => {
+  // The header said "+0 −0" for every file whose diff was withheld, because it
+  // counted plus signs in text that was never sent. The size is the whole
+  // reason to open a file or leave it.
+  it('states the size of a file it did not read', async () => {
+    const w = await open([
+      file('huge.rs', { added: 9000, removed: 0, tooLarge: true }),
+      file('src40.rs', { added: 3, removed: 0, deferred: true }),
+    ])
+    expect(row(w, 'huge.rs')).toContain('+9000 −0')
+    expect(row(w, 'src40.rs')).toContain('+3 −0')
+  })
+
+  // Opening by default would either fetch the whole change back, which is what
+  // the limit exists to stop, or show "Loading…" under a request nobody made.
+  it('leaves a deferred file closed until it is opened, then fetches it once', async () => {
+    one.mockResolvedValue(file('src40.rs', { diff: '@@ -0,0 +1 @@\n+fn f40() {}\n' }))
+    const w = await open([file('src40.rs', { added: 3, removed: 0, deferred: true })])
+
+    expect(row(w, 'src40.rs')).not.toContain('Loading')
+    expect(one).not.toHaveBeenCalled()
+
+    await w.find('[data-file="src40.rs"] button').trigger('click')
+    await flushPromises()
+
+    expect(one).toHaveBeenCalledTimes(1)
+    expect(one).toHaveBeenCalledWith('a1', 'src40.rs')
+    expect(row(w, 'src40.rs')).toContain('fn f40()')
+  })
+
+  // j is the motion for reading through a change. Landing on the thirty-first
+  // file and being told to reach for the mouse is not reading through it.
+  it('fetches a deferred file the reader moves onto with the keyboard', async () => {
+    one.mockResolvedValue(file('b.rs', { diff: '@@ -0,0 +1 @@\n+fn b() {}\n' }))
+    const w = await open([file('a.rs', { diff: '@@ -1 +1 @@\n-x\n+y\n' }), file('b.rs', { deferred: true })])
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'j' }))
+    await flushPromises()
+
+    expect(one).toHaveBeenCalledWith('a1', 'b.rs')
+    expect(row(w, 'b.rs')).toContain('fn b()')
+  })
+
+  // A binary file and a file that did not change look identical when both
+  // render nothing.
+  it('says why a binary file shows nothing', async () => {
+    const w = await open([file('logo.png', { status: 'A', added: 0, removed: 0, binary: true })])
+    expect(row(w, 'logo.png')).toContain('Binary file')
+  })
+})
