@@ -33,10 +33,15 @@ export function useRowDrag(source: {
       return box.top + box.height / 2
     })
     drag.value = { from: index, to: index }
-    ;(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId)
+    const handle = event.currentTarget as HTMLElement
+    handle.setPointerCapture(event.pointerId)
     // Touch scrolls the page otherwise, and the row goes nowhere while the list
-    // slides past underneath it.
+    // slides past underneath it. preventDefault also cancels the focus a click
+    // would have given the handle, which is where the arrow keys are read, so
+    // the focus is put back by hand: pressing a handle and then an arrow key
+    // did nothing at all.
     event.preventDefault()
+    handle.focus()
   }
 
   function dragTo(event: PointerEvent) {
