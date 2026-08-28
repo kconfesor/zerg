@@ -214,6 +214,15 @@ const PreviewDir = "preview"
 func (h *Hatchery) PreviewWorktree(ctx context.Context, commit string) (string, error) {
 	path := h.Path(PreviewDir)
 
+	// The same rule the role worktrees need, for the same reason and one more:
+	// a preview can be the first worktree a project ever gets, if somebody runs
+	// a change before starting a swarm. Without it .worktrees/preview is an
+	// untracked directory in the operator's own `git status`, and an agent
+	// running `git add -A` commits an embedded repository into the project.
+	if err := h.ensureIgnored(ctx); err != nil {
+		return "", err
+	}
+
 	if isWorktree(ctx, path) {
 		// Reused rather than recreated: a rebuild between two commits should
 		// not throw away a node_modules or a target directory that the build

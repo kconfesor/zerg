@@ -36,6 +36,9 @@ type DeployTarget struct {
 	// is not enough: `docker compose up` interrupted leaves its containers
 	// exited, and only the command knows they exist.
 	StopCommand string `json:"stopCommand,omitempty"`
+	// CopyFiles are paths git does not track, brought from the operator's
+	// checkout into the preview's. One per line; .env is what this is for.
+	CopyFiles string `json:"copyFiles,omitempty"`
 	// ReadySecs bounds the wait for the port to answer. An image that has to
 	// be pulled is minutes and a vite preview is seconds; neither should be
 	// the other's timeout.
@@ -65,10 +68,10 @@ func (db *DB) SaveDeployTarget(ctx context.Context, t *DeployTarget) (*DeployTar
 		t.CreatedAt = time.Now().UTC()
 		_, err := db.sql.ExecContext(ctx,
 			`INSERT INTO deploy_targets (id, project_id, name, kind, command, cwd, stop_command,
-			   ready_secs, created_at)
-			 VALUES (?,?,?,?,?,?,?,?,?)`,
-			t.ID, t.ProjectID, t.Name, t.Kind, t.Command, t.Cwd, t.StopCommand, t.ReadySecs,
-			t.CreatedAt.Format(time.RFC3339Nano))
+			   copy_files, ready_secs, created_at)
+			 VALUES (?,?,?,?,?,?,?,?,?,?)`,
+			t.ID, t.ProjectID, t.Name, t.Kind, t.Command, t.Cwd, t.StopCommand, t.CopyFiles,
+			t.ReadySecs, t.CreatedAt.Format(time.RFC3339Nano))
 		if err != nil {
 			if strings.Contains(err.Error(), "UNIQUE") {
 				return nil, invalid("this project already has a target called %q", t.Name)
@@ -80,9 +83,9 @@ func (db *DB) SaveDeployTarget(ctx context.Context, t *DeployTarget) (*DeployTar
 
 	res, err := db.sql.ExecContext(ctx,
 		`UPDATE deploy_targets SET name = ?, kind = ?, command = ?, cwd = ?, stop_command = ?,
-		   ready_secs = ?
+		   copy_files = ?, ready_secs = ?
 		  WHERE id = ?`,
-		t.Name, t.Kind, t.Command, t.Cwd, t.StopCommand, t.ReadySecs, t.ID)
+		t.Name, t.Kind, t.Command, t.Cwd, t.StopCommand, t.CopyFiles, t.ReadySecs, t.ID)
 	if err != nil {
 		return nil, fmt.Errorf("saving the target: %w", err)
 	}
@@ -95,7 +98,7 @@ func (db *DB) SaveDeployTarget(ctx context.Context, t *DeployTarget) (*DeployTar
 // GetDeployTarget reads one.
 func (db *DB) GetDeployTarget(ctx context.Context, id string) (*DeployTarget, error) {
 	row := db.read.QueryRowContext(ctx,
-		`SELECT id, project_id, name, kind, command, cwd, stop_command, ready_secs, created_at
+		`SELECT id, project_id, name, kind, command, cwd, stop_command, copy_files, ready_secs, created_at
 		   FROM deploy_targets WHERE id = ?`, id)
 	t, err := scanTarget(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -107,7 +110,7 @@ func (db *DB) GetDeployTarget(ctx context.Context, id string) (*DeployTarget, er
 // DeployTargets lists a project's, oldest first.
 func (db *DB) DeployTargets(ctx context.Context, projectID string) ([]DeployTarget, error) {
 	rows, err := db.read.QueryContext(ctx,
-		`SELECT id, project_id, name, kind, command, cwd, stop_command, ready_secs, created_at
+		`SELECT id, project_id, name, kind, command, cwd, stop_command, copy_files, ready_secs, created_at
 		   FROM deploy_targets WHERE project_id = ? ORDER BY created_at, id`, projectID)
 	if err != nil {
 		return nil, fmt.Errorf("reading targets: %w", err)
@@ -140,7 +143,7 @@ func scanTarget(s scanner) (*DeployTarget, error) {
 		createdAt string
 	)
 	if err := s.Scan(&t.ID, &t.ProjectID, &t.Name, &t.Kind, &t.Command, &t.Cwd,
-		&t.StopCommand, &t.ReadySecs, &createdAt); err != nil {
+		&t.StopCommand, &t.CopyFiles, &t.ReadySecs, &createdAt); err != nil {
 		return nil, err
 	}
 	t.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)

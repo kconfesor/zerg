@@ -12,6 +12,7 @@ import { Play, Trash2 } from '@lucide/vue'
 import { api, type DeployTarget } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { Textarea } from '@/components/ui/textarea'
 import { Label } from '@/components/ui/label'
 
 const props = defineProps<{ projectId: string | null }>()
@@ -20,7 +21,14 @@ const targets = ref<DeployTarget[]>([])
 const error = ref('')
 const busy = ref(false)
 
-const draft = ref({ name: '', command: '', stopCommand: '', cwd: '', readySecs: 120 })
+const draft = ref({
+  name: '',
+  command: '',
+  stopCommand: '',
+  copyFiles: '',
+  cwd: '',
+  readySecs: 120,
+})
 
 async function load() {
   if (!props.projectId) return
@@ -38,7 +46,7 @@ async function add() {
   error.value = ''
   try {
     await api.saveTarget(props.projectId, { ...draft.value, kind: 'local' })
-    draft.value = { name: '', command: '', stopCommand: '', cwd: '', readySecs: 120 }
+    draft.value = { name: '', command: '', stopCommand: '', copyFiles: '', cwd: '', readySecs: 120 }
     await load()
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e)
@@ -77,6 +85,9 @@ async function remove(t: DeployTarget) {
         <p class="text-muted-foreground font-mono text-[10px] break-all">{{ t.command }}</p>
         <p v-if="t.stopCommand" class="text-muted-foreground font-mono text-[10px] break-all">
           stop: {{ t.stopCommand }}
+        </p>
+        <p v-if="t.copyFiles" class="text-muted-foreground text-[10px]">
+          brings {{ t.copyFiles.split('\n').filter(Boolean).join(', ') }}
         </p>
         <p class="text-muted-foreground text-[10px]">
           waits {{ t.readySecs }}s for the port<template v-if="t.cwd"> · in {{ t.cwd }}</template>
@@ -120,6 +131,28 @@ async function remove(t: DeployTarget) {
           class="h-8 font-mono"
         />
       </div>
+      <div class="flex flex-col gap-1">
+        <Label for="target-copy" class="text-[11px]">
+          Bring these files
+          <span class="text-muted-foreground font-normal">
+            · one per line, for what git does not track
+          </span>
+        </Label>
+        <Textarea
+          id="target-copy"
+          v-model="draft.copyFiles"
+          rows="2"
+          placeholder=".env"
+          class="font-mono text-xs"
+        />
+        <p class="text-muted-foreground text-[10px] leading-relaxed">
+          A preview is a checkout of the commit, so anything in .gitignore is not there and a
+          compose file that wants an env file fails on the first run. Copied from your checkout
+          before the command runs. Your checkout is also at
+          <code>$ZERG_PROJECT_DIR</code> if you would rather point at it than copy.
+        </p>
+      </div>
+
       <div class="flex gap-2">
         <div class="flex flex-1 flex-col gap-1">
           <Label for="target-cwd" class="text-[11px]">

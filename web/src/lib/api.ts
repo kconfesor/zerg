@@ -537,6 +537,9 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(body),
     }),
+  /** What the running preview has printed so far. */
+  previewLog: (projectId: string) =>
+    call<{ log: string }>(`/projects/${projectId}/preview/log`),
   stopPreview: (projectId: string) =>
     call<void>(`/projects/${projectId}/preview`, { method: 'DELETE' }),
 
@@ -1031,6 +1034,9 @@ export interface DeployTarget {
   /** What undoes it, when killing the process group is not enough: compose
    *  interrupted leaves its containers exited. */
   stopCommand?: string
+  /** Paths git does not track, copied from the operator's checkout into the
+   *  preview's. One per line. */
+  copyFiles?: string
   cwd?: string
   readySecs: number
   createdAt: string

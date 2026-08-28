@@ -94,6 +94,15 @@ func (m *Manager) Start(ctx context.Context, project *store.Project, target *sto
 	if err != nil {
 		return nil, err
 	}
+	// Whatever git does not track and the command still needs. A worktree is
+	// made from a commit, so .env is not in it, and `docker compose up` fails
+	// on the first run with "env file .env not found" for every project that
+	// has one.
+	if err := copyUntracked(project.Path, dir, target.CopyFiles); err != nil {
+		return nil, err
+	}
+
+	root := dir
 	if target.Cwd != "" {
 		dir = filepath.Join(dir, target.Cwd)
 		if _, err := os.Stat(dir); err != nil {
@@ -120,6 +129,11 @@ func (m *Manager) Start(ctx context.Context, project *store.Project, target *sto
 		fmt.Sprintf("PORT=%d", port),
 		fmt.Sprintf("ZERG_PREVIEW_PORT=%d", port),
 		fmt.Sprintf("ZERG_COMMIT=%s", commit),
+		// Where the operator's own checkout is, so a command can reach what
+		// git does not carry without anything being copied:
+		// `docker compose --env-file "$ZERG_PROJECT_DIR/.env" up`.
+		fmt.Sprintf("ZERG_PROJECT_DIR=%s", project.Path),
+		fmt.Sprintf("ZERG_PREVIEW_DIR=%s", root),
 	)
 	// Its own process group, so stopping it stops what it started. A compose
 	// command that spawns docker, or a dev server that forks a watcher, leaves
@@ -360,6 +374,50 @@ func kill(cmd *exec.Cmd, done <-chan struct{}) {
 	case <-time.After(stopGrace):
 	}
 	_ = syscall.Kill(-pgid, syscall.SIGKILL)
+}
+
+// copyUntracked brings named files from the operator's checkout into the
+// preview's.
+//
+// Named, never guessed: copying anything that looks like a secret into a
+// directory the daemon runs commands in should be something somebody wrote
+// down. Paths are resolved inside the project for the same reason
+// `artifact add` is -- a target is configuration, and configuration that can
+// name /etc/shadow is a way to read it.
+func copyUntracked(projectDir, previewDir, list string) error {
+	for _, raw := range strings.Split(list, "\n") {
+		name := strings.TrimSpace(raw)
+		if name == "" {
+			continue
+		}
+		if filepath.IsAbs(name) || strings.Contains(name, "..") {
+			return fmt.Errorf("%q: files to copy are paths inside the project", name)
+		}
+		src := filepath.Join(projectDir, name)
+		info, err := os.Stat(src)
+		if err != nil {
+			// Said rather than skipped: the command is about to fail without
+			// it, and this is the message that explains why.
+			return fmt.Errorf("this target copies %s, which is not in %s", name, projectDir)
+		}
+		if info.IsDir() {
+			return fmt.Errorf("%q is a directory; copy the files a command needs, not a tree", name)
+		}
+		body, err := os.ReadFile(src)
+		if err != nil {
+			return fmt.Errorf("reading %s: %w", name, err)
+		}
+		dst := filepath.Join(previewDir, name)
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			return err
+		}
+		// The permissions of the original, because a .env that arrives
+		// world-readable is worse than one that does not arrive.
+		if err := os.WriteFile(dst, body, info.Mode().Perm()); err != nil {
+			return fmt.Errorf("copying %s into the preview: %w", name, err)
+		}
+	}
+	return nil
 }
 
 func freePort() (int, error) {

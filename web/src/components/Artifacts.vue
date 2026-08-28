@@ -65,6 +65,24 @@ async function run() {
   running.value = true
   runError.value = ''
   runLog.value = ''
+
+  // The command's output, while it runs rather than only when it fails.
+  //
+  // Two things are invisible without this. A build that pulls an image looks
+  // identical to one that has hung, and `docker compose up` warns about a
+  // variable it could not resolve and then starts anyway -- so the preview
+  // comes up, serves something misconfigured, and the only warning went to a
+  // log nobody was shown.
+  const poll = window.setInterval(async () => {
+    if (!props.projectId) return
+    try {
+      const { log } = await api.previewLog(props.projectId)
+      if (log) runLog.value = log
+    } catch {
+      // The log is a courtesy; failing to read it must not fail the run.
+    }
+  }, 1000)
+
   try {
     await api.runPreview(props.projectId, {
       commit: props.commit,
@@ -82,6 +100,7 @@ async function run() {
     const body = (e as { body?: { log?: string } })?.body
     if (body?.log) runLog.value = body.log
   } finally {
+    window.clearInterval(poll)
     running.value = false
   }
 }
@@ -95,6 +114,17 @@ async function stop() {
     runError.value = e instanceof Error ? e.message : String(e)
   }
 }
+
+/**
+ * Whether the command said something it called a warning.
+ *
+ * Not interpreted, and not specific to any tool: the output is left open when
+ * the command used the word. It exists because the worst case here is silent
+ * -- `docker compose up` warns that a variable resolved to an empty string and
+ * then starts perfectly well, so the preview comes up, serves something
+ * misconfigured, and nothing anywhere says so.
+ */
+const warned = computed(() => /\bwarn/i.test(runLog.value))
 
 /** Whether a preview of this change is already up. */
 const preview = computed(() =>
@@ -159,14 +189,21 @@ defineExpose({ load })
 
     <div v-if="runError" class="border-destructive/40 border p-2">
       <p class="text-destructive text-[11px]">{{ runError }}</p>
-      <!-- The command's own output. Whoever wrote the command is the only
-           person who can fix it, and this is what they need to read. -->
+    </div>
+
+    <!-- The command's own output, while it runs and after it fails. Whoever
+         wrote the command is the only person who can fix it, and compose says
+         things here -- an unresolved variable, an image being pulled -- that
+         exist nowhere else. -->
+    <details v-if="runLog" class="border" :open="!!runError || running || warned">
+      <summary class="text-muted-foreground cursor-pointer px-2 py-1 text-[11px]">
+        output<template v-if="warned"> · it printed a warning</template>
+      </summary>
       <pre
-        v-if="runLog"
-        class="text-muted-foreground mt-1 max-h-40 overflow-auto font-mono text-[10px] whitespace-pre-wrap"
+        class="text-muted-foreground max-h-56 overflow-auto px-2 pb-2 font-mono text-[10px] whitespace-pre-wrap"
         >{{ runLog }}</pre
       >
-    </div>
+    </details>
 
     <p v-if="items.length" class="text-muted-foreground flex items-center gap-1.5 text-[11px]">
       <Box :size="12" aria-hidden="true" class="shrink-0" />

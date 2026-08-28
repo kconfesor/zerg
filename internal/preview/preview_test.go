@@ -307,3 +307,62 @@ func TestTheStopCommandRunsBeforeTheGroupIsKilled(t *testing.T) {
 		t.Errorf("marker = %q", body)
 	}
 }
+
+// A preview is a checkout of a commit, so anything in .gitignore is not in it:
+// compose that wants an env file fails on the first run for every project that
+// has one, which is a wall rather than a message.
+func TestFilesGitDoesNotCarryAreBroughtIn(t *testing.T) {
+	ctx := context.Background()
+	m, db, p, commit := fixture(t, map[string]string{
+		".gitignore": ".env\n",
+		// Serves only if the file it needs arrived.
+		"serve.sh": "#!/bin/sh\ntest -f .env || { echo 'no .env here'; exit 1; }\n" +
+			"exec python3 -m http.server \"$PORT\" --bind 127.0.0.1\n",
+	})
+	// Untracked in the operator's checkout, exactly like a real one.
+	if err := os.WriteFile(filepath.Join(p.Path, ".env"), []byte("API_URL=x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	target, err := db.SaveDeployTarget(ctx, &store.DeployTarget{
+		ProjectID: p.ID, Name: "preview", Kind: store.TargetLocal,
+		Command: "./serve.sh", ReadySecs: 20,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Without being asked to bring it: the command fails, and says why.
+	if _, err := m.Start(ctx, p, target, commit, ""); err == nil {
+		t.Fatal("started without the file it needs")
+	}
+
+	target.CopyFiles = ".env"
+	if _, err := db.SaveDeployTarget(ctx, target); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Start(ctx, p, target, commit, ""); err != nil {
+		t.Fatalf("Start with the file brought in: %v", err)
+	}
+
+	// Copied, and no more readable than the original: a .env that arrives
+	// world-readable is worse than one that does not arrive.
+	copied := filepath.Join(p.Path, ".worktrees", "preview", ".env")
+	info, err := os.Stat(copied)
+	if err != nil {
+		t.Fatalf("the file was not brought in: %v", err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("copied with mode %v, want the original's 0600", info.Mode().Perm())
+	}
+}
+
+// A target is configuration, and configuration that can name /etc/shadow is a
+// way to read it.
+func TestCopyingRefusesPathsOutsideTheProject(t *testing.T) {
+	for _, bad := range []string{"/etc/hosts", "../../.ssh/id_rsa", "sub/../../escape"} {
+		if err := copyUntracked(t.TempDir(), t.TempDir(), bad); err == nil {
+			t.Errorf("copying %q was allowed", bad)
+		}
+	}
+}
