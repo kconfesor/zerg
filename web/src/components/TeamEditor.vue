@@ -26,6 +26,7 @@ import { Switch } from '@/components/ui/switch'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { cloneOverrides, followPreset, hasRoleOverrides, moveWithin, placeInPipeline } from '@/lib/team'
+import { useRowDrag } from '@/lib/row-drag'
 import RoleOverrideDialog from '@/components/RoleOverrideDialog.vue'
 import {
   Dialog,
@@ -156,57 +157,22 @@ const projectRunsItsOwn = computed(
  * Dragging a role to another place in the pipeline.
  *
  * Two arrow buttons per row were the whole reordering interface: eight pixels
- * of target each, four of them on a three-role team, and nothing at all on a
- * phone, where a tap on the wrong one silently reorders the pipeline. This is a
- * pointer-event drag rather than HTML5 drag-and-drop, because that has no touch
- * support at all, and rather than a library, because it is sixty lines and the
- * two it would replace are already written.
- *
- * The list does not reorder while the pointer moves. A line marks where the
- * role will land and the row being carried dims, so the thing under the pointer
- * stays the thing you grabbed, and nothing shuffles out from under it.
+ * of target each, and nothing at all on a phone, where a tap on the wrong one
+ * silently reorders the pipeline. The pointer handling is shared with the rail,
+ * which reorders the same pipelines in a narrower shape.
  */
 const pipelineList = ref<HTMLElement | null>(null)
-const drag = ref<{ from: number; to: number } | null>(null)
-let rowMidpoints: number[] = []
-
-function grab(event: PointerEvent, index: number) {
-  const rows = [...(pipelineList.value?.querySelectorAll('[data-role-row]') ?? [])]
-  rowMidpoints = rows.map((row) => {
-    const box = row.getBoundingClientRect()
-    return box.top + box.height / 2
-  })
-  drag.value = { from: index, to: index }
-  ;(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId)
-  // Touch scrolls the page otherwise, and the row goes nowhere while the list
-  // slides past under it.
-  event.preventDefault()
-}
-
-function dragTo(event: PointerEvent) {
-  if (!drag.value) return
-  let to = rowMidpoints.findIndex((mid) => event.clientY < mid)
-  if (to === -1) to = rowMidpoints.length
-  drag.value = { ...drag.value, to }
-}
-
-function drop() {
-  const move = drag.value
-  drag.value = null
-  if (!move || !activePreset.value) return
-  const roles = moveWithin(activePreset.value.roles, move.from, move.to)
-  if (roles === activePreset.value.roles) return
-  saveRoles(roles.map((role) => ({ ...role, ...cloneOverrides(role) })))
-}
-
-/** Where the line goes: before this row, or after the last one. */
-function dropsBefore(index: number): boolean {
-  return !!drag.value && drag.value.to === index && drag.value.from !== index && drag.value.from !== index - 1
-}
-function dropsLast(index: number): boolean {
-  const roles = activePreset.value?.roles ?? []
-  return !!drag.value && index === roles.length - 1 && drag.value.to === roles.length && drag.value.from !== index
-}
+const { drag, grab, dragTo, drop, dropsBefore, dropsLast } = useRowDrag({
+  container: pipelineList,
+  count: () => activePreset.value?.roles.length ?? 0,
+  onDrop(from, to) {
+    const preset = activePreset.value
+    if (!preset) return
+    const roles = moveWithin(preset.roles, from, to)
+    if (roles === preset.roles) return
+    saveRoles(roles.map((role) => ({ ...role, ...cloneOverrides(role) })))
+  },
+})
 
 /**
  * Which role finishes this pipeline: the last one that runs.
