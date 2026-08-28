@@ -155,10 +155,10 @@ const filtered = computed(() => outcome.value !== ANY || role.value !== ANY || !
 
     <div class="border bg-card">
       <ul class="divide-y">
-        <li v-for="task in entries" :key="task.id">
+        <li v-for="task in entries" :key="task.id" class="relative">
           <button
             type="button"
-            class="hover:bg-muted/50 focus-visible:outline-ring flex w-full flex-col gap-1.5 px-4 py-3 text-left focus-visible:outline-2 focus-visible:-outline-offset-2"
+            class="hover:bg-muted/50 focus-visible:outline-ring flex w-full flex-col gap-1.5 py-3 pr-24 pl-4 text-left focus-visible:outline-2 focus-visible:-outline-offset-2"
             @click="emit('open', task)"
           >
             <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
@@ -213,9 +213,11 @@ const filtered = computed(() => outcome.value !== ANY || role.value !== ANY || !
               <span v-if="task.roles.length" class="truncate">{{ task.roles.join(' → ') }}</span>
             </div>
           </button>
-          <!-- Outside the row's button, because a button inside a button is
-               not a thing a browser will render. -->
-          <div class="flex items-center gap-1 px-2 pb-2">
+          <!-- Over the row rather than inside it: a button inside a button is
+               not a thing a browser will render, and the row is the click
+               target for reading the card. The row's right padding is what
+               keeps a long name from running underneath. -->
+          <div class="absolute top-2 right-2">
             <Button
               size="xs"
               variant="ghost"
