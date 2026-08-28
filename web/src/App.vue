@@ -382,12 +382,40 @@ async function loadGlobals() {
       api.roles(),
       api.harnesses(),
     ])
-    for (const h of harnesses.value) {
-      models.value[h] = await api.models(h).catch(() => [])
-      thinking.value[h] = await api.thinking(h).catch(() => [])
-    }
   } catch (err) {
     fail(err)
+  }
+}
+
+/**
+ * What each harness can run, fetched after the board rather than in front of
+ * it.
+ *
+ * These lists belong to the pickers in Settings, the role library and the team
+ * editor. Nothing on the board needs them, and asking for them first was
+ * costing the whole first paint: a harness answers this by asking its own CLI,
+ * one of them took 1.9 seconds to reply, and the awaits ran one after another
+ * inside a loop that the board was waiting on. Measured in a browser: the
+ * first card arrived at 2046ms, immediately after that one request finished.
+ *
+ * Per harness and in parallel now, and not awaited by the caller. A picker
+ * opened before its list has landed sees the empty list it already handles,
+ * for the moment it takes to arrive.
+ */
+function loadCatalogues() {
+  for (const h of harnesses.value) {
+    void api
+      .models(h)
+      .catch(() => [])
+      .then((list) => {
+        models.value = { ...models.value, [h]: list }
+      })
+    void api
+      .thinking(h)
+      .catch(() => [])
+      .then((list) => {
+        thinking.value = { ...thinking.value, [h]: list }
+      })
   }
 }
 
@@ -724,6 +752,15 @@ onMounted(async () => {
     const asked = String(route.params.projectId ?? '')
     const wanted = projects.value.find((p) => p.id === asked) ?? projects.value[0]
     if (wanted) await open(wanted)
+    // Off the startup path entirely, deliberately: see loadCatalogues. Idle
+    // rather than merely last, because the browser models the whole boot as
+    // one dependency graph -- a request issued during it is part of it, even
+    // when nothing waits on the answer.
+    if ('requestIdleCallback' in window) {
+      window.requestIdleCallback(() => loadCatalogues(), { timeout: 4000 })
+    } else {
+      setTimeout(loadCatalogues, 1000)
+    }
   } finally {
     // In a finally: a failed load must still stop claiming to be loading, or
     // the spinner becomes its own kind of lie.

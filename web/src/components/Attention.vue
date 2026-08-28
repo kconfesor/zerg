@@ -776,7 +776,7 @@ function empty(a: Attention | null): boolean {
     <!-- Nothing waiting should feel like calm, not like a broken panel. -->
     <div
       v-if="empty(props.attention)"
-      class="text-muted-foreground/70 flex flex-col items-center gap-1 py-12 text-center"
+      class="text-muted-foreground flex flex-col items-center gap-1 py-12 text-center"
     >
       <span class="text-[var(--status-good)]/70 text-lg leading-none">✓</span>
       <p class="text-xs">Nothing needs you.</p>
@@ -896,7 +896,7 @@ function empty(a: Attention | null): boolean {
                 <BookOpen :size="12" aria-hidden="true" class="text-primary shrink-0" />
                 Map this change
               </button>
-              <span class="text-muted-foreground/70 text-[10px]">
+              <span class="text-muted-foreground text-[10px]">
                 what it is for, what each file adds, where to start · it describes, you decide
               </span>
               <span v-if="guides[a.id]?.error" class="text-destructive w-full text-[10px]">
@@ -924,7 +924,7 @@ function empty(a: Attention | null): boolean {
             <span class="min-w-0 max-w-[45%] truncate font-mono" :title="reading(a.id)">
               {{ reading(a.id) }}
             </span>
-            <span v-if="unread(a.id)" class="text-muted-foreground/80">
+            <span v-if="unread(a.id)" class="text-muted-foreground">
               · {{ unread(a.id) }} not read yet
             </span>
             <span v-else class="text-[var(--status-good)]">· all read</span>
@@ -951,7 +951,7 @@ function empty(a: Attention | null): boolean {
               </Button>
             </span>
           </div>
-          <p class="text-muted-foreground/60 mb-1.5 hidden text-[10px] sm:block">
+          <p class="text-muted-foreground mb-1.5 hidden text-[10px] sm:block">
             j and k move, and mark what you leave as read
           </p>
 
@@ -1256,7 +1256,7 @@ function empty(a: Attention | null): boolean {
         <span v-else class="text-muted-foreground">{{ mergeError(a.id) }}</span>
         <!-- Said even when the merge is clean: it is the difference between
              reviewing what will land and reviewing what was written. -->
-        <span v-if="(mergeState(a.id)?.baseAhead ?? 0) > 0" class="text-muted-foreground/80">
+        <span v-if="(mergeState(a.id)?.baseAhead ?? 0) > 0" class="text-muted-foreground">
           · {{ base(a.id) }} has moved {{ mergeState(a.id)?.baseAhead }}
           commit{{ mergeState(a.id)?.baseAhead === 1 ? '' : 's' }} since this was written
         </span>

@@ -750,7 +750,7 @@ function cloneTeam() {
                  column is the only place a pipeline can be ordered. -->
             <button
               type="button"
-              class="text-muted-foreground/60 hover:text-foreground focus-visible:outline-ring flex size-8 shrink-0 cursor-grab touch-none items-center justify-center focus-visible:outline-2 active:cursor-grabbing"
+              class="text-muted-foreground hover:text-foreground focus-visible:outline-ring flex size-8 shrink-0 cursor-grab touch-none items-center justify-center focus-visible:outline-2 active:cursor-grabbing"
               :aria-label="`Reorder ${libraryById.get(role.templateId)?.name}`"
               :title="`Drag to reorder ${libraryById.get(role.templateId)?.name}, or use the arrow keys`"
               @pointerdown="grab($event, index)"

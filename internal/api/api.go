@@ -47,6 +47,9 @@ type Server struct {
 
 	// tailnetHost is the discovered MagicDNS name; see Deps.TailnetHost.
 	tailnetHost string
+
+	// catalog remembers what each harness said its models were; see catalog.go.
+	catalog *catalog
 }
 
 // Deps are what the API needs to serve the cockpit.
@@ -94,6 +97,7 @@ func New(d Deps) *Server {
 		db: d.DB, log: d.Log, registry: d.Registry,
 		preflt: pf, over: d.Overmind, nyd: d.Nydus, bus: d.Bus, applied: d.Applied, chatMgr: d.Chat,
 		recorder: d.Recorder, ui: d.UI, tailnetHost: d.TailnetHost,
+		catalog: newCatalog(),
 	}
 }
 
@@ -549,7 +553,9 @@ func (s *Server) listModels(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, err.Error())
 		return
 	}
-	models, err := a.ListModels(r.Context())
+	// Through the cache: this runs the harness's CLI, and the cockpit asks for
+	// every harness on every load.
+	models, err := s.catalog.models(r.Context(), r.PathValue("name"), a.ListModels)
 	if err != nil {
 		s.fail(w, r, err)
 		return

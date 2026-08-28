@@ -34,9 +34,93 @@
          meant to work on a machine with no route to the internet. Removing it
          changes nothing on screen. To actually get the typeface, self-host the
          woff2 and match the family name; do not put the CDN back. -->
+    <style>
+      /* Only the frame, and only the values the running cockpit reports for
+         it. Duplicating the whole theme here would be a second copy to keep in
+         step with the first; four declarations is a thing that can be checked
+         by looking. */
+      html,
+      body,
+      #app {
+        height: 100%;
+      }
+      body {
+        margin: 0;
+        background: oklch(18.2% 0.019 304.8);
+      }
+      .boot {
+        display: flex;
+        height: 100%;
+      }
+      .boot-rail {
+        width: 240px;
+        flex: none;
+        background: oklch(15.5% 0.017 305);
+        border-right: 1px solid oklch(24.5% 0.038 300);
+      }
+      .boot-main {
+        flex: 1;
+      }
+      .boot-bar {
+        height: 56px;
+        border-bottom: 1px solid oklch(24.5% 0.038 300);
+      }
+      /* The rail is a drawer below md and is not on screen until it is opened,
+         so the frame should not claim it is. */
+      @media (max-width: 767px) {
+        .boot-rail {
+          display: none;
+        }
+      }
+    </style>
   </head>
   <body>
-    <div id="app"></div>
+    <!-- The frame, before the bundle exists.
+         Lighthouse put largest contentful paint at 2.6s, of which 2.2s was
+         "render delay": the page was blank until JavaScript had been fetched,
+         parsed and had asked the daemon what to draw. This is the part of the
+         layout that is the same on every screen and every project -- the rail
+         and the bar above the content -- so it can be sent as HTML and painted
+         immediately.
+
+         It lives inside #app on purpose: Vue replaces the contents of its
+         mount element, so the real interface takes its place with nothing to
+         remove and no flag to get wrong. Nothing here is content: no fake
+         cards, no shimmering placeholder rows. A skeleton that pretends to
+         have data is a worse lie than an empty frame. Its measurements are
+         read out of the running cockpit (240px rail, 56px bar, and the
+         surface colours from theme.css) so the real one lands on top of it
+         rather than beside it. -->
+    <div id="app">
+      <div class="boot" aria-hidden="true">
+        <div class="boot-rail"></div>
+        <div class="boot-main"><div class="boot-bar"></div></div>
+      </div>
+    </div>
+    <!-- The three calls the cockpit always makes, started before it exists.
+         The bundle has to be fetched, parsed and executed before it can ask
+         the daemon anything, and on a phone over a tailnet that round trip is
+         the better part of a second of the wait. Started here, it happens
+         while the bundle is still downloading.
+
+         An optimisation and nothing more: lib/api.ts takes each answer at most
+         once, and falls back to a normal request if one is missing or failed,
+         so every error still arrives through the API client with its status
+         attached. The catch is what keeps a failure here from being reported
+         as an unhandled rejection before the app is alive to deal with it. -->
+    <script>
+      window.__zergBoot = (function () {
+        var get = function (path) {
+          var p = fetch(path, { headers: { Accept: 'application/json' } }).then(function (r) {
+            if (!r.ok) throw new Error(String(r.status))
+            return r.json()
+          })
+          p.catch(function () {})
+          return p
+        }
+        return { projects: get('/api/projects'), roles: get('/api/roles'), harnesses: get('/api/harnesses') }
+      })()
+    </script>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

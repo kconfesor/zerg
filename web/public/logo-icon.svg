@@ -1,4 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <!-- Square corners throughout, deliberately: every surface in the cockpit is
+       rounded-none, and a mark with softer corners than the product it stands
+       for reads as somebody else's logo. -->
   <defs>
     <!-- Background Gradient -->
     <linearGradient id="bg-grad" x1="0%" y1="0%" x2="100%" y2="100%">
@@ -14,12 +17,16 @@
       <stop offset="100%" stop-color="#6366f1" />
     </linearGradient>
 
-    <linearGradient id="accent-cyan" x1="0%" y1="0%" x2="100%" y2="0%">
+    <!-- In user space, not the default object bounding box. A horizontal line
+         has a bounding box of zero height, and the spec says an element
+         painted with a gradient over an empty box is not rendered at all: the
+         beam was simply invisible, in the tab and in every generated icon. -->
+    <linearGradient id="accent-cyan" gradientUnits="userSpaceOnUse" x1="136" y1="140" x2="376" y2="140">
       <stop offset="0%" stop-color="#06b6d4" />
       <stop offset="100%" stop-color="#3b82f6" />
     </linearGradient>
 
-    <linearGradient id="accent-emerald" x1="0%" y1="100%" x2="100%" y2="0%">
+    <linearGradient id="accent-emerald" gradientUnits="userSpaceOnUse" x1="136" y1="372" x2="376" y2="372">
       <stop offset="0%" stop-color="#10b981" />
       <stop offset="100%" stop-color="#34d399" />
     </linearGradient>
@@ -42,8 +49,8 @@
   </defs>
 
   <!-- Container Box / Base Shield -->
-  <rect width="512" height="512" rx="112" fill="url(#bg-grad)" />
-  <rect width="508" height="508" x="2" y="2" rx="110" fill="none" stroke="#ffffff" stroke-opacity="0.08" stroke-width="2" />
+  <rect width="512" height="512" fill="url(#bg-grad)" />
+  <rect width="508" height="508" x="2" y="2" fill="none" stroke="#ffffff" stroke-opacity="0.08" stroke-width="2" />
 
   <!-- Background Cyber Hex Grid overlay -->
   <g opacity="0.12" stroke="#8b5cf6" stroke-width="1.5" fill="none">

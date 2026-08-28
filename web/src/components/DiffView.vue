@@ -366,14 +366,14 @@ const stat = computed(() => ({
           r.kind === 'add' && 'bg-[var(--status-good)]/10',
           r.kind === 'del' && 'bg-destructive/10',
           r.kind === 'hunk' && 'text-muted-foreground bg-muted/60 my-1',
-          r.kind === 'meta' && 'text-muted-foreground/60',
+          r.kind === 'meta' && 'text-muted-foreground',
         ]"
       >
         <!-- Both sides, so a line can be cited by number in either version.
              The new-side number is also the button that starts a thread there:
              the gutter rather than the row, so selecting code to copy it still
              works. -->
-        <span class="text-muted-foreground/50 w-8 shrink-0 text-right tabular-nums select-none">
+        <span class="text-muted-foreground w-8 shrink-0 text-right tabular-nums select-none">
           {{ r.oldNo ?? '' }}
         </span>
         <button
@@ -383,7 +383,7 @@ const stat = computed(() => ({
             'w-8 shrink-0 text-right tabular-nums select-none',
             marked.has(anchor(r))
               ? 'text-[var(--primary)] font-semibold'
-              : 'text-muted-foreground/50 hover:text-foreground',
+              : 'text-muted-foreground hover:text-foreground',
           ]"
           :title="marked.has(anchor(r)) ? 'This line is being discussed' : 'Comment on this line'"
           :aria-label="`Comment on line ${anchor(r)}`"
@@ -391,7 +391,7 @@ const stat = computed(() => ({
         >
           {{ r.newNo ?? r.oldNo }}
         </button>
-        <span v-else class="text-muted-foreground/50 w-8 shrink-0 text-right tabular-nums select-none">
+        <span v-else class="text-muted-foreground w-8 shrink-0 text-right tabular-nums select-none">
           {{ r.newNo ?? '' }}
         </span>
         <span

@@ -55,7 +55,7 @@ function resetsIn(iso?: string): string {
       </span>
       <span
         v-if="!compact && w.resetsAt"
-        class="text-muted-foreground/70 w-16 shrink-0 text-[10px]"
+        class="text-muted-foreground w-16 shrink-0 text-[10px]"
       >
         {{ resetsIn(w.resetsAt) }}
       </span>

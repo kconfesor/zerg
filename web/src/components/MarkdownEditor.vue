@@ -234,7 +234,7 @@ const tools = computed<Tool[]>(() => {
       </template>
 
       <div class="ml-auto flex items-center gap-2 pl-1 text-[11px]">
-        <span v-if="tab === 'write'" class="text-muted-foreground/70 tabular hidden sm:inline">
+        <span v-if="tab === 'write'" class="text-muted-foreground tabular hidden sm:inline">
           {{ words }} word{{ words === 1 ? '' : 's' }}
         </span>
         <!-- What will actually be sent. The document is Markdown underneath, so

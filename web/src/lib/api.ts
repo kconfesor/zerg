@@ -399,16 +399,47 @@ async function call<T>(path: string, init?: RequestInit): Promise<T> {
   return body as T
 }
 
+/**
+ * The answers the page started fetching before this bundle was parsed.
+ *
+ * index.html asks for the three things every start needs while the bundle is
+ * still on the wire, which on a phone over a tailnet is most of a round trip
+ * saved. This takes each answer at most once: a second call is a fresh
+ * request, because the point is a faster first paint, not a cache.
+ *
+ * Strictly an optimisation. If the boot fetch is missing, or failed for any
+ * reason, this asks again through call() so the error arrives the way every
+ * other error does, with its status and the daemon's own message.
+ */
+type BootKey = 'projects' | 'roles' | 'harnesses'
+
+declare global {
+  interface Window {
+    __zergBoot?: Partial<Record<BootKey, Promise<unknown>>>
+  }
+}
+
+async function booted<T>(key: BootKey, again: () => Promise<T>): Promise<T> {
+  const waiting = window.__zergBoot?.[key]
+  if (!waiting) return again()
+  delete window.__zergBoot![key]
+  try {
+    return (await waiting) as T
+  } catch {
+    return again()
+  }
+}
+
 export const api = {
   health: () => call<{ status: string }>('/health'),
 
-  harnesses: () => call<string[]>('/harnesses'),
+  harnesses: () => booted('harnesses', () => call<string[]>('/harnesses')),
   models: (harness: string) => call<Model[]>(`/harnesses/${harness}/models`),
   /** The reasoning levels this harness accepts, weakest first. Empty means it
    *  has no such control, and the field is not offered for it. */
   thinking: (harness: string) => call<string[]>(`/harnesses/${harness}/thinking`),
 
-  roles: () => call<RoleTemplate[]>('/roles'),
+  roles: () => booted('roles', () => call<RoleTemplate[]>('/roles')),
   /** The teams a project may use: the shared ones and its own. Without an id
    *  this is every team, which is not a list to show under one project. */
   teamPresets: async (projectId?: string) =>
@@ -429,7 +460,7 @@ export const api = {
     call<RoleTemplate>(`/roles/${r.id}`, { method: 'PUT', body: JSON.stringify(r) }),
   deleteRole: (id: string) => call<void>(`/roles/${id}`, { method: 'DELETE' }),
 
-  projects: () => call<Project[]>('/projects'),
+  projects: () => booted('projects', () => call<Project[]>('/projects')),
   createProject: (path: string, baseBranch: string) =>
     call<Project>('/projects', { method: 'POST', body: JSON.stringify({ path, baseBranch }) }),
 
