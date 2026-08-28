@@ -949,17 +949,19 @@ func TestIntegrationModeDecidesWhatCompletionDoes(t *testing.T) {
 	ctx := context.Background()
 
 	for _, tc := range []struct {
-		name       string
-		mode       string
-		draft      bool
-		wantMerges int
-		wantPRs    int
-		wantInBody string
+		name        string
+		mode        string
+		draft       bool
+		wantMerges  int
+		wantPRs     int
+		wantInBody  string
+		wantOutcome string
+		wantRef     string
 	}{
-		{"merge", store.IntegrateMerge, false, 1, 0, ""},
-		{"branch", store.IntegrateBranch, false, 0, 0, ""},
-		{"pr", store.IntegratePR, false, 0, 1, "Pull request: https://example.test/pr/1"},
-		{"draft-pr", store.IntegratePR, true, 0, 1, "Pull request: https://example.test/pr/1"},
+		{"merge", store.IntegrateMerge, false, 1, 0, "", store.OutcomeMerged, "aaaaaaaaaa"},
+		{"branch", store.IntegrateBranch, false, 0, 0, "", store.OutcomeBranch, "aaaaaaaaaa"},
+		{"pr", store.IntegratePR, false, 0, 1, "Pull request: https://example.test/pr/1", store.OutcomePR, "https://example.test/pr/1"},
+		{"draft-pr", store.IntegratePR, true, 0, 1, "Pull request: https://example.test/pr/1", store.OutcomePR, "https://example.test/pr/1"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFixture(t)
@@ -987,6 +989,18 @@ func TestIntegrationModeDecidesWhatCompletionDoes(t *testing.T) {
 			}
 			if tc.wantInBody != "" && !strings.Contains(msg.Body, tc.wantInBody) {
 				t.Errorf("%s: the completion does not record where the work went: %q", tc.mode, msg.Body)
+			}
+
+			// What happened is stored on the card, not left to be read back out
+			// of that sentence or guessed from the project's setting, which is
+			// a live value and answers differently the moment it is changed.
+			done, err := f.db.GetTask(ctx, task.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if done.Outcome != tc.wantOutcome || done.OutcomeRef != tc.wantRef {
+				t.Errorf("%s: recorded outcome %q %q, want %q %q",
+					tc.mode, done.Outcome, done.OutcomeRef, tc.wantOutcome, tc.wantRef)
 			}
 			// The task is finished either way. Whether it has landed is a
 			// separate question from whether the work is done.
@@ -1057,6 +1071,12 @@ func TestGatedTerminalRoleWaitsForApprovalBeforeLanding(t *testing.T) {
 	}
 	if len(f.git.merges) != 1 {
 		t.Errorf("approving did not land the work: %v merges", len(f.git.merges))
+	}
+	// Landing through an approval records what happened, the same as landing
+	// without one: a history that reads outcomes cannot have a hole where the
+	// gated pipelines are.
+	if done := f.reload(t, task.ID); done.Outcome != store.OutcomeMerged || done.OutcomeRef != "aaaaaaaaaa" {
+		t.Errorf("approved completion recorded %q %q, want merged aaaaaaaaaa", done.Outcome, done.OutcomeRef)
 	}
 	if got := f.reload(t, task.ID).State; got != store.TaskDone {
 		t.Errorf("task state is %q after approval, want done", got)
@@ -1194,6 +1214,12 @@ func TestInterruptedApprovalIsSettledFromTheRepository(t *testing.T) {
 	}
 	if a.State != store.ApprovalApproved {
 		t.Errorf("approval state is %q, want approved", a.State)
+	}
+	// The reconciler is the third way a card can end, and it knows the mode it
+	// just asked git about, so it records the outcome too rather than leaving
+	// the one card that survived a crash blank.
+	if done := f.reload(t, task.ID); done.Outcome != store.OutcomeMerged || done.OutcomeRef != "aaaaaaaaaa" {
+		t.Errorf("settled card recorded %q %q, want merged aaaaaaaaaa", done.Outcome, done.OutcomeRef)
 	}
 }
 

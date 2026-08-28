@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"database/sql"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -185,5 +187,71 @@ func TestStoppingACardCancelsItsQuestions(t *testing.T) {
 	}
 	if len(left) != 0 {
 		t.Errorf("%d question(s) still open on a stopped card", len(left))
+	}
+}
+
+// Migration 19 recovers the one outcome the old database wrote down.
+//
+// A pull request URL was appended to the terminal handoff's note as prose, so
+// it is the only ending that can be read back with confidence. A merge and a
+// branch left the same trace, which is none, and those stay empty rather than
+// being guessed from a project setting that may have changed since.
+func TestMigrationReadsBackThePullRequestItWroteIntoProse(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "prose.db")
+	raw, err := sql.Open("sqlite", path+"?_pragma=foreign_keys(1)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 18; i++ {
+		if _, err := raw.ExecContext(ctx, migrations[i]); err != nil {
+			t.Fatalf("migration %d: %v", i+1, err)
+		}
+	}
+	if _, err := raw.ExecContext(ctx, `PRAGMA user_version=18`); err != nil {
+		t.Fatal(err)
+	}
+	now := "2026-01-01T00:00:00Z"
+	if _, err := raw.ExecContext(ctx, `INSERT INTO projects (id,path,name,base_branch,created_at)
+		VALUES ('p',?,'Old','main',?)`, repoDir(t, "prose"), now); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ id, body string }{
+		{"shipped", "did the thing\n\nPull request: https://example.test/pr/7"},
+		{"merged", "did the thing"},
+	} {
+		if _, err := raw.ExecContext(ctx, `INSERT INTO tasks (id,project_id,name,body,lane,state,created_at,completed_at)
+			VALUES (?,'p',?,'','done','done',?,?)`, tc.id, tc.id, now, now); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := raw.ExecContext(ctx, `INSERT INTO messages (id,project_id,task_id,from_role,kind,priority,body,terminal,created_at)
+			VALUES (?,'p',?,'reviewer','handoff',50,?,1,?)`, "m-"+tc.id, tc.id, tc.body, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	raw.Close()
+
+	db, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("migrating: %v", err)
+	}
+	defer db.Close()
+
+	shipped, err := db.GetTask(ctx, "shipped")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if shipped.Outcome != OutcomePR || shipped.OutcomeRef != "https://example.test/pr/7" {
+		t.Errorf("recovered %q %q, want the pull request it named", shipped.Outcome, shipped.OutcomeRef)
+	}
+
+	// The other one is not guessed. A merge and a branch are indistinguishable
+	// in an old database, and saying either would be making it up.
+	merged, err := db.GetTask(ctx, "merged")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if merged.Outcome != "" {
+		t.Errorf("an ending nothing recorded came back as %q", merged.Outcome)
 	}
 }

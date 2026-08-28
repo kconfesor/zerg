@@ -26,6 +26,18 @@ const (
 	// apart, and it answers "when" as well.
 )
 
+// What happened to the work when a task finished. Empty on a card that has not
+// ended, and on one that ended before schema 19 recorded this.
+const (
+	// OutcomeMerged: the commit is in the base branch.
+	OutcomeMerged = "merged"
+	// OutcomePR: a pull request was opened, and OutcomeRef is its URL.
+	OutcomePR = "pr"
+	// OutcomeBranch: the work is committed on the role's branch and landing it
+	// is someone else's decision.
+	OutcomeBranch = "branch"
+)
+
 // LaneDone is the well a finished card lands in.
 const LaneDone = "done"
 
@@ -80,6 +92,14 @@ type Task struct {
 	// StoppedAt is set when a person parked this card, which is a different
 	// event from a role rejecting it even though both leave State "rejected".
 	StoppedAt *time.Time `json:"stoppedAt,omitempty"`
+
+	// Outcome is what happened to the work when the last role finished, and
+	// OutcomeRef is where it went: the commit that was merged, or the pull
+	// request's URL. Recorded at the moment it happens, because the project's
+	// integration setting is what it is *now* and a task ended under whatever
+	// it was then.
+	Outcome    string `json:"outcome,omitempty"`
+	OutcomeRef string `json:"outcomeRef,omitempty"`
 
 	// Tokens and CostUSD are what this card has cost across every role and
 	// every lap. A board that shows only a lane says nothing about the price
@@ -184,14 +204,15 @@ func (db *DB) CreateTask(ctx context.Context, projectID, name, body, lane string
 }
 
 const taskCols = `id, project_id, session_id, name, body, lane, state,
-	created_at, first_claimed_at, completed_at, active_ms, rework_count, hidden, stopped_at`
+	created_at, first_claimed_at, completed_at, active_ms, rework_count, hidden, stopped_at,
+	outcome, outcome_ref`
 
 // taskColsT is the same list qualified to the tasks table, for the queries that
 // join. Unqualified names resolve today and would become ambiguous the moment a
 // joined table gained a column of the same name.
 const taskColsT = `t.id, t.project_id, t.session_id, t.name, t.body, t.lane, t.state,
 	t.created_at, t.first_claimed_at, t.completed_at, t.active_ms, t.rework_count, t.hidden,
-	t.stopped_at`
+	t.stopped_at, t.outcome, t.outcome_ref`
 
 // GetTaskIn resolves a task that must belong to this project.
 //
@@ -278,6 +299,7 @@ func scanTaskWithSummary(s scanner) (*Task, error) {
 	)
 	if err := s.Scan(&t.ID, &t.ProjectID, &sessionID, &t.Name, &t.Body, &t.Lane, &t.State,
 		&created, &firstClaim, &completedAt, &t.ActiveMS, &t.ReworkCount, &t.Hidden, &stoppedAt,
+		&t.Outcome, &t.OutcomeRef,
 		&t.Tokens, &t.CostUSD, &t.Doing); err != nil {
 		return nil, err
 	}
@@ -298,7 +320,7 @@ func scanTask(s scanner) (*Task, error) {
 	)
 	if err := s.Scan(&t.ID, &t.ProjectID, &sessionID, &t.Name, &t.Body, &t.Lane, &t.State,
 		&created, &firstClaim, &completedAt, &t.ActiveMS, &t.ReworkCount, &t.Hidden,
-		&stoppedAt); err != nil {
+		&stoppedAt, &t.Outcome, &t.OutcomeRef); err != nil {
 		return nil, err
 	}
 	if err := fillTaskTimes(&t, sessionID, created, firstClaim, completedAt, stoppedAt); err != nil {
