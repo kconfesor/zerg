@@ -382,8 +382,7 @@ async function remove(tpl: RoleTemplate) {
                 @update:model-value="(v: boolean) => editing && (editing.finisher = v)"
               />
               <span class="text-muted-foreground">
-                Added to a team it goes last, where it finishes the task and the work is integrated.
-                Roles added after it go in front, so the pipeline keeps ending here as it grows.
+                Joins a team at the end and finishes the task there.
               </span>
             </label>
           </div>
