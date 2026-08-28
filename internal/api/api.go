@@ -162,6 +162,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/tasks/{id}/review", s.reviewThreads)
 	mux.HandleFunc("POST /api/tasks/{id}/review", s.openReviewThread)
 	mux.HandleFunc("POST /api/review-threads/{id}/comments", s.addReviewComment)
+	mux.HandleFunc("POST /api/tasks/{id}/review/ask", s.askAboutTheChange)
+	mux.HandleFunc("POST /api/review-threads/{id}/raise", s.raiseReviewThread)
 	mux.HandleFunc("PUT /api/review-threads/{id}/resolved", s.resolveReviewThread)
 	mux.HandleFunc("GET /api/approvals/{id}/diff", s.approvalDiff)
 	mux.HandleFunc("GET /api/approvals/{id}/mergeable", s.approvalMergeable)

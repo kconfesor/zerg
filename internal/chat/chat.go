@@ -15,6 +15,7 @@ package chat
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 
 	"log/slog"
@@ -64,6 +65,11 @@ type Manager struct {
 
 	mu       sync.Mutex
 	sessions map[string]*session
+
+	// asking serialises AskAndWait. The bus carries a session's output rather
+	// than a reply addressed to a caller, so two overlapping questions would
+	// each collect the other's sentences.
+	asking sync.Mutex
 }
 
 type session struct {
@@ -246,4 +252,71 @@ func (m *Manager) Reset(ctx context.Context, projectID string) error {
 		return fmt.Errorf("clearing the conversation: %w", err)
 	}
 	return nil
+}
+
+// AskAndWait asks and returns the answer, rather than leaving it on the bus.
+//
+// Ask is right for the chat screen, where the reply streams into a conversation
+// somebody is watching. A question asked from inside a diff has somewhere
+// specific to land: the review thread it was asked on. So this one listens for
+// the agent's own messages until it finishes its turn, and hands back what it
+// said.
+//
+// One question at a time per project. Two overlapping asks would each collect
+// the other's sentences, since the bus carries the session's output and not a
+// reply addressed to a caller.
+func (m *Manager) AskAndWait(ctx context.Context, projectID, question string) (string, error) {
+	if question == "" {
+		return "", fmt.Errorf("nothing to ask")
+	}
+	m.asking.Lock()
+	defer m.asking.Unlock()
+
+	// Subscribed before the question is sent: a fast agent can answer before a
+	// subscription taken afterwards exists, and the answer would be lost to a
+	// caller that is still waiting for it.
+	events, cancel := m.bus.Subscribe(256)
+	defer cancel()
+
+	if err := m.Ask(ctx, projectID, question); err != nil {
+		return "", err
+	}
+
+	var said []string
+	for {
+		select {
+		case <-ctx.Done():
+			// Whatever it managed to say is better than nothing: a long answer
+			// cut short still tells the reader something.
+			return strings.TrimSpace(strings.Join(said, "\n\n")), ctx.Err()
+		case ev, ok := <-events:
+			if !ok {
+				return strings.TrimSpace(strings.Join(said, "\n\n")), nil
+			}
+			if ev.ProjectID != projectID || ev.Role != Role {
+				continue
+			}
+			switch ev.Kind {
+			case adapter.EventMessage:
+				if text := strings.TrimSpace(ev.Text); text != "" {
+					said = append(said, text)
+				}
+			case adapter.EventTurnEnd:
+				// Not the first turn that ends: the one that carried the
+				// answer. A session emits a turn_end before this question's
+				// reply arrives, and returning there gave the thread an empty
+				// comment while the agent went on to answer perfectly well two
+				// seconds later.
+				if len(said) == 0 {
+					continue
+				}
+				return strings.TrimSpace(strings.Join(said, "\n\n")), nil
+			case adapter.EventError:
+				if len(said) == 0 {
+					return "", fmt.Errorf("the agent could not answer: %s", ev.Text)
+				}
+				return strings.TrimSpace(strings.Join(said, "\n\n")), nil
+			}
+		}
+	}
 }

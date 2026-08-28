@@ -530,6 +530,30 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ body, author }),
     }),
+  /**
+   * Put a question to the project's agent about a hunk, with the code attached.
+   *
+   * The answer lands in the thread as a comment, written when the agent
+   * finishes: the reply is not waited for here, because an agent turn outlives
+   * a request held open on a phone. The thread comes back at once so the
+   * question is on screen while it is being answered.
+   */
+  askAboutChange: (
+    taskId: string,
+    body: {
+      threadId?: string
+      approvalId?: string
+      commitSha?: string
+      base?: string
+      file?: string
+      line?: number
+      hunk?: string
+      question: string
+    },
+  ) => call<ReviewThread>(`/tasks/${taskId}/review/ask`, { method: 'POST', body: JSON.stringify(body) }),
+  /** Turn a question into a remark: what was learned has to be dealt with. */
+  raiseReviewThread: (threadId: string) =>
+    call<ReviewThread>(`/review-threads/${threadId}/raise`, { method: 'POST', body: '{}' }),
   /** Settle a thread, or open it again. A person only: the gate reads this. */
   resolveReviewThread: (threadId: string, resolved: boolean) =>
     call<ReviewThread>(`/review-threads/${threadId}/resolved`, {
@@ -844,6 +868,8 @@ export interface TaskDetail {
 /** One remark on a card's code, and everything said about it. */
 export interface ReviewThread {
   id: string
+  /** A remark holds the gate until it is settled; a question never does. */
+  kind: 'remark' | 'question'
   projectId: string
   taskId: string
   approvalId?: string

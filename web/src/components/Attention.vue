@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
 import type { Attention } from '@/lib/api'
-import { AlertTriangle, ChevronRight, GitMerge, MessageSquare } from '@lucide/vue'
+import { AlertTriangle, ChevronRight, GitMerge, HelpCircle, MessageSquare } from '@lucide/vue'
 import { api, type ChangedFile, type Mergeable, type ReviewThread } from '@/lib/api'
 import { renderMarkdown } from '@/lib/markdown'
 import DiffView from '@/components/DiffView.vue'
@@ -99,7 +99,9 @@ function isDoc(f: ChangedFile): boolean {
  * enforces rather than this panel.
  */
 const threads = ref<Record<string, ReviewThread[]>>({})
-const composing = ref<{ task: string; file: string; line: number } | null>(null)
+const composing = ref<{ task: string; file: string; line: number; hunk: string } | null>(null)
+/** Threads waiting on an agent, so the box says so instead of looking empty. */
+const awaiting = ref<Set<string>>(new Set())
 const draft = ref('')
 const replies = ref<Record<string, string>>({})
 const reviewError = ref('')
@@ -120,18 +122,113 @@ function threadsFor(taskId: string | undefined, file: string): ReviewThread[] {
  *  conversation is without opening anything. */
 function discussed(taskId: string | undefined, file: string): number[] {
   return threadsFor(taskId, file)
-    .filter((t) => t.state === 'open' && t.line > 0)
+    .filter((t) => t.line > 0 && (t.state === 'open' || t.kind === 'question'))
     .map((t) => t.line)
 }
 
+/** What holds the gate: remarks the reader has not settled. A question never
+ *  counts, however many are open. */
 function openCount(taskId: string | undefined): number {
-  return (threads.value[taskId ?? ''] ?? []).filter((t) => t.state === 'open').length
+  return (threads.value[taskId ?? ''] ?? []).filter(
+    (t) => t.state === 'open' && t.kind !== 'question',
+  ).length
 }
 
-function compose(taskId: string | undefined, file: string, line: number) {
+function compose(taskId: string | undefined, file: string, line: number, hunk = '') {
   if (!taskId) return
-  composing.value = { task: taskId, file, line }
+  composing.value = { task: taskId, file, line, hunk }
   draft.value = ''
+}
+
+/**
+ * The questions a reader actually asks at a hunk, one press away.
+ *
+ * Prefilled rather than canned: they go in the box, so the reader can change
+ * one before asking. The agent answers them; it does not review the change and
+ * does not decide anything, which is why asking opens a thread that holds
+ * nothing at the gate.
+ */
+const PROMPTS = [
+  'Why is it done this way?',
+  'What breaks if this is wrong?',
+  'What else did this change touch?',
+]
+
+async function ask(approval: { id: string; commit?: string }, taskId: string | undefined, question: string) {
+  const at = composing.value
+  if (!taskId || !question.trim()) return
+  reviewError.value = ''
+  try {
+    const thread = await api.askAboutChange(taskId, {
+      approvalId: approval.id,
+      commitSha: approval.commit,
+      base: diffs.value[approval.id]?.base,
+      file: at?.file,
+      line: at?.line,
+      hunk: at?.hunk,
+      question,
+    })
+    composing.value = null
+    draft.value = ''
+    awaiting.value = new Set(awaiting.value).add(thread.id)
+    await loadThreads(taskId)
+    void waitForAnswer(taskId, thread.id, thread.comments.length)
+  } catch (e) {
+    reviewError.value = e instanceof Error ? e.message : String(e)
+  }
+}
+
+/** A follow-up on the same thread, which is how a conversation continues. */
+async function askAgain(approval: { id: string; commit?: string }, taskId: string | undefined, thread: ReviewThread) {
+  const text = replies.value[thread.id]
+  if (!taskId || !text?.trim()) return
+  reviewError.value = ''
+  try {
+    await api.askAboutChange(taskId, {
+      threadId: thread.id,
+      approvalId: approval.id,
+      commitSha: approval.commit,
+      base: diffs.value[approval.id]?.base,
+      file: thread.file,
+      line: thread.line,
+      question: text,
+    })
+    replies.value = { ...replies.value, [thread.id]: '' }
+    awaiting.value = new Set(awaiting.value).add(thread.id)
+    await loadThreads(taskId)
+    void waitForAnswer(taskId, thread.id, (thread.comments.length ?? 0) + 1)
+  } catch (e) {
+    reviewError.value = e instanceof Error ? e.message : String(e)
+  }
+}
+
+/**
+ * The answer is written when the agent finishes its turn, which is tens of
+ * seconds away, so this looks for it rather than leaving the reader wondering
+ * whether anything happened. It gives up after the daemon's own timeout, by
+ * which point the daemon has written whatever it could.
+ */
+async function waitForAnswer(taskId: string, threadId: string, had: number) {
+  for (let i = 0; i < 60; i++) {
+    await new Promise((r) => setTimeout(r, 3000))
+    await loadThreads(taskId)
+    const thread = (threads.value[taskId] ?? []).find((t) => t.id === threadId)
+    if ((thread?.comments.length ?? 0) > had) break
+  }
+  const still = new Set(awaiting.value)
+  still.delete(threadId)
+  awaiting.value = still
+}
+
+async function raise(taskId: string | undefined, threadId: string) {
+  if (!taskId) return
+  reviewError.value = ''
+  try {
+    await api.raiseReviewThread(threadId)
+    await loadThreads(taskId)
+  } catch (e) {
+    reviewError.value = e instanceof Error ? e.message : String(e)
+  }
 }
 
 function composingHere(taskId: string | undefined, file: string): boolean {
@@ -387,7 +484,7 @@ function empty(a: Attention | null): boolean {
                 v-if="f.diff"
                 :diff="f.diff"
                 :discussed="discussed(a.taskId, f.path)"
-                @comment="(line) => compose(a.taskId, f.path, line)"
+                @comment="(line, hunk) => compose(a.taskId, f.path, line, hunk)"
               />
               <p v-else class="text-muted-foreground px-2 text-[11px]">(no diff)</p>
             </div>
@@ -408,11 +505,24 @@ function empty(a: Attention | null): boolean {
                 ]"
               >
                 <div class="text-muted-foreground mb-1 flex items-center gap-1.5 text-[10px]">
-                  <MessageSquare :size="10" aria-hidden="true" />
+                  <component :is="t.kind === 'question' ? HelpCircle : MessageSquare" :size="10" aria-hidden="true" />
                   <span v-if="t.line">line {{ t.line }}</span>
                   <span v-else>this file</span>
-                  <span v-if="t.state === 'resolved'">· settled</span>
+                  <span v-if="t.kind === 'question'">· asked</span>
+                  <span v-else-if="t.state === 'resolved'">· settled</span>
+                  <!-- A question holds nothing, so what it offers is a way to
+                       make it matter rather than a way to dismiss it. -->
                   <button
+                    v-if="t.kind === 'question'"
+                    type="button"
+                    class="hover:text-foreground focus-visible:outline-ring ml-auto underline-offset-2 hover:underline focus-visible:outline-2"
+                    title="Make this a remark, which has to be settled before the work lands"
+                    @click="raise(a.taskId, t.id)"
+                  >
+                    raise it
+                  </button>
+                  <button
+                    v-else
                     type="button"
                     class="hover:text-foreground focus-visible:outline-ring ml-auto underline-offset-2 hover:underline focus-visible:outline-2"
                     @click="settle(a.taskId, t)"
@@ -424,14 +534,24 @@ function empty(a: Attention | null): boolean {
                   <span class="text-muted-foreground font-semibold">{{ c.author }}</span>
                   <span class="ml-1.5">{{ c.body }}</span>
                 </p>
+                <p v-if="awaiting.has(t.id)" class="text-muted-foreground mb-1 text-[10px] italic">
+                  asking the agent…
+                </p>
                 <InputGroup>
                   <InputGroupInput
                     v-model="replies[t.id]"
-                    placeholder="reply"
-                    @keyup.enter="reply(a.taskId, t.id)"
+                    :placeholder="t.kind === 'question' ? 'ask a follow-up' : 'reply'"
+                    @keyup.enter="t.kind === 'question' ? askAgain(a, a.taskId, t) : reply(a.taskId, t.id)"
                   />
                   <InputGroupAddon align="inline-end">
-                    <InputGroupButton size="sm" @click="reply(a.taskId, t.id)">Send</InputGroupButton>
+                    <InputGroupButton
+                      v-if="t.kind === 'question'"
+                      size="sm"
+                      @click="askAgain(a, a.taskId, t)"
+                    >
+                      Ask
+                    </InputGroupButton>
+                    <InputGroupButton v-else size="sm" @click="reply(a.taskId, t.id)">Send</InputGroupButton>
                   </InputGroupAddon>
                 </InputGroup>
               </div>
@@ -444,19 +564,41 @@ function empty(a: Attention | null): boolean {
                 <InputGroup>
                   <InputGroupInput
                     v-model="draft"
-                    placeholder="what about it?"
+                    placeholder="remark, or a question about this code"
                     autofocus
                     @keyup.enter="startThread(a)"
                   />
                   <InputGroupAddon align="inline-end">
                     <InputGroupButton size="sm" :disabled="!draft.trim()" @click="startThread(a)">
-                      Comment
+                      Remark
+                    </InputGroupButton>
+                    <InputGroupButton
+                      size="sm"
+                      variant="ghost"
+                      :disabled="!draft.trim()"
+                      title="Ask the project's agent. It answers here; it does not decide anything."
+                      @click="ask(a, a.taskId, draft)"
+                    >
+                      Ask
                     </InputGroupButton>
                     <InputGroupButton size="sm" variant="ghost" @click="composing = null">
                       Cancel
                     </InputGroupButton>
                   </InputGroupAddon>
                 </InputGroup>
+                <!-- The questions a reader actually asks at a hunk, one press
+                     away and editable before sending: they go in the box. -->
+                <div class="flex flex-wrap gap-1">
+                  <button
+                    v-for="q in PROMPTS"
+                    :key="q"
+                    type="button"
+                    class="text-muted-foreground hover:text-foreground focus-visible:outline-ring border px-1.5 py-0.5 text-[10px] focus-visible:outline-2"
+                    @click="draft = q"
+                  >
+                    {{ q }}
+                  </button>
+                </div>
               </div>
             </div>
 

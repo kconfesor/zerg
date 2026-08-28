@@ -27,7 +27,23 @@ const props = defineProps<{
  * copy it is the other thing people do here, and a row that opens a comment box
  * on every click fights that.
  */
-const emit = defineEmits<{ comment: [line: number] }>()
+const emit = defineEmits<{ comment: [line: number, hunk: string] }>()
+
+/**
+ * The lines around a click, which is what a question about "this" needs.
+ *
+ * Sent with the question rather than fetched from the commit, so the agent is
+ * asked about what the reader is actually looking at, including the removals:
+ * a hunk without them is a question about the result rather than the change.
+ */
+function hunkAround(index: number): string {
+  const start = Math.max(0, index - 6)
+  return rows.value
+    .slice(start, index + 7)
+    .filter((r) => r.kind !== 'meta')
+    .map((r) => (r.kind === 'add' ? '+' : r.kind === 'del' ? '-' : ' ') + r.text)
+    .join('\n')
+}
 
 const marked = computed(() => new Set(props.discussed ?? []))
 
@@ -118,7 +134,7 @@ const stat = computed(() => ({
           ]"
           :title="marked.has(anchor(r)) ? 'This line is being discussed' : 'Comment on this line'"
           :aria-label="`Comment on line ${anchor(r)}`"
-          @click="emit('comment', anchor(r))"
+          @click="emit('comment', anchor(r), hunkAround(i))"
         >
           {{ r.newNo ?? r.oldNo }}
         </button>

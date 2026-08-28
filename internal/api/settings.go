@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/kconfesor/zerg/internal/chat"
 	"github.com/kconfesor/zerg/internal/hatchery"
 	"github.com/kconfesor/zerg/internal/store"
 	"github.com/kconfesor/zerg/internal/tailnet"
@@ -615,6 +616,145 @@ func (s *Server) resolveReviewThread(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.db.SetReviewThreadState(r.Context(), r.PathValue("id"), req.Resolved); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	thread, err := s.db.ReviewThread(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, thread)
+}
+
+// askAboutTheChange puts a reader's question to the agent, with the code in
+// front of it, and lands the answer in the thread where it was asked.
+//
+// The reviewer is the one reviewing. This is not a second opinion on the change
+// and does not decide anything: it exists so a person can get a change into
+// their head, from inside the diff, without going to find someone. So the
+// thread it opens is a question rather than a remark, and holds nothing at the
+// gate. If what comes back matters, the reader raises it.
+func (s *Server) askAboutTheChange(w http.ResponseWriter, r *http.Request) {
+	if s.chatMgr == nil {
+		writeError(w, http.StatusNotImplemented, "this build has no agent to ask")
+		return
+	}
+	var req struct {
+		ThreadID   string `json:"threadId"`
+		ApprovalID string `json:"approvalId"`
+		CommitSHA  string `json:"commitSha"`
+		Base       string `json:"base"`
+		File       string `json:"file"`
+		Line       int    `json:"line"`
+		// Hunk is the lines the reader is looking at. Sent rather than fetched
+		// so the agent is asked about what is on the reader's screen.
+		Hunk     string `json:"hunk"`
+		Question string `json:"question"`
+	}
+	if !decode(w, r, &req) {
+		return
+	}
+	if strings.TrimSpace(req.Question) == "" {
+		badRequest(w, "a question needs some text")
+		return
+	}
+	task, err := s.db.GetTask(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+
+	thread := &store.ReviewThread{}
+	if req.ThreadID != "" {
+		// A follow-up belongs on the thread that started it.
+		if _, err := s.db.AddReviewComment(r.Context(), req.ThreadID, store.OperatorRole, req.Question); err != nil {
+			s.fail(w, r, err)
+			return
+		}
+		if thread, err = s.db.ReviewThread(r.Context(), req.ThreadID); err != nil {
+			s.fail(w, r, err)
+			return
+		}
+	} else {
+		thread.ProjectID, thread.TaskID = task.ProjectID, task.ID
+		thread.CommitSHA, thread.File, thread.Line = req.CommitSHA, req.File, req.Line
+		thread.Kind = store.ThreadQuestion
+		if req.ApprovalID != "" {
+			thread.ApprovalID = &req.ApprovalID
+		}
+		if thread, err = s.db.OpenReviewThread(r.Context(), thread, store.OperatorRole, req.Question); err != nil {
+			s.fail(w, r, err)
+			return
+		}
+	}
+
+	// Answered in the background, and the thread comes back now. An agent turn
+	// is tens of seconds; a request held open for that is a request that dies
+	// on a phone changing networks, and the answer would die with it.
+	go s.answerInThread(thread.ID, task.ProjectID, askPrompt(req.Base, req.CommitSHA, req.File, req.Line, req.Hunk, req.Question))
+
+	writeJSON(w, http.StatusAccepted, thread)
+}
+
+// answerInThread waits for the agent and writes what it said as a comment.
+func (s *Server) answerInThread(threadID, projectID, prompt string) {
+	// Its own context: the request that asked is already answered, and its
+	// cancellation would take the agent's turn with it.
+	ctx, cancel := context.WithTimeout(context.Background(), askTimeout)
+	defer cancel()
+
+	answer, err := s.chatMgr.AskAndWait(ctx, projectID, prompt)
+	if err != nil && answer == "" {
+		answer = "I could not answer that: " + err.Error()
+	}
+	if _, err := s.db.AddReviewComment(ctx, threadID, chat.Role, answer); err != nil {
+		s.log.Error("review: the answer could not be recorded", "thread", threadID, "err", err)
+	}
+}
+
+// askTimeout bounds one answer. Long enough for an agent to read the files
+// around a hunk, short enough that a thread does not sit empty for ever.
+const askTimeout = 3 * time.Minute
+
+// askPrompt puts the reader's question in front of the code it is about.
+//
+// The hunk, the file and the range, because a question about "this" means
+// nothing without them; and an instruction to answer rather than review,
+// because the person reading is the reviewer and an agent that volunteers a
+// verdict is answering a question nobody asked.
+func askPrompt(base, commit, file string, line int, hunk, question string) string {
+	var b strings.Builder
+	b.WriteString("A person is reviewing a change and has a question about it.\n\n")
+	if file != "" {
+		fmt.Fprintf(&b, "File: %s", file)
+		if line > 0 {
+			fmt.Fprintf(&b, ", around line %d", line)
+		}
+		b.WriteString("\n")
+	}
+	if base != "" && commit != "" {
+		fmt.Fprintf(&b, "The change is %s..%s in this repository.\n", base, commit)
+	}
+	if strings.TrimSpace(hunk) != "" {
+		b.WriteString("\nWhat they are looking at:\n\n```\n")
+		b.WriteString(strings.TrimRight(hunk, "\n"))
+		b.WriteString("\n```\n")
+	}
+	fmt.Fprintf(&b, "\nTheir question: %s\n", strings.TrimSpace(question))
+	b.WriteString(`
+Answer that question and nothing else. Read the surrounding code before you
+answer. They are reviewing this change, not you: do not give a verdict on it,
+do not list unrelated problems, and do not approve or reject anything. If the
+answer is that something is wrong, say what and why, and leave the decision to
+them. Keep it to a few sentences.`)
+	return b.String()
+}
+
+// raiseReviewThread turns a question into a remark, which is the reader
+// deciding that what they learned has to be dealt with before this lands.
+func (s *Server) raiseReviewThread(w http.ResponseWriter, r *http.Request) {
+	if err := s.db.RaiseReviewThread(r.Context(), r.PathValue("id")); err != nil {
 		s.fail(w, r, err)
 		return
 	}

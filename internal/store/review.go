@@ -24,6 +24,16 @@ const (
 	// thread: an agent answering its own question would be marking its own
 	// homework.
 	ThreadResolved = "resolved"
+
+	// ThreadRemark is the reviewer's own remark about the code, and holds the
+	// gate until it is settled.
+	ThreadRemark = "remark"
+	// ThreadQuestion is a question the reviewer asked an agent while reading.
+	// It holds nothing: making it an obligation would mean asking anything
+	// costs a click to dismiss, and a reviewer who learns that stops asking.
+	// Raising one turns it into a remark, which is the person deciding that
+	// what they learned matters.
+	ThreadQuestion = "question"
 )
 
 // ReviewThread is one remark and everything said about it.
@@ -38,6 +48,8 @@ type ReviewThread struct {
 	File      string `json:"file,omitempty"`
 	Line      int    `json:"line"`
 
+	// Kind is whether this holds the gate: a remark does, a question does not.
+	Kind       string          `json:"kind"`
 	State      string          `json:"state"`
 	CreatedAt  time.Time       `json:"createdAt"`
 	ResolvedAt *time.Time      `json:"resolvedAt,omitempty"`
@@ -69,6 +81,9 @@ func (db *DB) OpenReviewThread(ctx context.Context, t *ReviewThread, author, bod
 	}
 	now := time.Now().UTC()
 	t.ID, t.State, t.CreatedAt = NewID(), ThreadOpen, now
+	if t.Kind == "" {
+		t.Kind = ThreadRemark
+	}
 
 	tx, err := db.sql.BeginTx(ctx, nil)
 	if err != nil {
@@ -77,9 +92,9 @@ func (db *DB) OpenReviewThread(ctx context.Context, t *ReviewThread, author, bod
 	defer tx.Rollback()
 
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO review_threads (id,project_id,task_id,approval_id,commit_sha,file,line,state,created_at)
-		 VALUES (?,?,?,?,?,?,?,?,?)`,
-		t.ID, t.ProjectID, t.TaskID, t.ApprovalID, t.CommitSHA, t.File, t.Line, t.State,
+		`INSERT INTO review_threads (id,project_id,task_id,approval_id,commit_sha,file,line,kind,state,created_at)
+		 VALUES (?,?,?,?,?,?,?,?,?,?)`,
+		t.ID, t.ProjectID, t.TaskID, t.ApprovalID, t.CommitSHA, t.File, t.Line, t.Kind, t.State,
 		now.Format(time.RFC3339Nano)); err != nil {
 		return nil, fmt.Errorf("opening a review thread: %w", err)
 	}
@@ -138,7 +153,7 @@ func (db *DB) SetReviewThreadState(ctx context.Context, id string, resolved bool
 // ReviewThread reads one thread with everything said on it.
 func (db *DB) ReviewThread(ctx context.Context, id string) (*ReviewThread, error) {
 	t, err := scanThread(db.read.QueryRowContext(ctx,
-		`SELECT id,project_id,task_id,approval_id,commit_sha,file,line,state,created_at,resolved_at
+		`SELECT id,project_id,task_id,approval_id,commit_sha,file,line,kind,state,created_at,resolved_at
 		   FROM review_threads WHERE id = ?`, id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("review thread %s: %w", id, ErrNotFound)
@@ -153,7 +168,7 @@ func (db *DB) ReviewThread(ctx context.Context, id string) (*ReviewThread, error
 // ReviewThreads is every thread on a card, oldest first, with its comments.
 func (db *DB) ReviewThreads(ctx context.Context, taskID string) ([]ReviewThread, error) {
 	rows, err := db.read.QueryContext(ctx,
-		`SELECT id,project_id,task_id,approval_id,commit_sha,file,line,state,created_at,resolved_at
+		`SELECT id,project_id,task_id,approval_id,commit_sha,file,line,kind,state,created_at,resolved_at
 		   FROM review_threads WHERE task_id = ? ORDER BY created_at`, taskID)
 	if err != nil {
 		return nil, fmt.Errorf("reading review threads: %w", err)
@@ -182,16 +197,29 @@ func (db *DB) ReviewThreads(ctx context.Context, taskID string) ([]ReviewThread,
 	return out, nil
 }
 
-// OpenReviewThreads counts what is still unsettled on a card. The approval gate
-// asks this, which is why it is a count and not a list.
+// OpenReviewThreads counts what still holds the gate on a card: remarks the
+// reviewer has not settled. Questions are not counted, however many are open,
+// because asking one is reading the change rather than objecting to it.
 func (db *DB) OpenReviewThreads(ctx context.Context, taskID string) (int, error) {
 	var n int
 	if err := db.read.QueryRowContext(ctx,
-		`SELECT count(*) FROM review_threads WHERE task_id = ? AND state = ?`,
-		taskID, ThreadOpen).Scan(&n); err != nil {
+		`SELECT count(*) FROM review_threads WHERE task_id = ? AND kind = ? AND state = ?`,
+		taskID, ThreadRemark, ThreadOpen).Scan(&n); err != nil {
 		return 0, fmt.Errorf("counting open review threads: %w", err)
 	}
 	return n, nil
+}
+
+// RaiseReviewThread turns a question into a remark: the person deciding that
+// what they learned has to be dealt with before this lands.
+func (db *DB) RaiseReviewThread(ctx context.Context, id string) error {
+	res, err := db.sql.ExecContext(ctx,
+		`UPDATE review_threads SET kind = ?, state = ?, resolved_at = NULL WHERE id = ?`,
+		ThreadRemark, ThreadOpen, id)
+	if err != nil {
+		return fmt.Errorf("raising review thread %s: %w", id, err)
+	}
+	return mustAffect(res, fmt.Sprintf("review thread %s", id))
 }
 
 func (db *DB) reviewComments(ctx context.Context, threadID string) ([]ReviewComment, error) {
@@ -228,7 +256,7 @@ func scanThread(s scanner) (*ReviewThread, error) {
 		resolvedAt sql.NullString
 	)
 	if err := s.Scan(&t.ID, &t.ProjectID, &t.TaskID, &approval, &t.CommitSHA, &t.File, &t.Line,
-		&t.State, &created, &resolvedAt); err != nil {
+		&t.Kind, &t.State, &created, &resolvedAt); err != nil {
 		return nil, err
 	}
 	if approval.Valid {
