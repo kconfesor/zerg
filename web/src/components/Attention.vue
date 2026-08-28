@@ -279,14 +279,79 @@ function onKey(e: KeyboardEvent) {
   }
 }
 
-onMounted(() => window.addEventListener('keydown', onKey))
-onUnmounted(() => window.removeEventListener('keydown', onKey))
+onMounted(() => {
+  window.addEventListener('keydown', onKey)
+  // The dialog builds its body around this panel, so the scroller exists by
+  // the time the first frame is painted, not when this runs.
+  requestAnimationFrame(() => {
+    scroller = scrollerFor(root.value)
+    scroller?.addEventListener('scroll', onScroll, { passive: true })
+  })
+})
+onUnmounted(() => {
+  window.removeEventListener('keydown', onKey)
+  scroller?.removeEventListener('scroll', onScroll)
+})
 
 /** Scroll the file being read to the top of the panel, since the panel is what
- *  scrolls rather than the page. */
+ *  scrolls rather than the page. scroll-mt on the file leaves room for the bar,
+ *  which is sticky and would otherwise land on top of the header. */
 function focusFile(path: string) {
   requestAnimationFrame(() => {
     document.querySelector(`[data-file="${CSS.escape(path)}"]`)?.scrollIntoView({ block: 'start' })
+  })
+}
+
+/** The panel's root, so the scroll tracking can find what scrolls it. */
+const root = ref<HTMLElement | null>(null)
+
+/**
+ * Where the bar sits, and the line it reads the current file from.
+ *
+ * The bar follows the reader down the change, so what it says has to follow
+ * the reader too: pinned to the top and still reporting "file 3 of 47" twelve
+ * files later, next would jump backwards and the count would be a lie. The
+ * file whose header has passed under the bar is the file being read.
+ */
+const BAR = 48
+
+/** The scrolling ancestor: the dialog's body, or whatever holds this panel. */
+function scrollerFor(el: HTMLElement | null): HTMLElement | null {
+  for (let p = el?.parentElement; p; p = p.parentElement) {
+    const y = getComputedStyle(p).overflowY
+    if (y === 'auto' || y === 'scroll') return p
+  }
+  return null
+}
+
+let scroller: HTMLElement | null = null
+let queued = false
+
+function trackReading() {
+  if (!root.value || !scroller) return
+  const line = scroller.getBoundingClientRect().top + BAR
+  for (const group of root.value.querySelectorAll<HTMLElement>('[data-approval]')) {
+    const id = group.dataset.approval
+    if (!id) continue
+    let under: string | null = null
+    for (const f of group.querySelectorAll<HTMLElement>('[data-file]')) {
+      if (f.getBoundingClientRect().top > line) break
+      under = f.dataset.file ?? null
+    }
+    if (under && current.value[id] !== under) {
+      current.value = { ...current.value, [id]: under }
+    }
+  }
+}
+
+// One read per frame. Scroll fires far faster than the layout can be measured,
+// and measuring in the handler is what makes a scroll janky.
+function onScroll() {
+  if (queued) return
+  queued = true
+  requestAnimationFrame(() => {
+    queued = false
+    trackReading()
   })
 }
 
@@ -566,7 +631,7 @@ function empty(a: Attention | null): boolean {
 </script>
 
 <template>
-  <div v-if="props.attention" class="flex flex-col gap-3">
+  <div v-if="props.attention" ref="root" class="flex flex-col gap-3">
     <!-- Nothing waiting should feel like calm, not like a broken panel. -->
     <div
       v-if="empty(props.attention)"
@@ -630,7 +695,7 @@ function empty(a: Attention | null): boolean {
           <code class="ml-1 opacity-70">{{ a.commit!.slice(0, 8) }}</code>
         </button>
 
-        <div v-if="diffs[a.id]?.open" class="mt-2">
+        <div v-if="diffs[a.id]?.open" :data-approval="a.id" class="mt-2">
           <p v-if="diffs[a.id]?.error" class="text-destructive text-[11px]">
             {{ diffs[a.id]?.error }}
           </p>
@@ -647,15 +712,24 @@ function empty(a: Attention | null): boolean {
             {{ diffs[a.id]!.files.length === 1 ? 'file' : 'files' }}.
           </p>
 
-          <!-- Where you are and what is left. A twelve-file diff is otherwise
-               one long scroll with no sense of progress, and this one may have
-               been started on a phone yesterday. -->
+          <!-- Where you are and what is left, pinned.
+               A twelve-file diff is otherwise one long scroll with no sense of
+               progress, and this one may have been started on a phone
+               yesterday. Sticky because next is useless at the top of a
+               forty-seven file change: by the time you have read a file, the
+               control for leaving it has scrolled away, and scrolling back up
+               to press it loses your place. It names the file it is over, so
+               it reads as attached to what is under it rather than to the
+               card. -->
           <div
             v-if="(diffs[a.id]?.files.length ?? 0) > 1"
-            class="bg-muted/40 mb-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 border px-2 py-1 text-[10px]"
+            class="bg-card sticky top-0 z-20 mb-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 border px-2 py-1 text-[10px] shadow-sm"
           >
             <span class="text-muted-foreground tabular-nums">
               file {{ positionOf(a.id).at }} of {{ positionOf(a.id).of }}
+            </span>
+            <span class="min-w-0 max-w-[45%] truncate font-mono" :title="reading(a.id)">
+              {{ reading(a.id) }}
             </span>
             <span v-if="unread(a.id)" class="text-muted-foreground/80">
               · {{ unread(a.id) }} not read yet
@@ -683,17 +757,17 @@ function empty(a: Attention | null): boolean {
                 next unread
               </Button>
             </span>
-            <span class="text-muted-foreground/60 hidden w-full sm:block">
-              j and k move, and mark what you leave as read
-            </span>
           </div>
+          <p class="text-muted-foreground/60 mb-1.5 hidden text-[10px] sm:block">
+            j and k move, and mark what you leave as read
+          </p>
 
           <div
             v-for="f in diffs[a.id]?.files ?? []"
             :key="f.path"
             :data-file="f.path"
             :class="[
-              'mb-3 border last:mb-0',
+              'mb-3 scroll-mt-12 border last:mb-0',
               reading(a.id) === f.path && 'border-l-2 border-l-[var(--primary)]',
               isSeen(a.id, f.path) && reading(a.id) !== f.path && 'opacity-70',
             ]"

@@ -1095,7 +1095,7 @@ watch(current, () => (banner.value = null))
             Nothing downstream moves until these are decided.
           </DialogDescription>
         </DialogHeader>
-        <DialogBody>
+        <DialogBody class="pt-0">
           <!-- Where the person who pressed the button is looking. -->
           <p
             v-if="dialogError"
@@ -1105,6 +1105,7 @@ watch(current, () => (banner.value = null))
             {{ dialogError }}
           </p>
           <Attention
+            class="pt-4"
             :attention="attention"
             :busy="busy.is"
             @approve="act.approve"

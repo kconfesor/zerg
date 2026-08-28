@@ -105,6 +105,24 @@ describe('a change too large to send in one piece', () => {
     expect(row(w, 'b.rs')).toContain('fn b()')
   })
 
+  // The bar is pinned to the top of the panel for the whole read, so what it
+  // names has to be the file under it rather than the file the reader started
+  // on. The scroll tracking itself needs layout and is checked in a browser;
+  // this covers the part that does not: pressing next renames the bar.
+  it('names the file being read, and renames it on next', async () => {
+    const w = await open([file('a.rs', { diff: '@@ -1 +1 @@\n-x\n+y\n' }), file('b.rs', { diff: '@@ -1 +1 @@\n-p\n+q\n' })])
+    const bar = () => w.find('.sticky').text().replace(/\s+/g, ' ')
+
+    expect(bar()).toContain('file 1 of 2')
+    expect(bar()).toContain('a.rs')
+
+    await w.findAll('.sticky button').find((b) => b.text() === 'next')!.trigger('click')
+    await flushPromises()
+
+    expect(bar()).toContain('file 2 of 2')
+    expect(bar()).toContain('b.rs')
+  })
+
   // A binary file and a file that did not change look identical when both
   // render nothing.
   it('says why a binary file shows nothing', async () => {
