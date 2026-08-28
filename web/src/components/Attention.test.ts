@@ -47,8 +47,8 @@ const attention = (files: ChangedFile[]): AttentionData => {
   }
 }
 
-async function open(files: ChangedFile[]) {
-  const w = mount(Attention, { props: { attention: attention(files) } })
+async function open(files: ChangedFile[], opts: Record<string, unknown> = {}) {
+  const w = mount(Attention, { props: { attention: attention(files) }, ...opts })
   await flushPromises()
   // The panel opens the diff itself at a terminal gate; only click if it did not.
   const toggle = w.findAll('button').find((b) => /^Show\b/.test(b.text()))
@@ -121,6 +121,41 @@ describe('a change too large to send in one piece', () => {
 
     expect(bar()).toContain('file 2 of 2')
     expect(bar()).toContain('b.rs')
+  })
+
+  // "comment on this file" opened a box whose buttons were Remark and Ask: one
+  // word covering two different acts, and the one most often done there was
+  // putting a question to an agent. The reader says which now.
+  it('opens an ask, with the cursor already in it', async () => {
+    const w = await open([file('a.rs', { diff: '@@ -1 +1 @@\n-x\n+y\n' })], { attachTo: document.body })
+
+    await w.findAll('button').find((b) => b.text() === 'Ask about this file')!.trigger('click')
+    await flushPromises()
+
+    const box = w.find('[data-composer]')
+    expect((box.element as HTMLInputElement).placeholder).toContain('know about this code')
+    // autofocus is honoured on a page load, not on an input mounted later, so
+    // the box was opened with the cursor nowhere.
+    expect(document.activeElement).toBe(box.element)
+    const actions = w.findAll('[data-slot=input-group] button').map((b) => b.text())
+    expect(actions).toContain('Ask')
+    expect(actions).toContain('Remark instead')
+  })
+
+  // A prompt is a question, so pressing one is asking, whichever way the box
+  // was opened.
+  it('turns a remark into an ask when a prompt is used', async () => {
+    const w = await open([file('a.rs', { diff: '@@ -1 +1 @@\n-x\n+y\n' })])
+
+    await w.findAll('button').find((b) => b.text() === 'Remark on this file')!.trigger('click')
+    await flushPromises()
+    expect(w.findAll('[data-slot=input-group] button').map((b) => b.text())).toContain('Remark')
+
+    await w.findAll('button').find((b) => b.text() === 'Why is it done this way?')!.trigger('click')
+    await flushPromises()
+
+    expect((w.find('[data-composer]').element as HTMLInputElement).value).toBe('Why is it done this way?')
+    expect(w.findAll('[data-slot=input-group] button').map((b) => b.text())).toContain('Ask')
   })
 
   // A binary file and a file that did not change look identical when both

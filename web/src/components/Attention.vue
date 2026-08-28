@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref, watch } from 'vue'
+import { nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useMediaQuery } from '@vueuse/core'
 import type { Attention } from '@/lib/api'
 import { AlertTriangle, ChevronRight, GitMerge, HelpCircle, MessageSquare } from '@lucide/vue'
@@ -364,7 +364,24 @@ function onScroll() {
  * enforces rather than this panel.
  */
 const threads = ref<Record<string, ReviewThread[]>>({})
-const composing = ref<{ task: string; file: string; line: number; hunk: string } | null>(null)
+/**
+ * What the reader opened the box to do.
+ *
+ * The two acts are not the same thing and were behind one word: "comment on
+ * this file" opened a box whose buttons were Remark and Ask, so the label
+ * promised a note and the thing most often done there was putting a question
+ * to an agent. The reader now says which, and the box answers to that: Enter
+ * does it, and the other stays beside it for a mind changed mid-sentence.
+ */
+type Intent = 'ask' | 'remark'
+
+const composing = ref<{
+  task: string
+  file: string
+  line: number
+  hunk: string
+  intent: Intent
+} | null>(null)
 /** Threads waiting on an agent, so the box says so instead of looking empty. */
 const awaiting = ref<Set<string>>(new Set())
 const draft = ref('')
@@ -399,10 +416,17 @@ function openCount(taskId: string | undefined): number {
   ).length
 }
 
-function compose(taskId: string | undefined, file: string, line: number, hunk = '') {
+function compose(
+  taskId: string | undefined,
+  file: string,
+  line: number,
+  hunk = '',
+  intent: Intent = 'remark',
+) {
   if (!taskId) return
-  composing.value = { task: taskId, file, line, hunk }
+  composing.value = { task: taskId, file, line, hunk, intent }
   draft.value = ''
+  void nextTick(() => document.querySelector<HTMLInputElement>('[data-composer]')?.focus())
 }
 
 /**
@@ -418,6 +442,12 @@ const PROMPTS = [
   'What breaks if this is wrong?',
   'What else did this change touch?',
 ]
+
+/** Put a prompt in the box and make the box an ask, since a prompt is one. */
+function askThis(question: string) {
+  draft.value = question
+  if (composing.value) composing.value = { ...composing.value, intent: 'ask' }
+}
 
 async function ask(approval: { id: string; commit?: string }, taskId: string | undefined, question: string) {
   const at = composing.value
@@ -923,28 +953,68 @@ function empty(a: Attention | null): boolean {
 
               <div v-if="composingHere(a.taskId, f.path)" class="flex flex-col gap-1">
                 <p class="text-muted-foreground text-[10px]">
-                  <template v-if="composing?.line">on line {{ composing?.line }}</template>
-                  <template v-else>on this file</template>
+                  <template v-if="composing?.intent === 'ask'">asking about</template>
+                  <template v-else>a remark on</template>
+                  <template v-if="composing?.line"> line {{ composing?.line }}</template>
+                  <template v-else> this file</template>
+                  <template v-if="composing?.intent === 'ask'">
+                    · the agent answers here, it decides nothing
+                  </template>
+                  <template v-else> · it holds the merge until you settle it</template>
                 </p>
                 <InputGroup>
                   <InputGroupInput
                     v-model="draft"
-                    placeholder="remark, or a question about this code"
-                    autofocus
-                    @keyup.enter="startThread(a)"
+                    data-composer
+                    :placeholder="
+                      composing?.intent === 'ask'
+                        ? 'what do you want to know about this code?'
+                        : 'what is wrong here, or what should change'
+                    "
+                    @keyup.enter="
+                      composing?.intent === 'ask' ? ask(a, a.taskId, draft) : startThread(a)
+                    "
                   />
                   <InputGroupAddon :align="narrow ? 'block-end' : 'inline-end'">
-                    <InputGroupButton size="sm" :disabled="!draft.trim()" @click="startThread(a)">
+                    <!-- The act the reader asked for leads; the other is beside
+                         it for a mind changed halfway through the sentence. -->
+                    <InputGroupButton
+                      v-if="composing?.intent === 'ask'"
+                      variant="default"
+                      size="sm"
+                      :disabled="!draft.trim()"
+                      title="Ask the project's agent. It answers here; it does not decide anything."
+                      @click="ask(a, a.taskId, draft)"
+                    >
+                      Ask
+                    </InputGroupButton>
+                    <InputGroupButton
+                      v-else
+                      variant="default"
+                      size="sm"
+                      :disabled="!draft.trim()"
+                      @click="startThread(a)"
+                    >
                       Remark
                     </InputGroupButton>
                     <InputGroupButton
+                      v-if="composing?.intent === 'ask'"
+                      size="sm"
+                      variant="ghost"
+                      :disabled="!draft.trim()"
+                      @click="startThread(a)"
+                    >
+                      Remark instead
+                    </InputGroupButton>
+                    <InputGroupButton
+                      v-else
                       size="sm"
                       variant="ghost"
                       :disabled="!draft.trim()"
                       title="Ask the project's agent. It answers here; it does not decide anything."
                       @click="ask(a, a.taskId, draft)"
                     >
-                      Ask
+                      Ask instead
                     </InputGroupButton>
                     <InputGroupButton size="sm" variant="ghost" @click="composing = null">
                       Cancel
@@ -952,14 +1022,16 @@ function empty(a: Attention | null): boolean {
                   </InputGroupAddon>
                 </InputGroup>
                 <!-- The questions a reader actually asks at a hunk, one press
-                     away and editable before sending: they go in the box. -->
+                     away and editable before sending: they go in the box. A
+                     question is an ask, so pressing one makes the box an ask,
+                     whichever way it was opened. -->
                 <div class="flex flex-wrap gap-1">
                   <button
                     v-for="q in PROMPTS"
                     :key="q"
                     type="button"
                     class="text-muted-foreground hover:text-foreground focus-visible:outline-ring border px-2 py-1.5 text-[11px] focus-visible:outline-2 sm:px-1.5 sm:py-0.5 sm:text-[10px]"
-                    @click="draft = q"
+                    @click="askThis(q)"
                   >
                     {{ q }}
                   </button>
@@ -967,16 +1039,32 @@ function empty(a: Attention | null): boolean {
               </div>
             </div>
 
-            <!-- A remark about the file itself, for the case a line cannot
-                 carry: a file that should not exist, or one that is missing. -->
-            <button
+            <!-- The two things to do about a file rather than a line: a
+                 remark a line cannot carry (a file that should not exist, or
+                 one that is missing), and a question about it. One button
+                 saying "comment on this file" covered both and named neither,
+                 and what it mostly opened was a question to an agent. -->
+            <div
               v-if="defaultOpen(a, f) && !composingHere(a.taskId, f.path)"
-              type="button"
-              class="text-muted-foreground hover:text-foreground focus-visible:outline-ring hairline-t w-full px-2 py-2.5 text-left text-[11px] focus-visible:outline-2 sm:py-1 sm:text-[10px]"
-              @click="compose(a.taskId, f.path, 0)"
+              class="hairline-t flex"
             >
-              comment on this file
-            </button>
+              <button
+                type="button"
+                class="hover:bg-muted focus-visible:outline-ring flex flex-1 items-center gap-1.5 px-2 py-2.5 text-left text-[11px] font-medium focus-visible:outline-2 focus-visible:-outline-offset-2 sm:py-1.5"
+                @click="compose(a.taskId, f.path, 0, '', 'ask')"
+              >
+                <HelpCircle :size="12" aria-hidden="true" class="text-primary shrink-0" />
+                Ask about this file
+              </button>
+              <button
+                type="button"
+                class="hover:bg-muted focus-visible:outline-ring flex flex-1 items-center justify-end gap-1.5 px-2 py-2.5 text-right text-[11px] font-medium focus-visible:outline-2 focus-visible:-outline-offset-2 sm:py-1.5"
+                @click="compose(a.taskId, f.path, 0, '', 'remark')"
+              >
+                <MessageSquare :size="12" aria-hidden="true" class="text-[var(--status-warning)] shrink-0" />
+                Remark on this file
+              </button>
+            </div>
           </div>
         </div>
       </div>
