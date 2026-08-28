@@ -567,6 +567,11 @@ export const api = {
   /** One file of a change, for the ones a large diff left unread. */
   approvalFile: (approvalId: string, path: string) =>
     call<ChangedFile>(`/approvals/${approvalId}/file?path=${encodeURIComponent(path)}`),
+  /** The agent's orientation for a change: what it is for, what each file
+   *  contributes, where to start. It describes; it never decides. */
+  approvalGuide: (id: string) => call<ReviewGuide>(`/approvals/${id}/guide`),
+  requestGuide: (id: string) =>
+    call<{ status: string }>(`/approvals/${id}/guide`, { method: 'POST' }),
   /** Record where a reader got to, so a review interrupted on one device
    *  resumes on the next. */
   markFileSeen: (approvalId: string, file: string, seen: boolean) =>
@@ -916,6 +921,14 @@ export interface Mergeable {
    *  so it will not land however clean the merge would be. A rebase fixes it,
    *  not a resolution. */
   diverged?: boolean
+}
+
+/** The agent's orientation for one approval. */
+export interface ReviewGuide {
+  approvalId: string
+  commitSha: string
+  body: string
+  createdAt: string
 }
 
 /** One file a commit touched, with both its content and its diff. */

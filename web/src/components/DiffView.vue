@@ -53,6 +53,147 @@ function anchor(r: Row): number {
   return r.newNo ?? r.oldNo ?? 0
 }
 
+/** One run of a changed line: the characters, and whether they are the edit. */
+interface Seg {
+  text: string
+  hot: boolean
+}
+
+/**
+ * What actually changed inside each changed line.
+ *
+ * A whole line painted red and its replacement painted green makes the reader
+ * diff them by eye, which is the machine's job. Where a removed run of lines is
+ * replaced by an equal run, each pair is compared token by token and only the
+ * tokens that differ get the strong ground; renaming one argument in a long
+ * signature reads as that one argument.
+ *
+ * Equal-length runs only. Pairing three removed lines with one added one
+ * highlights nonsense, and the tools that try are wrong often enough that not
+ * trying reads better. A pair that shares less than a third of its tokens gets
+ * no marking either: everything hot is the same as nothing hot.
+ */
+const segs = computed<Map<number, Seg[]>>(() => {
+  const out = new Map<number, Seg[]>()
+  const r = rows.value
+  for (let i = 0; i < r.length; i++) {
+    if (r[i].kind !== 'del') continue
+    let j = i
+    while (j < r.length && r[j].kind === 'del') j++
+    let k = j
+    while (k < r.length && r[k].kind === 'add') k++
+    if (k - j === j - i) {
+      for (let p = 0; p < j - i; p++) {
+        const pair = pairSegs(r[i + p].text, r[j + p].text)
+        if (pair) {
+          out.set(i + p, pair[0])
+          out.set(j + p, pair[1])
+        }
+      }
+    }
+    i = k - 1
+  }
+  return out
+})
+
+/** Words, runs of spaces, and single other characters: the units an edit is
+ *  read in. */
+function tokens(s: string): string[] {
+  return s.match(/\w+|\s+|[^\w\s]/g) ?? []
+}
+
+function pairSegs(a: string, b: string): [Seg[], Seg[]] | null {
+  const ta = tokens(a)
+  const tb = tokens(b)
+  const n = ta.length
+  const m = tb.length
+  // A line long enough to make the comparison quadratic in a way that matters
+  // is a line nobody is reading token by token anyway.
+  if (!n || !m || n > 300 || m > 300) return null
+
+  const dp: Uint16Array[] = Array.from({ length: n + 1 }, () => new Uint16Array(m + 1))
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      dp[i][j] = ta[i] === tb[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1])
+    }
+  }
+  // Lines that share too little are a rewrite, not an edit. Measured over the
+  // words: every pair of lines shares spaces and parentheses, and counting
+  // those made a full rewrite look like an edit with most of its line hot.
+  const words = (t: string[]) => t.filter((x) => /\w/.test(x)).length
+  const shared = sharedWords(ta, tb, dp)
+  if ((2 * shared) / Math.max(1, words(ta) + words(tb)) < 0.3) return null
+
+  const keepA = new Array<boolean>(n).fill(false)
+  const keepB = new Array<boolean>(m).fill(false)
+  let i = 0
+  let j = 0
+  while (i < n && j < m) {
+    if (ta[i] === tb[j]) {
+      keepA[i] = keepB[j] = true
+      i++
+      j++
+    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+      i++
+    } else {
+      j++
+    }
+  }
+  return [runs(ta, keepA), runs(tb, keepB)]
+}
+
+/** How many word tokens the LCS keeps, walking the same path the marking does. */
+function sharedWords(ta: string[], tb: string[], dp: Uint16Array[]): number {
+  let i = 0
+  let j = 0
+  let shared = 0
+  while (i < ta.length && j < tb.length) {
+    if (ta[i] === tb[j]) {
+      if (/\w/.test(ta[i])) shared++
+      i++
+      j++
+    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+      i++
+    } else {
+      j++
+    }
+  }
+  return shared
+}
+
+function runs(t: string[], keep: boolean[]): Seg[] {
+  const out: Seg[] = []
+  for (let i = 0; i < t.length; i++) {
+    const hot = !keep[i]
+    if (out.length && out[out.length - 1].hot === hot) out[out.length - 1].text += t[i]
+    else out.push({ text: t[i], hot })
+  }
+  return out
+}
+
+/**
+ * A hunk header a person can read.
+ *
+ * "@@ -12,7 +12,9 @@ fn parse(s: &Scanner)" is git's bookkeeping. The reader
+ * wants the two facts inside it: where in the file they are, and what function
+ * they are in, which git already puts after the second @@ when it can find it.
+ */
+function hunkLabel(text: string): string {
+  const m = text.match(/@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@ ?(.*)/)
+  if (!m) return text
+  const newStart = Number(m[3])
+  const newCount = m[4] === undefined ? 1 : Number(m[4])
+  const oldStart = Number(m[1])
+  const oldCount = m[2] === undefined ? 1 : Number(m[2])
+  let where: string
+  if (newCount === 0) {
+    where = oldCount === 1 ? `removed line ${oldStart}` : `removed lines ${oldStart}-${oldStart + oldCount - 1}`
+  } else {
+    where = newCount === 1 ? `line ${newStart}` : `lines ${newStart}-${newStart + newCount - 1}`
+  }
+  return m[5] ? `${where} · ${m[5]}` : where
+}
+
 interface Row {
   kind: 'add' | 'del' | 'ctx' | 'hunk' | 'meta'
   text: string
@@ -195,7 +336,7 @@ const stat = computed(() => ({
 </script>
 
 <template>
-  <div class="font-mono text-[10px] leading-relaxed">
+  <div class="font-mono text-[11px] leading-relaxed">
     <p class="text-muted-foreground mb-1 flex items-center gap-2 px-2">
       <span class="tabular-nums">
         <span class="text-[var(--status-good)]">+{{ stat.added }}</span>
@@ -259,7 +400,21 @@ const stat = computed(() => ({
         >
           {{ r.kind === 'add' ? '+' : r.kind === 'del' ? '−' : '' }}
         </span>
-        <span class="min-w-0">{{ r.text }}</span>
+        <span v-if="r.kind === 'hunk'" class="min-w-0" :title="r.text">{{ hunkLabel(r.text) }}</span>
+        <span v-else-if="segs.has(i)" class="min-w-0">
+          <template v-for="(sg, si) in segs.get(i)" :key="si"
+            ><span
+              v-if="sg.hot"
+              :class="
+                r.kind === 'add'
+                  ? 'bg-[var(--status-good)]/30 rounded-[2px]'
+                  : 'bg-destructive/25 rounded-[2px]'
+              "
+              >{{ sg.text }}</span
+            ><template v-else>{{ sg.text }}</template></template
+          >
+        </span>
+        <span v-else class="min-w-0">{{ r.text }}</span>
         <!-- A reformat says so in one line rather than in four hundred. -->
         <button
           v-if="foldedCount(i)"

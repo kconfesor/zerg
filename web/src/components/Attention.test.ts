@@ -16,6 +16,8 @@ vi.mock('@/lib/api', () => ({
     markFileSeen: vi.fn(),
     review: vi.fn(),
     resolveReviewThread: vi.fn(),
+    approvalGuide: vi.fn(),
+    requestGuide: vi.fn(),
   },
 }))
 enableAutoUnmount(afterEach)
@@ -25,6 +27,8 @@ const one = vi.mocked(api.approvalFile)
 const mergeable = vi.mocked(api.approvalMergeable)
 const seen = vi.mocked(api.markFileSeen)
 const review = vi.mocked(api.review)
+const guide = vi.mocked(api.approvalGuide)
+const askGuide = vi.mocked(api.requestGuide)
 
 function file(path: string, over: Partial<ChangedFile> = {}): ChangedFile {
   return { path, status: 'M', added: 3, removed: 1, ...over }
@@ -230,6 +234,40 @@ describe('a change too large to send in one piece', () => {
     expect(text).toContain('this caller was left behind')
     // And it can be settled from there, which is the whole point.
     expect(w.findAll('button').some((b) => b.text() === 'settle')).toBe(true)
+  })
+
+  // The first ten minutes of any review is working out what the change is
+  // trying to do. The guide is that part, cached; without one, the panel
+  // offers to have the agent write it, and says who decides.
+  it('offers a guide, and renders the one that exists', async () => {
+    const w = await open([file('a.rs', { diff: '@@ -1 +1 @@\n-x\n+y\n' })])
+    const offer = w.findAll('button').find((b) => b.text().includes('Map this change'))
+    expect(offer).toBeDefined()
+    expect(w.text()).toContain('it describes, you decide')
+
+    guide.mockResolvedValue({
+      approvalId: 'a1',
+      commitSha: 'abc1234',
+      body: '**What this is for.** Postfix factorial.',
+      createdAt: '2026-01-01T00:00:00Z',
+    })
+    askGuide.mockResolvedValue({ status: 'reading' })
+    await offer!.trigger('click')
+    expect(askGuide).toHaveBeenCalledWith('a1')
+  })
+
+  it('shows a stored guide without being asked', async () => {
+    guide.mockResolvedValue({
+      approvalId: 'a1',
+      commitSha: 'abc1234',
+      body: 'Start with parse.rs, the rest follows it.',
+      createdAt: '2026-01-01T00:00:00Z',
+    })
+    const w = await open([file('a.rs', { diff: '@@ -1 +1 @@\n-x\n+y\n' })])
+    expect(w.text()).toContain('Start with parse.rs')
+    expect(w.text()).toContain('reading guide')
+    // And a way to have it rewritten after a rework.
+    expect(w.findAll('button').some((b) => b.text() === 'rewrite it')).toBe(true)
   })
 
   // A binary file and a file that did not change look identical when both

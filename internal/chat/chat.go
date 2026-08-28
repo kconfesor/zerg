@@ -110,6 +110,14 @@ func (m *Manager) endTurn(projectID string) {
 	delete(m.turns, projectID)
 }
 
+// Busy reports whether the project's session is mid-answer. Advisory: the
+// caller that wants the session still has to win beginTurn.
+func (m *Manager) Busy(projectID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.turns[projectID]
+}
+
 type session struct {
 	cer    *cerebrate.Cerebrate
 	cancel context.CancelFunc

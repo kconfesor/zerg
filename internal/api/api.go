@@ -168,6 +168,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/approvals/{id}/diff", s.approvalDiff)
 	mux.HandleFunc("GET /api/approvals/{id}/mergeable", s.approvalMergeable)
 	mux.HandleFunc("GET /api/approvals/{id}/file", s.approvalFile)
+	mux.HandleFunc("GET /api/approvals/{id}/guide", s.approvalGuide)
+	mux.HandleFunc("POST /api/approvals/{id}/guide", s.requestGuide)
 	mux.HandleFunc("PUT /api/approvals/{id}/seen", s.markFileSeen)
 	mux.HandleFunc("POST /api/approvals/{id}/approve", s.approve)
 	mux.HandleFunc("POST /api/approvals/{id}/reject", s.reject)

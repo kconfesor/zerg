@@ -103,3 +103,52 @@ func TestAReviewThreadHoldsTheConversationAndItsState(t *testing.T) {
 		t.Errorf("a deleted card left %d threads behind (%v)", len(left), err)
 	}
 }
+
+// The guide is keyed by the commit it described, which is how a stale one is
+// told apart from a current one after a rejection produces a new revision.
+func TestAGuideBelongsToTheCommitItDescribed(t *testing.T) {
+	ctx := context.Background()
+	db, p := seeded(t)
+	task, err := db.CreateTask(ctx, p.ID, "Postfix operator", "add it", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// An approval to hang it on, built the way the router builds one.
+	if _, err := db.sql.ExecContext(ctx,
+		`INSERT INTO messages (id, project_id, task_id, from_role, kind, created_at)
+		 VALUES ('MSG1', ?, ?, 'coder', 'handoff', '2026-01-01T00:00:00Z')`, p.ID, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.sql.ExecContext(ctx,
+		`INSERT INTO approvals (id, project_id, message_id, state, created_at)
+		 VALUES ('APR1', ?, 'MSG1', 'pending', '2026-01-01T00:00:00Z')`, p.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := db.ReviewGuideFor(ctx, "APR1"); err == nil {
+		t.Fatal("a guide existed before one was written")
+	}
+	if err := db.SaveReviewGuide(ctx, "APR1", "aaaa111", "Start with parse.rs."); err != nil {
+		t.Fatalf("SaveReviewGuide: %v", err)
+	}
+	g, err := db.ReviewGuideFor(ctx, "APR1")
+	if err != nil {
+		t.Fatalf("ReviewGuideFor: %v", err)
+	}
+	if g.CommitSHA != "aaaa111" || g.Body != "Start with parse.rs." {
+		t.Errorf("stored guide = %+v", g)
+	}
+
+	// A new revision replaces it: one current change, one guide.
+	if err := db.SaveReviewGuide(ctx, "APR1", "bbbb222", "The rework moved the parser."); err != nil {
+		t.Fatal(err)
+	}
+	g2, _ := db.ReviewGuideFor(ctx, "APR1")
+	if g2.CommitSHA != "bbbb222" || g2.Body == g.Body {
+		t.Errorf("the replacement did not take: %+v", g2)
+	}
+
+	if err := db.SaveReviewGuide(ctx, "APR1", "cccc333", "   "); err == nil {
+		t.Error("an empty guide was accepted")
+	}
+}

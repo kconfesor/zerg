@@ -343,3 +343,47 @@ func (db *DB) FilesSeen(ctx context.Context, approvalID string) ([]string, error
 	}
 	return out, rows.Err()
 }
+
+// ── the reading guide ─────────────────────────────────────────────────────
+
+// ReviewGuide is the agent's orientation for one approval: the objective, what
+// each file contributes, and where to start reading. It describes; it never
+// decides.
+type ReviewGuide struct {
+	ApprovalID string    `json:"approvalId"`
+	CommitSHA  string    `json:"commitSha"`
+	Body       string    `json:"body"`
+	CreatedAt  time.Time `json:"createdAt"`
+}
+
+// SaveReviewGuide stores the guide for an approval, replacing any older one:
+// there is one current change to describe, so there is one guide.
+func (db *DB) SaveReviewGuide(ctx context.Context, approvalID, commitSHA, body string) error {
+	if strings.TrimSpace(body) == "" {
+		return invalid("a guide needs something in it")
+	}
+	if _, err := db.sql.ExecContext(ctx,
+		`INSERT OR REPLACE INTO review_guides (approval_id, commit_sha, body, created_at)
+		 VALUES (?,?,?,?)`,
+		approvalID, commitSHA, body, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		return fmt.Errorf("saving the reading guide: %w", err)
+	}
+	return nil
+}
+
+// ReviewGuideFor returns the stored guide, or ErrNotFound.
+func (db *DB) ReviewGuideFor(ctx context.Context, approvalID string) (*ReviewGuide, error) {
+	g := &ReviewGuide{ApprovalID: approvalID}
+	var at string
+	err := db.read.QueryRowContext(ctx,
+		`SELECT commit_sha, body, created_at FROM review_guides WHERE approval_id = ?`,
+		approvalID).Scan(&g.CommitSHA, &g.Body, &at)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("guide for approval %s: %w", approvalID, ErrNotFound)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reading the guide: %w", err)
+	}
+	g.CreatedAt, _ = time.Parse(time.RFC3339Nano, at)
+	return g, nil
+}

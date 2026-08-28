@@ -2,7 +2,14 @@
 import { nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useMediaQuery } from '@vueuse/core'
 import type { Attention } from '@/lib/api'
-import { AlertTriangle, ChevronRight, GitMerge, HelpCircle, MessageSquare } from '@lucide/vue'
+import {
+  AlertTriangle,
+  BookOpen,
+  ChevronRight,
+  GitMerge,
+  HelpCircle,
+  MessageSquare,
+} from '@lucide/vue'
 import { api, type ChangedFile, type Mergeable, type ReviewThread } from '@/lib/api'
 import { renderMarkdown } from '@/lib/markdown'
 import DiffView from '@/components/DiffView.vue'
@@ -630,11 +637,61 @@ function mergeError(id: string): string {
   return m && 'error' in m ? m.error : ''
 }
 
+/**
+ * The agent's orientation, per approval: the objective, the map, the order.
+ *
+ * The single biggest cost of reviewing someone else's change is the first ten
+ * minutes of working out what it is trying to do. The guide is that part,
+ * written by the agent that can read the whole repository, cached against the
+ * commit it describes, and explicitly not a review: it says what, the person
+ * says whether.
+ */
+const guides = ref<Record<string, { body?: string; pending?: boolean; error?: string }>>({})
+
+async function loadGuide(id: string) {
+  try {
+    const g = await api.approvalGuide(id)
+    guides.value = { ...guides.value, [id]: { body: g.body } }
+  } catch {
+    // No guide yet, or one for an earlier revision: the offer renders instead.
+  }
+}
+
+async function requestGuide(id: string) {
+  guides.value = { ...guides.value, [id]: { pending: true } }
+  try {
+    await api.requestGuide(id)
+  } catch (e) {
+    guides.value = {
+      ...guides.value,
+      [id]: { error: e instanceof Error ? e.message : String(e) },
+    }
+    return
+  }
+  // The agent reads in the background; poll until its note lands. Bounded, so
+  // an agent that dies quietly hands back the offer rather than a spinner.
+  for (let i = 0; i < 45; i++) {
+    await new Promise((r) => setTimeout(r, 4000))
+    try {
+      const g = await api.approvalGuide(id)
+      guides.value = { ...guides.value, [id]: { body: g.body } }
+      return
+    } catch {
+      // still reading
+    }
+  }
+  guides.value = {
+    ...guides.value,
+    [id]: { error: 'No guide arrived. The agent may not be configured; try again.' },
+  }
+}
+
 watch(
   () => props.attention?.approvals?.map((a) => a.id).join(',') ?? '',
   () => {
     for (const a of props.attention?.approvals ?? []) {
       if (a.commit && !diffs.value[a.id]) void loadFiles(a.id)
+      if (a.commit && !guides.value[a.id]) void loadGuide(a.id)
       if (a.commit && !merges.value[a.id]) void loadMergeable(a.id)
       if (a.taskId && !threads.value[a.taskId]) void loadThreads(a.taskId)
     }
@@ -761,6 +818,58 @@ function empty(a: Attention | null): boolean {
             {{ diffs[a.id]!.files.length }}
             {{ diffs[a.id]!.files.length === 1 ? 'file' : 'files' }}.
           </p>
+
+          <!-- The agent's orientation, above the files it describes. Not a
+               review: it says what the change is for and where to start, and
+               the decision stays with the person reading. -->
+          <div
+            v-if="guides[a.id]?.body"
+            class="border-l-primary bg-muted/20 mb-1.5 border border-l-2 p-2"
+          >
+            <div class="text-muted-foreground mb-1 flex items-center gap-1.5 text-[10px]">
+              <BookOpen :size="10" aria-hidden="true" class="shrink-0" />
+              <span>reading guide · written by the project's agent · it describes, you decide</span>
+              <button
+                type="button"
+                class="hover:text-foreground focus-visible:outline-ring ml-auto shrink-0 underline-offset-2 hover:underline focus-visible:outline-2"
+                title="Ask the agent to read the change again and rewrite this"
+                @click="requestGuide(a.id)"
+              >
+                rewrite it
+              </button>
+            </div>
+            <div
+              class="md min-w-0 overflow-x-auto text-xs leading-relaxed"
+              v-html="renderMarkdown(guides[a.id]!.body!)"
+            />
+          </div>
+          <div
+            v-else-if="diffs[a.id]?.files.length"
+            class="bg-muted/20 mb-1.5 flex flex-wrap items-center gap-2 border border-dashed px-2 py-1.5"
+          >
+            <template v-if="guides[a.id]?.pending">
+              <BookOpen :size="12" aria-hidden="true" class="text-muted-foreground shrink-0" />
+              <span class="text-muted-foreground text-[11px] italic">
+                the agent is reading the change…
+              </span>
+            </template>
+            <template v-else>
+              <button
+                type="button"
+                class="hover:text-foreground text-muted-foreground focus-visible:outline-ring flex items-center gap-1.5 text-[11px] font-medium focus-visible:outline-2"
+                @click="requestGuide(a.id)"
+              >
+                <BookOpen :size="12" aria-hidden="true" class="text-primary shrink-0" />
+                Map this change
+              </button>
+              <span class="text-muted-foreground/70 text-[10px]">
+                what it is for, what each file adds, where to start · it describes, you decide
+              </span>
+              <span v-if="guides[a.id]?.error" class="text-destructive w-full text-[10px]">
+                {{ guides[a.id]?.error }}
+              </span>
+            </template>
+          </div>
 
           <!-- Where you are and what is left, pinned.
                A twelve-file diff is otherwise one long scroll with no sense of

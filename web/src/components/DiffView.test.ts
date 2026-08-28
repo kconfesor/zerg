@@ -85,6 +85,35 @@ describe('a diff', () => {
     expect(w.text()).toContain('let x = 1;')
   })
 
+  // A whole line painted red and its replacement green makes the reader diff
+  // them by eye, which is the machine's job.
+  it('marks only the token that changed inside a line pair', () => {
+    const w = mount(DiffView, { props: { diff: real } })
+    const hot = w.findAll('.rounded-\\[2px\\]').map((el) => el.text())
+    expect(hot).toContain('2')
+    expect(hot).toContain('1')
+    expect(hot.join('')).not.toContain('let')
+  })
+
+  it('does not mark a rewrite as an edit', () => {
+    const rewrite = `@@ -1,1 +1,1 @@
+-const answer = compute(x);
++return nothing_like_it_at_all()
+`
+    const w = mount(DiffView, { props: { diff: rewrite } })
+    expect(w.findAll('.rounded-\\[2px\\]').length).toBe(0)
+  })
+
+  // git's bookkeeping, translated: the reader wants where they are and what
+  // function they are in, both already inside the marker.
+  it('renders a hunk header as a place, not a marker', () => {
+    const w = mount(DiffView, {
+      props: { diff: '@@ -12,7 +12,9 @@ fn parse(s: &Scanner)\n x\n' },
+    })
+    expect(w.text()).toContain('lines 12-20 · fn parse(s: &Scanner)')
+    expect(w.text()).not.toContain('@@ -12,7')
+  })
+
   it('offers each line as somewhere to comment', async () => {
     const w = mount(DiffView, { props: { diff: real } })
     const gutter = w.get('[aria-label="Comment on line 2"]')

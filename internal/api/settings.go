@@ -789,6 +789,147 @@ them. Keep it to a few sentences.`)
 	return b.String()
 }
 
+// ── the reading guide ─────────────────────────────────────────────────────
+
+// approvalGuide serves the stored orientation for an approval, when one exists
+// for the change as it stands now.
+//
+// A guide written for a commit the approval no longer points at is a
+// description of a diff nobody is looking at, so it is a 404 rather than a
+// stale answer: the panel offers to write a fresh one.
+func (s *Server) approvalGuide(w http.ResponseWriter, r *http.Request) {
+	approval, err := s.db.GetApproval(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	guide, err := s.db.ReviewGuideFor(r.Context(), approval.ID)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if guide.CommitSHA != approval.Commit {
+		writeError(w, http.StatusNotFound, "the guide describes an earlier revision")
+		return
+	}
+	writeJSON(w, http.StatusOK, guide)
+}
+
+// requestGuide asks the project's agent to orient the reader: what the change
+// is for, what each file contributes, and where to start.
+//
+// 202 and a background turn, like a question at a hunk: the agent reads the
+// change in its own worktree, and the panel polls for the result. The guide
+// describes and never decides, which the prompt spells out.
+func (s *Server) requestGuide(w http.ResponseWriter, r *http.Request) {
+	if s.chatMgr == nil {
+		writeError(w, http.StatusNotImplemented, "this build has no agent to ask")
+		return
+	}
+	approval, err := s.db.GetApproval(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if approval.Commit == "" {
+		badRequest(w, "this approval carries no commit, so there is nothing to describe")
+		return
+	}
+	project, err := s.db.GetProject(r.Context(), approval.ProjectID)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	// Being second in line is not a fault; say so rather than half-starting.
+	if s.chatMgr.Busy(project.ID) {
+		writeError(w, http.StatusConflict,
+			"the agent is in the middle of an answer; ask again when it finishes")
+		return
+	}
+	prompt := guidePrompt(project.BaseBranch, approval.Commit, approval.Terminal, approval.Body)
+	go s.buildGuide(approval.ID, project.ID, approval.Commit, prompt)
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "reading"})
+}
+
+// buildGuide runs the agent's read of the change and stores what it wrote.
+func (s *Server) buildGuide(approvalID, projectID, commit, prompt string) {
+	ctx, cancel := context.WithTimeout(context.Background(), askTimeout)
+	defer cancel()
+
+	var body string
+	var err error
+	for attempt := 0; attempt < 3; attempt++ {
+		body, err = s.chatMgr.AskAndWait(ctx, projectID, prompt)
+		if !errors.Is(err, chat.ErrBusy) {
+			break
+		}
+		// The session freed itself between the handler's check and this call,
+		// or a question got in first. Short waits, because a guide asked for
+		// and silently dropped is a button that does nothing.
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(10 * time.Second):
+		}
+	}
+	if err != nil && body == "" {
+		// Stored rather than logged and dropped: the person who pressed the
+		// button is watching a "reading the change" line, and a failure that
+		// only reaches the daemon's log leaves it there for ever.
+		body = "The guide could not be written: " + err.Error()
+	}
+
+	// A fresh context for the write. The one above bounded the agent, and on a
+	// timeout it is already cancelled, which would throw the answer away.
+	write, cancelWrite := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelWrite()
+	if err := s.db.SaveReviewGuide(write, approvalID, commit, body); err != nil {
+		s.log.Error("review: the guide could not be recorded", "approval", approvalID, "err", err)
+	}
+}
+
+// guidePrompt asks for orientation, and draws the line that keeps it from
+// becoming a review: the guide describes the change; the person judges it.
+func guidePrompt(base, commit string, terminal bool, note string) string {
+	var b strings.Builder
+	b.WriteString("A person is about to review a change at the approval gate, and you are " +
+		"writing the note that orients them before they read it.\n\n")
+	if terminal && base != "" {
+		fmt.Fprintf(&b, "The change is everything in %s...%s (git diff %s...%s in this repository). ",
+			base, commit, base, commit)
+	} else {
+		fmt.Fprintf(&b, "The change is commit %s (git show %s in this repository). ", commit, commit)
+	}
+	b.WriteString("Read it before writing anything.\n")
+	if strings.TrimSpace(note) != "" {
+		b.WriteString("\nThe note that came with it:\n\n")
+		b.WriteString(strings.TrimSpace(note))
+		b.WriteString("\n")
+	}
+	b.WriteString(`
+Write, in markdown, briefly:
+
+**What this is for.** One or two sentences on the objective, from the note and
+the code together. If the code does something the note does not mention, or the
+note claims something the code does not contain, say so plainly: the reader
+needs to know what they are actually looking at.
+
+**The map.** One line per file, saying what its change contributes to the
+objective. Group the purely mechanical ones (renames, reformats, generated
+files) into a single line at the end rather than listing them.
+
+**Where to start.** The reading order you would use, as a short list: the file
+that carries the idea first, then what depends on it. One clause each on why.
+
+You are the guide, not the reviewer. Do not judge the change, do not list
+problems, do not say whether it should land, and do not approve or reject
+anything. Keep the whole thing under 250 words.`)
+	return b.String()
+}
+
+// raiseReviewThread turns a question into a remark, which is the reader
+// deciding that what they learned has to be dealt with before this lands.
+
 // raiseReviewThread turns a question into a remark, which is the reader
 // deciding that what they learned has to be dealt with before this lands.
 func (s *Server) raiseReviewThread(w http.ResponseWriter, r *http.Request) {
