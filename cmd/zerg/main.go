@@ -366,7 +366,7 @@ func runUp(args []string) error {
 		Handler: api.New(api.Deps{
 			DB: db, Log: log, Registry: registry,
 			Overmind: over, Nydus: nyd, Bus: bus, Recorder: recorder, Applied: cfg.Listener(), Chat: chatMgr,
-			TailnetHost: tailnetHost, UI: ui,
+			TailnetHost: tailnetHost, UI: ui, Blobs: blobs,
 		}).Routes(),
 		ReadHeaderTimeout: 10 * time.Second,
 		// A body that arrives a byte at a time holds a connection open

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/kconfesor/zerg/internal/adapter"
+	"github.com/kconfesor/zerg/internal/artifact"
 	"github.com/kconfesor/zerg/internal/chat"
 	"github.com/kconfesor/zerg/internal/event"
 	"github.com/kconfesor/zerg/internal/nydus"
@@ -50,6 +51,9 @@ type Server struct {
 
 	// catalog remembers what each harness said its models were; see catalog.go.
 	catalog *catalog
+
+	// blobs is where artifact bytes live; see artifacts.go.
+	blobs *artifact.Store
 }
 
 // Deps are what the API needs to serve the cockpit.
@@ -67,6 +71,10 @@ type Deps struct {
 
 	// Recorder is optional; health reports its lag and losses when present.
 	Recorder *event.Recorder
+
+	// Blobs is where artifact bytes live. Without it the endpoints that serve
+	// them say so rather than failing on a nil.
+	Blobs *artifact.Store
 
 	// Applied is the listener configuration the daemon bound at startup.
 	Applied store.Listener
@@ -97,7 +105,7 @@ func New(d Deps) *Server {
 		db: d.DB, log: d.Log, registry: d.Registry,
 		preflt: pf, over: d.Overmind, nyd: d.Nydus, bus: d.Bus, applied: d.Applied, chatMgr: d.Chat,
 		recorder: d.Recorder, ui: d.UI, tailnetHost: d.TailnetHost,
-		catalog: newCatalog(),
+		catalog: newCatalog(), blobs: d.Blobs,
 	}
 }
 
@@ -172,6 +180,11 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/approvals/{id}/diff", s.approvalDiff)
 	mux.HandleFunc("GET /api/approvals/{id}/mergeable", s.approvalMergeable)
 	mux.HandleFunc("GET /api/approvals/{id}/file", s.approvalFile)
+	// Artifacts: what a task produced, and its bytes. See §13.
+	mux.HandleFunc("GET /api/tasks/{id}/artifacts", s.taskArtifacts)
+	mux.HandleFunc("GET /api/artifacts/{id}/bytes", s.artifactBytes)
+	mux.HandleFunc("PUT /api/artifacts/{id}/pinned", s.pinArtifact)
+
 	mux.HandleFunc("GET /api/approvals/{id}/guide", s.approvalGuide)
 	mux.HandleFunc("POST /api/approvals/{id}/guide", s.requestGuide)
 	mux.HandleFunc("PUT /api/approvals/{id}/seen", s.markFileSeen)
