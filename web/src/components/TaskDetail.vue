@@ -113,6 +113,8 @@ function tokensOf(u: TaskDetail['usage']): number {
           :steps="detail.history"
           :roles="roles ?? []"
           :project="project"
+          :outcome="task?.outcome"
+          :outcome-ref="task?.outcomeRef"
           :current="task?.lane"
         >
           <template #note="{ step }">

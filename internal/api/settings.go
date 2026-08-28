@@ -248,20 +248,37 @@ func (s *Server) taskEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	limit, _ := strconv.Atoi(q.Get("limit"))
+	if limit <= 0 {
+		limit = stepTranscriptLimit
+	}
+	// One more than asked for, so a full page can be told from a page that
+	// happens to end. A transcript cut at five hundred rows reads exactly like
+	// a step that made five hundred calls and stopped.
 	events, err := s.db.ListEvents(r.Context(), store.EventQuery{
 		ProjectID: task.ProjectID,
 		Task:      task.ID,
 		Role:      q.Get("role"),
 		From:      from,
 		Until:     until,
-		Limit:     limit,
+		Limit:     limit + 1,
 	})
 	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, orEmpty(events))
+	truncated := len(events) > limit
+	if truncated {
+		events = events[:limit]
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"events":    orEmpty(events),
+		"truncated": truncated,
+	})
 }
+
+// stepTranscriptLimit bounds one step's transcript. A step is minutes of one
+// role's work, so this is generous; the flag beside it is what matters.
+const stepTranscriptLimit = 500
 
 func optionalTime(v string) (time.Time, error) {
 	if v == "" {

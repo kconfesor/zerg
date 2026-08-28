@@ -22,7 +22,10 @@ type fakeIntegrator struct {
 	into           []string
 	published      []string
 	publishedDraft []bool
-	err            error
+	// publishedURL is what each title's pull request answers to, so Landed can
+	// report where the work went the way `gh` does.
+	publishedURL map[string]string
+	err          error
 	// landedErr makes the "did this integration finish" question unanswerable,
 	// which must leave an interrupted approval claimed rather than releasing
 	// one whose merge may have happened.
@@ -50,7 +53,12 @@ func (f *fakeIntegrator) Publish(_ context.Context, _, base, commit, title, body
 	f.published = append(f.published, title+" -> "+base+"@"+commit[:min(8, len(commit))])
 	f.publishedDraft = append(f.publishedDraft, draft)
 	_ = body
-	return "https://example.test/pr/1", nil
+	url := "https://example.test/pr/1"
+	if f.publishedURL == nil {
+		f.publishedURL = map[string]string{}
+	}
+	f.publishedURL[title] = url
+	return url, nil
 }
 
 func (f *fakeIntegrator) Resolve(_ context.Context, _, ref string) (string, error) {
@@ -66,29 +74,30 @@ func (f *fakeIntegrator) MergeInto(_ context.Context, _, commit string) error {
 
 // Landed answers from what Merge and Publish recorded, so a test can replay a
 // crash mid-integration without a git repository.
-func (f *fakeIntegrator) Landed(_ context.Context, _, _, commit, title, mode string) (bool, error) {
+func (f *fakeIntegrator) Landed(_ context.Context, _, _, commit, title, mode string) (string, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.landedErr != nil {
-		return false, f.landedErr
+		return "", false, f.landedErr
 	}
 	switch mode {
 	case "branch":
-		return false, nil
+		return "", false, nil
 	case "pr":
-		for _, p := range f.published {
-			if strings.HasPrefix(p, title+" -> ") {
-				return true, nil
-			}
+		// The URL comes back with the answer, the way `gh` reports it: a gated
+		// completion's note was written before anything was published, so this
+		// is the only place a recovered card can learn where its work went.
+		if url := f.publishedURL[title]; url != "" {
+			return url, true, nil
 		}
-		return false, nil
+		return "", false, nil
 	default:
 		for _, c := range f.merges {
 			if c == commit {
-				return true, nil
+				return commit, true, nil
 			}
 		}
-		return false, nil
+		return "", false, nil
 	}
 }
 
@@ -1456,5 +1465,58 @@ func TestStoppedCardRefusesLateCompletion(t *testing.T) {
 	}
 	if got := f.reload(t, task.ID); got.State != store.TaskRejected || got.StoppedAt == nil {
 		t.Errorf("state = %q stopped_at = %v, want it still stopped", got.State, got.StoppedAt)
+	}
+}
+
+// A gated pull request keeps its URL across a crash.
+//
+// The note a completion carries is written when the role finishes, and a gated
+// one is not published until somebody approves it, so the note cannot name the
+// pull request: it did not exist yet. The process that opened it is the one
+// that was killed. git is the only thing that still knows, which is why Landed
+// answers with the URL and not only with the fact.
+func TestInterruptedGatedPullRequestKeepsItsURL(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	if _, err := f.db.SetIntegration(ctx, f.project.ID, store.IntegratePR, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.SQL().ExecContext(ctx,
+		`UPDATE role_templates SET gate = ? WHERE name = 'reviewer'`, store.GateApproval); err != nil {
+		t.Fatal(err)
+	}
+	task := f.task(t, "Calculator")
+	msg, err := f.n.Send(ctx, f.project.ID, "reviewer", SendRequest{
+		TaskID: task.ID, Commit: "aaaaaaaaaa", Body: "looks right",
+	})
+	if err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	// The note was written before anyone approved it, so it cannot name a pull
+	// request. This is the fact the recovery has to work around.
+	if strings.Contains(msg.Body, "Pull request") {
+		t.Fatalf("a held completion already names a pull request: %q", msg.Body)
+	}
+
+	pending, _ := f.db.ListPendingApprovals(ctx, f.project.ID)
+	if len(pending) != 1 {
+		t.Fatalf("got %d approvals waiting, want 1", len(pending))
+	}
+	// The crash: claimed, published, killed before the decision was written.
+	f.stick(t, pending[0].ID)
+	if _, err := f.git.Publish(ctx, f.project.Path, "main", "aaaaaaaaaa", task.Name, "looks right", false); err != nil {
+		t.Fatal(err)
+	}
+
+	if settled, released, err := f.n.ReconcileIntegrating(ctx); err != nil || settled != 1 || released != 0 {
+		t.Fatalf("reconciling: settled %d released %d (%v), want it settled", settled, released, err)
+	}
+
+	done := f.reload(t, task.ID)
+	if done.Outcome != store.OutcomePR {
+		t.Errorf("recovered card records outcome %q, want a pull request", done.Outcome)
+	}
+	if done.OutcomeRef != "https://example.test/pr/1" {
+		t.Errorf("recovered card points at %q; the pull request it opened is unreachable", done.OutcomeRef)
 	}
 }

@@ -499,7 +499,9 @@ export const api = {
       if (value) query.set(key, String(value))
     }
     const suffix = query.toString()
-    return call<ActivityEvent[]>(`/tasks/${id}/events${suffix ? '?' + suffix : ''}`)
+    return call<{ events: ActivityEvent[]; truncated: boolean }>(
+      `/tasks/${id}/events${suffix ? '?' + suffix : ''}`,
+    )
   },
   workspace: (projectId: string) => call<Workspace>(`/projects/${projectId}/workspace`),
   resetChat: (projectId: string) =>
@@ -783,6 +785,11 @@ export interface TaskStep {
   /** When the role took the work. Absent for a step with no lease behind it,
    *  which is what the operator's own first message is. */
   startedAt?: string
+  /** The span this step's turns were summed over, so anything else reading the
+   *  step reads the same one. `windowEnd` is exclusive and absent on a role's
+   *  last step, which runs to the end of the card. */
+  windowStart?: string
+  windowEnd?: string
   /** How long that role held it. Zero when there is nothing to measure from. */
   durationMs: number
   tokens: number

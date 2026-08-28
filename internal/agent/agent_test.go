@@ -45,13 +45,13 @@ func (r *recordingIntegrator) MergeInto(_ context.Context, _, commit string) err
 	return nil
 }
 
-func (r *recordingIntegrator) Landed(_ context.Context, _, _, commit, _, _ string) (bool, error) {
+func (r *recordingIntegrator) Landed(_ context.Context, _, _, commit, _, _ string) (string, bool, error) {
 	for _, c := range r.commits {
 		if c == commit {
-			return true, nil
+			return commit, true, nil
 		}
 	}
-	return false, nil
+	return "", false, nil
 }
 
 func (r *recordingIntegrator) Merge(_ context.Context, _, _, commit string) error {

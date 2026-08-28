@@ -323,6 +323,15 @@ func TestListHistoryPagesAndFilters(t *testing.T) {
 		return out
 	}
 
+	// The operator opens every card, so it is on every row and says nothing.
+	// Its message is still in the trail; this is the list of agents.
+	if _, err := db.SQL().ExecContext(ctx,
+		`INSERT INTO messages (id,project_id,task_id,from_role,kind,priority,body,terminal,created_at)
+		 SELECT ?, project_id, id, 'operator', 'handoff', 50, '', 0, created_at FROM tasks WHERE name = 'Factorial'`,
+		NewID()); err != nil {
+		t.Fatal(err)
+	}
+
 	// Newest first, and a card still running is part of history: it is being
 	// worked on, which is what the list is about.
 	page, next, err := db.ListHistory(ctx, p.ID, HistoryFilter{Limit: 4})
@@ -362,6 +371,13 @@ func TestListHistoryPagesAndFilters(t *testing.T) {
 	}
 	if len(page[3].Roles) != 1 || page[3].Roles[0] != "docs" {
 		t.Errorf("Readme was worked by %v, want docs", page[3].Roles)
+	}
+	oldest, _, err := db.ListHistory(ctx, p.ID, HistoryFilter{Query: "Factorial"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(oldest) != 1 || len(oldest[0].Roles) != 1 || oldest[0].Roles[0] != "coder" {
+		t.Errorf("Factorial was worked by %v, want the agent and not the operator", oldest[0].Roles)
 	}
 
 	for _, tc := range []struct {
@@ -602,5 +618,75 @@ func TestListTasksReadsEveryColumnItSelects(t *testing.T) {
 	}
 	if got.Doing != "Bash" {
 		t.Errorf("the board reports %q as the last thing done, want the tool", got.Doing)
+	}
+}
+
+// A card that finishes between two pages is still on one of them.
+//
+// Ordering by "completed, or else created" made a running card's sort key move
+// the moment it finished: a card below the cursor jumped above it, and page two
+// asks only for what is below, so nothing ever returned it. Unfinished cards
+// are their own group at the top now, and a finished card's key never changes.
+func TestHistoryPagingDoesNotDropACardThatFinishesMidway(t *testing.T) {
+	ctx := context.Background()
+	db, p := seeded(t)
+
+	base := time.Date(2026, 1, 1, 9, 0, 0, 0, time.UTC)
+	ids := map[string]string{}
+	for i, name := range []string{"Oldest", "Middle", "Newest"} {
+		task, err := db.CreateTask(ctx, p.ID, name, "body", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids[name] = task.ID
+		at := base.Add(time.Duration(i) * time.Minute).Format(time.RFC3339Nano)
+		if _, err := db.SQL().ExecContext(ctx,
+			`UPDATE tasks SET created_at=?, completed_at=?, state='done', lane='done' WHERE id=?`,
+			at, at, task.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// One card still being worked on, created before all of them.
+	running, err := db.CreateTask(ctx, p.ID, "Running", "body", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SQL().ExecContext(ctx,
+		`UPDATE tasks SET created_at=? WHERE id=?`,
+		base.Add(-time.Hour).Format(time.RFC3339Nano), running.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	names := func(entries []HistoryEntry) []string {
+		var out []string
+		for _, e := range entries {
+			out = append(out, e.Name)
+		}
+		return out
+	}
+
+	// A card being worked on leads, however old it is: it is the one thing on
+	// this list that is still happening.
+	page, cursor, err := db.ListHistory(ctx, p.ID, HistoryFilter{Limit: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fmt.Sprint(names(page)); got != "[Running Newest]" {
+		t.Fatalf("first page is %s", got)
+	}
+
+	// It finishes while the reader is on page one.
+	if _, err := db.SQL().ExecContext(ctx,
+		`UPDATE tasks SET state='done', lane='done', completed_at=? WHERE id=?`,
+		base.Add(time.Hour).Format(time.RFC3339Nano), running.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	rest, _, err := db.ListHistory(ctx, p.ID, HistoryFilter{Limit: 5, Before: cursor})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fmt.Sprint(names(rest)); got != "[Middle Oldest]" {
+		t.Errorf("second page is %s, want the two below the cursor and nothing repeated", got)
 	}
 }

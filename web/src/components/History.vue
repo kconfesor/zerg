@@ -14,6 +14,7 @@
 import { computed, ref, watch } from 'vue'
 import { GitBranch, GitMerge, GitPullRequest, Pin, RotateCcw, Search } from '@lucide/vue'
 import { api, type HistoryEntry, type Task } from '@/lib/api'
+import { latest } from '@/lib/latest'
 import { duration, money, taskState } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -44,8 +45,19 @@ const query = ref('')
 
 const ANY = 'all'
 
+/**
+ * Only the newest request may write.
+ *
+ * A filter change, a project switch and a page of older work are three requests
+ * that can be in flight together, and nothing cancels the ones already gone.
+ * A slow first answer landing last put an unfiltered list under a filter, or
+ * appended a page of one project's work to another's.
+ */
+const newest = latest()
+
 async function load(append = false) {
   if (!props.projectId) return
+  const current = newest()
   loading.value = true
   error.value = ''
   try {
@@ -55,12 +67,14 @@ async function load(append = false) {
       role: role.value === ANY ? '' : role.value,
       q: query.value.trim(),
     })
+    if (!current()) return // a newer request has been asked for
     entries.value = append ? [...entries.value, ...page.entries] : page.entries
     next.value = page.next
   } catch (e) {
+    if (!current()) return
     error.value = e instanceof Error ? e.message : String(e)
   } finally {
-    loading.value = false
+    if (current()) loading.value = false
   }
 }
 
@@ -75,10 +89,22 @@ watch(query, () => {
 })
 load()
 
+/**
+ * When a card stopped being a card: finished, or parked by a person.
+ *
+ * A stopped card has no completedAt, so measuring to "now" made its wall time
+ * grow for as long as the database held it, and the date beside it read as when
+ * it was created rather than when it was stopped.
+ */
+function ended(task: HistoryEntry): string | undefined {
+  return task.completedAt ?? task.stoppedAt
+}
+
 /** Wall time is what a person waited; active is what the agents ran for. */
 function wall(task: HistoryEntry): number {
-  const end = task.completedAt ? new Date(task.completedAt) : new Date()
-  return Math.max(0, end.getTime() - new Date(task.createdAt).getTime())
+  const end = ended(task)
+  const at = end ? new Date(end) : new Date()
+  return Math.max(0, at.getTime() - new Date(task.createdAt).getTime())
 }
 
 /**
@@ -198,8 +224,8 @@ const filtered = computed(() => outcome.value !== ANY || role.value !== ANY || !
             </div>
 
             <div class="text-muted-foreground flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px]">
-              <span :title="task.completedAt ?? task.createdAt">
-                {{ new Date(task.completedAt ?? task.createdAt).toLocaleString() }}
+              <span :title="ended(task) ?? task.createdAt">
+                {{ new Date(ended(task) ?? task.createdAt).toLocaleString() }}
               </span>
               <!-- The gap between these two is the reading: six hours of wall
                    time against twelve minutes of work is a card that was

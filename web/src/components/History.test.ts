@@ -122,6 +122,49 @@ describe('History', () => {
     expect(w.text()).toContain('$0.42')
   })
 
+  it('lets only the newest request write', async () => {
+    // A filter change, a project switch and a page of older work can be in
+    // flight together, and nothing cancels the ones already gone. A slow first
+    // answer landing last put an unfiltered list under a filter.
+    let releaseFirst: (v: { entries: HistoryEntry[]; next: string }) => void = () => {}
+    history.mockImplementationOnce(
+      () => new Promise((resolve) => { releaseFirst = resolve }),
+    )
+    history.mockResolvedValueOnce({ entries: [entry('Filtered')], next: '' })
+
+    const w = screen()
+    await w.get('input[aria-label="Search history"]').setValue('filtered')
+    // The debounce fires the second request while the first is still out.
+    await new Promise((r) => setTimeout(r, 300))
+    await flushPromises()
+    expect(w.text()).toContain('Filtered')
+
+    // The first answer arrives last, and is dropped.
+    releaseFirst({ entries: [entry('Stale')], next: 'old-cursor' })
+    await flushPromises()
+    expect(w.text()).toContain('Filtered')
+    expect(w.text()).not.toContain('Stale')
+  })
+
+  it('stops a stopped card\'s clock when it was stopped', async () => {
+    // No completedAt, so measuring to now made a parked card's wall time grow
+    // for as long as the database held it.
+    history.mockResolvedValue({
+      entries: [
+        entry('Parked', {
+          state: 'rejected',
+          completedAt: undefined,
+          stoppedAt: '2026-01-01T09:30:00Z',
+          createdAt: '2026-01-01T09:00:00Z',
+        }),
+      ],
+      next: '',
+    })
+    const w = screen()
+    await flushPromises()
+    expect(w.text()).toContain('30m wall')
+  })
+
   it('says the difference between an empty project and an empty search', async () => {
     history.mockResolvedValue({ entries: [], next: '' })
     const w = screen()

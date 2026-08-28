@@ -749,21 +749,37 @@ func TestTaskEventsReadOneStepOfTheTrail(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d: %s", rec.Code, rec.Body)
 	}
-	var events []store.Event
-	decodeInto(t, rec, &events)
-	if len(events) != 2 {
-		t.Fatalf("got %d events, want the two inside the step: %+v", len(events), events)
+	var slice struct {
+		Events    []store.Event `json:"events"`
+		Truncated bool          `json:"truncated"`
 	}
-	if events[0].Text != "reading the parser" || events[1].Text != "running the tests" {
-		t.Errorf("a step is read from where it started: %q then %q", events[0].Text, events[1].Text)
+	decodeInto(t, rec, &slice)
+	if len(slice.Events) != 2 {
+		t.Fatalf("got %d events, want the two inside the step: %+v", len(slice.Events), slice.Events)
+	}
+	if slice.Events[0].Text != "reading the parser" || slice.Events[1].Text != "running the tests" {
+		t.Errorf("a step is read from where it started: %q then %q", slice.Events[0].Text, slice.Events[1].Text)
+	}
+	if slice.Truncated {
+		t.Error("two events came back marked truncated")
+	}
+
+	// A step longer than the page says so. A transcript cut silently reads
+	// exactly like a step that stopped there.
+	rec = do(t, h, "GET", fmt.Sprintf("/api/tasks/%s/events?role=coder&limit=1&from=%s&until=%s",
+		task.ID, at(0).Format(time.RFC3339Nano), at(10).Format(time.RFC3339Nano)), nil)
+	decodeInto(t, rec, &slice)
+	if len(slice.Events) != 1 || !slice.Truncated {
+		t.Errorf("a cut transcript came back as %d events, truncated=%v", len(slice.Events), slice.Truncated)
 	}
 
 	// A window that has aged out is an ordinary answer, not an error: events
 	// are the tier that gets swept (ARCHITECTURE §12.1).
 	rec = do(t, h, "GET", fmt.Sprintf("/api/tasks/%s/events?role=docs&from=%s&until=%s",
 		task.ID, at(0).Format(time.RFC3339Nano), at(10).Format(time.RFC3339Nano)), nil)
-	if rec.Code != http.StatusOK || strings.TrimSpace(rec.Body.String()) != "[]" {
-		t.Errorf("an empty window answered %d %s, want 200 []", rec.Code, rec.Body)
+	decodeInto(t, rec, &slice)
+	if rec.Code != http.StatusOK || len(slice.Events) != 0 {
+		t.Errorf("an empty window answered %d %s, want 200 and no events", rec.Code, rec.Body)
 	}
 
 	if rec := do(t, h, "GET", "/api/tasks/"+task.ID+"/events?from=yesterday", nil); rec.Code != http.StatusBadRequest {

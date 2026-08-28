@@ -68,31 +68,41 @@ func (Git) Merge(ctx context.Context, repoPath, baseBranch, commit string) error
 // commit that says so leaves an approval reading "integrating" forever: it is
 // excluded from Attention, so nothing asks anyone about it, and the work has
 // landed on the base branch with a card that never moved to Done.
-func (g Git) Landed(ctx context.Context, repoPath, base, commit, title, mode string) (bool, error) {
+// Landed reports whether the work is already integrated, and where it went.
+//
+// The URL is returned rather than only the fact, because the caller has nowhere
+// else to get it: a gated completion stores its note before anyone approves it,
+// so the note cannot name a pull request that did not exist yet, and the
+// process that opened it is the one that was killed. Without this the recovered
+// card records "opened a pull request" and no way to reach it.
+func (g Git) Landed(ctx context.Context, repoPath, base, commit, title, mode string) (string, bool, error) {
 	switch mode {
 	case "branch":
 		// Nothing is integrated in this mode, so nothing can have half
 		// happened. The decision is safe to take again.
-		return false, nil
+		return "", false, nil
 
 	case "pr":
 		if _, err := exec.LookPath("gh"); err != nil {
-			return false, err
+			return "", false, err
 		}
 		url, err := existingPR(ctx, repoPath, TaskBranchPrefix+slug(title))
 		if err != nil {
 			// gh exits non-zero when there is no pull request for the branch,
 			// which is the ordinary "not landed" answer rather than a fault.
-			return false, nil
+			return "", false, nil
 		}
-		return strings.TrimSpace(url) != "", nil
+		url = strings.TrimSpace(url)
+		return url, url != "", nil
 
 	default:
 		if err := verifyCommit(ctx, repoPath, commit); err != nil {
-			return false, err
+			return "", false, err
 		}
-		_, err := runGit(ctx, repoPath, "merge-base", "--is-ancestor", commit, base)
-		return err == nil, nil
+		if _, err := runGit(ctx, repoPath, "merge-base", "--is-ancestor", commit, base); err != nil {
+			return "", false, nil
+		}
+		return commit, true, nil
 	}
 }
 

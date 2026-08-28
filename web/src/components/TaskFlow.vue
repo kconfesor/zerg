@@ -29,8 +29,14 @@ const props = defineProps<{
   steps: TaskStep[]
   /** The team's roles, in pipeline order. */
   roles: string[]
-  /** Read for where finished work lands: merge, pull request, or nowhere. */
+  /** Read for where finished work lands, for a card that has not landed yet:
+   *  merge, pull request, or nowhere. A card that has ended says so itself. */
   project?: Project | null
+  /** What happened to this card's work, and where it went, as recorded when it
+   *  happened. A project's integration setting is a live value and answers a
+   *  different question tomorrow, which is why this was recorded at all. */
+  outcome?: string
+  outcomeRef?: string
   /** Which role is holding the card now, if any — the lane it sits in. */
   current?: string
 }>()
@@ -45,13 +51,15 @@ const MERGED = '(merged)'
  * ages out (ARCHITECTURE §12.1), so they are fetched per step when asked for
  * rather than shipped with every card.
  *
- * The window is the step's own: from when the role took the work to a little
- * after it handed it on. The grace at the end is not slack, it is the turn that
- * produced the handoff, which finishes after the message is written.
+ * The window is the one the daemon summed this step's cost over, handed out on
+ * the step itself. It used to be the handoff plus a guessed half minute, which
+ * disagreed with the cost in both directions: a closing turn that ran longer
+ * was missing from what the step "did" while being charged to it, and a quick
+ * second lap by the same role leaked into the step before it.
  */
-const GRACE_MS = 30_000
 const open = ref<Set<number>>(new Set())
 const slices = ref<Record<number, ActivityEvent[]>>({})
+const cut = ref<Record<number, boolean>>({})
 const loading = ref<Set<number>>(new Set())
 const failed = ref<Record<number, string>>({})
 
@@ -66,18 +74,19 @@ async function toggle(index: number, step: TaskStep) {
   open.value = showing
   if (slices.value[index] || loading.value.has(index) || !props.taskId) return
 
-  const from = step.startedAt ?? props.steps[index - 1]?.at
+  const from = step.windowStart ?? step.startedAt ?? props.steps[index - 1]?.at
   if (!from) return
   loading.value = new Set(loading.value).add(index)
   try {
-    slices.value = {
-      ...slices.value,
-      [index]: await api.taskEvents(props.taskId, {
-        role: step.from,
-        from,
-        until: new Date(new Date(step.at).getTime() + GRACE_MS).toISOString(),
-      }),
-    }
+    const slice = await api.taskEvents(props.taskId, {
+      role: step.from,
+      from,
+      // Absent on a role's last step, which runs to the end of the card: an
+      // open window is the honest one there.
+      until: step.windowEnd,
+    })
+    slices.value = { ...slices.value, [index]: slice.events }
+    cut.value = { ...cut.value, [index]: slice.truncated }
   } catch (e) {
     failed.value = { ...failed.value, [index]: e instanceof Error ? e.message : String(e) }
   } finally {
@@ -89,7 +98,7 @@ async function toggle(index: number, step: TaskStep) {
 
 /** A step can only be opened where there is a window to read it over. */
 function readable(index: number, step: TaskStep): boolean {
-  return !!props.taskId && !!(step.startedAt ?? props.steps[index - 1]?.at)
+  return !!props.taskId && !!(step.windowStart ?? step.startedAt ?? props.steps[index - 1]?.at)
 }
 
 function short(event: ActivityEvent): string {
@@ -183,8 +192,26 @@ function time(at: string): string {
  */
 function label(name: string): string {
   if (name !== MERGED) return name
+  // What this card actually did, when it is known. The project setting is the
+  // fallback for a card still in flight, and it was the only source until
+  // outcomes were recorded: a card merged last week under a project since
+  // switched to pull requests was labelled as having opened one.
+  switch (props.outcome) {
+    case 'merged':
+      return 'merged'
+    case 'pr':
+      return 'pull request'
+    case 'branch':
+      return 'its branch'
+  }
   return props.project ? landing(props.project).head : 'merged'
 }
+
+/** The pull request a card opened, for the one outcome that has somewhere to
+ *  go. A commit is shown on the step that made it. */
+const pullRequest = computed(() =>
+  props.outcome === 'pr' && props.outcomeRef?.startsWith('http') ? props.outcomeRef : '',
+)
 </script>
 
 <template>
@@ -279,6 +306,18 @@ function label(name: string): string {
                 <span v-if="a.step.subject" class="text-muted-foreground ml-1.5">
                   {{ a.step.subject }}
                 </span>
+                <!-- Where the work went, on the step that sent it there. It was
+                     recorded so it could be read; without this it was in the
+                     database and nowhere on screen. -->
+                <a
+                  v-if="a.step.final && pullRequest"
+                  :href="pullRequest"
+                  target="_blank"
+                  rel="noreferrer"
+                  class="text-[var(--primary)] ml-1.5 underline underline-offset-2"
+                >
+                  pull request
+                </a>
               </p>
               <!-- What this step cost and how long it took, which is where a
                    card's hours go. Per step rather than per card: a total says
@@ -346,6 +385,11 @@ function label(name: string): string {
                 <p v-if="open.has(i) && hiddenCount(i) > 0" class="text-muted-foreground/60 mt-0.5 text-[10px]">
                   and {{ hiddenCount(i) }} more of the machinery: tool results, thinking, turn
                   accounting.
+                </p>
+                <!-- Said rather than cut silently: a transcript that stops at
+                     the page boundary reads like a step that stopped there. -->
+                <p v-if="cut[i]" class="text-muted-foreground/60 mt-0.5 text-[10px]">
+                  This step is longer than one page; the rest is not shown.
                 </p>
               </div>
             </div>

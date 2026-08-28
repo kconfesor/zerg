@@ -38,6 +38,11 @@ const (
 	OutcomeBranch = "branch"
 )
 
+// OperatorRole is the sender of the message that opens a card. It is a person,
+// not an agent, and it is on every task, so the history lists the roles that
+// worked on a card without it.
+const OperatorRole = "operator"
+
 // LaneDone is the well a finished card lands in.
 const LaneDone = "done"
 
@@ -992,7 +997,10 @@ func (db *DB) ListHistory(ctx context.Context, projectID string, f HistoryFilter
 	}
 
 	where := []string{"t.project_id = ?"}
-	args := []any{projectID}
+	// The operator is the sender of the message that opens every card, so it is
+	// on every row and says nothing about who worked on it. The trail still
+	// shows that first message; this is the list of agents.
+	args := []any{OperatorRole, projectID}
 	switch {
 	case f.Outcome == "none":
 		where = append(where, "t.outcome = ''")
@@ -1010,10 +1018,17 @@ func (db *DB) ListHistory(ctx context.Context, projectID string, f HistoryFilter
 	}
 	// The cursor is a position, not an offset: a page taken while a task
 	// finishes would otherwise repeat a row or skip one. Row values compare
-	// left to right, so the id breaks ties between tasks that ended in the
+	// left to right, so the id breaks ties between two cards that ended in the
 	// same nanosecond.
+	//
+	// Unfinished cards sort first as a group, and the rest by when they ended,
+	// which is a key that never changes once written. Ordering everything by
+	// "completed, or else created" made the key of a running card move the
+	// moment it finished: a card below the cursor jumped above it and no later
+	// page could return it. What is left of that is a card still running while
+	// you page past the first fifty, which is a queue nobody is watching.
 	if at, id, ok := splitCursor(f.Before); ok {
-		where = append(where, "(COALESCE(t.completed_at, t.created_at), t.id) < (?, ?)")
+		where = append(where, "(t.completed_at IS NOT NULL) AND (COALESCE(t.completed_at, t.created_at), t.id) < (?, ?)")
 		args = append(args, at, id)
 	}
 
@@ -1024,7 +1039,8 @@ func (db *DB) ListHistory(ctx context.Context, projectID string, f HistoryFilter
 		        EXISTS (SELECT 1 FROM events e WHERE e.task_id = t.id),
 		        COALESCE((SELECT group_concat(role, char(10)) FROM (
 		            SELECT m.from_role AS role, MIN(m.created_at) AS first
-		              FROM messages m WHERE m.task_id = t.id AND m.from_role <> ''
+		              FROM messages m
+		             WHERE m.task_id = t.id AND m.from_role <> '' AND m.from_role <> ?
 		             GROUP BY m.from_role ORDER BY first)), '')
 		   FROM tasks t
 		   LEFT JOIN (
@@ -1034,7 +1050,8 @@ func (db *DB) ListHistory(ctx context.Context, projectID string, f HistoryFilter
 		         FROM usage_turns GROUP BY task_id
 		   ) u ON u.task_id = t.id
 		  WHERE `+strings.Join(where, " AND ")+`
-		  ORDER BY COALESCE(t.completed_at, t.created_at) DESC, t.id DESC
+		  ORDER BY (t.completed_at IS NULL) DESC,
+		           COALESCE(t.completed_at, t.created_at) DESC, t.id DESC
 		  LIMIT ?`, args...)
 	if err != nil {
 		return nil, "", fmt.Errorf("reading history: %w", err)
@@ -1115,6 +1132,16 @@ type TrailStep struct {
 	// Zero when there is no lease to measure from, which is not the same as a
 	// step that took no time and is why the field is separate from StartedAt.
 	DurationMS int64 `json:"durationMs"`
+
+	// WindowStart and WindowEnd are what this step's turns were summed over,
+	// handed out so that anything else reading the step reads the same span.
+	// The transcript did not: it stopped at the handoff plus a guessed half
+	// minute, so a closing turn that ran longer was missing from what a step
+	// "did" while its cost was counted, and a quick second lap by the same role
+	// leaked into the step before it. End is exclusive and absent on a role's
+	// last step, which runs to the end of the card.
+	WindowStart *time.Time `json:"windowStart,omitempty"`
+	WindowEnd   *time.Time `json:"windowEnd,omitempty"`
 
 	// What the turns inside that window cost. Per step rather than per task,
 	// because "this pipeline cost four dollars" does not say which role spent
@@ -1220,6 +1247,16 @@ func (db *DB) TaskTrail(ctx context.Context, taskID string) ([]TrailStep, error)
 
 	if err := db.attachTurns(ctx, taskID, steps); err != nil {
 		return nil, err
+	}
+	// The same windows the turns were bucketed into, so a reader of one step
+	// asks for exactly what that step was charged for.
+	for _, w := range windowsFor(steps) {
+		from := w.from
+		steps[w.step].WindowStart = &from
+		if !w.until.IsZero() {
+			until := w.until
+			steps[w.step].WindowEnd = &until
+		}
 	}
 	return steps, db.attachClarifications(ctx, taskID, steps)
 }

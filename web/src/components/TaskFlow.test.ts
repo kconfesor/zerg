@@ -16,6 +16,8 @@ function step(over: Partial<TaskStep> = {}): TaskStep {
     body: 'did it',
     at: '2026-01-01T09:10:00.000Z',
     startedAt: '2026-01-01T09:00:00.000Z',
+    windowStart: '2026-01-01T09:00:00.000Z',
+    windowEnd: '2026-01-01T09:30:00.000Z',
     durationMs: 600_000,
     tokens: 300,
     costUsd: 0.25,
@@ -40,7 +42,7 @@ function flow(steps: TaskStep[] = [step()]) {
 
 beforeEach(() => {
   taskEvents.mockReset()
-  taskEvents.mockResolvedValue([])
+  taskEvents.mockResolvedValue({ events: [], truncated: false })
 })
 
 describe('a step of the trail', () => {
@@ -58,21 +60,24 @@ describe('a step of the trail', () => {
     const [id, opts] = taskEvents.mock.calls.at(-1)!
     expect(id).toBe('task-1')
     expect(opts).toMatchObject({ role: 'coder', from: '2026-01-01T09:00:00.000Z' })
-    // The window runs past the handoff on purpose: the turn that produced it
-    // finishes after the message is written, and stopping at the handoff drops
-    // the largest turn of the step.
-    expect(new Date(opts!.until!).getTime()).toBeGreaterThan(new Date('2026-01-01T09:10:00.000Z').getTime())
+    // The window is the daemon's own, the one the step's cost was summed over,
+    // rather than the handoff plus a guess: the two disagreeing is how a step
+    // gets charged for a turn that is missing from what it did.
+    expect(opts).toMatchObject({ until: '2026-01-01T09:30:00.000Z' })
   })
 
   it('lists what the role did and counts the machinery', async () => {
-    taskEvents.mockResolvedValue([
-      event('tool_call', { tool: 'Bash' }),
-      event('message', { text: 'following the existing convention' }),
-      event('tool_done', { text: 'ok' }),
-      event('thinking', { text: '' }),
-      event('usage'),
-      event('turn_end'),
-    ])
+    taskEvents.mockResolvedValue({
+      events: [
+        event('tool_call', { tool: 'Bash' }),
+        event('message', { text: 'following the existing convention' }),
+        event('tool_done', { text: 'ok' }),
+        event('thinking', { text: '' }),
+        event('usage'),
+        event('turn_end'),
+      ],
+      truncated: false,
+    })
     const w = flow()
     await w.findAll('button').find((b) => b.text().includes('what it did'))!.trigger('click')
     await flushPromises()
@@ -86,7 +91,7 @@ describe('a step of the trail', () => {
   })
 
   it('says a transcript is gone rather than showing an empty box', async () => {
-    taskEvents.mockResolvedValue([])
+    taskEvents.mockResolvedValue({ events: [], truncated: false })
     const w = flow()
     await w.findAll('button').find((b) => b.text().includes('what it did'))!.trigger('click')
     await flushPromises()
@@ -96,7 +101,9 @@ describe('a step of the trail', () => {
   it('offers nothing to open on a step with no window to read', () => {
     // The operator's own first message has no lease behind it and nothing
     // before it, so there is no window and no transcript to ask for.
-    const w = flow([step({ from: 'operator', startedAt: undefined, durationMs: 0 })])
+    const w = flow([
+      step({ from: 'operator', startedAt: undefined, windowStart: undefined, windowEnd: undefined, durationMs: 0 }),
+    ])
     expect(w.findAll('button').some((b) => b.text().includes('what it did'))).toBe(false)
   })
 })

@@ -43,7 +43,10 @@ type Integrator interface {
 	// actually completed: the commit already contained in the base branch, or
 	// the pull request already open. It is what lets a crash mid-integration be
 	// reconciled from the repository rather than guessed at.
-	Landed(ctx context.Context, repoPath, base, commit, title, mode string) (bool, error)
+	// Landed says whether the work is already integrated and where it went.
+	// The second answer matters for a gated pull request: its note was written
+	// before anyone approved it, so the URL exists only here.
+	Landed(ctx context.Context, repoPath, base, commit, title, mode string) (string, bool, error)
 
 	// Resolve turns a commit-ish into the absolute sha it names in the tree at
 	// path. Every commit that enters the system goes through this.
@@ -1321,15 +1324,18 @@ func (n *Nydus) ReconcileIntegrating(ctx context.Context) (settled, released int
 			if err != nil {
 				return settled, released, err
 			}
-			landed, err = n.integrator.Landed(ctx, project.Path, project.BaseBranch,
+			var where string
+			where, landed, err = n.integrator.Landed(ctx, project.Path, project.BaseBranch,
 				a.commit.String, task.Name, project.Integration)
 			// The mode this was integrated under is the one being asked about
-			// right here, which is the only moment it can be recorded honestly.
+			// right here, which is the only moment it can be recorded honestly,
+			// and git is the only thing that still knows where the work went:
+			// a gated completion's note was written before it was published.
 			switch project.Integration {
 			case store.IntegrateBranch:
 				outcome, outcomeRef = store.OutcomeBranch, a.commit.String
 			case store.IntegratePR:
-				outcome, outcomeRef = store.OutcomePR, prURL(a.body)
+				outcome, outcomeRef = store.OutcomePR, where
 			default:
 				outcome, outcomeRef = store.OutcomeMerged, a.commit.String
 			}
@@ -1357,21 +1363,6 @@ func (n *Nydus) ReconcileIntegrating(ctx context.Context) (settled, released int
 		settled++
 	}
 	return settled, released, nil
-}
-
-// prURL reads back the link nydus appends to a completion's note.
-//
-// Only for the reconciler, which finds a decision that was interrupted after
-// the pull request was opened and before anything was written: the URL was
-// returned to a process that is no longer running, and the note is where it
-// survived. Every path that has the URL in hand records it directly.
-func prURL(body string) string {
-	const marker = "Pull request: "
-	i := strings.Index(body, marker)
-	if i < 0 {
-		return ""
-	}
-	return strings.TrimSpace(body[i+len(marker):])
 }
 
 // finishIntegrated records the approval and closes the card for work that is
