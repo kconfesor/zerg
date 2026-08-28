@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -507,4 +508,99 @@ func (h *Hatchery) Measure() Workspace {
 		out.Bytes += n
 	}
 	return out
+}
+
+// ── mergeability ──────────────────────────────────────────────────────────
+
+// Mergeable is whether the work would land, and what stands in the way.
+type Mergeable struct {
+	// Clean is whether the merge would go through without a person resolving
+	// anything.
+	Clean bool `json:"clean"`
+	// Conflicts are the paths git could not merge, when it could not.
+	Conflicts []string `json:"conflicts,omitempty"`
+	// BaseAhead is how many commits the base branch has taken since this work
+	// diverged from it. A diff that was right against yesterday's base is the
+	// usual reason an approval that looked clean fails at the merge.
+	BaseAhead int `json:"baseAhead"`
+}
+
+// MergeCheck asks whether a commit still merges into the base branch.
+//
+// `git merge-tree --write-tree` does the merge in memory: no worktree, no
+// index, nothing checked out and nothing to clean up if it fails. Exit 0 means
+// clean and prints the tree it would produce; exit 1 means conflicts, and the
+// lines after the tree name every path that has one, tab-separated, once per
+// stage. Anything else is a real failure and is reported as one.
+//
+// Verified against a repository with a base that had moved underneath: clean
+// returns a tree id alone, conflicting returns the tree, three staged entries
+// for the one file, then git's own account of what it could not merge.
+func (h *Hatchery) MergeCheck(ctx context.Context, base, commit string) (*Mergeable, error) {
+	for _, ref := range []string{base, commit} {
+		ok, err := h.resolves(ctx, ref)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return nil, fmt.Errorf("%q: %w", ref, ErrNoSuchRevision)
+		}
+	}
+
+	out := &Mergeable{}
+	// How far the base has moved since the work left it. Counted separately
+	// from the merge because a base that has moved is worth saying even when
+	// the merge is still clean: it is the difference between reviewing what
+	// will land and reviewing what was written.
+	if ahead, err := git(ctx, h.repoPath, "rev-list", "--count", commit+".."+base); err == nil {
+		out.BaseAhead, _ = strconv.Atoi(ahead)
+	}
+
+	cmd := exec.CommandContext(ctx, "git", "merge-tree", "--write-tree", base, commit)
+	cmd.Dir = h.repoPath
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	err := cmd.Run()
+	if err == nil {
+		out.Clean = true
+		return out, nil
+	}
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.ExitCode() != 1 {
+		msg := strings.TrimSpace(stderr.String())
+		if msg == "" {
+			msg = err.Error()
+		}
+		return nil, fmt.Errorf("git merge-tree %s %s: %s", base, commit, msg)
+	}
+
+	out.Conflicts = conflictPaths(stdout.String())
+	return out, nil
+}
+
+// conflictPaths reads the paths out of merge-tree's conflicted output.
+//
+// The first line is the tree it would have written. What follows, until a blank
+// line, is one entry per conflicting stage: "<mode> <oid> <stage>\t<path>", so a
+// single conflicted file appears three times. Git's prose about what it could
+// not merge comes after that blank line and is not parsed: the paths are the
+// part a caller can act on.
+func conflictPaths(out string) []string {
+	var paths []string
+	seen := map[string]bool{}
+	for i, line := range strings.Split(out, "\n") {
+		if i == 0 {
+			continue // the tree id
+		}
+		if strings.TrimSpace(line) == "" {
+			break
+		}
+		_, path, ok := strings.Cut(line, "\t")
+		if !ok || seen[path] {
+			continue
+		}
+		seen[path] = true
+		paths = append(paths, path)
+	}
+	return paths
 }

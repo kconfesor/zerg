@@ -509,3 +509,80 @@ func TestChangedFilesSeparatesUnknownRevisionsFromRealFailures(t *testing.T) {
 		}
 	})
 }
+
+// Whether the work still merges, asked without touching a worktree.
+//
+// An approval decides whether work lands, and nothing said whether it could.
+// `git merge-tree --write-tree` does the merge in memory, so the answer costs
+// nothing and leaves nothing behind: no checkout, no index, nothing to clean up
+// when it conflicts.
+func TestMergeCheckAnswersBeforeAnythingIsMerged(t *testing.T) {
+	h, dir := newProject(t)
+	ctx := context.Background()
+
+	write := func(t *testing.T, name, content, message string) string {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := git(ctx, dir, "add", "."); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := git(ctx, dir, "commit", "-m", message); err != nil {
+			t.Fatal(err)
+		}
+		sha, err := git(ctx, dir, "rev-parse", "HEAD")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return sha
+	}
+
+	write(t, "f.txt", "one\ntwo\nthree\n", "base")
+	if _, err := git(ctx, dir, "checkout", "-b", "work"); err != nil {
+		t.Fatal(err)
+	}
+	work := write(t, "f.txt", "ONE\ntwo\nthree\n", "the work")
+	if _, err := git(ctx, dir, "checkout", "main"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Nothing has moved, so it lands.
+	clean, err := h.MergeCheck(ctx, "main", work)
+	if err != nil {
+		t.Fatalf("MergeCheck: %v", err)
+	}
+	if !clean.Clean || len(clean.Conflicts) != 0 || clean.BaseAhead != 0 {
+		t.Errorf("a merge into an unchanged base came back %+v", clean)
+	}
+
+	// The base takes a commit on the same lines, which is the ordinary way an
+	// approval that looked clean fails at the merge.
+	write(t, "f.txt", "uno\ntwo\nthree\n", "the base moves")
+	conflicted, err := h.MergeCheck(ctx, "main", work)
+	if err != nil {
+		t.Fatalf("MergeCheck after the base moved: %v", err)
+	}
+	if conflicted.Clean {
+		t.Error("a conflicting merge came back clean")
+	}
+	if len(conflicted.Conflicts) != 1 || conflicted.Conflicts[0] != "f.txt" {
+		t.Errorf("conflicts are %v, want the one file: git reports it once per stage", conflicted.Conflicts)
+	}
+	// Worth saying on its own: reviewing a diff taken against a base that has
+	// since moved is reviewing something other than what will land.
+	if conflicted.BaseAhead != 1 {
+		t.Errorf("base is %d commits ahead, want 1", conflicted.BaseAhead)
+	}
+
+	// And the check leaves nothing behind: no merge in progress, no changes.
+	if status, err := git(ctx, dir, "status", "--porcelain"); err != nil || status != "" {
+		t.Errorf("the check left the repository dirty: %q (%v)", status, err)
+	}
+
+	// A ref this repository does not have is the operator's problem, and is
+	// answerable as one rather than as a fault.
+	if _, err := h.MergeCheck(ctx, "main", "0000000000000000000000000000000000000000"); !errors.Is(err, ErrNoSuchRevision) {
+		t.Errorf("an unknown commit gave %v, want ErrNoSuchRevision", err)
+	}
+}

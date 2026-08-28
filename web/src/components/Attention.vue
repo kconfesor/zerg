@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
 import type { Attention } from '@/lib/api'
-import { ChevronRight } from '@lucide/vue'
-import { api, type ChangedFile } from '@/lib/api'
+import { AlertTriangle, ChevronRight, GitMerge } from '@lucide/vue'
+import { api, type ChangedFile, type Mergeable } from '@/lib/api'
 import { renderMarkdown } from '@/lib/markdown'
 import DiffView from '@/components/DiffView.vue'
 import { Badge } from '@/components/ui/badge'
@@ -90,11 +90,48 @@ function isDoc(f: ChangedFile): boolean {
  * away than the buttons that decide it. The document is the point of the card;
  * the card should open with it.
  */
+/**
+ * Whether approving would actually land the work.
+ *
+ * Asked when the diff is, and separately from it: the merge runs in memory, so
+ * it costs nothing and leaves nothing behind, and the answer is the one thing
+ * about an approval that the diff cannot show. A diff read against a base that
+ * has moved since the work was written is not a diff of what will land, which
+ * is the ordinary way a clean-looking approval fails at the merge.
+ */
+const merges = ref<Record<string, Mergeable | { error: string } | undefined>>({})
+
+async function loadMergeable(id: string) {
+  try {
+    merges.value = { ...merges.value, [id]: await api.approvalMergeable(id) }
+  } catch (e) {
+    merges.value = {
+      ...merges.value,
+      [id]: { error: e instanceof Error ? e.message : String(e) },
+    }
+  }
+}
+
+function mergeState(id: string): Mergeable | undefined {
+  const m = merges.value[id]
+  return m && !('error' in m) ? m : undefined
+}
+/** The branch this would land on, as the diff endpoint reported it. */
+function base(id: string): string {
+  return diffs.value[id]?.base || 'the base branch'
+}
+
+function mergeError(id: string): string {
+  const m = merges.value[id]
+  return m && 'error' in m ? m.error : ''
+}
+
 watch(
   () => props.attention?.approvals?.map((a) => a.id).join(',') ?? '',
   () => {
     for (const a of props.attention?.approvals ?? []) {
       if (a.commit && !diffs.value[a.id]) void loadFiles(a.id)
+      if (a.commit && !merges.value[a.id]) void loadMergeable(a.id)
     }
   },
   { immediate: true },
@@ -259,6 +296,33 @@ function empty(a: Attention | null): boolean {
           </div>
         </div>
       </div>
+
+      <!-- Whether it would land, beside the button that lands it. An approval
+           is the moment a person decides, and until now nothing said whether
+           the decision could be carried out. -->
+      <p
+        v-if="a.commit && (mergeState(a.id) || mergeError(a.id))"
+        class="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px]"
+      >
+        <template v-if="mergeState(a.id)?.clean">
+          <GitMerge :size="12" class="text-[var(--status-good)] shrink-0" aria-hidden="true" />
+          <span class="text-muted-foreground">merges cleanly</span>
+        </template>
+        <template v-else-if="mergeState(a.id)">
+          <AlertTriangle :size="12" class="text-[var(--status-warning)] shrink-0" aria-hidden="true" />
+          <span class="text-[var(--status-warning)]">
+            conflicts with {{ base(a.id) }} in
+            {{ (mergeState(a.id)?.conflicts ?? []).join(', ') }}
+          </span>
+        </template>
+        <span v-else class="text-muted-foreground">{{ mergeError(a.id) }}</span>
+        <!-- Said even when the merge is clean: it is the difference between
+             reviewing what will land and reviewing what was written. -->
+        <span v-if="(mergeState(a.id)?.baseAhead ?? 0) > 0" class="text-muted-foreground/80">
+          · {{ base(a.id) }} has moved {{ mergeState(a.id)?.baseAhead }}
+          commit{{ mergeState(a.id)?.baseAhead === 1 ? '' : 's' }} since this was written
+        </span>
+      </p>
 
       <!-- The note and the two decisions are one control: the text only means
            anything to Reject, and a field floating beside two buttons did not

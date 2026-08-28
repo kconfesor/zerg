@@ -494,6 +494,42 @@ func (s *Server) setTaskPinned(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, task)
 }
 
+// approvalMergeable answers whether the work would land, before deciding that
+// it should.
+//
+// Approving is what merges, and nothing said whether the merge would go
+// through. The answer costs nothing: the merge happens in memory, so there is
+// no worktree to check out and nothing to clean up when it conflicts.
+func (s *Server) approvalMergeable(w http.ResponseWriter, r *http.Request) {
+	approval, err := s.db.GetApproval(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	project, err := s.db.GetProject(r.Context(), approval.ProjectID)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if approval.Commit == "" {
+		badRequest(w, "this approval carries no commit, so there is nothing to merge")
+		return
+	}
+	answer, err := hatchery.New(project.Path).MergeCheck(r.Context(), project.BaseBranch, approval.Commit)
+	if err != nil {
+		// A ref this repository does not have is the operator's problem: a
+		// branch deleted, a worktree pruned, a clone that never had it. Every
+		// other failure here is a genuine fault.
+		if errors.Is(err, hatchery.ErrNoSuchRevision) {
+			badRequest(w, err.Error())
+			return
+		}
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, answer)
+}
+
 // stopTask parks a card so nothing picks it up again.
 func (s *Server) stopTask(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")

@@ -520,6 +520,10 @@ export const api = {
     call<Task>(`/tasks/${id}/pinned`, { method: 'PUT', body: JSON.stringify({ pinned }) }),
   approvalDiff: (id: string) =>
     call<{ files: ChangedFile[]; range: boolean; base: string }>(`/approvals/${id}/diff`),
+  /** Whether this work still merges into the base, and how far the base has
+   *  moved since it was written. The merge happens in memory, so asking costs
+   *  nothing and leaves nothing behind. */
+  approvalMergeable: (id: string) => call<Mergeable>(`/approvals/${id}/mergeable`),
   spend: (id: string, range: SpendRange) =>
     call<Spend>(`/projects/${id}/spend?range=${range}`),
 
@@ -817,6 +821,16 @@ export interface TaskDetail {
   task: Task
   history: TaskStep[]
   usage: UsageTotal
+}
+
+/** Whether approving would land the work, and what stands in the way. */
+export interface Mergeable {
+  clean: boolean
+  /** The paths git could not merge, when it could not. */
+  conflicts?: string[]
+  /** Commits the base has taken since this work left it. A diff read against a
+   *  base that has moved is not a diff of what will land. */
+  baseAhead: number
 }
 
 /** One file a commit touched, with both its content and its diff. */
