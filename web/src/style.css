@@ -1,5 +1,4 @@
 
-@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap');
 
 @import "tailwindcss";
 @import "tw-animate-css";
@@ -148,7 +147,12 @@
   --secondary: oklch(23.5% 0.035 301.6);
   --secondary-foreground: oklch(89.9% 0.030 305.1);
   --muted: oklch(23.5% 0.035 301.6);
-  --muted-foreground: oklch(54.3% 0.057 301.0);
+  /* 62%, not 54.3%. Measured against the three surfaces muted text sits on,
+     the old value gave 3.84, 3.68 and 3.50 to one -- axe flagged every label
+     on the board -- where WCAG AA asks 4.5 for text this size. This is the
+     lowest lightness that clears it on all three (5.31, 5.09, 4.84), so the
+     labels are as quiet as they can be and still be readable. */
+  --muted-foreground: oklch(62.0% 0.057 301.0);
   --accent: oklch(23.5% 0.035 301.6);
   --accent-foreground: oklch(89.9% 0.030 305.1);
   --destructive: oklch(66.2% 0.188 22.0);
@@ -346,4 +350,23 @@
   float: left;
   height: 0;
   pointer-events: none;
+}
+
+/* A floor on type size where the screen is a phone.
+ *
+ * The cockpit is dense on purpose: ten and eleven pixel labels are what let a
+ * board, a diff and a review fit on one screen at a desk. In a hand they are
+ * not readable, and Lighthouse says so plainly -- it scored 48% of the text
+ * illegible under mobile emulation.
+ *
+ * Raised here rather than in every component, because the density is the
+ * desktop design and this is the exception to it: one place to find, one place
+ * to change. Unlayered, so it wins against Tailwind's utility layer wherever
+ * the utility is what set the size.
+ */
+@media (max-width: 640px) {
+  .text-\[10px\],
+  .text-\[11px\] {
+    font-size: 12px;
+  }
 }

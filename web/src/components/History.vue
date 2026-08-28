@@ -210,13 +210,13 @@ const filtered = computed(() => outcome.value !== ANY || role.value !== ANY || !
                 <RotateCcw :size="10" aria-hidden="true" />
                 {{ task.reworkCount }}
               </span>
-              <span v-if="task.hidden" class="text-muted-foreground/70 text-[10px]">put away</span>
+              <span v-if="task.hidden" class="text-muted-foreground text-[10px]">put away</span>
               <!-- Said rather than discovered on opening it: the transcript is
                    the tier that ages out, and a card that has lost it still has
                    its outcome, its cost and its trail. -->
               <span
                 v-if="!task.hasTranscript"
-                class="text-muted-foreground/60 text-[10px]"
+                class="text-muted-foreground text-[10px]"
                 title="Its events have been swept. The trail, the cost and the outcome are still here."
               >
                 transcript aged out
@@ -232,7 +232,7 @@ const filtered = computed(() => outcome.value !== ANY || role.value !== ANY || !
                    waiting, not a task that was hard. -->
               <span class="tabular">
                 {{ duration(wall(task)) }} wall
-                <span class="text-muted-foreground/60">/</span>
+                <span class="text-muted-foreground">/</span>
                 {{ duration(task.activeMs) }} working
               </span>
               <span class="tabular">{{ money(task.costUsd) }}</span>

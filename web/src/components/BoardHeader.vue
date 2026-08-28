@@ -46,7 +46,7 @@ function size(bytes: number): string {
     <!-- Identity: which repository, on which branch. -->
     <div class="flex flex-wrap items-center gap-x-3 gap-y-1">
       <h1 class="text-[17px] leading-none font-semibold tracking-tight">Board</h1>
-      <span class="text-muted-foreground/40">/</span>
+      <span class="text-muted-foreground">/</span>
       <span
         class="text-muted-foreground inline-flex min-w-0 items-center gap-1.5 text-[11px]"
         :title="project.path"

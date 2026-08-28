@@ -786,3 +786,104 @@ func TestTaskEventsReadOneStepOfTheTrail(t *testing.T) {
 		t.Errorf("an unreadable time answered %d, want 400 naming it", rec.Code)
 	}
 }
+
+// The reader asks; the agent answers into the thread; nothing is blocked by it.
+//
+// The point of this feature is a person reviewing a change with help reading
+// it, not an agent reviewing it for them. So a question opens a thread that
+// holds nothing at the gate, and what turns an answer into an obligation is the
+// reader raising it.
+func TestAskingAboutAHunkDoesNotHoldTheGate(t *testing.T) {
+	h, db := newTestServer(t)
+	ctx := context.Background()
+
+	var p store.Project
+	decodeInto(t, do(t, h, "POST", "/api/projects", map[string]any{"path": t.TempDir()}), &p)
+	task, err := db.CreateTask(ctx, p.ID, "Postfix factorial", "add it", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A remark holds the gate.
+	remark, err := db.OpenReviewThread(ctx, &store.ReviewThread{
+		ProjectID: p.ID, TaskID: task.ID, File: "parse.rs", Line: 3,
+	}, store.OperatorRole, "this loops forever")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n, _ := db.OpenReviewThreads(ctx, task.ID); n != 1 {
+		t.Fatalf("a remark does not hold the gate: %d", n)
+	}
+
+	// A question does not, however many are open. Asking should not cost the
+	// reader a click to dismiss, or they stop asking.
+	for i := 0; i < 3; i++ {
+		if _, err := db.OpenReviewThread(ctx, &store.ReviewThread{
+			ProjectID: p.ID, TaskID: task.ID, File: "parse.rs", Line: 3,
+			Kind: store.ThreadQuestion,
+		}, store.OperatorRole, "why is this recursive?"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n, _ := db.OpenReviewThreads(ctx, task.ID); n != 1 {
+		t.Errorf("questions are holding the gate: %d threads counted, want the one remark", n)
+	}
+
+	// Raising one is the reader deciding that what they learned matters.
+	var threads []store.ReviewThread
+	decodeInto(t, do(t, h, "GET", "/api/tasks/"+task.ID+"/review", nil), &threads)
+	var question store.ReviewThread
+	for _, th := range threads {
+		if th.Kind == store.ThreadQuestion {
+			question = th
+			break
+		}
+	}
+	if question.ID == "" {
+		t.Fatal("no question thread came back")
+	}
+	rec := do(t, h, "POST", "/api/review-threads/"+question.ID+"/raise", map[string]any{})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("raising: %d %s", rec.Code, rec.Body)
+	}
+	var raised store.ReviewThread
+	decodeInto(t, rec, &raised)
+	if raised.Kind != store.ThreadRemark || raised.State != store.ThreadOpen {
+		t.Errorf("raised thread is %+v, want an open remark", raised)
+	}
+	if n, _ := db.OpenReviewThreads(ctx, task.ID); n != 2 {
+		t.Errorf("open remarks = %d, want the original and the raised one", n)
+	}
+
+	// And a build with no agent says so rather than failing obscurely.
+	rec = do(t, h, "POST", "/api/tasks/"+task.ID+"/review/ask", map[string]any{
+		"file": "parse.rs", "line": 3, "question": "why?",
+	})
+	if rec.Code != http.StatusNotImplemented {
+		t.Errorf("asking with no chat agent gave %d, want 501: %s", rec.Code, rec.Body)
+	}
+	_ = remark
+}
+
+// The question the agent is given is about the code the reader is looking at,
+// and asks it to answer rather than to review.
+func TestTheAskPromptCarriesTheHunkAndAsksForAnAnswer(t *testing.T) {
+	prompt := askPrompt("main", "abc123", "src/parse.rs", 41,
+		"+    while peek(s) == Some('!') {\n", "why is this a while and not an if?")
+
+	for _, want := range []string{
+		"src/parse.rs", "around line 41", "main..abc123",
+		"while peek(s) == Some('!')", "why is this a while and not an if?",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("the prompt does not carry %q:\n%s", want, prompt)
+		}
+	}
+	// The reviewer is the person. An agent that volunteers a verdict is
+	// answering a question nobody asked.
+	for _, want := range []string{"do not give a verdict", "leave the decision to"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("the prompt does not say %q", want)
+		}
+	}
+}

@@ -399,16 +399,47 @@ async function call<T>(path: string, init?: RequestInit): Promise<T> {
   return body as T
 }
 
+/**
+ * The answers the page started fetching before this bundle was parsed.
+ *
+ * index.html asks for the three things every start needs while the bundle is
+ * still on the wire, which on a phone over a tailnet is most of a round trip
+ * saved. This takes each answer at most once: a second call is a fresh
+ * request, because the point is a faster first paint, not a cache.
+ *
+ * Strictly an optimisation. If the boot fetch is missing, or failed for any
+ * reason, this asks again through call() so the error arrives the way every
+ * other error does, with its status and the daemon's own message.
+ */
+type BootKey = 'projects' | 'roles' | 'harnesses'
+
+declare global {
+  interface Window {
+    __zergBoot?: Partial<Record<BootKey, Promise<unknown>>>
+  }
+}
+
+async function booted<T>(key: BootKey, again: () => Promise<T>): Promise<T> {
+  const waiting = window.__zergBoot?.[key]
+  if (!waiting) return again()
+  delete window.__zergBoot![key]
+  try {
+    return (await waiting) as T
+  } catch {
+    return again()
+  }
+}
+
 export const api = {
   health: () => call<{ status: string }>('/health'),
 
-  harnesses: () => call<string[]>('/harnesses'),
+  harnesses: () => booted('harnesses', () => call<string[]>('/harnesses')),
   models: (harness: string) => call<Model[]>(`/harnesses/${harness}/models`),
   /** The reasoning levels this harness accepts, weakest first. Empty means it
    *  has no such control, and the field is not offered for it. */
   thinking: (harness: string) => call<string[]>(`/harnesses/${harness}/thinking`),
 
-  roles: () => call<RoleTemplate[]>('/roles'),
+  roles: () => booted('roles', () => call<RoleTemplate[]>('/roles')),
   /** The teams a project may use: the shared ones and its own. Without an id
    *  this is every team, which is not a list to show under one project. */
   teamPresets: async (projectId?: string) =>
@@ -429,7 +460,7 @@ export const api = {
     call<RoleTemplate>(`/roles/${r.id}`, { method: 'PUT', body: JSON.stringify(r) }),
   deleteRole: (id: string) => call<void>(`/roles/${id}`, { method: 'DELETE' }),
 
-  projects: () => call<Project[]>('/projects'),
+  projects: () => booted('projects', () => call<Project[]>('/projects')),
   createProject: (path: string, baseBranch: string) =>
     call<Project>('/projects', { method: 'POST', body: JSON.stringify({ path, baseBranch }) }),
 
@@ -518,8 +549,71 @@ export const api = {
   /** Keep this card's transcript past the retention window, or let it go. */
   setTaskPinned: (id: string, pinned: boolean) =>
     call<Task>(`/tasks/${id}/pinned`, { method: 'PUT', body: JSON.stringify({ pinned }) }),
+  /** The conversation about a card's code. */
+  review: (taskId: string) => call<ReviewThread[]>(`/tasks/${taskId}/review`),
+  /** Start a thread on a line. Line 0 is the file as a whole. */
+  openReviewThread: (
+    taskId: string,
+    body: { approvalId?: string; commitSha?: string; file?: string; line: number; body: string },
+  ) => call<ReviewThread>(`/tasks/${taskId}/review`, { method: 'POST', body: JSON.stringify(body) }),
+  addReviewComment: (threadId: string, body: string, author?: string) =>
+    call<ReviewThread>(`/review-threads/${threadId}/comments`, {
+      method: 'POST',
+      body: JSON.stringify({ body, author }),
+    }),
+  /**
+   * Put a question to the project's agent about a hunk, with the code attached.
+   *
+   * The answer lands in the thread as a comment, written when the agent
+   * finishes: the reply is not waited for here, because an agent turn outlives
+   * a request held open on a phone. The thread comes back at once so the
+   * question is on screen while it is being answered.
+   */
+  askAboutChange: (
+    taskId: string,
+    body: {
+      threadId?: string
+      approvalId?: string
+      commitSha?: string
+      base?: string
+      file?: string
+      line?: number
+      hunk?: string
+      question: string
+    },
+  ) => call<ReviewThread>(`/tasks/${taskId}/review/ask`, { method: 'POST', body: JSON.stringify(body) }),
+  /** Turn a question into a remark: what was learned has to be dealt with. */
+  raiseReviewThread: (threadId: string) =>
+    call<ReviewThread>(`/review-threads/${threadId}/raise`, { method: 'POST', body: '{}' }),
+  /** Settle a thread, or open it again. A person only: the gate reads this. */
+  resolveReviewThread: (threadId: string, resolved: boolean) =>
+    call<ReviewThread>(`/review-threads/${threadId}/resolved`, {
+      method: 'PUT',
+      body: JSON.stringify({ resolved }),
+    }),
   approvalDiff: (id: string) =>
-    call<{ files: ChangedFile[]; range: boolean; base: string }>(`/approvals/${id}/diff`),
+    call<{ files: ChangedFile[]; range: boolean; base: string; seen: string[] }>(
+      `/approvals/${id}/diff`,
+    ),
+  /** One file of a change, for the ones a large diff left unread. */
+  approvalFile: (approvalId: string, path: string) =>
+    call<ChangedFile>(`/approvals/${approvalId}/file?path=${encodeURIComponent(path)}`),
+  /** The agent's orientation for a change: what it is for, what each file
+   *  contributes, where to start. It describes; it never decides. */
+  approvalGuide: (id: string) => call<ReviewGuide>(`/approvals/${id}/guide`),
+  requestGuide: (id: string) =>
+    call<{ status: string }>(`/approvals/${id}/guide`, { method: 'POST' }),
+  /** Record where a reader got to, so a review interrupted on one device
+   *  resumes on the next. */
+  markFileSeen: (approvalId: string, file: string, seen: boolean) =>
+    call<{ seen: string[] }>(`/approvals/${approvalId}/seen`, {
+      method: 'PUT',
+      body: JSON.stringify({ file, seen }),
+    }),
+  /** Whether this work still merges into the base, and how far the base has
+   *  moved since it was written. The merge happens in memory, so asking costs
+   *  nothing and leaves nothing behind. */
+  approvalMergeable: (id: string) => call<Mergeable>(`/approvals/${id}/mergeable`),
   spend: (id: string, range: SpendRange) =>
     call<Spend>(`/projects/${id}/spend?range=${range}`),
 
@@ -819,6 +913,55 @@ export interface TaskDetail {
   usage: UsageTotal
 }
 
+/** One remark on a card's code, and everything said about it. */
+export interface ReviewThread {
+  id: string
+  /** A remark holds the gate until it is settled; a question never does. */
+  kind: 'remark' | 'question'
+  projectId: string
+  taskId: string
+  approvalId?: string
+  commitSha?: string
+  file?: string
+  /** 0 means the file as a whole rather than a line within it. */
+  line: number
+  state: 'open' | 'resolved'
+  createdAt: string
+  resolvedAt?: string
+  comments: ReviewComment[]
+}
+
+export interface ReviewComment {
+  id: string
+  threadId: string
+  /** The operator, a role, or the agent that answered a question about a hunk. */
+  author: string
+  body: string
+  createdAt: string
+}
+
+/** Whether approving would land the work, and what stands in the way. */
+export interface Mergeable {
+  clean: boolean
+  /** The paths git could not merge, when it could not. */
+  conflicts?: string[]
+  /** Commits the base has taken since this work left it. A diff read against a
+   *  base that has moved is not a diff of what will land. */
+  baseAhead: number
+  /** The landing fast-forwards and this commit is no longer on top of the base,
+   *  so it will not land however clean the merge would be. A rebase fixes it,
+   *  not a resolution. */
+  diverged?: boolean
+}
+
+/** The agent's orientation for one approval. */
+export interface ReviewGuide {
+  approvalId: string
+  commitSha: string
+  body: string
+  createdAt: string
+}
+
 /** One file a commit touched, with both its content and its diff. */
 export interface ChangedFile {
   path: string
@@ -826,4 +969,15 @@ export interface ChangedFile {
   status: 'A' | 'M' | 'D' | string
   content?: string
   diff?: string
+  /** Line counts, which git reports without reading the file. */
+  added: number
+  removed: number
+  /** A file git will not diff: an image, a font, a compiled thing. Named and
+   *  counted rather than fetched. */
+  binary?: boolean
+  /** Past the byte cap. Said rather than left empty, since a file with no diff
+   *  is otherwise indistinguishable from one that did not change. */
+  tooLarge?: boolean
+  /** Listed but not read, because the change is large. Fetched when opened. */
+  deferred?: boolean
 }

@@ -323,7 +323,7 @@ const roleCounts = computed(() => {
         <li
           v-if="(active || blocked) && state === 'live' && events.length"
           class="flex items-center gap-2 px-2 py-1 md:px-3"
-          :class="blocked ? 'text-[var(--status-warning)]' : 'text-muted-foreground/70'"
+          :class="blocked ? 'text-[var(--status-warning)]' : 'text-muted-foreground'"
         >
           <span
             class="pulse-dot size-1.5 rounded-full"

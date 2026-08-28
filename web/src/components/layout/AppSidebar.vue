@@ -507,7 +507,7 @@ function live(r: RoleStatus): boolean {
         >
           {{ teamName || 'Roles' }}
         </span>
-        <span v-if="!editing" class="text-muted-foreground/70 tabular shrink-0 text-[10px]">
+        <span v-if="!editing" class="text-muted-foreground tabular shrink-0 text-[10px]">
           {{ rolesShown.length }}
         </span>
         <!-- The pipeline is edited where it is read. Everything this button
@@ -590,7 +590,7 @@ function live(r: RoleStatus): boolean {
               <span
                 :class="[
                   'truncate text-xs',
-                  r.role.enabled ? 'font-medium' : 'text-muted-foreground/60 line-through',
+                  r.role.enabled ? 'font-medium' : 'text-muted-foreground line-through',
                 ]"
               >
                 {{ r.role.name }}
@@ -602,7 +602,7 @@ function live(r: RoleStatus): boolean {
                  from each other. Drag, or the arrow keys once it has focus. -->
             <button
               type="button"
-              class="text-muted-foreground/60 hover:text-foreground focus-visible:outline-ring flex size-6 shrink-0 cursor-grab touch-none items-center justify-center focus-visible:outline-2 active:cursor-grabbing"
+              class="text-muted-foreground hover:text-foreground focus-visible:outline-ring flex size-6 shrink-0 cursor-grab touch-none items-center justify-center focus-visible:outline-2 active:cursor-grabbing"
               :aria-label="'Reorder ' + r.role.name"
               :title="'Drag to reorder ' + r.role.name + ', or use the arrow keys'"
               @pointerdown="grab($event, i)"
@@ -616,7 +616,7 @@ function live(r: RoleStatus): boolean {
             </button>
             <button
               type="button"
-              class="text-muted-foreground/70 hover:text-destructive shrink-0 p-0.5 disabled:opacity-25"
+              class="text-muted-foreground hover:text-destructive shrink-0 p-0.5 disabled:opacity-25"
               :disabled="r.role.enabled && enabledCount === 1"
               :aria-label="'Remove ' + r.role.name + ' from this pipeline'"
               :title="
@@ -668,7 +668,7 @@ function live(r: RoleStatus): boolean {
             />
             <ChevronDown
               :size="9"
-              class="text-muted-foreground/50 absolute -bottom-[7px] left-[2.5px]"
+              class="text-muted-foreground absolute -bottom-[7px] left-[2.5px]"
               aria-hidden="true"
             />
           </template>
@@ -696,7 +696,7 @@ function live(r: RoleStatus): boolean {
             >
               {{ r.live.state }}
             </span>
-            <span v-else class="text-muted-foreground/60 tabular ml-auto text-[10px]">
+            <span v-else class="text-muted-foreground tabular ml-auto text-[10px]">
               not started
             </span>
           </div>
@@ -726,7 +726,7 @@ function live(r: RoleStatus): boolean {
              route and the one step of it that is not a role. Read from the
              project: two of the three settings do not merge anything. -->
         <li v-if="current?.baseBranch" class="relative px-1 pt-1.5">
-          <div class="text-muted-foreground/60 flex items-center gap-2 text-[10px]">
+          <div class="text-muted-foreground flex items-center gap-2 text-[10px]">
             <component
               :is="
                 current.integration === 'pr'
@@ -755,7 +755,7 @@ function live(r: RoleStatus): boolean {
           Plan usage
         </p>
         <div v-for="q in quotas" :key="q.provider" class="mb-2 last:mb-0">
-          <p class="text-muted-foreground/80 mb-1 truncate text-[10px]">
+          <p class="text-muted-foreground mb-1 truncate text-[10px]">
             {{ q.report.provider || q.provider
             }}<span v-if="q.report.plan"> · {{ q.report.plan }}</span>
           </p>

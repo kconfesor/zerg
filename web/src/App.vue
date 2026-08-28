@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, useId, watch } from 'vue'
+import { computed, defineAsyncComponent, onMounted, onUnmounted, ref, useId, watch } from 'vue'
 import {
   ApiError,
   api,
@@ -19,18 +19,33 @@ import {
 } from '@/lib/api'
 import { followPreset } from '@/lib/team'
 import Attention from '@/components/Attention.vue'
-import Activity from '@/components/Activity.vue'
-import Spend from '@/components/Spend.vue'
 import Board from '@/components/Board.vue'
-import Chat from '@/components/Chat.vue'
-import MarkdownEditor from '@/components/MarkdownEditor.vue'
-import Projects from '@/components/Projects.vue'
 import ProjectPathField from '@/components/ProjectPathField.vue'
-import History from '@/components/History.vue'
-import TaskDetail from '@/components/TaskDetail.vue'
-import Settings from '@/components/Settings.vue'
-import ReadinessPanel from '@/components/Readiness.vue'
-import TeamEditor from '@/components/TeamEditor.vue'
+
+/**
+ * Everything that is not the board, loaded when it is opened.
+ *
+ * The cockpit shipped as one file: a megabyte of JavaScript, of which
+ * Lighthouse measured 71% unused on the board, because the rich-text editor,
+ * the settings screens, the charts and every other view were parsed and
+ * evaluated before the first card appeared. They are behind a v-if that is
+ * false on load, so nothing here changes what renders, only when it is
+ * fetched.
+ *
+ * The board and the attention panel stay eager. The board is what a reload
+ * lands on, and the panel is what interrupts it; a spinner in front of either
+ * would be a regression to pay for a smaller first byte.
+ */
+const Activity = defineAsyncComponent(() => import('@/components/Activity.vue'))
+const Spend = defineAsyncComponent(() => import('@/components/Spend.vue'))
+const Chat = defineAsyncComponent(() => import('@/components/Chat.vue'))
+const MarkdownEditor = defineAsyncComponent(() => import('@/components/MarkdownEditor.vue'))
+const Projects = defineAsyncComponent(() => import('@/components/Projects.vue'))
+const History = defineAsyncComponent(() => import('@/components/History.vue'))
+const TaskDetail = defineAsyncComponent(() => import('@/components/TaskDetail.vue'))
+const Settings = defineAsyncComponent(() => import('@/components/Settings.vue'))
+const ReadinessPanel = defineAsyncComponent(() => import('@/components/Readiness.vue'))
+const TeamEditor = defineAsyncComponent(() => import('@/components/TeamEditor.vue'))
 import AppSidebar from '@/components/layout/AppSidebar.vue'
 import { useRoute, useRouter } from 'vue-router'
 import { viewOf, viewPath, type View } from '@/router'
@@ -367,12 +382,40 @@ async function loadGlobals() {
       api.roles(),
       api.harnesses(),
     ])
-    for (const h of harnesses.value) {
-      models.value[h] = await api.models(h).catch(() => [])
-      thinking.value[h] = await api.thinking(h).catch(() => [])
-    }
   } catch (err) {
     fail(err)
+  }
+}
+
+/**
+ * What each harness can run, fetched after the board rather than in front of
+ * it.
+ *
+ * These lists belong to the pickers in Settings, the role library and the team
+ * editor. Nothing on the board needs them, and asking for them first was
+ * costing the whole first paint: a harness answers this by asking its own CLI,
+ * one of them took 1.9 seconds to reply, and the awaits ran one after another
+ * inside a loop that the board was waiting on. Measured in a browser: the
+ * first card arrived at 2046ms, immediately after that one request finished.
+ *
+ * Per harness and in parallel now, and not awaited by the caller. A picker
+ * opened before its list has landed sees the empty list it already handles,
+ * for the moment it takes to arrive.
+ */
+function loadCatalogues() {
+  for (const h of harnesses.value) {
+    void api
+      .models(h)
+      .catch(() => [])
+      .then((list) => {
+        models.value = { ...models.value, [h]: list }
+      })
+    void api
+      .thinking(h)
+      .catch(() => [])
+      .then((list) => {
+        thinking.value = { ...thinking.value, [h]: list }
+      })
   }
 }
 
@@ -709,6 +752,15 @@ onMounted(async () => {
     const asked = String(route.params.projectId ?? '')
     const wanted = projects.value.find((p) => p.id === asked) ?? projects.value[0]
     if (wanted) await open(wanted)
+    // Off the startup path entirely, deliberately: see loadCatalogues. Idle
+    // rather than merely last, because the browser models the whole boot as
+    // one dependency graph -- a request issued during it is part of it, even
+    // when nothing waits on the answer.
+    if ('requestIdleCallback' in window) {
+      window.requestIdleCallback(() => loadCatalogues(), { timeout: 4000 })
+    } else {
+      setTimeout(loadCatalogues, 1000)
+    }
   } finally {
     // In a finally: a failed load must still stop claiming to be loading, or
     // the spinner becomes its own kind of lie.
@@ -1080,14 +1132,22 @@ watch(current, () => (banner.value = null))
            min-width:auto — it refuses to shrink below its content and overflows
            the panel instead of scrolling inside it, which is what cut the right
            side off a wide table. -->
-      <DialogContent class="min-w-0 gap-0 overflow-hidden p-0 sm:max-w-4xl">
+      <!-- Nothing is focused on opening. The first focusable thing here is the
+           box for a rejection reason, and a dialog that opens with the cursor
+           in it is a dialog whose keyboard shortcuts can never fire: j and k
+           move between files, and every press was going into that field
+           instead. Rejecting is also not the thing you came to do. -->
+      <DialogContent
+        class="min-w-0 gap-0 overflow-hidden p-0 sm:max-w-4xl"
+        @open-auto-focus.prevent
+      >
         <DialogHeader class="hairline-b shrink-0 px-5 py-4 pr-12">
           <DialogTitle>Waiting on you</DialogTitle>
           <DialogDescription>
             Nothing downstream moves until these are decided.
           </DialogDescription>
         </DialogHeader>
-        <DialogBody>
+        <DialogBody class="pt-0">
           <!-- Where the person who pressed the button is looking. -->
           <p
             v-if="dialogError"
@@ -1097,6 +1157,7 @@ watch(current, () => (banner.value = null))
             {{ dialogError }}
           </p>
           <Attention
+            class="pt-4"
             :attention="attention"
             :busy="busy.is"
             @approve="act.approve"

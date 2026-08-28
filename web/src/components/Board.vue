@@ -299,7 +299,7 @@ const byLane = computed(() => {
           <!-- An empty lane is normal; it should read as quiet, not broken. -->
           <p
             v-if="!byLane.get(lane)?.length"
-            class="text-muted-foreground/50 px-1 py-3 text-[11px]"
+            class="text-muted-foreground px-1 py-3 text-[11px]"
           >
             empty
           </p>

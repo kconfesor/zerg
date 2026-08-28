@@ -47,6 +47,9 @@ type Server struct {
 
 	// tailnetHost is the discovered MagicDNS name; see Deps.TailnetHost.
 	tailnetHost string
+
+	// catalog remembers what each harness said its models were; see catalog.go.
+	catalog *catalog
 }
 
 // Deps are what the API needs to serve the cockpit.
@@ -94,6 +97,7 @@ func New(d Deps) *Server {
 		db: d.DB, log: d.Log, registry: d.Registry,
 		preflt: pf, over: d.Overmind, nyd: d.Nydus, bus: d.Bus, applied: d.Applied, chatMgr: d.Chat,
 		recorder: d.Recorder, ui: d.UI, tailnetHost: d.TailnetHost,
+		catalog: newCatalog(),
 	}
 }
 
@@ -159,7 +163,18 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("PUT /api/tasks/{id}/pinned", s.setTaskPinned)
 	mux.HandleFunc("POST /api/tasks/{id}/stop", s.stopTask)
 	mux.HandleFunc("DELETE /api/tasks/{id}", s.deleteTask)
+	mux.HandleFunc("GET /api/tasks/{id}/review", s.reviewThreads)
+	mux.HandleFunc("POST /api/tasks/{id}/review", s.openReviewThread)
+	mux.HandleFunc("POST /api/review-threads/{id}/comments", s.addReviewComment)
+	mux.HandleFunc("POST /api/tasks/{id}/review/ask", s.askAboutTheChange)
+	mux.HandleFunc("POST /api/review-threads/{id}/raise", s.raiseReviewThread)
+	mux.HandleFunc("PUT /api/review-threads/{id}/resolved", s.resolveReviewThread)
 	mux.HandleFunc("GET /api/approvals/{id}/diff", s.approvalDiff)
+	mux.HandleFunc("GET /api/approvals/{id}/mergeable", s.approvalMergeable)
+	mux.HandleFunc("GET /api/approvals/{id}/file", s.approvalFile)
+	mux.HandleFunc("GET /api/approvals/{id}/guide", s.approvalGuide)
+	mux.HandleFunc("POST /api/approvals/{id}/guide", s.requestGuide)
+	mux.HandleFunc("PUT /api/approvals/{id}/seen", s.markFileSeen)
 	mux.HandleFunc("POST /api/approvals/{id}/approve", s.approve)
 	mux.HandleFunc("POST /api/approvals/{id}/reject", s.reject)
 	mux.HandleFunc("POST /api/clarifications/{id}/answer", s.answer)
@@ -199,7 +214,9 @@ func (s *Server) Routes() http.Handler {
 		mux.Handle("/", ui)
 	}
 
-	return s.guard(s.withLogging(mux))
+	// Compression inside the guard: the guard rejects a request before anything
+	// is written, and there is nothing to compress about a rejection.
+	return s.guard(s.withLogging(compressed(mux)))
 }
 
 // ── health ────────────────────────────────────────────────────────────────
@@ -536,7 +553,9 @@ func (s *Server) listModels(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, err.Error())
 		return
 	}
-	models, err := a.ListModels(r.Context())
+	// Through the cache: this runs the harness's CLI, and the cockpit asks for
+	// every harness on every load.
+	models, err := s.catalog.models(r.Context(), r.PathValue("name"), a.ListModels)
 	if err != nil {
 		s.fail(w, r, err)
 		return

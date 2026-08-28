@@ -293,7 +293,7 @@ const pullRequest = computed(() =>
           <!-- What the role said it did. The substance of the step, in prose,
                under the arrow that carried it. -->
           <div class="flex gap-3 px-1">
-            <span class="text-muted-foreground/70 tabular shrink-0 text-[10px] leading-5">
+            <span class="text-muted-foreground tabular shrink-0 text-[10px] leading-5">
               {{ time(a.step.at) }}
             </span>
             <div class="min-w-0 flex-1">
@@ -325,7 +325,7 @@ const pullRequest = computed(() =>
                    nor which lap. -->
               <p
                 v-if="a.step.durationMs || a.step.costUsd || a.step.gate || a.step.clarifications?.length"
-                class="text-muted-foreground/80 mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px]"
+                class="text-muted-foreground mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px]"
               >
                 <span v-if="a.step.durationMs" class="tabular">{{ duration(a.step.durationMs) }}</span>
                 <span v-if="a.step.costUsd" class="tabular">{{ money(a.step.costUsd) }}</span>
@@ -379,16 +379,16 @@ const pullRequest = computed(() =>
                 </ol>
                 <!-- Not an empty box: events are the tier that ages out, and a
                      step whose transcript is gone should say so. -->
-                <p v-else class="text-muted-foreground/70 text-[10px]">
+                <p v-else class="text-muted-foreground text-[10px]">
                   No transcript kept for this step.
                 </p>
-                <p v-if="open.has(i) && hiddenCount(i) > 0" class="text-muted-foreground/60 mt-0.5 text-[10px]">
+                <p v-if="open.has(i) && hiddenCount(i) > 0" class="text-muted-foreground mt-0.5 text-[10px]">
                   and {{ hiddenCount(i) }} more of the machinery: tool results, thinking, turn
                   accounting.
                 </p>
                 <!-- Said rather than cut silently: a transcript that stops at
                      the page boundary reads like a step that stopped there. -->
-                <p v-if="cut[i]" class="text-muted-foreground/60 mt-0.5 text-[10px]">
+                <p v-if="cut[i]" class="text-muted-foreground mt-0.5 text-[10px]">
                   This step is longer than one page; the rest is not shown.
                 </p>
               </div>

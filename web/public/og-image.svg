@@ -1,4 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630">
+  <!-- Square corners throughout, deliberately: every surface in the cockpit is
+       rounded-none, and a mark with softer corners than the product it stands
+       for reads as somebody else's logo. -->
   <defs>
     <!-- Background Gradient -->
     <linearGradient id="og-bg" x1="0%" y1="0%" x2="100%" y2="100%">
@@ -67,14 +70,14 @@
   </g>
 
   <!-- Outer Card Frame -->
-  <rect width="1160" height="590" x="20" y="20" rx="36" fill="none" stroke="#ffffff" stroke-opacity="0.1" stroke-width="2" />
+  <rect width="1160" height="590" x="20" y="20" fill="none" stroke="#ffffff" stroke-opacity="0.1" stroke-width="2" />
 
   <!-- LEFT COLUMN: Main Brand & Copy -->
   <g transform="translate(100, 120)">
 
     <!-- Top Badge -->
     <g transform="translate(0, 0)">
-      <rect width="240" height="36" rx="18" fill="#8b5cf6" fill-opacity="0.15" stroke="#8b5cf6" stroke-opacity="0.4" stroke-width="1.5" />
+      <rect width="240" height="36" fill="#8b5cf6" fill-opacity="0.15" stroke="#8b5cf6" stroke-opacity="0.4" stroke-width="1.5" />
       <circle cx="20" cy="18" r="4" fill="#34d399" />
       <text x="34" y="23" font-family="'JetBrains Mono', monospace" font-size="12" font-weight="700" letter-spacing="2" fill="#34d399">MULTI-AGENT ORCHESTRATOR</text>
     </g>
@@ -84,26 +87,26 @@
     <circle cx="282" cy="132" r="10" fill="#a855f7" filter="url(#glow-card)" />
 
     <!-- Subtitle / Tagline -->
-    <text x="0" y="195" font-family="'Inter', system-ui, sans-serif" font-size="28" font-weight="500" fill="#94a3b8">Supervise autonomous AI agent swarms in git worktrees.</text>
+    <text x="0" y="195" font-family="'Inter', system-ui, sans-serif" font-size="26" font-weight="500" fill="#94a3b8">Supervise AI agent swarms in git worktrees.</text>
     <text x="0" y="230" font-family="'Inter', system-ui, sans-serif" font-size="22" font-weight="400" fill="#64748b">Configured entirely in the UI. No config files or copied prompts.</text>
 
     <!-- Feature Pill Badges -->
     <g transform="translate(0, 275)">
       <!-- Pill 1: Go Daemon -->
       <g transform="translate(0, 0)">
-        <rect width="140" height="42" rx="12" fill="#1e293b" stroke="#334155" stroke-width="1.5" />
+        <rect width="140" height="42" fill="#1e293b" stroke="#334155" stroke-width="1.5" />
         <text x="20" y="26" font-family="'JetBrains Mono', monospace" font-size="13" font-weight="600" fill="#38bdf8">⚡ Go Daemon</text>
       </g>
 
       <!-- Pill 2: Isolated Worktrees -->
       <g transform="translate(155, 0)">
-        <rect width="190" height="42" rx="12" fill="#1e293b" stroke="#334155" stroke-width="1.5" />
+        <rect width="190" height="42" fill="#1e293b" stroke="#334155" stroke-width="1.5" />
         <text x="20" y="26" font-family="'JetBrains Mono', monospace" font-size="13" font-weight="600" fill="#c084fc">🌳 Git Worktrees</text>
       </g>
 
       <!-- Pill 3: Vue 3 Cockpit -->
       <g transform="translate(360, 0)">
-        <rect width="160" height="42" rx="12" fill="#1e293b" stroke="#334155" stroke-width="1.5" />
+        <rect width="160" height="42" fill="#1e293b" stroke="#334155" stroke-width="1.5" />
         <text x="20" y="26" font-family="'JetBrains Mono', monospace" font-size="13" font-weight="600" fill="#34d399">🖥 Vue Cockpit</text>
       </g>
     </g>
@@ -111,7 +114,7 @@
 
   <!-- RIGHT COLUMN: Large 3D Swarm Emblem -->
   <g transform="translate(760, 135)" filter="url(#glow-card)">
-    <rect width="320" height="320" rx="72" fill="#090d16" stroke="#8b5cf6" stroke-opacity="0.4" stroke-width="3" />
+    <rect width="320" height="320" fill="#090d16" stroke="#8b5cf6" stroke-opacity="0.4" stroke-width="3" />
 
     <!-- Connection Beams -->
     <path d="M 85 90 L 235 90" stroke="#38bdf8" stroke-width="16" stroke-linecap="round" />

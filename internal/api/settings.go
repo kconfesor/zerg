@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/kconfesor/zerg/internal/chat"
 	"github.com/kconfesor/zerg/internal/hatchery"
 	"github.com/kconfesor/zerg/internal/store"
 	"github.com/kconfesor/zerg/internal/tailnet"
@@ -163,6 +164,14 @@ func (s *Server) askChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.chatMgr.Ask(r.Context(), r.PathValue("id"), strings.TrimSpace(req.Message)); err != nil {
+		// One session answers both this screen and the questions asked from a
+		// review, and its output carries nobody's name, so the two take turns.
+		// Being second is not a fault and is over in a moment: say so rather
+		// than reporting an internal error.
+		if errors.Is(err, chat.ErrBusy) {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
 		s.fail(w, r, err)
 		return
 	}
@@ -387,17 +396,29 @@ func (s *Server) approvalDiff(w http.ResponseWriter, r *http.Request) {
 	// — which is not how anyone reads a document they are being asked to
 	// approve.
 	const maxFile = 256 * 1024
+
+	// How many files are read in full before the rest are left to be opened.
+	// A hundred-file change otherwise reads every file and every diff before
+	// anyone has looked at the first one, and a reviewer reads them one at a
+	// time by construction now.
+	const eagerFiles = 30
 	hat := hatchery.New(project.Path)
 
 	// The final gate asks a different question. A hand-off between roles is
 	// about what that role just wrote; the approval that lands the work is
 	// about everything that would reach the base branch, which is usually
 	// several commits by several roles.
+	seen, err := s.db.FilesSeen(r.Context(), approval.ID)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+
 	var files []hatchery.ChangedFile
 	if approval.Terminal {
-		files, err = hat.RangeFiles(r.Context(), project.BaseBranch, approval.Commit, maxFile)
+		files, err = hat.RangeFiles(r.Context(), project.BaseBranch, approval.Commit, maxFile, eagerFiles)
 	} else {
-		files, err = hat.ChangedFiles(r.Context(), approval.Commit, maxFile)
+		files, err = hat.ChangedFiles(r.Context(), approval.Commit, maxFile, eagerFiles)
 	}
 	if err != nil {
 		// A ref this repository does not have is the operator's problem, not the
@@ -426,6 +447,10 @@ func (s *Server) approvalDiff(w http.ResponseWriter, r *http.Request) {
 		// So the view can say whether this is one commit or a merge.
 		"range": approval.Terminal,
 		"base":  project.BaseBranch,
+		// Where the reader got to last time. With the files rather than in a
+		// second request: it is about these files, and an approval read on a
+		// phone and finished at a desk should open where it was left.
+		"seen": seen,
 	})
 }
 
@@ -492,6 +517,490 @@ func (s *Server) setTaskPinned(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, task)
+}
+
+// approvalMergeable answers whether the work would land, before deciding that
+// it should.
+//
+// Approving is what merges, and nothing said whether the merge would go
+// through. The answer costs nothing: the merge happens in memory, so there is
+// no worktree to check out and nothing to clean up when it conflicts.
+func (s *Server) approvalMergeable(w http.ResponseWriter, r *http.Request) {
+	approval, err := s.db.GetApproval(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	project, err := s.db.GetProject(r.Context(), approval.ProjectID)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if approval.Commit == "" {
+		badRequest(w, "this approval carries no commit, so there is nothing to merge")
+		return
+	}
+	// The check has to ask what the landing will ask. Merge mode fast-forwards,
+	// so a commit that has fallen behind the base does not land however clean
+	// the merge would be; a pull request is merged by the forge, and branch
+	// mode lands nothing.
+	answer, err := hatchery.New(project.Path).MergeCheck(
+		r.Context(), project.BaseBranch, approval.Commit,
+		project.Integration == store.IntegrateMerge)
+	if err != nil {
+		// A ref this repository does not have is the operator's problem: a
+		// branch deleted, a worktree pruned, a clone that never had it. Every
+		// other failure here is a genuine fault.
+		if errors.Is(err, hatchery.ErrNoSuchRevision) {
+			badRequest(w, err.Error())
+			return
+		}
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, answer)
+}
+
+// ── review ────────────────────────────────────────────────────────────────
+
+// reviewThreads is the conversation about a card's code, anchored to it.
+func (s *Server) reviewThreads(w http.ResponseWriter, r *http.Request) {
+	threads, err := s.db.ReviewThreads(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, orEmpty(threads))
+}
+
+// openReviewThread starts a thread on a line, with the remark that opened it.
+func (s *Server) openReviewThread(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ApprovalID string `json:"approvalId"`
+		CommitSHA  string `json:"commitSha"`
+		File       string `json:"file"`
+		Line       int    `json:"line"`
+		Body       string `json:"body"`
+	}
+	if !decode(w, r, &req) {
+		return
+	}
+	task, err := s.db.GetTask(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	thread := &store.ReviewThread{
+		ProjectID: task.ProjectID,
+		TaskID:    task.ID,
+		CommitSHA: req.CommitSHA,
+		File:      req.File,
+		Line:      req.Line,
+	}
+	if req.ApprovalID != "" {
+		thread.ApprovalID = &req.ApprovalID
+	}
+	// The person reading the diff is the author. An agent's answer arrives on
+	// the same thread later, under its own name.
+	opened, err := s.db.OpenReviewThread(r.Context(), thread, store.OperatorRole, req.Body)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, opened)
+}
+
+// addReviewComment adds a turn to a thread.
+func (s *Server) addReviewComment(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Author string `json:"author"`
+		Body   string `json:"body"`
+	}
+	if !decode(w, r, &req) {
+		return
+	}
+	if req.Author == "" {
+		req.Author = store.OperatorRole
+	}
+	if _, err := s.db.AddReviewComment(r.Context(), r.PathValue("id"), req.Author, req.Body); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	thread, err := s.db.ReviewThread(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, thread)
+}
+
+// resolveReviewThread settles a thread, or opens it again.
+//
+// A person only: an agent that could resolve the thread asking about its own
+// work would be marking its own homework, and the gate reads this.
+func (s *Server) resolveReviewThread(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Resolved bool `json:"resolved"`
+	}
+	if !decode(w, r, &req) {
+		return
+	}
+	if err := s.db.SetReviewThreadState(r.Context(), r.PathValue("id"), req.Resolved); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	thread, err := s.db.ReviewThread(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, thread)
+}
+
+// askAboutTheChange puts a reader's question to the agent, with the code in
+// front of it, and lands the answer in the thread where it was asked.
+//
+// The reviewer is the one reviewing. This is not a second opinion on the change
+// and does not decide anything: it exists so a person can get a change into
+// their head, from inside the diff, without going to find someone. So the
+// thread it opens is a question rather than a remark, and holds nothing at the
+// gate. If what comes back matters, the reader raises it.
+func (s *Server) askAboutTheChange(w http.ResponseWriter, r *http.Request) {
+	if s.chatMgr == nil {
+		writeError(w, http.StatusNotImplemented, "this build has no agent to ask")
+		return
+	}
+	var req struct {
+		ThreadID   string `json:"threadId"`
+		ApprovalID string `json:"approvalId"`
+		CommitSHA  string `json:"commitSha"`
+		Base       string `json:"base"`
+		File       string `json:"file"`
+		Line       int    `json:"line"`
+		// Hunk is the lines the reader is looking at. Sent rather than fetched
+		// so the agent is asked about what is on the reader's screen.
+		Hunk     string `json:"hunk"`
+		Question string `json:"question"`
+	}
+	if !decode(w, r, &req) {
+		return
+	}
+	if strings.TrimSpace(req.Question) == "" {
+		badRequest(w, "a question needs some text")
+		return
+	}
+	task, err := s.db.GetTask(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+
+	thread := &store.ReviewThread{}
+	if req.ThreadID != "" {
+		// A follow-up belongs on the thread that started it.
+		if _, err := s.db.AddReviewComment(r.Context(), req.ThreadID, store.OperatorRole, req.Question); err != nil {
+			s.fail(w, r, err)
+			return
+		}
+		if thread, err = s.db.ReviewThread(r.Context(), req.ThreadID); err != nil {
+			s.fail(w, r, err)
+			return
+		}
+	} else {
+		thread.ProjectID, thread.TaskID = task.ProjectID, task.ID
+		thread.CommitSHA, thread.File, thread.Line = req.CommitSHA, req.File, req.Line
+		thread.Kind = store.ThreadQuestion
+		if req.ApprovalID != "" {
+			thread.ApprovalID = &req.ApprovalID
+		}
+		if thread, err = s.db.OpenReviewThread(r.Context(), thread, store.OperatorRole, req.Question); err != nil {
+			s.fail(w, r, err)
+			return
+		}
+	}
+
+	// Answered in the background, and the thread comes back now. An agent turn
+	// is tens of seconds; a request held open for that is a request that dies
+	// on a phone changing networks, and the answer would die with it.
+	go s.answerInThread(thread.ID, task.ProjectID, askPrompt(req.Base, req.CommitSHA, req.File, req.Line, req.Hunk, req.Question))
+
+	writeJSON(w, http.StatusAccepted, thread)
+}
+
+// answerInThread waits for the agent and writes what it said as a comment.
+func (s *Server) answerInThread(threadID, projectID, prompt string) {
+	// Its own context: the request that asked is already answered, and its
+	// cancellation would take the agent's turn with it.
+	ctx, cancel := context.WithTimeout(context.Background(), askTimeout)
+	defer cancel()
+
+	answer, err := s.chatMgr.AskAndWait(ctx, projectID, prompt)
+	if err != nil && answer == "" {
+		answer = "I could not answer that: " + err.Error()
+	}
+
+	// A context of its own for the write. The one above is what bounds the
+	// agent, and on a timeout it is already cancelled: writing through it threw
+	// away both the partial answer and the sentence explaining what happened,
+	// so a question that timed out left a thread that had never been answered
+	// and no record of why.
+	write, cancelWrite := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelWrite()
+	if _, err := s.db.AddReviewComment(write, threadID, chat.Role, answer); err != nil {
+		s.log.Error("review: the answer could not be recorded", "thread", threadID, "err", err)
+	}
+}
+
+// askTimeout bounds one answer. Long enough for an agent to read the files
+// around a hunk, short enough that a thread does not sit empty for ever.
+const askTimeout = 3 * time.Minute
+
+// askPrompt puts the reader's question in front of the code it is about.
+//
+// The hunk, the file and the range, because a question about "this" means
+// nothing without them; and an instruction to answer rather than review,
+// because the person reading is the reviewer and an agent that volunteers a
+// verdict is answering a question nobody asked.
+func askPrompt(base, commit, file string, line int, hunk, question string) string {
+	var b strings.Builder
+	b.WriteString("A person is reviewing a change and has a question about it.\n\n")
+	if file != "" {
+		fmt.Fprintf(&b, "File: %s", file)
+		if line > 0 {
+			fmt.Fprintf(&b, ", around line %d", line)
+		}
+		b.WriteString("\n")
+	}
+	if base != "" && commit != "" {
+		fmt.Fprintf(&b, "The change is %s..%s in this repository.\n", base, commit)
+	}
+	if strings.TrimSpace(hunk) != "" {
+		b.WriteString("\nWhat they are looking at:\n\n```\n")
+		b.WriteString(strings.TrimRight(hunk, "\n"))
+		b.WriteString("\n```\n")
+	}
+	fmt.Fprintf(&b, "\nTheir question: %s\n", strings.TrimSpace(question))
+	b.WriteString(`
+Answer that question and nothing else. Read the surrounding code before you
+answer. They are reviewing this change, not you: do not give a verdict on it,
+do not list unrelated problems, and do not approve or reject anything. If the
+answer is that something is wrong, say what and why, and leave the decision to
+them. Keep it to a few sentences.`)
+	return b.String()
+}
+
+// ── the reading guide ─────────────────────────────────────────────────────
+
+// approvalGuide serves the stored orientation for an approval, when one exists
+// for the change as it stands now.
+//
+// A guide written for a commit the approval no longer points at is a
+// description of a diff nobody is looking at, so it is a 404 rather than a
+// stale answer: the panel offers to write a fresh one.
+func (s *Server) approvalGuide(w http.ResponseWriter, r *http.Request) {
+	approval, err := s.db.GetApproval(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	guide, err := s.db.ReviewGuideFor(r.Context(), approval.ID)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if guide.CommitSHA != approval.Commit {
+		writeError(w, http.StatusNotFound, "the guide describes an earlier revision")
+		return
+	}
+	writeJSON(w, http.StatusOK, guide)
+}
+
+// requestGuide asks the project's agent to orient the reader: what the change
+// is for, what each file contributes, and where to start.
+//
+// 202 and a background turn, like a question at a hunk: the agent reads the
+// change in its own worktree, and the panel polls for the result. The guide
+// describes and never decides, which the prompt spells out.
+func (s *Server) requestGuide(w http.ResponseWriter, r *http.Request) {
+	if s.chatMgr == nil {
+		writeError(w, http.StatusNotImplemented, "this build has no agent to ask")
+		return
+	}
+	approval, err := s.db.GetApproval(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if approval.Commit == "" {
+		badRequest(w, "this approval carries no commit, so there is nothing to describe")
+		return
+	}
+	project, err := s.db.GetProject(r.Context(), approval.ProjectID)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	// Being second in line is not a fault; say so rather than half-starting.
+	if s.chatMgr.Busy(project.ID) {
+		writeError(w, http.StatusConflict,
+			"the agent is in the middle of an answer; ask again when it finishes")
+		return
+	}
+	prompt := guidePrompt(project.BaseBranch, approval.Commit, approval.Terminal, approval.Body)
+	go s.buildGuide(approval.ID, project.ID, approval.Commit, prompt)
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "reading"})
+}
+
+// buildGuide runs the agent's read of the change and stores what it wrote.
+func (s *Server) buildGuide(approvalID, projectID, commit, prompt string) {
+	ctx, cancel := context.WithTimeout(context.Background(), askTimeout)
+	defer cancel()
+
+	var body string
+	var err error
+	for attempt := 0; attempt < 3; attempt++ {
+		body, err = s.chatMgr.AskAndWait(ctx, projectID, prompt)
+		if !errors.Is(err, chat.ErrBusy) {
+			break
+		}
+		// The session freed itself between the handler's check and this call,
+		// or a question got in first. Short waits, because a guide asked for
+		// and silently dropped is a button that does nothing.
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(10 * time.Second):
+		}
+	}
+	if err != nil && body == "" {
+		// Stored rather than logged and dropped: the person who pressed the
+		// button is watching a "reading the change" line, and a failure that
+		// only reaches the daemon's log leaves it there for ever.
+		body = "The guide could not be written: " + err.Error()
+	}
+
+	// A fresh context for the write. The one above bounded the agent, and on a
+	// timeout it is already cancelled, which would throw the answer away.
+	write, cancelWrite := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelWrite()
+	if err := s.db.SaveReviewGuide(write, approvalID, commit, body); err != nil {
+		s.log.Error("review: the guide could not be recorded", "approval", approvalID, "err", err)
+	}
+}
+
+// guidePrompt asks for orientation, and draws the line that keeps it from
+// becoming a review: the guide describes the change; the person judges it.
+func guidePrompt(base, commit string, terminal bool, note string) string {
+	var b strings.Builder
+	b.WriteString("A person is about to review a change at the approval gate, and you are " +
+		"writing the note that orients them before they read it.\n\n")
+	if terminal && base != "" {
+		fmt.Fprintf(&b, "The change is everything in %s...%s (git diff %s...%s in this repository). ",
+			base, commit, base, commit)
+	} else {
+		fmt.Fprintf(&b, "The change is commit %s (git show %s in this repository). ", commit, commit)
+	}
+	b.WriteString("Read it before writing anything.\n")
+	if strings.TrimSpace(note) != "" {
+		b.WriteString("\nThe note that came with it:\n\n")
+		b.WriteString(strings.TrimSpace(note))
+		b.WriteString("\n")
+	}
+	b.WriteString(`
+Write, in markdown, briefly:
+
+**What this is for.** One or two sentences on the objective, from the note and
+the code together. If the code does something the note does not mention, or the
+note claims something the code does not contain, say so plainly: the reader
+needs to know what they are actually looking at.
+
+**The map.** One line per file, saying what its change contributes to the
+objective. Group the purely mechanical ones (renames, reformats, generated
+files) into a single line at the end rather than listing them.
+
+**Where to start.** The reading order you would use, as a short list: the file
+that carries the idea first, then what depends on it. One clause each on why.
+
+You are the guide, not the reviewer. Do not judge the change, do not list
+problems, do not say whether it should land, and do not approve or reject
+anything. Keep the whole thing under 250 words.`)
+	return b.String()
+}
+
+// raiseReviewThread turns a question into a remark, which is the reader
+// deciding that what they learned has to be dealt with before this lands.
+
+// raiseReviewThread turns a question into a remark, which is the reader
+// deciding that what they learned has to be dealt with before this lands.
+func (s *Server) raiseReviewThread(w http.ResponseWriter, r *http.Request) {
+	if err := s.db.RaiseReviewThread(r.Context(), r.PathValue("id")); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	thread, err := s.db.ReviewThread(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, thread)
+}
+
+// approvalFile reads one file of a change, for the ones the listing left alone.
+func (s *Server) approvalFile(w http.ResponseWriter, r *http.Request) {
+	approval, err := s.db.GetApproval(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	project, err := s.db.GetProject(r.Context(), approval.ProjectID)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	path := r.URL.Query().Get("path")
+	if path == "" || approval.Commit == "" {
+		badRequest(w, "which file, of which commit?")
+		return
+	}
+	base := ""
+	if approval.Terminal {
+		base = project.BaseBranch
+	}
+	file, err := hatchery.New(project.Path).LoadFile(r.Context(), base, approval.Commit, path, 256*1024)
+	if err != nil {
+		if errors.Is(err, hatchery.ErrNoSuchRevision) {
+			badRequest(w, err.Error())
+			return
+		}
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, file)
+}
+
+// markFileSeen records where a reader has got to in a diff.
+func (s *Server) markFileSeen(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		File string `json:"file"`
+		Seen bool   `json:"seen"`
+	}
+	if !decode(w, r, &req) {
+		return
+	}
+	if req.File == "" {
+		badRequest(w, "which file?")
+		return
+	}
+	if err := s.db.MarkFileSeen(r.Context(), r.PathValue("id"), req.File, req.Seen); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	seen, err := s.db.FilesSeen(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"seen": seen})
 }
 
 // stopTask parks a card so nothing picks it up again.

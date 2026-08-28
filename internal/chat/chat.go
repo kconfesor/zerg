@@ -14,8 +14,11 @@ package chat
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"sync"
+	"time"
 
 	"log/slog"
 
@@ -64,6 +67,55 @@ type Manager struct {
 
 	mu       sync.Mutex
 	sessions map[string]*session
+
+	// asking serialises AskAndWait. The bus carries a session's output rather
+	// than a reply addressed to a caller, so two overlapping questions would
+	// each collect the other's sentences.
+	asking sync.Mutex
+
+	// turns is the projects whose chat session is mid-turn.
+	//
+	// One session answers both the chat screen and a question asked from a
+	// review, and its output is a stream with nobody's name on it. A review
+	// question that overlapped an ordinary chat message collected that
+	// message's answer and recorded it on the thread, under the agent's name,
+	// as though it were about the code. There is nothing in an event to tell
+	// them apart, so they take turns instead.
+	turns map[string]bool
+}
+
+// ErrBusy is returned when the project's chat session is already answering.
+//
+// A distinct error because it is not a fault: it is the operator's to wait
+// out, and the API turns it into a 409 rather than a 500.
+var ErrBusy = errors.New("the agent is in the middle of an answer; ask again when it finishes")
+
+// beginTurn claims the session for one question, or reports it taken.
+func (m *Manager) beginTurn(projectID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.turns[projectID] {
+		return false
+	}
+	if m.turns == nil {
+		m.turns = map[string]bool{}
+	}
+	m.turns[projectID] = true
+	return true
+}
+
+func (m *Manager) endTurn(projectID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.turns, projectID)
+}
+
+// Busy reports whether the project's session is mid-answer. Advisory: the
+// caller that wants the session still has to win beginTurn.
+func (m *Manager) Busy(projectID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.turns[projectID]
 }
 
 type session struct {
@@ -75,6 +127,7 @@ func NewManager(db *store.DB, reg *adapter.Registry, bus *event.Bus, log *slog.L
 	return &Manager{
 		db: db, registry: reg, bus: bus, log: log, stateDir: stateDir,
 		sessions: map[string]*session{},
+		turns:    map[string]bool{},
 	}
 }
 
@@ -84,7 +137,26 @@ func (m *Manager) Ask(ctx context.Context, projectID, text string) error {
 	if text == "" {
 		return fmt.Errorf("nothing to ask")
 	}
+	if !m.beginTurn(projectID) {
+		return ErrBusy
+	}
+	// Subscribed before the question is sent: an answer that arrives before
+	// the subscription exists would leave the session marked busy until the
+	// backstop, and every question in between refused.
+	events, cancel := m.bus.Subscribe(256)
+	if err := m.submit(ctx, projectID, text); err != nil {
+		cancel()
+		m.endTurn(projectID)
+		return err
+	}
+	// The chat screen does not wait for its own answer, so something has to:
+	// the session is this question's until the agent stops talking.
+	go m.releaseAtTurnEnd(projectID, events, cancel)
+	return nil
+}
 
+// submit records the question and hands it to the session.
+func (m *Manager) submit(ctx context.Context, projectID, text string) error {
 	// The question goes on the record before the answer, so a reload shows the
 	// conversation rather than replies with nothing to reply to.
 	m.bus.Publish(event.Event{
@@ -102,6 +174,49 @@ func (m *Manager) Ask(ctx context.Context, projectID, text string) error {
 		return fmt.Errorf("chat agent did not start: %w", err)
 	}
 	return s.cer.Submit(text)
+}
+
+// turnBackstop frees a session whose agent never said it had finished.
+//
+// A harness killed mid-turn emits nothing more, and without this the project
+// would be marked busy for the life of the daemon and every later question
+// refused. Long enough not to cut a real answer short.
+const turnBackstop = 5 * time.Minute
+
+// releaseAtTurnEnd frees the session when the agent stops talking.
+func (m *Manager) releaseAtTurnEnd(projectID string, events <-chan event.Event, cancel func()) {
+	defer m.endTurn(projectID)
+	defer cancel()
+
+	said := false
+	backstop := time.After(turnBackstop)
+	for {
+		select {
+		case <-backstop:
+			return
+		case ev, ok := <-events:
+			if !ok {
+				return
+			}
+			if ev.ProjectID != projectID || ev.Role != Role {
+				continue
+			}
+			switch ev.Kind {
+			case adapter.EventMessage:
+				said = true
+			case adapter.EventError:
+				return
+			case adapter.EventTurnEnd:
+				// Not the first turn that ends: a session emits one before the
+				// reply to this question arrives, and releasing there would let
+				// the next question start into the middle of this answer, which
+				// is the crossed wire this exists to prevent.
+				if said {
+					return
+				}
+			}
+		}
+	}
 }
 
 // ensure starts the session for a project if it is not already running.
@@ -246,4 +361,79 @@ func (m *Manager) Reset(ctx context.Context, projectID string) error {
 		return fmt.Errorf("clearing the conversation: %w", err)
 	}
 	return nil
+}
+
+// AskAndWait asks and returns the answer, rather than leaving it on the bus.
+//
+// Ask is right for the chat screen, where the reply streams into a conversation
+// somebody is watching. A question asked from inside a diff has somewhere
+// specific to land: the review thread it was asked on. So this one listens for
+// the agent's own messages until it finishes its turn, and hands back what it
+// said.
+//
+// One question at a time per project. Two overlapping asks would each collect
+// the other's sentences, since the bus carries the session's output and not a
+// reply addressed to a caller.
+func (m *Manager) AskAndWait(ctx context.Context, projectID, question string) (string, error) {
+	if question == "" {
+		return "", fmt.Errorf("nothing to ask")
+	}
+	m.asking.Lock()
+	defer m.asking.Unlock()
+
+	// Waits for the session rather than talking over it, and holds it until
+	// the answer is in hand: everything this collects has to belong to this
+	// question.
+	if !m.beginTurn(projectID) {
+		return "", ErrBusy
+	}
+	defer m.endTurn(projectID)
+
+	// Subscribed before the question is sent: a fast agent can answer before a
+	// subscription taken afterwards exists, and the answer would be lost to a
+	// caller that is still waiting for it.
+	events, cancel := m.bus.Subscribe(256)
+	defer cancel()
+
+	if err := m.submit(ctx, projectID, question); err != nil {
+		return "", err
+	}
+
+	var said []string
+	for {
+		select {
+		case <-ctx.Done():
+			// Whatever it managed to say is better than nothing: a long answer
+			// cut short still tells the reader something.
+			return strings.TrimSpace(strings.Join(said, "\n\n")), ctx.Err()
+		case ev, ok := <-events:
+			if !ok {
+				return strings.TrimSpace(strings.Join(said, "\n\n")), nil
+			}
+			if ev.ProjectID != projectID || ev.Role != Role {
+				continue
+			}
+			switch ev.Kind {
+			case adapter.EventMessage:
+				if text := strings.TrimSpace(ev.Text); text != "" {
+					said = append(said, text)
+				}
+			case adapter.EventTurnEnd:
+				// Not the first turn that ends: the one that carried the
+				// answer. A session emits a turn_end before this question's
+				// reply arrives, and returning there gave the thread an empty
+				// comment while the agent went on to answer perfectly well two
+				// seconds later.
+				if len(said) == 0 {
+					continue
+				}
+				return strings.TrimSpace(strings.Join(said, "\n\n")), nil
+			case adapter.EventError:
+				if len(said) == 0 {
+					return "", fmt.Errorf("the agent could not answer: %s", ev.Text)
+				}
+				return strings.TrimSpace(strings.Join(said, "\n\n")), nil
+			}
+		}
+	}
 }

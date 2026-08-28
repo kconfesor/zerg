@@ -1,4 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 180" width="100%" height="100%">
+  <!-- Square corners throughout, deliberately: every surface in the cockpit is
+       rounded-none, and a mark with softer corners than the product it stands
+       for reads as somebody else's logo. -->
   <defs>
     <linearGradient id="full-bg" x1="0%" y1="0%" x2="100%" y2="100%">
       <stop offset="0%" stop-color="#0f172a" />
@@ -30,12 +33,12 @@
   </defs>
 
   <!-- Background Canvas -->
-  <rect width="720" height="180" rx="24" fill="url(#full-bg)" />
-  <rect width="716" height="176" x="2" y="2" rx="22" fill="none" stroke="#ffffff" stroke-opacity="0.06" stroke-width="2" />
+  <rect width="720" height="180" fill="url(#full-bg)" />
+  <rect width="716" height="176" x="2" y="2" fill="none" stroke="#ffffff" stroke-opacity="0.06" stroke-width="2" />
 
   <!-- Embedded Swarm Emblem (Left Icon) -->
   <g transform="translate(24, 18)">
-    <rect width="144" height="144" rx="32" fill="#131b2e" stroke="#8b5cf6" stroke-opacity="0.3" stroke-width="2" />
+    <rect width="144" height="144" fill="#131b2e" stroke="#8b5cf6" stroke-opacity="0.3" stroke-width="2" />
 
     <!-- Connection Beams -->
     <path d="M 40 44 L 104 44" stroke="#38bdf8" stroke-width="8" stroke-linecap="round" />
