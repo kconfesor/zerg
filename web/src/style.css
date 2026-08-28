@@ -272,13 +272,22 @@
     to   { opacity: 1; transform: none; }
   }
 
+  /* A deploy is minutes, not milliseconds, so it gets a spinner: the wait is
+     long enough that a still icon reads as stuck. */
+  .spin {
+    animation: spin 1.1s linear infinite;
+  }
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+
   .hairline-t { border-top: 1px solid var(--hairline); }
   .hairline-b { border-bottom: 1px solid var(--hairline); }
   .hairline-r { border-right: 1px solid var(--hairline); }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .pulse-dot, .rise { animation: none; }
+  .pulse-dot, .rise, .spin { animation: none; }
 }
 
 /* A slow pulse for the first load. Fading rather than spinning: the wait is

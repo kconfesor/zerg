@@ -442,6 +442,18 @@ func (db *DB) resolveLayeredTeam(ctx context.Context, p *Project) ([]ResolvedRol
 				"project", projectID, "template", membership.TemplateID)
 			continue
 		}
+		// A role the daemon starts itself is never part of a pipeline, whatever
+		// a row says. Refused when a team is written, and skipped here as well
+		// because the write path only guards new mistakes: a database edited by
+		// hand, or a role whose purpose changed after it joined a team, would
+		// otherwise get a lane, be routed work, and be minted the full token
+		// that goes with a team role -- which for the runner means a preview
+		// agent able to claim and finish somebody's card.
+		if base.Purpose != PurposePipeline {
+			slog.Warn("a team references a role that is not part of a pipeline",
+				"project", projectID, "role", base.Name, "purpose", base.Purpose)
+			continue
+		}
 		// A copy per role: applyOverrides writes through the pointer, and the
 		// map holds one template that several members could share.
 		roleCopy := base

@@ -122,6 +122,30 @@ type Task struct {
 	// being worked. "working" for four minutes is indistinguishable from
 	// stuck; "running cargo test" is not.
 	Doing string `json:"doing,omitempty"`
+
+	// Deploy is where this card's work should be put when it lands, decided by
+	// whoever wrote the card. Empty for most of them: a preview costs an agent
+	// turn, and only some work is worth looking at.
+	Deploy string `json:"deploy,omitempty"`
+}
+
+// Where a finished card gets deployed. Empty is the default and means nowhere.
+const (
+	DeployNone  = ""
+	DeployLocal = "local"
+)
+
+// ValidDeploy reports whether a target is one this build knows how to reach.
+//
+// Named targets rather than a boolean because dev and staging are the same
+// decision with a different destination, and an unknown one has to be refused
+// at the edge: stored, it would be a card that silently never deploys.
+func ValidDeploy(target string) bool {
+	switch target {
+	case DeployNone, DeployLocal:
+		return true
+	}
+	return false
 }
 
 type Message struct {
@@ -216,14 +240,14 @@ func (db *DB) CreateTask(ctx context.Context, projectID, name, body, lane string
 
 const taskCols = `id, project_id, session_id, name, body, lane, state,
 	created_at, first_claimed_at, completed_at, active_ms, rework_count, hidden, stopped_at,
-	outcome, outcome_ref, pinned`
+	outcome, outcome_ref, pinned, deploy`
 
 // taskColsT is the same list qualified to the tasks table, for the queries that
 // join. Unqualified names resolve today and would become ambiguous the moment a
 // joined table gained a column of the same name.
 const taskColsT = `t.id, t.project_id, t.session_id, t.name, t.body, t.lane, t.state,
 	t.created_at, t.first_claimed_at, t.completed_at, t.active_ms, t.rework_count, t.hidden,
-	t.stopped_at, t.outcome, t.outcome_ref, t.pinned`
+	t.stopped_at, t.outcome, t.outcome_ref, t.pinned, t.deploy`
 
 // GetTaskIn resolves a task that must belong to this project.
 //
@@ -310,7 +334,7 @@ func scanTaskWithSummary(s scanner) (*Task, error) {
 	)
 	if err := s.Scan(&t.ID, &t.ProjectID, &sessionID, &t.Name, &t.Body, &t.Lane, &t.State,
 		&created, &firstClaim, &completedAt, &t.ActiveMS, &t.ReworkCount, &t.Hidden, &stoppedAt,
-		&t.Outcome, &t.OutcomeRef, &t.Pinned,
+		&t.Outcome, &t.OutcomeRef, &t.Pinned, &t.Deploy,
 		&t.Tokens, &t.CostUSD, &t.Doing); err != nil {
 		return nil, err
 	}
@@ -331,7 +355,7 @@ func scanTask(s scanner) (*Task, error) {
 	)
 	if err := s.Scan(&t.ID, &t.ProjectID, &sessionID, &t.Name, &t.Body, &t.Lane, &t.State,
 		&created, &firstClaim, &completedAt, &t.ActiveMS, &t.ReworkCount, &t.Hidden,
-		&stoppedAt, &t.Outcome, &t.OutcomeRef, &t.Pinned); err != nil {
+		&stoppedAt, &t.Outcome, &t.OutcomeRef, &t.Pinned, &t.Deploy); err != nil {
 		return nil, err
 	}
 	if err := fillTaskTimes(&t, sessionID, created, firstClaim, completedAt, stoppedAt); err != nil {
@@ -1071,7 +1095,7 @@ func (db *DB) ListHistory(ctx context.Context, projectID string, f HistoryFilter
 		)
 		if err := rows.Scan(&e.ID, &e.ProjectID, &sessionID, &e.Name, &e.Body, &e.Lane, &e.State,
 			&created, &firstClaim, &completedAt, &e.ActiveMS, &e.ReworkCount, &e.Hidden,
-			&stoppedAt, &e.Outcome, &e.OutcomeRef, &e.Pinned,
+			&stoppedAt, &e.Outcome, &e.OutcomeRef, &e.Pinned, &e.Deploy,
 			&e.Tokens, &e.CostUSD, &e.HasTranscript, &roles); err != nil {
 			return nil, "", err
 		}

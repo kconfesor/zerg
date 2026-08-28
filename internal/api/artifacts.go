@@ -21,8 +21,9 @@ import (
 // running service can be reached.
 type artifactOut struct {
 	store.Artifact
-	// URL is the service's address on the proxy's own origin, empty for a file
-	// and for a service that has stopped. Built per request; see ServiceURL.
+	// URL is the service's address on an origin of its own, empty for a file
+	// and for a service that has stopped. Built per request, because it names
+	// the host the browser asking is already using; see ServiceURL.
 	URL string `json:"url,omitempty"`
 }
 
@@ -36,8 +37,8 @@ func (s *Server) taskArtifacts(w http.ResponseWriter, r *http.Request) {
 	out := make([]artifactOut, 0, len(list))
 	for _, a := range list {
 		item := artifactOut{Artifact: a}
-		if a.Live() {
-			item.URL = ServiceURL(r, s.proxyPort, a.ID)
+		if a.Live() && s.viewer != nil {
+			item.URL = ServiceURL(r, s.viewer.PortFor(&a))
 		}
 		out = append(out, item)
 	}

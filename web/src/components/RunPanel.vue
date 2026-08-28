@@ -9,7 +9,7 @@
  * be able to do when it is wrong -- correct it, or start again.
  */
 import { computed, onUnmounted, ref, watch } from 'vue'
-import { MessageCircleQuestion, Play, RotateCcw, Square } from '@lucide/vue'
+import { ExternalLink, MessageCircleQuestion, Play, RotateCcw, Square } from '@lucide/vue'
 import { api, type RunState } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -49,7 +49,7 @@ async function refresh() {
     const was = state.value?.state
     state.value = next
     // Tell the parent once, when it arrives: the artifact list is what shows
-    // the frame, and it does not otherwise know to look again.
+    // the link, and it does not otherwise know to look again.
     if (next.state === 'serving' && was !== 'serving') emit('served')
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e)
@@ -184,6 +184,20 @@ const says = computed(() => {
         </Button>
       </template>
 
+      <!-- The link, where the state is. Saying "running" and stopping there
+           answers the wrong question: the reason to run one is to open it. -->
+      <a
+        v-for="s in state?.services ?? []"
+        :key="s.id"
+        :href="s.url"
+        target="_blank"
+        rel="noopener noreferrer"
+        class="text-primary focus-visible:outline-ring flex items-center gap-1 text-[11px] font-medium underline-offset-2 hover:underline focus-visible:outline-2"
+      >
+        {{ s.label || 'open it' }}
+        <ExternalLink :size="11" aria-hidden="true" />
+      </a>
+
       <span
         v-if="says"
         class="text-[11px]"
@@ -252,10 +266,13 @@ const says = computed(() => {
       </template>
     </div>
 
+    <!-- The default for new cards, not the decision. Whether a particular card
+         is worth a preview is answered on the card, by whoever writes it; this
+         is only where the switch in the composer starts. -->
     <label class="text-muted-foreground flex items-center gap-2 text-[10px]">
       <input type="checkbox" class="size-3" :checked="state?.autoRun" @change="toggleAuto" />
-      run a preview whenever a task here finishes
-      <span class="text-muted-foreground/70">· each one costs an agent turn</span>
+      new tasks here start with "deploy locally" on
+      <span class="text-muted-foreground/70">· each deploy costs an agent turn</span>
     </label>
 
     <p v-if="error" class="text-destructive text-[11px]">{{ error }}</p>

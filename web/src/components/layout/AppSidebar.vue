@@ -167,10 +167,17 @@ const editRows = computed(() =>
 
 const enabledCount = computed(() => pipeline.value.filter((r) => r.enabled).length)
 
-/** Library roles this pipeline does not have yet. */
+/**
+ * Library roles this pipeline does not have yet.
+ *
+ * Not every role can be in one. The runner is started by the daemon when a
+ * card asks to be deployed; it holds no place in the order of work, and this
+ * list offered it because the filter lived in the other list that shows the
+ * library. The store refuses it now too -- this is so it is never offered.
+ */
 const addable = computed(() => {
   const inTeam = new Set(pipeline.value.map((r) => r.id))
-  return props.library.filter((t) => !inTeam.has(t.id))
+  return props.library.filter((t) => !inTeam.has(t.id) && t.purpose !== 'runner')
 })
 
 /**

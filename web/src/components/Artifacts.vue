@@ -6,30 +6,22 @@
  * library and answers nothing for anything with a screen: the next thing
  * anybody asks is what it looks like, and today that means checking out the
  * branch and running it. These are the answers an agent left behind -- a
- * screenshot, a report, or a dev server it started and registered.
+ * screenshot, a report, or a dev server it started and registered -- and a
+ * running server is a link, opened in a tab like any other local server.
  */
 import { ref, watch } from 'vue'
 import { Box, ExternalLink, FileText, Image as ImageIcon, Monitor, Pin } from '@lucide/vue'
 import { api, artifactBytes, type Artifact } from '@/lib/api'
-import { Button } from '@/components/ui/button'
 
 const props = defineProps<{
   taskId: string | undefined
-  /** Compact drops the service viewer, for the places that are already dense. */
-  compact?: boolean
 }>()
 
 const items = ref<Artifact[]>([])
 const error = ref('')
 
-/** Which service is open in the viewer. One at a time: each is a whole
- *  application, and two of them side by side in a card is nobody's idea of a
- *  review. */
-const open = ref<string | null>(null)
-
 async function load(taskId: string | undefined) {
   items.value = []
-  open.value = null
   if (!taskId) return
   try {
     items.value = await api.taskArtifacts(taskId)
@@ -88,24 +80,25 @@ defineExpose({ load })
         >
           stopped
         </span>
-        <Button
-          v-else-if="a.kind === 'service'"
-          size="xs"
-          variant="ghost"
-          class="h-6 shrink-0 gap-1 px-1.5 text-[10px]"
-          @click="open = open === a.id ? null : a.id"
-        >
-          {{ open === a.id ? 'hide' : 'open' }}
-        </Button>
+        <!-- A running service is a link and nothing more. It was a frame
+             embedded here, which is the wrong shape for it: what an agent
+             started is a whole application, and half a card is not where
+             anybody clicks around one. It opens in a tab, like every other
+             local server a person runs.
+
+             The href is the proxy's origin, not localhost:port. A dev server
+             binds 127.0.0.1, so the direct address is reachable only from the
+             machine the daemon is on -- and the reason to look at a preview on
+             a phone is exactly the case that would break. -->
         <a
-          v-if="a.kind === 'service' && a.url"
+          v-else-if="a.kind === 'service' && a.url"
           :href="a.url"
           target="_blank"
           rel="noopener noreferrer"
-          class="text-muted-foreground hover:text-foreground focus-visible:outline-ring shrink-0 focus-visible:outline-2"
-          title="Open in a tab of its own"
+          class="text-primary focus-visible:outline-ring shrink-0 text-[10px] underline-offset-2 hover:underline focus-visible:outline-2"
         >
-          <ExternalLink :size="12" aria-hidden="true" />
+          open
+          <ExternalLink :size="10" aria-hidden="true" class="ml-0.5 inline-block align-[-1px]" />
         </a>
         <a
           v-else-if="a.kind !== 'service'"
@@ -139,22 +132,6 @@ defineExpose({ load })
         loading="lazy"
       />
 
-      <!-- A service, in a frame of its own.
-           The src is a different origin from the cockpit (see §13.4), which is
-           what keeps an agent's dev server away from the command API. The
-           sandbox is the second layer: scripts and forms run, because a dev
-           server that cannot run scripts is not worth looking at, and
-           allow-same-origin grants it only its own origin, which holds nothing
-           but itself. Top-level navigation is not granted, so the page cannot
-           replace the cockpit around it. -->
-      <iframe
-        v-if="!compact && a.kind === 'service' && a.url && open === a.id"
-        :src="a.url"
-        :title="a.label || 'service'"
-        sandbox="allow-scripts allow-forms allow-same-origin allow-popups"
-        referrerpolicy="no-referrer"
-        class="hairline-t h-96 w-full bg-white"
-      />
     </div>
 
     <p v-if="error" class="text-destructive text-[11px]">{{ error }}</p>

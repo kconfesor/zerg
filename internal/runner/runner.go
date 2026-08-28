@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -66,9 +67,11 @@ const (
 // It should not happen: the role is seeded. It exists so that a database
 // somebody has edited into a state with no runner still shows them their app,
 // rather than answering a button press with a lookup failure.
-const fallbackPrompt = `You are starting this project so a person can look at it in a browser.
-Work out how it serves itself, bind $PORT, start it in the background, and
-register it with: zerg artifact serve --port $PORT --label "<what it is>"`
+const fallbackPrompt = `You are starting this project so a person can open it and use it.
+Work out how it serves itself, bind $PORT (the only port being proxied; the
+block is in $ZERG_PORTS if it is genuinely more than one server), start it in
+the background, wait until it answers, and register it with:
+zerg artifact serve --port $PORT --label "<what it is>"`
 
 // Manager owns one runner session per project.
 type Manager struct {
@@ -89,13 +92,21 @@ type Manager struct {
 
 	mu       sync.Mutex
 	sessions map[string]*session
+	// reserved is every port handed to a runner and not yet given back.
+	//
+	// A port is asked of the operating system and the listener closed at once,
+	// so the number is only spoken for as long as it takes the agent to bind it -- which is a repository read and a build, not
+	// milliseconds. Two previews starting together, which is what happens when
+	// several cards land at once, could be handed the same port and the second
+	// server would fail to bind for a reason nothing here would explain.
+	reserved map[int]bool
 }
 
 type session struct {
 	cer    *cerebrate.Cerebrate
 	cancel context.CancelFunc
 	token  string
-	port   int
+	ports  []int
 	// role is what this session's agent is called, which is whatever the
 	// library role is named. Filtering on a constant instead meant renaming
 	// the role in Settings silently stopped the panel updating.
@@ -115,7 +126,7 @@ func NewManager(db *store.DB, reg *adapter.Registry, bus *event.Bus, agents *age
 		log = slog.Default()
 	}
 	m := &Manager{db: db, registry: reg, bus: bus, agents: agents, binDir: binDir, log: log,
-		sessions: map[string]*session{}}
+		sessions: map[string]*session{}, reserved: map[int]bool{}}
 	go m.reapIdle()
 	go m.watchTurns()
 	return m
@@ -198,10 +209,15 @@ func (m *Manager) Run(ctx context.Context, projectID, commit, taskID string) err
 	token := m.agents.MintFor(projectID, role.Name, taskID,
 		agent.CanArtifact, agent.CanAsk, agent.CanRemember)
 
-	// The port is the daemon's to choose, not the project's. Two projects that
-	// both default to 5173 would collide, and the proxy has to know where to
-	// send traffic before the agent has decided anything.
-	port, err := freePort()
+	// The ports are the daemon's to choose, not the project's. Two projects
+	// that both default to 5173 would collide, and the proxy has to know where
+	// to send traffic before the agent has decided anything.
+	//
+	// Three of them, because a project is often not one server: an API and the
+	// web app in front of it is the ordinary shape, and a runner given one port
+	// either serves half the thing or picks its own number for the rest, which
+	// the proxy cannot reach.
+	ports, err := m.reservePorts(3)
 	if err != nil {
 		return err
 	}
@@ -215,7 +231,8 @@ func (m *Manager) Run(ctx context.Context, projectID, commit, taskID string) err
 		Token:     token,
 		BinDir:    m.binDir,
 		Env: []string{
-			fmt.Sprintf("PORT=%d", port),
+			fmt.Sprintf("PORT=%d", ports[0]),
+			fmt.Sprintf("ZERG_PORTS=%s", joinPorts(ports)),
 			fmt.Sprintf("ZERG_COMMIT=%s", commit),
 		},
 		Bus:          m.bus,
@@ -231,7 +248,7 @@ func (m *Manager) Run(ctx context.Context, projectID, commit, taskID string) err
 	}()
 
 	s := &session{
-		cer: cer, cancel: cancel, token: token, port: port, role: role.Name,
+		cer: cer, cancel: cancel, token: token, ports: ports, role: role.Name,
 		state: StateWorking, commit: commit, taskID: taskID, touched: time.Now(),
 	}
 	m.mu.Lock()
@@ -285,11 +302,19 @@ func (m *Manager) Stop(ctx context.Context, projectID string) {
 	m.agents.Revoke(s.token)
 	s.cancel()
 
-	// Whatever it registered is gone with its process: the agent is the parent
-	// of the server it started.
+	// The server does not go with the agent -- see reclaim.go, which is the
+	// record of finding one still serving hours after its runner was killed.
+	// Killed before the rows are marked stopped, so a preview reported as
+	// stopped is one that is.
+	m.reclaim(s.ports)
 	if _, err := m.db.StopServices(ctx, projectID, store.OwnerDaemon); err != nil {
 		m.log.Warn("could not mark the preview stopped", "project", projectID, "err", err)
 	}
+
+	m.mu.Lock()
+	m.release(s.ports)
+	m.mu.Unlock()
+
 	m.log.Info("runner stopped", "project", projectID)
 }
 
@@ -447,14 +472,56 @@ func (m *Manager) role(ctx context.Context, project *store.Project) (store.Resol
 	return pick, fallbackPrompt, nil
 }
 
-// freePort asks the operating system for one nothing is using.
-func freePort() (int, error) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return 0, fmt.Errorf("finding a port for the preview: %w", err)
+// reservePorts takes n ports nothing is using and nothing else here has been
+// given, and remembers them until the session ends.
+//
+// The listeners are all held open until every port is chosen and only then
+// closed, because closing each one before asking for the next lets the
+// operating system hand back the number it just gave.
+func (m *Manager) reservePorts(n int) ([]int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	var (
+		held []net.Listener
+		out  []int
+	)
+	defer func() {
+		for _, ln := range held {
+			ln.Close()
+		}
+	}()
+
+	for len(out) < n {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			return nil, fmt.Errorf("finding a port for the preview: %w", err)
+		}
+		held = append(held, ln)
+		port := ln.Addr().(*net.TCPAddr).Port
+		if m.reserved[port] {
+			continue
+		}
+		m.reserved[port] = true
+		out = append(out, port)
 	}
-	defer ln.Close()
-	return ln.Addr().(*net.TCPAddr).Port, nil
+	return out, nil
+}
+
+// release gives a stopped session's ports back.
+func (m *Manager) release(ports []int) {
+	for _, p := range ports {
+		delete(m.reserved, p)
+	}
+}
+
+// joinPorts renders the block for the agent's environment.
+func joinPorts(ports []int) string {
+	parts := make([]string, len(ports))
+	for i, p := range ports {
+		parts[i] = strconv.Itoa(p)
+	}
+	return strings.Join(parts, ",")
 }
 
 // reapIdle stops sessions nobody has touched.

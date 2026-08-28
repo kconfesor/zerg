@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
@@ -70,5 +71,100 @@ func TestARoleWithNoPurposeIsAPipelineRole(t *testing.T) {
 	}
 	if made.Purpose != PurposePipeline {
 		t.Errorf("purpose = %q, want the pipeline by default", made.Purpose)
+	}
+}
+
+// The runner cannot be put in a pipeline, and it is the store that says so.
+//
+// It was said only by the cockpit, in one filter, in one of the two lists that
+// show the library -- so the sidebar offered it, and nothing between that list
+// and the table objected. In a team it would get a lane, be routed cards, and
+// be minted the unscoped token a team role gets: a preview agent able to claim
+// and finish somebody's work.
+func TestATeamCannotContainARoleThePipelineDoesNotRun(t *testing.T) {
+	ctx := context.Background()
+	db, project := seeded(t)
+
+	runner, err := db.RoleFor(ctx, PurposeRunner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coder, err := db.GetTemplateByName(ctx, "coder")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = db.CreateTeamPreset(ctx, &TeamPreset{
+		Name: "With a runner in it", ProjectID: &project.ID,
+		Roles: []TeamPresetRole{
+			{TemplateID: coder.ID, Enabled: true},
+			{TemplateID: runner.ID, Enabled: true},
+		},
+	})
+	if err == nil {
+		t.Fatal("a team was created with the runner in its pipeline")
+	}
+	if !isInvalid(err) {
+		t.Errorf("err = %v, want one the API renders as a 400", err)
+	}
+	if !strings.Contains(err.Error(), "runner") {
+		t.Errorf("err = %v, want it to name the role", err)
+	}
+
+	// And the team was not half-written: the refusal happens inside the same
+	// transaction as the insert, so a rejected team leaves nothing behind.
+	presets, err := db.ListTeamPresets(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range presets {
+		if p.Name == "With a runner in it" {
+			t.Error("the rejected team was stored anyway")
+		}
+	}
+}
+
+// A row that got in before the rule existed, or by hand, still never runs.
+//
+// The write path only guards new mistakes. This is the half that guards a
+// database that already has one -- including a role whose purpose changed
+// after it joined a team, which no write to the team would catch.
+func TestATeamRowForANonPipelineRoleNeverResolves(t *testing.T) {
+	ctx := context.Background()
+	db, project := seeded(t)
+
+	before, err := db.ResolveTeam(ctx, project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Straight into the table, which is the state this defends against.
+	runner, err := db.RoleFor(ctx, PurposeRunner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var presetID string
+	if err := db.read.QueryRowContext(ctx,
+		`SELECT preset_id FROM team_preset_roles LIMIT 1`).Scan(&presetID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SQL().ExecContext(ctx,
+		`INSERT INTO team_preset_roles (preset_id, template_id, position, enabled)
+		 VALUES (?,?,?,1)`, presetID, runner.ID, 99); err != nil {
+		t.Fatal(err)
+	}
+
+	after, err := db.ResolveTeam(ctx, project.ID)
+	if err != nil {
+		t.Fatalf("the team stopped resolving: %v", err)
+	}
+	if len(after) != len(before) {
+		t.Errorf("team resolved to %d roles, want the same %d as before the bad row",
+			len(after), len(before))
+	}
+	for _, r := range after {
+		if r.Name == runner.Name {
+			t.Error("the runner resolved into the pipeline and would be minted a full token")
+		}
 	}
 }

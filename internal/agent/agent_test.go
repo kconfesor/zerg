@@ -112,7 +112,7 @@ func TestAgentClaimsWorksAndHandsOn(t *testing.T) {
 	ctx := context.Background()
 	f := newFixture(t)
 
-	task, err := f.nyd.NewTask(ctx, f.project.ID, "Calculator", "build a calculator")
+	task, err := f.nyd.NewTask(ctx, f.project.ID, "Calculator", "build a calculator", "")
 	if err != nil {
 		t.Fatalf("NewTask: %v", err)
 	}
@@ -183,7 +183,7 @@ func TestNextWaitsForWorkToArrive(t *testing.T) {
 
 	go func() {
 		time.Sleep(300 * time.Millisecond)
-		if _, err := f.nyd.NewTask(ctx, f.project.ID, "Later", "arrives after the wait began"); err != nil {
+		if _, err := f.nyd.NewTask(ctx, f.project.ID, "Later", "arrives after the wait began", ""); err != nil {
 			t.Errorf("NewTask: %v", err)
 		}
 	}()
@@ -207,7 +207,7 @@ func TestTokenScopesTheSender(t *testing.T) {
 	ctx := context.Background()
 	f := newFixture(t)
 
-	if _, err := f.nyd.NewTask(ctx, f.project.ID, "Calculator", "x"); err != nil {
+	if _, err := f.nyd.NewTask(ctx, f.project.ID, "Calculator", "x", ""); err != nil {
 		t.Fatalf("NewTask: %v", err)
 	}
 
@@ -250,7 +250,7 @@ func TestRevokedTokenStopsWorking(t *testing.T) {
 func TestDoneIsIdempotent(t *testing.T) {
 	ctx := context.Background()
 	f := newFixture(t)
-	if _, err := f.nyd.NewTask(ctx, f.project.ID, "Calculator", "x"); err != nil {
+	if _, err := f.nyd.NewTask(ctx, f.project.ID, "Calculator", "x", ""); err != nil {
 		t.Fatalf("NewTask: %v", err)
 	}
 
@@ -343,7 +343,7 @@ func TestTerminalRoleCompletesTheTask(t *testing.T) {
 	t.Cleanup(func() { f.srv.Close() })
 	f.socket = socket
 
-	task, err := f.nyd.NewTask(ctx, f.project.ID, "Calculator", "x")
+	task, err := f.nyd.NewTask(ctx, f.project.ID, "Calculator", "x", "")
 	if err != nil {
 		t.Fatalf("NewTask: %v", err)
 	}
@@ -429,7 +429,7 @@ func TestAnAgentCannotNameAnotherProjectsTask(t *testing.T) {
 
 	// The agent's own project still works by id and by name, once it is
 	// actually holding the card.
-	mine, err := f.nyd.NewTask(ctx, f.project.ID, "Mine", "yours")
+	mine, err := f.nyd.NewTask(ctx, f.project.ID, "Mine", "yours", "")
 	if err != nil {
 		t.Fatalf("NewTask: %v", err)
 	}
@@ -451,7 +451,7 @@ func TestSendRequiresHoldingTheTask(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
 
-	task, err := f.nyd.NewTask(ctx, f.project.ID, "Calculator", "build a calculator")
+	task, err := f.nyd.NewTask(ctx, f.project.ID, "Calculator", "build a calculator", "")
 	if err != nil {
 		t.Fatalf("NewTask: %v", err)
 	}
@@ -480,7 +480,7 @@ func TestRepeatedSendIsAbsorbed(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
 
-	task, err := f.nyd.NewTask(ctx, f.project.ID, "Calculator", "build a calculator")
+	task, err := f.nyd.NewTask(ctx, f.project.ID, "Calculator", "build a calculator", "")
 	if err != nil {
 		t.Fatalf("NewTask: %v", err)
 	}

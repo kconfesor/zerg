@@ -28,6 +28,10 @@ type runStatus struct {
 	NoteAuthor string `json:"noteAuthor,omitempty"`
 	// AutoRun is whether finishing a task starts one of these.
 	AutoRun bool `json:"autoRun"`
+	// Services is what is being served, with an address. The panel said
+	// "running" and stopped there, which answers the wrong question: the
+	// reason to run a preview is to open it.
+	Services []liveService `json:"services"`
 }
 
 func (s *Server) runState(w http.ResponseWriter, r *http.Request) {
@@ -44,6 +48,7 @@ func (s *Server) runState(w http.ResponseWriter, r *http.Request) {
 	if note, err := s.db.RunNoteFor(r.Context(), id); err == nil {
 		out.Note, out.NoteAuthor = note.Note, note.Author
 	}
+	out.Services = s.liveServices(r, id)
 	writeJSON(w, http.StatusOK, out)
 }
 

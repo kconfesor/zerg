@@ -1,56 +1,28 @@
 package main
 
 import (
-	"errors"
 	"log/slog"
-	"net"
-	"net/http"
-	"time"
 
 	"github.com/kconfesor/zerg/internal/api"
 	"github.com/kconfesor/zerg/internal/store"
 )
 
-// listenProxy binds the origin that serves agents' services.
+// newViewer builds the thing that puts a running service on an origin of its
+// own, next to the cockpit.
 //
-// Bound here and served later, in two steps, because the port has to be known
-// before the API is built -- the links it hands the cockpit contain it -- and
-// the certificate is not resolved until after that. Returns zero when it could
-// not bind, which makes service links absent rather than broken.
-//
-// Loopback only, even when the cockpit is on a tailnet. What is proxied is a
-// program an agent wrote; the cockpit reaches it through the browser that is
-// already talking to this machine, and there is no reason for the rest of the
-// network to reach it directly.
-func listenProxy(db *store.DB, log *slog.Logger) (port int, serve func(cert, key string), closer func()) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		log.Warn("the service viewer is unavailable", "err", err)
-		return 0, func(string, string) {}, func() {}
-	}
-
-	srv := &http.Server{
-		Handler:           api.NewProxy(db, log).Handler(),
-		ReadHeaderTimeout: 10 * time.Second,
-		IdleTimeout:       120 * time.Second,
-		// No ReadTimeout or WriteTimeout: what is on the other side of this is
-		// somebody's dev server, and a websocket for hot reload is the normal
-		// case rather than the exception.
-	}
-
-	port = ln.Addr().(*net.TCPAddr).Port
-	serve = func(cert, key string) {
-		go func() {
-			var err error
-			if cert != "" {
-				err = srv.ServeTLS(ln, cert, key)
-			} else {
-				err = srv.Serve(ln)
-			}
-			if err != nil && !errors.Is(err, http.ErrServerClosed) {
-				log.Warn("the service viewer stopped", "err", err)
-			}
-		}()
-	}
-	return port, serve, func() { srv.Close() }
+// One origin per service, opened when somebody first asks for the link; see
+// internal/api/proxy.go for why it is not one shared origin with the service
+// in the path. Bound on the same interface as the cockpit, because a preview
+// reachable only from the daemon's own machine is no use to the phone reading
+// the approval, and given the cockpit's certificate so a tailnet preview is
+// https for a name the browser already trusts.
+func newViewer(db *store.DB, cockpitAddr string, log *slog.Logger) *api.Viewer {
+	return api.NewViewer(db, cockpitAddr, log).WithTouch(func(projectID string) {
+		// Looked up when a request arrives rather than captured: the runner is
+		// built after this, and the alternative is ordering the two by an
+		// accident of the file.
+		if runners != nil {
+			runners.Touch(projectID)
+		}
+	})
 }

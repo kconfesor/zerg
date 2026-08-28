@@ -110,6 +110,9 @@ export interface Project {
   icon?: string
   createdAt: string
   lastOpenedAt?: string
+  /** What a new card here starts with for "deploy when it lands". The default,
+   *  not the decision: that is per card. */
+  autoRun?: boolean
 }
 
 /** One subdirectory the folder picker can descend into or select. */
@@ -224,6 +227,10 @@ export interface Task {
    *  this. `outcomeRef` is the commit or the pull request's URL. */
   outcome?: 'merged' | 'pr' | 'branch'
   outcomeRef?: string
+  /** Where this card's work gets put when it lands. Decided when the card is
+   *  written: a preview costs an agent turn, and most cards are not worth
+   *  looking at. Empty means nowhere. */
+  deploy?: 'local'
 }
 
 /** One worked task as the history screen reads it. */
@@ -304,6 +311,12 @@ export interface SwarmStatus {
   roles: RoleStatus[]
   /** Subscription headroom, keyed by provider — one account, many roles. */
   quotas?: Record<string, QuotaReport>
+  /** Apps an agent has running for this project, each with a link. On the
+   *  status poll because a preview nobody can find is a preview nobody has. */
+  services?: LiveService[]
+  /** A deploy in flight, so the card that asked for one can say so while it
+   *  is happening rather than only when it finishes. */
+  deploy?: { state: RunState['state']; taskId?: string; message?: string }
 }
 
 export interface Approval {
@@ -502,8 +515,11 @@ export const api = {
     const suffix = query.toString()
     return call<HistoryPage>(`/projects/${id}/history${suffix ? '?' + suffix : ''}`)
   },
-  newTask: (id: string, name: string, body: string) =>
-    call<Task>(`/projects/${id}/tasks`, { method: 'POST', body: JSON.stringify({ name, body }) }),
+  newTask: (id: string, name: string, body: string, deploy: string) =>
+    call<Task>(`/projects/${id}/tasks`, {
+      method: 'POST',
+      body: JSON.stringify({ name, body, deploy }),
+    }),
 
   attention: (id: string) => call<Attention>(`/projects/${id}/attention`),
   approve: (id: string) => call<void>(`/approvals/${id}/approve`, { method: 'POST' }),
@@ -1039,8 +1055,16 @@ export interface Artifact {
  *
  * `working` it is reading the repository and trying things; `asking` it put a
  * question in Attention and is waiting; `serving` a port is registered and the
- * frame works; `gave up` the turn ended without anything serving.
+ * link works; `gave up` the turn ended without anything serving.
  */
+/** A service an agent started, as a link somebody can click. */
+export interface LiveService {
+  id: string
+  label?: string
+  taskId?: string
+  url: string
+}
+
 export interface RunState {
   state: 'idle' | 'working' | 'asking' | 'serving' | 'gave up'
   commit?: string
@@ -1052,6 +1076,8 @@ export interface RunState {
   note?: string
   noteAuthor?: string
   autoRun: boolean
+  /** What is being served right now, with an address. */
+  services?: LiveService[]
 }
 
 /** Where the bytes of a file artifact live. */

@@ -100,7 +100,7 @@ func New(db *store.DB, opts ...Option) *Nydus {
 // ── starting work ─────────────────────────────────────────────────────────
 
 // NewTask opens a card and queues it for the first enabled role.
-func (n *Nydus) NewTask(ctx context.Context, projectID, name, body string) (*store.Task, error) {
+func (n *Nydus) NewTask(ctx context.Context, projectID, name, body, deploy string) (*store.Task, error) {
 	team, err := n.db.ResolveTeam(ctx, projectID)
 	if err != nil {
 		return nil, err
@@ -112,6 +112,12 @@ func (n *Nydus) NewTask(ctx context.Context, projectID, name, body string) (*sto
 
 	if name == "" {
 		return nil, invalid("a task needs a name; the name follows the card through the whole pipeline")
+	}
+	// Refused here rather than stored. A target this build cannot reach would
+	// be a card that looks like it deploys and never does, and the person who
+	// asked would find out by it not happening.
+	if !store.ValidDeploy(deploy) {
+		return nil, invalid("%q is not somewhere this can deploy; it is local, or nothing", deploy)
 	}
 
 	// The card and the message that starts it are written together. Created
@@ -133,12 +139,13 @@ func (n *Nydus) NewTask(ctx context.Context, projectID, name, body string) (*sto
 		Lane:      first.Name,
 		State:     store.TaskQueued,
 		CreatedAt: now.UTC(),
+		Deploy:    deploy,
 	}
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO tasks (id, project_id, name, body, lane, state, created_at)
-		 VALUES (?,?,?,?,?,?,?)`,
+		`INSERT INTO tasks (id, project_id, name, body, lane, state, created_at, deploy)
+		 VALUES (?,?,?,?,?,?,?,?)`,
 		task.ID, task.ProjectID, task.Name, task.Body, task.Lane, task.State,
-		task.CreatedAt.Format(time.RFC3339Nano)); err != nil {
+		task.CreatedAt.Format(time.RFC3339Nano), task.Deploy); err != nil {
 		return nil, fmt.Errorf("creating task %q: %w", name, err)
 	}
 

@@ -185,7 +185,7 @@ func newFixture(t *testing.T, opts ...Option) *fixture {
 
 func (f *fixture) task(t *testing.T, name string) *store.Task {
 	t.Helper()
-	task, err := f.n.NewTask(context.Background(), f.project.ID, name, "do the thing")
+	task, err := f.n.NewTask(context.Background(), f.project.ID, name, "do the thing", "")
 	if err != nil {
 		t.Fatalf("NewTask: %v", err)
 	}
@@ -732,7 +732,7 @@ func TestClaimMergesHandoffIntoWorktree(t *testing.T) {
 	}
 
 	n := New(db, WithIntegrator(Git{}))
-	task, err := n.NewTask(ctx, project.ID, "Calculator", "do the thing")
+	task, err := n.NewTask(ctx, project.ID, "Calculator", "do the thing", "")
 	if err != nil {
 		t.Fatalf("NewTask: %v", err)
 	}
@@ -817,7 +817,7 @@ func setupRealRepo(t *testing.T, roles ...string) (*Nydus, *store.Project, *hatc
 func TestSendResolvesHeadInTheSendersWorktree(t *testing.T) {
 	ctx := context.Background()
 	n, project, hat := setupRealRepo(t, "coder", "reviewer")
-	task, err := n.NewTask(ctx, project.ID, "Calculator", "do the thing")
+	task, err := n.NewTask(ctx, project.ID, "Calculator", "do the thing", "")
 	if err != nil {
 		t.Fatalf("NewTask: %v", err)
 	}
@@ -859,7 +859,7 @@ func TestSendResolvesHeadInTheSendersWorktree(t *testing.T) {
 func TestCompleteIntegratesIntoTheBaseBranch(t *testing.T) {
 	ctx := context.Background()
 	n, project, hat := setupRealRepo(t, "coder")
-	task, err := n.NewTask(ctx, project.ID, "Calculator", "do the thing")
+	task, err := n.NewTask(ctx, project.ID, "Calculator", "do the thing", "")
 	if err != nil {
 		t.Fatalf("NewTask: %v", err)
 	}
@@ -892,7 +892,7 @@ func TestCompleteIntegratesIntoTheBaseBranch(t *testing.T) {
 func TestCompleteRefusesWithoutACommit(t *testing.T) {
 	ctx := context.Background()
 	n, project, _ := setupRealRepo(t, "coder")
-	task, err := n.NewTask(ctx, project.ID, "Calculator", "do the thing")
+	task, err := n.NewTask(ctx, project.ID, "Calculator", "do the thing", "")
 	if err != nil {
 		t.Fatalf("NewTask: %v", err)
 	}
@@ -1663,4 +1663,116 @@ func TestRejectingHandsTheReviewBackToTheAuthor(t *testing.T) {
 	if back.Items[0].TaskID == nil || *back.Items[0].TaskID != task.ID {
 		t.Errorf("the rejection came back on %v, want task %s", back.Items[0].TaskID, task.ID)
 	}
+}
+
+// Where a card gets deployed is decided when it is written, and has to survive
+// being written down: the whole point of moving it off the project is that a
+// card carries its own answer.
+func TestATaskRemembersWhereItDeploys(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+
+	task, err := f.n.NewTask(ctx, f.project.ID, "Add the settings page", "do it", store.DeployLocal)
+	if err != nil {
+		t.Fatalf("NewTask: %v", err)
+	}
+	if got := f.reload(t, task.ID).Deploy; got != store.DeployLocal {
+		t.Errorf("deploy = %q, want local — the card came back without it", got)
+	}
+
+	// The default is nowhere, which is what every card written before this
+	// existed asked for by not being able to ask.
+	plain := f.task(t, "Fix a typo")
+	if got := f.reload(t, plain.ID).Deploy; got != "" {
+		t.Errorf("deploy = %q on a card that did not ask, want empty", got)
+	}
+}
+
+// A target this build cannot reach is refused rather than stored. Stored, it
+// would be a card that looks like it deploys and never does, and the person
+// who asked would find out by it not happening.
+func TestATaskCannotAskToDeploySomewhereThatDoesNotExist(t *testing.T) {
+	f := newFixture(t)
+
+	_, err := f.n.NewTask(context.Background(), f.project.ID, "Ship it", "do it", "production")
+	if err == nil {
+		t.Fatal("a card asked to deploy to production and was accepted")
+	}
+	var invalid *validationError
+	if !errors.As(err, &invalid) {
+		t.Errorf("err = %v, want one the API renders as a 400", err)
+	}
+	if !strings.Contains(err.Error(), "production") {
+		t.Errorf("err = %v, want it to name what was asked for", err)
+	}
+}
+
+// A card that lands reports the commit that landed, on both the path that ends
+// in a role finishing and the path that ends in a person approving.
+//
+// This is the seam the deploy hangs on: the daemon starts a preview here, and
+// it starts it *at* a commit. It was wired only to the ungated path once, so
+// on any project with an approval gate at the end -- the arrangement the gate
+// exists for -- nothing that runs when a card lands ran at all.
+func TestLandingReportsTheCommitThatLanded(t *testing.T) {
+	ctx := context.Background()
+
+	type landing struct{ projectID, taskID, commit string }
+
+	t.Run("a role finishes it", func(t *testing.T) {
+		var landed []landing
+		f := newFixture(t, WithOnTaskDone(func(_ context.Context, p, tk, c string) {
+			landed = append(landed, landing{p, tk, c})
+		}))
+		task := f.task(t, "Calculator")
+
+		// reviewer is terminal in this fixture, so this finishes the card.
+		if _, err := f.n.Send(ctx, f.project.ID, "reviewer", SendRequest{
+			TaskID: task.ID, Commit: "aaaaaaaaaa", Body: "approved"}); err != nil {
+			t.Fatalf("complete: %v", err)
+		}
+
+		if len(landed) != 1 {
+			t.Fatalf("%d landings, want 1", len(landed))
+		}
+		if landed[0] != (landing{f.project.ID, task.ID, "aaaaaaaaaa"}) {
+			t.Errorf("landed %+v, want the project, the card and the commit", landed[0])
+		}
+	})
+
+	t.Run("a person approves it", func(t *testing.T) {
+		var landed []landing
+		f := newFixture(t, WithOnTaskDone(func(_ context.Context, p, tk, c string) {
+			landed = append(landed, landing{p, tk, c})
+		}))
+		task := f.task(t, "Calculator")
+
+		// reviewer gates its completion, so finishing it only asks.
+		if _, err := f.db.SQL().ExecContext(ctx,
+			`UPDATE role_templates SET gate = ? WHERE name = 'reviewer'`, store.GateApproval); err != nil {
+			t.Fatalf("gating reviewer: %v", err)
+		}
+		if _, err := f.n.Send(ctx, f.project.ID, "reviewer", SendRequest{
+			TaskID: task.ID, Commit: "bbbbbbbbbb", Body: "approved"}); err != nil {
+			t.Fatalf("complete: %v", err)
+		}
+		if len(landed) != 0 {
+			t.Fatalf("the card landed before anybody approved it: %+v", landed)
+		}
+
+		pending, err := f.db.ListPendingApprovals(ctx, f.project.ID)
+		if err != nil || len(pending) != 1 {
+			t.Fatalf("%d approvals pending (%v), want 1", len(pending), err)
+		}
+		if err := f.n.Approve(ctx, pending[0].ID); err != nil {
+			t.Fatalf("Approve: %v", err)
+		}
+
+		if len(landed) != 1 {
+			t.Fatalf("%d landings after approval, want 1", len(landed))
+		}
+		if landed[0] != (landing{f.project.ID, task.ID, "bbbbbbbbbb"}) {
+			t.Errorf("landed %+v, want the project, the card and the commit", landed[0])
+		}
+	})
 }

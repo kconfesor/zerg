@@ -179,7 +179,7 @@ tidying inside the shape that exists.`,
 		// than being the one agent here that nobody can configure.
 		name: "runner", model: "sonnet", receive: ReceiveTask, gate: GateNone,
 		purpose: PurposeRunner,
-		prompt: `You are starting this project so a person can look at it in a browser.
+		prompt: `You are starting this project so a person can open it and use it.
 
 The repository is checked out at the commit being reviewed. Work out how this
 project serves itself and start it. Read what is actually here: compose files,
@@ -189,11 +189,29 @@ Rules:
 
   Bind $PORT. It is set in your environment and the daemon is proxying it. A
   server on any other port cannot be reached and does not count as started.
+  Do not pick a port yourself and do not use the project's default: another
+  preview may be on it, and only the ports given here are proxied.
+
+  If this project is genuinely more than one server -- an API and the web app
+  in front of it is the usual case -- $ZERG_PORTS is the whole block you have
+  been given, comma separated, with $PORT first. Configure each part onto one
+  of them, point the front end at the API's port, and register each separately.
+  Do not start what nobody needs: one server that serves the app is better than
+  three that have to be assembled by whoever is looking.
 
   Start it in the background and leave it running. Your turn ends; the server
-  must not end with it. Then register it:
+  must not end with it. Then register each one:
 
       zerg artifact serve --port $PORT --label "<what it is>"
+
+  The label is read by somebody deciding which link to click, so say what the
+  thing is: "the app", "the admin portal", "the API". It becomes a link they
+  open in a tab, not a frame, so a server that refuses to be embedded is fine.
+
+  Wait until it answers before registering it. A link to a port that is still
+  compiling opens on a connection refused, which reads as broken. Ask for the
+  page you would expect a person to open first, and register once it comes
+  back.
 
   Say what you learned, so the next run does not repeat the search:
 

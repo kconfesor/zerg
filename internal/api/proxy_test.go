@@ -2,11 +2,13 @@ package api
 
 import (
 	"context"
+	"crypto/tls"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -14,7 +16,8 @@ import (
 )
 
 // upstream is a stand-in for the dev server an agent started: it reports the
-// path it was asked for, so the test can see what the proxy rewrote.
+// path it was asked for, so a test can see whether anything was rewritten, and
+// it sets a cookie the way anything with a login does.
 func upstream(t *testing.T) (port int, close func()) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -22,14 +25,14 @@ func upstream(t *testing.T) (port int, close func()) {
 		t.Fatal(err)
 	}
 	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Set-Cookie", "session=agent-set-this")
+		w.Header().Set("Set-Cookie", "session=agent-set-this; Path=/; HttpOnly")
 		_, _ = io.WriteString(w, "asked for "+r.URL.Path)
 	})}
 	go srv.Serve(ln)
 	return ln.Addr().(*net.TCPAddr).Port, func() { srv.Close() }
 }
 
-func serviceFixture(t *testing.T) (*Proxy, *streamFixture, *store.Artifact, func()) {
+func serviceFixture(t *testing.T) (*Viewer, *streamFixture, *store.Artifact, func()) {
 	t.Helper()
 	f := newFixture(t)
 	port, closeUp := upstream(t)
@@ -41,124 +44,144 @@ func serviceFixture(t *testing.T) (*Proxy, *streamFixture, *store.Artifact, func
 	if err != nil {
 		t.Fatal(err)
 	}
-	return NewProxy(f.db, slog.New(slog.NewTextHandler(io.Discard, nil))), f, a, closeUp
+	v := NewViewer(f.db, "127.0.0.1:0", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	t.Cleanup(v.CloseAll)
+	return v, f, a, closeUp
 }
 
-// The service is reached at /<id>/..., and it does not know that. Without the
-// rewrite a dev server answers 404 for its own assets.
-func TestTheProxyStripsTheArtifactPrefix(t *testing.T) {
-	p, _, a, closeUp := serviceFixture(t)
-	defer closeUp()
-	h := p.Handler()
+// get fetches a path from a service's own origin.
+func get(t *testing.T, port int, path string) *http.Response {
+	t.Helper()
+	resp, err := http.Get("http://" + net.JoinHostPort("127.0.0.1", strconv.Itoa(port)) + path)
+	if err != nil {
+		t.Fatalf("GET %s: %v", path, err)
+	}
+	return resp
+}
 
-	for _, tc := range []struct{ ask, want string }{
-		{"/" + a.ID + "/", "asked for /"},
-		{"/" + a.ID, "asked for /"},
-		{"/" + a.ID + "/assets/main.js", "asked for /assets/main.js"},
-		{"/" + a.ID + "/nested/deep/page", "asked for /nested/deep/page"},
-	} {
-		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, httptest.NewRequest("GET", tc.ask, nil))
-		if rec.Code != 200 || rec.Body.String() != tc.want {
-			t.Errorf("%s -> %d %q, want %q", tc.ask, rec.Code, rec.Body.String(), tc.want)
+// A service keeps its own paths.
+//
+// It was reached at /<id>/... on one shared origin, and the prefix had to be
+// stripped on the way through. That works for a static directory and fails for
+// every dev server: the HTML they serve names absolute scripts like
+// /src/main.ts, the browser asks the shared origin's root for it, and the page
+// renders blank while the HTML itself came back 200. An origin per service is
+// what makes the service's own paths already correct.
+func TestAServiceIsReachedOnItsOwnPathsAndItsOwnOrigin(t *testing.T) {
+	v, _, a, closeUp := serviceFixture(t)
+	defer closeUp()
+
+	port := v.PortFor(a)
+	if port == 0 {
+		t.Fatal("no origin was opened for the service")
+	}
+
+	for _, path := range []string{"/", "/src/main.ts", "/assets/index-a1b2.js", "/works/nightjar"} {
+		resp := get(t, port, path)
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != 200 || string(body) != "asked for "+path {
+			t.Errorf("%s -> %d %q, want the service asked for %s", path, resp.StatusCode, body, path)
 		}
 	}
+
+	// The same service asked for twice is the same origin, not a second one.
+	if again := v.PortFor(a); again != port {
+		t.Errorf("a second look opened another origin: %d then %d", port, again)
+	}
 }
 
-// The service is somebody else's code. It has no business setting cookies on
-// the origin it is being viewed from.
-func TestTheProxyDropsCookiesFromTheService(t *testing.T) {
-	p, _, a, closeUp := serviceFixture(t)
+// Two services are two origins, which is what keeps their cookies and their
+// storage apart without anything being rewritten.
+func TestTwoServicesGetTwoOrigins(t *testing.T) {
+	v, f, a, closeUp := serviceFixture(t)
 	defer closeUp()
 
-	rec := httptest.NewRecorder()
-	p.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/"+a.ID+"/", nil))
-	if got := rec.Header().Get("Set-Cookie"); got != "" {
-		t.Errorf("the service set a cookie on the viewer origin: %q", got)
+	otherPort, closeOther := upstream(t)
+	defer closeOther()
+	b, err := f.db.AddArtifact(context.Background(), &store.Artifact{
+		ProjectID: f.project.ID, Role: "coder", Kind: store.ArtifactService,
+		Label: "The API", Port: otherPort,
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if rec.Header().Get("X-Content-Type-Options") != "nosniff" {
-		t.Error("no nosniff on a proxied response")
+
+	if v.PortFor(a) == v.PortFor(b) {
+		t.Error("two services landed on one origin, so one could read the other's session")
+	}
+
+	// A cookie survives, because an origin of its own is what makes that safe.
+	// Dropping them made anything with a login impossible to look at.
+	resp := get(t, v.PortFor(a), "/")
+	resp.Body.Close()
+	if got := resp.Header.Get("Set-Cookie"); !strings.Contains(got, "session=agent-set-this") {
+		t.Errorf("the service's cookie did not survive: %q", got)
 	}
 }
 
-// A stopped service's port belongs to whatever binds it next. Proxying anyway
-// is how a dead link quietly becomes a live one to the wrong program.
+// A stopped service is not given an origin: its port belongs to whatever binds
+// it next, and proxying anyway is how a dead link becomes a live one to the
+// wrong program.
 func TestAStoppedServiceIsNotProxied(t *testing.T) {
-	p, f, a, closeUp := serviceFixture(t)
+	v, f, a, closeUp := serviceFixture(t)
 	defer closeUp()
 
 	if _, err := f.db.StopServices(context.Background(), f.project.ID, ""); err != nil {
 		t.Fatal(err)
 	}
-	rec := httptest.NewRecorder()
-	p.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/"+a.ID+"/", nil))
-	if rec.Code != http.StatusGone {
-		t.Errorf("status %d, want 410", rec.Code)
-	}
-}
-
-// The process dies without telling anybody, which is the ordinary case.
-func TestAServiceThatStoppedAnsweringSaysSo(t *testing.T) {
-	p, _, a, closeUp := serviceFixture(t)
-	closeUp() // it is gone, and the row does not know
-
-	rec := httptest.NewRecorder()
-	p.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/"+a.ID+"/", nil))
-	if rec.Code != http.StatusBadGateway {
-		t.Errorf("status %d, want 502", rec.Code)
-	}
-	if !strings.Contains(rec.Body.String(), "not answering") {
-		t.Errorf("body = %q, which does not say what happened", rec.Body.String())
-	}
-}
-
-// This origin exists to be untrusted. It serves proxied services and nothing
-// else: no cockpit, no API, and no link back to either.
-func TestTheProxyOriginServesNothingElse(t *testing.T) {
-	p, _, _, closeUp := serviceFixture(t)
-	defer closeUp()
-	h := p.Handler()
-
-	for _, path := range []string{"/", "/api/projects", "/index.html"} {
-		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
-		if rec.Code != http.StatusNotFound {
-			t.Errorf("%s returned %d, want 404 on the service origin", path, rec.Code)
-		}
-		if loc := rec.Header().Get("Location"); loc != "" {
-			t.Errorf("%s redirected to %q; this origin must not point at the cockpit", path, loc)
-		}
-	}
-}
-
-// A file is not a service, and the message should say which mistake was made.
-func TestAFileIsNotProxied(t *testing.T) {
-	f := newFixture(t)
-	a, err := f.db.AddArtifact(context.Background(), &store.Artifact{
-		ProjectID: f.project.ID, Kind: store.ArtifactFile, SHA256: strings.Repeat("a", 64),
-	})
+	stopped, err := f.db.GetArtifact(context.Background(), a.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := NewProxy(f.db, slog.New(slog.NewTextHandler(io.Discard, nil)))
-
-	rec := httptest.NewRecorder()
-	p.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/"+a.ID+"/", nil))
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("status %d, want 400", rec.Code)
+	if port := v.PortFor(stopped); port != 0 {
+		t.Errorf("a stopped service was given origin %d", port)
 	}
 }
 
-// The link is built from the request, so it is right for whoever asked:
-// loopback for a local browser, the tailnet name for a phone.
-func TestAServiceLinkFollowsTheHostThatAsked(t *testing.T) {
-	r := httptest.NewRequest("GET", "http://kelvins-machine.ts.net:7717/api/tasks/x/artifacts", nil)
-	if got := ServiceURL(r, 45123, "ART1"); got != "http://kelvins-machine.ts.net:45123/ART1/" {
-		t.Errorf("ServiceURL = %q", got)
+// Reading a preview keeps its runner alive.
+//
+// The idle timer used to measure a signal nothing sent: the cockpit never
+// called touch, so a preview somebody was using died thirty minutes after it
+// started. A request through here is the honest signal, and the only one that
+// is true from a phone or from a tab left open.
+func TestReadingAServiceKeepsItsRunnerAlive(t *testing.T) {
+	v, f, a, closeUp := serviceFixture(t)
+	defer closeUp()
+
+	var touched []string
+	v.WithTouch(func(projectID string) { touched = append(touched, projectID) })
+
+	get(t, v.PortFor(a), "/").Body.Close()
+	if len(touched) != 1 || touched[0] != f.project.ID {
+		t.Errorf("touched %v, want one report for %s", touched, f.project.ID)
+	}
+}
+
+// The link is built from the host the browser used, so the same daemon answers
+// a phone on a tailnet and a browser on loopback with an address each can
+// reach.
+func TestTheLinkFollowsWhoeverIsAsking(t *testing.T) {
+	for _, tc := range []struct {
+		host, want string
+		tls        bool
+	}{
+		{host: "127.0.0.1:7717", want: "http://127.0.0.1:52000/"},
+		{host: "kelvin.tail1234.ts.net:7717", want: "https://kelvin.tail1234.ts.net:52000/", tls: true},
+		{host: "100.97.75.92:7717", want: "http://100.97.75.92:52000/"},
+	} {
+		r := httptest.NewRequest("GET", "/api/tasks/x/artifacts", nil)
+		r.Host = tc.host
+		if tc.tls {
+			r.TLS = &tls.ConnectionState{}
+		}
+		if got := ServiceURL(r, 52000); got != tc.want {
+			t.Errorf("from %s the link is %q, want %q", tc.host, got, tc.want)
+		}
 	}
 
-	// No proxy running: no link, rather than one that cannot work.
-	if got := ServiceURL(r, 0, "ART1"); got != "" {
-		t.Errorf("ServiceURL with no proxy = %q, want empty", got)
+	// No origin means no link, rather than one that cannot be reached.
+	if got := ServiceURL(httptest.NewRequest("GET", "/", nil), 0); got != "" {
+		t.Errorf("link without an origin: %q", got)
 	}
 }

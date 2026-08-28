@@ -459,6 +459,15 @@ func (db *DB) validatePresetProjectOverrides(ctx context.Context, p *TeamPreset)
 
 func insertPresetRoles(ctx context.Context, tx *sql.Tx, id string, roles []TeamPresetRole) error {
 	for i, r := range roles {
+		// Not every role can be in a pipeline. The runner is started by the
+		// daemon with a scoped token and no lease, and it holds no place in
+		// the order of work; in a team it would get a lane, be routed cards,
+		// and be minted the unscoped token a team role gets. This was enforced
+		// by one filter in one list in the cockpit, so the other list offered
+		// it and nothing between there and the table said no.
+		if err := refusePipelineImposter(ctx, tx, r.TemplateID); err != nil {
+			return err
+		}
 		args, err := marshalOverrideArgs(r.ArgsOverride)
 		if err != nil {
 			return err
@@ -471,6 +480,26 @@ func insertPresetRoles(ctx context.Context, tx *sql.Tx, id string, roles []TeamP
 			r.PromptOverride, r.GateOverride, r.ThinkingOverride); err != nil {
 			return fmt.Errorf("adding role to team preset: %w", err)
 		}
+	}
+	return nil
+}
+
+// refusePipelineImposter rejects a role that is not the pipeline's to run.
+//
+// A missing row is left to the foreign key, which reports it better than a
+// lookup here would.
+func refusePipelineImposter(ctx context.Context, tx *sql.Tx, templateID string) error {
+	var name, purpose string
+	err := tx.QueryRowContext(ctx,
+		`SELECT name, purpose FROM role_templates WHERE id = ?`, templateID).Scan(&name, &purpose)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("reading role %s: %w", templateID, err)
+	}
+	if purpose != PurposePipeline {
+		return invalid("%q is a %s, not a pipeline role: the daemon starts it when it is needed, so it cannot be part of a team", name, purpose)
 	}
 	return nil
 }

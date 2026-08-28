@@ -225,6 +225,15 @@ func runUp(args []string) error {
 		}
 		*dbPath = p
 	}
+	// Resolved before anything is derived from it. The agent socket, the
+	// worktrees and the blob store are all built from this path, and an agent
+	// runs in a worktree: `zerg up --db ./r.db` handed every agent the socket
+	// as "state/agent.sock", which resolves against its own directory and is
+	// not there. The agent then spends a turn hunting for the daemon it is
+	// already connected to, and the failure names nothing.
+	if abs, err := filepath.Abs(*dbPath); err == nil {
+		*dbPath = abs
+	}
 
 	// Signals cancel the context, which shuts the server down gracefully.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -383,8 +392,8 @@ func runUp(args []string) error {
 	// implementation detail of a link the daemon builds itself, and asking
 	// somebody to pick a second port -- and to keep it free -- buys nothing.
 	// A failure here costs the service viewer and not the daemon.
-	proxyPort, serveProxy, closeProxy := listenProxy(db, log)
-	defer closeProxy()
+	viewer := newViewer(db, cfg.Addr, log)
+	defer viewer.CloseAll()
 
 	// Starting a project so somebody can look at it. An agent does the work:
 	// the daemon spawns it with a commit checked out and three verbs, and it
@@ -405,7 +414,7 @@ func runUp(args []string) error {
 		Handler: api.New(api.Deps{
 			DB: db, Log: log, Registry: registry,
 			Overmind: over, Nydus: nyd, Bus: bus, Recorder: recorder, Applied: cfg.Listener(), Chat: chatMgr,
-			TailnetHost: tailnetHost, UI: ui, Blobs: blobs, ProxyPort: proxyPort,
+			TailnetHost: tailnetHost, UI: ui, Blobs: blobs, Viewer: viewer,
 			Runner: runners,
 		}).Routes(),
 		ReadHeaderTimeout: 10 * time.Second,
@@ -464,7 +473,7 @@ func runUp(args []string) error {
 	// Same scheme as the cockpit, necessarily: an https page cannot embed an
 	// http iframe, so a plain proxy beside a TLS cockpit would be a viewer
 	// that never loads and a browser console nobody reads.
-	serveProxy(tlsCert, tlsKey)
+	viewer.WithTLS(tlsCert, tlsKey)
 
 	log.Info("overmind up", "url", scheme+"://"+shown, "db", *dbPath, "socket", socket)
 	fmt.Printf("Cockpit: %s://%s\n", scheme, shown)

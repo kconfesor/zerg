@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import type { ResolvedRole, Task } from '@/lib/api'
+import type { LiveService, ResolvedRole, SwarmStatus, Task } from '@/lib/api'
 import { duration, taskState } from '@/lib/utils'
 
 /**
@@ -27,7 +27,17 @@ function compactTokens(n: number): string {
 function money(n: number): string {
   return n >= 1 ? `$${n.toFixed(2)}` : `$${n.toFixed(3)}`
 }
-import { Bell, Eye, EyeOff, MessageCircleQuestion, ScrollText, Square, Trash2 } from '@lucide/vue'
+import {
+  Bell,
+  Eye,
+  EyeOff,
+  ExternalLink,
+  LoaderCircle,
+  MessageCircleQuestion,
+  ScrollText,
+  Square,
+  Trash2,
+} from '@lucide/vue'
 import { Badge } from '@/components/ui/badge'
 
 const props = defineProps<{
@@ -39,6 +49,10 @@ const props = defineProps<{
   blockedOn?: Map<string, 'question' | 'approval'>
   /** Whether cards a person has put away are shown. */
   showHidden?: boolean
+  /** Apps running right now, so the card that asked for one can link to it. */
+  services?: LiveService[]
+  /** A deploy in flight, for the card that is waiting on it. */
+  deploy?: SwarmStatus['deploy']
 }>()
 const emit = defineEmits<{
   open: [task: Task]
@@ -48,7 +62,33 @@ const emit = defineEmits<{
   stop: [task: Task]
   activity: [task: Task]
   remove: [task: Task]
+  stopDeploy: [task: Task]
 }>()
+
+/**
+ * What a card's deployment is doing, if it has one.
+ *
+ * On the card that asked for it. It was in the top bar, which is the wrong
+ * place twice over: it says a thing is running without saying what produced
+ * it, and it is nowhere near the card whose change you want to look at.
+ */
+const deployFor = computed(() => (task: Task) => {
+  const live = (props.services ?? []).find((s) => s.taskId === task.id)
+  if (live) return { state: 'serving' as const, url: live.url, label: live.label }
+  const d = props.deploy
+  if (d && d.taskId === task.id && d.state !== 'idle') {
+    return { state: d.state, url: '', label: '', message: d.message }
+  }
+  return null
+})
+
+/** What the strip says, which is different in each of the three states. */
+function deploySays(state: string): string {
+  if (state === 'serving') return 'Deployment done'
+  if (state === 'gave up') return 'Deployment failed'
+  if (state === 'asking') return 'Deployment needs an answer'
+  return 'Deploying'
+}
 
 /** Lanes are the enabled roles in pipeline order, then the Done well. */
 const lanes = computed(() => {
@@ -276,6 +316,56 @@ const byLane = computed(() => {
               <component :is="task.hidden ? Eye : EyeOff" :size="12" aria-hidden="true" />
               {{ task.hidden ? 'Unhide' : 'Hide' }}
             </button>
+
+            <!-- What this card's change is doing when it is running somewhere.
+                 On the card rather than in the top bar: an app running is only
+                 meaningful next to the change that produced it, and this is
+                 where somebody is already looking when they want to see it. -->
+            <div
+              v-if="deployFor(task)"
+              class="hairline-t flex items-center gap-1.5 px-2.5 py-1.5 text-[11px]"
+              :class="
+                deployFor(task)!.state === 'gave up'
+                  ? 'text-[var(--status-warning)]'
+                  : 'text-muted-foreground'
+              "
+            >
+              <span
+                v-if="deployFor(task)!.state === 'serving'"
+                class="pulse-dot size-1.5 shrink-0 rounded-full bg-[var(--status-good)]"
+              />
+              <LoaderCircle
+                v-else-if="deployFor(task)!.state === 'working'"
+                :size="11"
+                aria-hidden="true"
+                class="spin shrink-0"
+              />
+              <span class="truncate">{{ deploySays(deployFor(task)!.state) }}</span>
+
+              <a
+                v-if="deployFor(task)!.state === 'serving'"
+                :href="deployFor(task)!.url"
+                target="_blank"
+                rel="noopener noreferrer"
+                class="text-primary hover:bg-muted focus-visible:outline-ring ml-auto grid size-5 shrink-0 place-items-center transition-colors focus-visible:outline-2"
+                :title="`Open ${deployFor(task)!.label || 'it'} in a new tab`"
+                :aria-label="`Open ${deployFor(task)!.label || 'this deployment'} in a new tab`"
+                @click.stop
+              >
+                <ExternalLink :size="12" aria-hidden="true" />
+              </a>
+
+              <button
+                type="button"
+                class="text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-ring grid size-5 shrink-0 place-items-center transition-colors focus-visible:outline-2"
+                :class="deployFor(task)!.state === 'serving' ? '' : 'ml-auto'"
+                title="Stop this deployment"
+                aria-label="Stop this deployment"
+                @click.stop="emit('stopDeploy', task)"
+              >
+                <Square :size="11" aria-hidden="true" />
+              </button>
+            </div>
 
             <!-- The action the card is waiting for, on the card. Reaching a
                  decision through a notification means finding the card again
