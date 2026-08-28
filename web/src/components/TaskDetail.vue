@@ -76,7 +76,12 @@ function tokensOf(u: TaskDetail['usage']): number {
          is what keeps the padding still while the content moves. pr-12 on the
          header reserves the corner the close button sits in, so a long task
          name truncates before it reaches it rather than running underneath. -->
-    <DialogContent class="gap-0 overflow-hidden p-0 sm:max-w-3xl">
+    <!-- Wider than the dialogs that ask a question, and matching the two that
+         also carry a transcript: this one holds a diagram whose columns are one
+         per role, the note each role wrote, and a step's events. At 3xl a team
+         of five put its lifelines on top of each other and every transcript
+         line truncated. -->
+    <DialogContent class="min-w-0 gap-0 overflow-hidden p-0 sm:max-w-5xl">
       <DialogHeader class="hairline-b shrink-0 px-5 py-4 pr-12">
         <DialogTitle class="truncate">{{ task?.name }}</DialogTitle>
         <DialogDescription class="flex flex-wrap items-center gap-2 text-[11px]">
