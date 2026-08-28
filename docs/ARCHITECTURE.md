@@ -1206,7 +1206,8 @@ and §6.1 are almost entirely coordination bugs caught without spending a token.
 11. **Provider-limit handling** (§16): a spent quota window pauses a role
     instead of failing it.
 
-Still open: pty attach and takeover (§10.1, needs `github.com/creack/pty`), artifacts (§13),
+Still open: pty attach and takeover (§10.1, needs `github.com/creack/pty`), deploying an artifact
+somewhere (issue #9's second half, which has four open questions in it and no answers yet),
 authentication (§17), detaching the daemon from its terminal, and harness session resume across a
 respawn (§7.4). Nothing resumes a swarm after a daemon restart. Agents stop and stay stopped until
 Start is pressed, which is deliberate while spawning an LLM process costs money, but it is a
