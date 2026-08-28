@@ -54,6 +54,9 @@ type Server struct {
 
 	// blobs is where artifact bytes live; see artifacts.go.
 	blobs *artifact.Store
+
+	// proxyPort is the origin services are proxied on; see proxy.go.
+	proxyPort int
 }
 
 // Deps are what the API needs to serve the cockpit.
@@ -75,6 +78,11 @@ type Deps struct {
 	// Blobs is where artifact bytes live. Without it the endpoints that serve
 	// them say so rather than failing on a nil.
 	Blobs *artifact.Store
+
+	// ProxyPort is the port the service proxy listens on, so a link to a
+	// running service can be built for whoever is asking. Zero when no proxy
+	// is running, which makes those links absent rather than broken.
+	ProxyPort int
 
 	// Applied is the listener configuration the daemon bound at startup.
 	Applied store.Listener
@@ -105,7 +113,7 @@ func New(d Deps) *Server {
 		db: d.DB, log: d.Log, registry: d.Registry,
 		preflt: pf, over: d.Overmind, nyd: d.Nydus, bus: d.Bus, applied: d.Applied, chatMgr: d.Chat,
 		recorder: d.Recorder, ui: d.UI, tailnetHost: d.TailnetHost,
-		catalog: newCatalog(), blobs: d.Blobs,
+		catalog: newCatalog(), blobs: d.Blobs, proxyPort: d.ProxyPort,
 	}
 }
 

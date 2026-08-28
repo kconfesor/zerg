@@ -716,6 +716,16 @@ func (o *Overmind) stop(ctx context.Context, projectID, reason string) error {
 		o.log.Info("returned in-flight work to the queue", "project", projectID, "leases", n)
 	}
 
+	// The services those agents started went with them. The rows outlive the
+	// processes, and a port that is free again is a port something else can
+	// take: a link to a stopped dev server that silently reaches whatever
+	// bound 5173 afterwards is worse than a link that says it is gone.
+	if n, err := o.db.StopServices(ctx, projectID); err != nil {
+		o.log.Warn("could not mark this project's services stopped", "project", projectID, "err", err)
+	} else if n > 0 {
+		o.log.Info("services stopped with the swarm", "project", projectID, "services", n)
+	}
+
 	o.log.Info("swarm down", "project", projectID, "reason", reason)
 	return nil
 }

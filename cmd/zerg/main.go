@@ -362,11 +362,26 @@ func runUp(args []string) error {
 	// One probe for the certificate, the guard and the banner.
 	tailnetHost, tailnetStatus := tailnetHostFor(cfg, func() tailnet.Status { return tailnet.Probe(ctx) })
 
+	// The services an agent started, proxied on an origin of their own.
+	//
+	// A separate listener rather than a route on the cockpit, which is §13.4:
+	// a dev server an agent wrote is code running in a browser, and on the
+	// cockpit's origin it would have same-origin access to a command API with
+	// no authentication. A different port is a different origin, and that is
+	// the entire mechanism.
+	//
+	// The port is chosen by the operating system and not configured. It is an
+	// implementation detail of a link the daemon builds itself, and asking
+	// somebody to pick a second port -- and to keep it free -- buys nothing.
+	// A failure here costs the service viewer and not the daemon.
+	proxyPort, serveProxy, closeProxy := listenProxy(db, log)
+	defer closeProxy()
+
 	srv := &http.Server{
 		Handler: api.New(api.Deps{
 			DB: db, Log: log, Registry: registry,
 			Overmind: over, Nydus: nyd, Bus: bus, Recorder: recorder, Applied: cfg.Listener(), Chat: chatMgr,
-			TailnetHost: tailnetHost, UI: ui, Blobs: blobs,
+			TailnetHost: tailnetHost, UI: ui, Blobs: blobs, ProxyPort: proxyPort,
 		}).Routes(),
 		ReadHeaderTimeout: 10 * time.Second,
 		// A body that arrives a byte at a time holds a connection open
@@ -421,6 +436,11 @@ func runUp(args []string) error {
 		}
 	}
 
+	// Same scheme as the cockpit, necessarily: an https page cannot embed an
+	// http iframe, so a plain proxy beside a TLS cockpit would be a viewer
+	// that never loads and a browser console nobody reads.
+	serveProxy(tlsCert, tlsKey)
+
 	log.Info("overmind up", "url", scheme+"://"+shown, "db", *dbPath, "socket", socket)
 	fmt.Printf("Cockpit: %s://%s\n", scheme, shown)
 	if localLn != nil {
@@ -455,6 +475,13 @@ func runUp(args []string) error {
 		return err
 	case <-ctx.Done():
 		log.Info("shutting down")
+		// Every service belonged to a process this daemon owned, so none of
+		// them survives it.
+		if n, err := db.StopServices(context.Background(), ""); err != nil {
+			log.Warn("could not mark services stopped", "err", err)
+		} else if n > 0 {
+			log.Info("services stopped with the daemon", "services", n)
+		}
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		return srv.Shutdown(shutdownCtx)

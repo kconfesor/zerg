@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"os"
 	"strings"
+
+	"github.com/kconfesor/zerg/internal/store"
 )
 
 // Serving artifacts.
@@ -15,6 +17,15 @@ import (
 // range requests, and would head-of-line block the live events behind a four
 // megabyte screenshot. A GET already does all of that well.
 
+// artifactOut is an artifact as the cockpit needs it: the row, plus where a
+// running service can be reached.
+type artifactOut struct {
+	store.Artifact
+	// URL is the service's address on the proxy's own origin, empty for a file
+	// and for a service that has stopped. Built per request; see ServiceURL.
+	URL string `json:"url,omitempty"`
+}
+
 // taskArtifacts lists what a card produced.
 func (s *Server) taskArtifacts(w http.ResponseWriter, r *http.Request) {
 	list, err := s.db.ArtifactsForTask(r.Context(), r.PathValue("id"))
@@ -22,7 +33,15 @@ func (s *Server) taskArtifacts(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, orEmpty(list))
+	out := make([]artifactOut, 0, len(list))
+	for _, a := range list {
+		item := artifactOut{Artifact: a}
+		if a.Live() {
+			item.URL = ServiceURL(r, s.proxyPort, a.ID)
+		}
+		out = append(out, item)
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // artifactBytes serves a stored file.
