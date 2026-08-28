@@ -16,8 +16,15 @@ import { Input } from '@/components/ui/input'
 
 const props = defineProps<{
   projectId: string | undefined
-  /** The commit to run: the one being decided about, at a gate. */
-  commit: string | undefined
+  /**
+   * The commit to run.
+   *
+   * At a gate it is the one being decided about, and at a finished card the
+   * one that landed. Absent means the base branch as it stands, which is what
+   * "run this project" means when nobody is looking at a particular change --
+   * and the daemon resolves it, because only the repository knows the head.
+   */
+  commit?: string
   taskId?: string
 }>()
 
@@ -83,8 +90,8 @@ async function act(fn: () => Promise<unknown>) {
 
 const run = () =>
   act(async () => {
-    if (!props.projectId || !props.commit) return
-    await api.startRun(props.projectId, { commit: props.commit, taskId: props.taskId })
+    if (!props.projectId) return
+    await api.startRun(props.projectId, { commit: props.commit ?? '', taskId: props.taskId })
   })
 
 const guide = () =>
@@ -115,6 +122,13 @@ const toggleAuto = () =>
 const running = computed(() => state.value && state.value.state !== 'idle')
 const sameCommit = computed(() => state.value?.commit === props.commit)
 
+/** What the button offers, which depends on what is being run and what is
+ *  already up. */
+const label = computed(() => {
+  if (running.value && !sameCommit.value) return 'Run this one instead'
+  return props.commit ? 'Run this change' : 'Run this project'
+})
+
 const says = computed(() => {
   switch (state.value?.state) {
     case 'working':
@@ -132,7 +146,7 @@ const says = computed(() => {
 </script>
 
 <template>
-  <div v-if="projectId && commit" class="flex flex-col gap-2">
+  <div v-if="projectId" class="flex flex-col gap-2">
     <div class="flex flex-wrap items-center gap-2">
       <Button
         v-if="!running || !sameCommit"
@@ -143,7 +157,7 @@ const says = computed(() => {
         @click="run"
       >
         <Play :size="12" aria-hidden="true" />
-        {{ running && !sameCommit ? 'Run this commit instead' : 'Run this change' }}
+        {{ label }}
       </Button>
 
       <template v-if="running">

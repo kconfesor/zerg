@@ -37,6 +37,18 @@ type RoleTemplate struct {
 	// as it grows. It is not the same field as ResolvedRole.Terminal, which is
 	// which role is finishing *this* pipeline.
 	Finisher bool `json:"finisher"`
+
+	// Purpose says whether this role is part of the pipeline or a job the
+	// daemon starts.
+	//
+	// PurposePipeline is a role that claims work, appears on the board and can
+	// be put in a team. PurposeRunner is the agent that works out how a
+	// project serves itself and starts it: never routed to, never on the
+	// board, never in a team, and started by the daemon when somebody asks to
+	// see the app. Everything else about it -- harness, model, thinking level,
+	// prompt -- is configured exactly where every other role's is, which is
+	// the whole reason it is a role rather than a special case in the binary.
+	Purpose string `json:"purpose"`
 	// Thinking is how hard the harness reasons before answering, in that
 	// harness's own vocabulary: claude spends it as --effort, pi as --thinking,
 	// and their level sets are not the same. Empty leaves the harness's default
@@ -88,6 +100,12 @@ type Project struct {
 	// because every run is an agent turn and therefore money.
 	AutoRun bool `json:"autoRun"`
 }
+
+// What a role is for; see RoleTemplate.Purpose.
+const (
+	PurposePipeline = "pipeline"
+	PurposeRunner   = "runner"
+)
 
 // RoleOverrides is the nullable layer shared by reusable-team roles and a
 // project's local role settings. Nil means inherit. Args deliberately keeps
@@ -203,6 +221,15 @@ func (t *RoleTemplate) Validate() error {
 	}
 	if t.Gate != GateNone && t.Gate != GateApproval {
 		return invalid("role %q has gate %q, want %q or %q", t.Name, t.Gate, GateNone, GateApproval)
+	}
+	// Empty is the pipeline, so every role that existed before purpose did
+	// keeps working without being rewritten.
+	if t.Purpose == "" {
+		t.Purpose = PurposePipeline
+	}
+	if t.Purpose != PurposePipeline && t.Purpose != PurposeRunner {
+		return invalid("role %q has purpose %q, want %q or %q",
+			t.Name, t.Purpose, PurposePipeline, PurposeRunner)
 	}
 	if t.Receive == ReceiveBatch {
 		if t.BatchMaxItems < 1 {

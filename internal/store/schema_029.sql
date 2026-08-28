@@ -1,0 +1,19 @@
+-- What a role is for: the pipeline, or a job the daemon starts.
+--
+-- The runner -- the agent that works out how a project serves itself and
+-- starts it -- was written as a special case with its prompt in the binary and
+-- its model borrowed from the chat settings. That makes it the one agent here
+-- nobody can configure: no harness, no model, no thinking level, no prompt,
+-- while every other agent's are rows edited in the cockpit.
+--
+-- So it is a role like any other, with a column saying it is not in the
+-- pipeline. It never appears on the board, is never routed to, is never part
+-- of a team and never affects readiness; it is looked up by purpose when the
+-- daemon needs to start one. Everything else about it -- which harness, which
+-- model, how hard it thinks, what it is told -- is edited exactly where every
+-- other role's is.
+--
+-- A value rather than a boolean because the daemon has to find *the* runner,
+-- not merely know that some roles are off the pipeline. 'chat' is the obvious
+-- next one to move here; its prompt is in the binary too.
+ALTER TABLE role_templates ADD COLUMN purpose TEXT NOT NULL DEFAULT 'pipeline';

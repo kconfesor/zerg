@@ -205,6 +205,18 @@ func (h *Hatchery) EnsureWorktree(ctx context.Context, role, baseBranch string) 
 // whole point of previewing at the approval gate.
 const PreviewDir = "preview"
 
+// Resolve turns a ref into the commit it names.
+//
+// For "run this project", where the thing to run is the base branch as it
+// stands and only the repository knows what that is.
+func (h *Hatchery) Resolve(ctx context.Context, ref string) (string, error) {
+	out, err := git(ctx, h.repoPath, "rev-parse", ref)
+	if err != nil {
+		return "", fmt.Errorf("%w: %s in %s", ErrNoSuchRevision, ref, h.repoPath)
+	}
+	return strings.TrimSpace(out), nil
+}
+
 // PreviewWorktree checks a commit out into the preview worktree and returns
 // its path.
 //

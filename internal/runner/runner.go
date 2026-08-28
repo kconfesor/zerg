@@ -17,6 +17,7 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -60,46 +61,14 @@ const (
 	StateIdle = "idle"
 )
 
-// systemPrompt is the instruction, not a command.
+// fallbackPrompt is used only when the library has no runner role.
 //
-// Everything specific to a project is discovered by reading it. The three
-// rules that matter are here: bind the port you were given, register it, and
-// ask rather than guess -- an agent that guesses which of three apps to serve
-// wastes a turn and shows the wrong thing, which is worse than a question.
-const systemPrompt = `You are starting this project so a person can look at it in a browser.
-
-The repository is checked out at the commit being reviewed. Work out how this
-project serves itself and start it. Read what is actually here: compose files,
-package scripts, a justfile or Makefile, the README, how the app is configured.
-
-Rules:
-
-  Bind $PORT. It is set in your environment and the daemon is proxying it. A
-  server on any other port cannot be reached and does not count as started.
-
-  Start it in the background and leave it running. Your turn ends; the server
-  must not end with it. Then register it:
-
-      zerg artifact serve --port $PORT --label "<what it is>"
-
-  Say what you learned, so the next run does not repeat the search:
-
-      zerg remember "serves with: <command>. needs: <what, if anything>.
-                     takes about <n> seconds to be ready."
-
-  Ask rather than guess. If the project needs a file that is not in the
-  repository, a secret, a database, or if there are several apps and no way to
-  tell which one is wanted:
-
-      zerg ask "which of these should I serve: admin, customer, or the API?"
-
-  It blocks until somebody answers, and the answer is worth remembering too.
-
-  If it will not start, say why in a sentence and stop. Do not rewrite the
-  project to make it start: you are showing what is there, not fixing it.
-
-You cannot claim work, hand work on, or finish a task. Those verbs are not
-yours; this is the whole of your job.`
+// It should not happen: the role is seeded. It exists so that a database
+// somebody has edited into a state with no runner still shows them their app,
+// rather than answering a button press with a lookup failure.
+const fallbackPrompt = `You are starting this project so a person can look at it in a browser.
+Work out how it serves itself, bind $PORT, start it in the background, and
+register it with: zerg artifact serve --port $PORT --label "<what it is>"`
 
 // Manager owns one runner session per project.
 type Manager struct {
@@ -127,6 +96,10 @@ type session struct {
 	cancel context.CancelFunc
 	token  string
 	port   int
+	// role is what this session's agent is called, which is whatever the
+	// library role is named. Filtering on a constant instead meant renaming
+	// the role in Settings silently stopped the panel updating.
+	role string
 
 	// What the cockpit reads.
 	state   string
@@ -158,7 +131,7 @@ func (m *Manager) watchTurns() {
 	events, cancel := m.bus.Subscribe(256)
 	defer cancel()
 	for ev := range events {
-		if ev.Role != Role || ev.Kind != adapter.EventTurnEnd {
+		if ev.Kind != adapter.EventTurnEnd || !m.isOurs(ev.ProjectID, ev.Role) {
 			continue
 		}
 		live, err := m.db.LiveServices(context.Background(), ev.ProjectID)
@@ -181,9 +154,6 @@ func (m *Manager) watchTurns() {
 // is always about the commit in front of somebody. A second press replaces
 // what was there.
 func (m *Manager) Run(ctx context.Context, projectID, commit, taskID string) error {
-	if commit == "" {
-		return fmt.Errorf("a preview needs the commit to run")
-	}
 	m.Stop(ctx, projectID)
 
 	project, err := m.db.GetProject(ctx, projectID)
@@ -191,7 +161,19 @@ func (m *Manager) Run(ctx context.Context, projectID, commit, taskID string) err
 		return err
 	}
 
-	role, err := m.pickHarness(ctx, project)
+	// No commit means the base branch as it stands, which is what "run this
+	// project" means when nobody is looking at a particular change. Resolved
+	// here rather than in the cockpit: the branch head is a fact about the
+	// repository, and the browser has no way to know it.
+	if commit == "" {
+		head, err := hatchery.New(project.Path).Resolve(ctx, project.BaseBranch)
+		if err != nil {
+			return fmt.Errorf("reading %s to run it: %w", project.BaseBranch, err)
+		}
+		commit = head
+	}
+
+	role, prompt, err := m.role(ctx, project)
 	if err != nil {
 		return err
 	}
@@ -213,7 +195,7 @@ func (m *Manager) Run(ctx context.Context, projectID, commit, taskID string) err
 	// Three verbs and no more. It registers what it started, asks when it is
 	// stuck, and writes down what it learned. It cannot claim work or hand any
 	// on -- which matters most when it starts on its own, after a task lands.
-	token := m.agents.MintFor(projectID, Role, taskID,
+	token := m.agents.MintFor(projectID, role.Name, taskID,
 		agent.CanArtifact, agent.CanAsk, agent.CanRemember)
 
 	// The port is the daemon's to choose, not the project's. Two projects that
@@ -223,9 +205,6 @@ func (m *Manager) Run(ctx context.Context, projectID, commit, taskID string) err
 	if err != nil {
 		return err
 	}
-
-	role.Name = Role
-	role.Prompt = systemPrompt
 
 	cer := cerebrate.New(cerebrate.Config{
 		ProjectID: projectID,
@@ -241,7 +220,7 @@ func (m *Manager) Run(ctx context.Context, projectID, commit, taskID string) err
 		},
 		Bus:          m.bus,
 		Log:          m.log,
-		SystemPrompt: systemPrompt,
+		SystemPrompt: prompt,
 	})
 
 	runCtx, cancel := context.WithCancel(context.Background())
@@ -252,7 +231,7 @@ func (m *Manager) Run(ctx context.Context, projectID, commit, taskID string) err
 	}()
 
 	s := &session{
-		cer: cer, cancel: cancel, token: token, port: port,
+		cer: cer, cancel: cancel, token: token, port: port, role: role.Name,
 		state: StateWorking, commit: commit, taskID: taskID, touched: time.Now(),
 	}
 	m.mu.Lock()
@@ -353,15 +332,24 @@ func (m *Manager) Status(projectID string) Status {
 // its own agent got somewhere. Other roles do the same things for their own
 // reasons, so the role is checked rather than assumed.
 func (m *Manager) Served(projectID, role string) {
-	if role == Role {
+	if m.isOurs(projectID, role) {
 		m.setState(projectID, StateServing, "")
 	}
 }
 
 func (m *Manager) Asked(projectID, role string) {
-	if role == Role {
+	if m.isOurs(projectID, role) {
 		m.setState(projectID, StateAsking, "")
 	}
+}
+
+// isOurs reports whether an event came from this project's runner, by the name
+// the session was actually started with rather than by a constant.
+func (m *Manager) isOurs(projectID, role string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s, ok := m.sessions[projectID]
+	return ok && s.role == role
 }
 
 // Touch marks interest, which is what the idle timer measures.
@@ -408,12 +396,42 @@ func (m *Manager) instruction(ctx context.Context, projectID, commit string) str
 	return b.String()
 }
 
-// pickHarness decides which agent runs this, the same way chat does: an
-// explicit choice, otherwise the team's last enabled role.
-func (m *Manager) pickHarness(ctx context.Context, project *store.Project) (store.ResolvedRole, error) {
+// The shared instructions are deliberately not prepended.
+//
+// They are the protocol document: claim with `zerg next`, hand on with `zerg
+// send`, finish with `zerg done`. Every line of that is a lie here -- the
+// runner's token carries none of those verbs -- and chat drops them for the
+// same reason. What is composed for this agent is its own prompt and nothing
+// else.
+
+// role reads the runner out of the library.
+//
+// A row, not a special case: which harness, which model, how hard it thinks
+// and what it is told are all edited in Settings beside every other role's,
+// because an agent nobody can configure is the odd one out in a tool whose
+// whole configuration is rows.
+//
+// Falling back to the team's last enabled role only when the library has none,
+// which is a database somebody has edited rather than one this ever ships.
+func (m *Manager) role(ctx context.Context, project *store.Project) (store.ResolvedRole, string, error) {
+	t, err := m.db.RoleFor(ctx, store.PurposeRunner)
+	if err == nil {
+		return store.ResolvedRole{
+			Name:     t.Name,
+			Harness:  t.Harness,
+			Model:    t.Model,
+			Thinking: t.Thinking,
+			Args:     t.Args,
+			Prompt:   t.Prompt,
+		}, t.Prompt, nil
+	}
+	if !errors.Is(err, store.ErrNotFound) {
+		return store.ResolvedRole{}, "", err
+	}
+
 	team, err := m.db.ResolveTeam(ctx, project.ID)
 	if err != nil {
-		return store.ResolvedRole{}, err
+		return store.ResolvedRole{}, "", err
 	}
 	var pick store.ResolvedRole
 	for _, r := range team {
@@ -421,17 +439,12 @@ func (m *Manager) pickHarness(ctx context.Context, project *store.Project) (stor
 			pick = r
 		}
 	}
-	if project.ChatHarness != "" {
-		pick.Harness = project.ChatHarness
-		pick.Model = project.ChatModel
-	} else if project.ChatModel != "" {
-		pick.Model = project.ChatModel
-	}
 	if pick.Harness == "" {
-		return store.ResolvedRole{}, fmt.Errorf(
-			"no harness to run with: this project has no enabled roles, and no chat harness is set")
+		return store.ResolvedRole{}, "", fmt.Errorf(
+			"no runner role in the library, and this project has no enabled roles to borrow a harness from")
 	}
-	return pick, nil
+	pick.Name = Role
+	return pick, fallbackPrompt, nil
 }
 
 // freePort asks the operating system for one nothing is using.

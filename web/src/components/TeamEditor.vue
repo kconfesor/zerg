@@ -129,6 +129,16 @@ function toggleOwnership(preset: TeamPreset) {
 
 
 const libraryById = computed(() => new Map(props.library.map((role) => [role.id, role])))
+
+/**
+ * The roles a team can be built from.
+ *
+ * Not the whole library: a role can exist without being part of any pipeline.
+ * The runner is started by the daemon when somebody asks to see the app, and
+ * offering it here as something to add to a team would be offering a lane it
+ * never appears in and a queue it cannot claim from.
+ */
+const pipeline = computed(() => props.library.filter((r) => r.purpose !== 'runner'))
 const selectedRoleIds = computed(
   () => new Set(activePreset.value?.roles.map((role) => role.templateId) ?? []),
 )
@@ -618,7 +628,7 @@ function cloneTeam() {
       </div>
 
       <ul v-if="activePreset" class="divide-y">
-        <li v-for="template in library" :key="template.id" class="flex items-center gap-3 px-4 py-3">
+        <li v-for="template in pipeline" :key="template.id" class="flex items-center gap-3 px-4 py-3">
           <!-- A switch, like the pipeline's. Both answer "is this role part of
                the run", and two controls for one kind of question read as two
                different kinds of question. -->

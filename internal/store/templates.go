@@ -14,7 +14,7 @@ import (
 var ErrNotFound = errors.New("not found")
 
 const templateCols = `id, name, harness, model, args, thinking, receive, batch_max_items,
-	batch_max_age_sec, prompt, gate, finisher, builtin, created_at, updated_at`
+	batch_max_age_sec, prompt, gate, finisher, purpose, builtin, created_at, updated_at`
 
 // CreateTemplate adds a role to the library.
 func (db *DB) CreateTemplate(ctx context.Context, t *RoleTemplate) (*RoleTemplate, error) {
@@ -32,9 +32,9 @@ func (db *DB) CreateTemplate(ctx context.Context, t *RoleTemplate) (*RoleTemplat
 
 	_, err = db.sql.ExecContext(ctx,
 		`INSERT INTO role_templates (`+templateCols+`)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		t.ID, t.Name, t.Harness, t.Model, args, t.Thinking, t.Receive, t.BatchMaxItems,
-		t.BatchMaxAgeSec, t.Prompt, t.Gate, t.Finisher, t.Builtin,
+		t.BatchMaxAgeSec, t.Prompt, t.Gate, t.Finisher, t.Purpose, t.Builtin,
 		now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
 	if err != nil {
 		return nil, fmt.Errorf("creating role %q: %w", t.Name, err)
@@ -142,10 +142,11 @@ func (db *DB) UpdateTemplate(ctx context.Context, t *RoleTemplate) error {
 
 	res, err := db.sql.ExecContext(ctx,
 		`UPDATE role_templates SET name=?, harness=?, model=?, args=?, thinking=?, receive=?,
-		   batch_max_items=?, batch_max_age_sec=?, prompt=?, gate=?, finisher=?, updated_at=?
+		   batch_max_items=?, batch_max_age_sec=?, prompt=?, gate=?, finisher=?, purpose=?, updated_at=?
 		 WHERE id=?`,
 		t.Name, t.Harness, t.Model, args, t.Thinking, t.Receive, t.BatchMaxItems,
-		t.BatchMaxAgeSec, t.Prompt, t.Gate, t.Finisher, t.UpdatedAt.Format(time.RFC3339Nano), t.ID)
+		t.BatchMaxAgeSec, t.Prompt, t.Gate, t.Finisher, t.Purpose,
+		t.UpdatedAt.Format(time.RFC3339Nano), t.ID)
 	if err != nil {
 		return fmt.Errorf("updating role %q: %w", t.Name, err)
 	}
@@ -176,7 +177,7 @@ func scanTemplate(s scanner) (*RoleTemplate, error) {
 		finisherInt int
 	)
 	if err := s.Scan(&t.ID, &t.Name, &t.Harness, &t.Model, &args, &t.Thinking, &t.Receive,
-		&t.BatchMaxItems, &t.BatchMaxAgeSec, &t.Prompt, &t.Gate, &finisherInt, &builtinInt,
+		&t.BatchMaxItems, &t.BatchMaxAgeSec, &t.Prompt, &t.Gate, &finisherInt, &t.Purpose, &builtinInt,
 		&created, &updated); err != nil {
 		return nil, err
 	}
@@ -228,4 +229,22 @@ func mustAffect(res sql.Result, what string) error {
 		return fmt.Errorf("%s: %w", what, ErrNotFound)
 	}
 	return nil
+}
+
+// RoleFor returns the library role with a purpose, for the agents the daemon
+// starts itself rather than routes work to.
+//
+// One per purpose: "the runner" is a single role, and a second one would be a
+// question about which the daemon has no way to answer. The unique index on
+// name does not enforce that, so the newest wins and the older is left alone
+// rather than being an error somebody has to clear before anything works.
+func (db *DB) RoleFor(ctx context.Context, purpose string) (*RoleTemplate, error) {
+	row := db.read.QueryRowContext(ctx,
+		`SELECT `+templateCols+` FROM role_templates WHERE purpose = ?
+		  ORDER BY updated_at DESC, id LIMIT 1`, purpose)
+	t, err := scanTemplate(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("no %s role: %w", purpose, ErrNotFound)
+	}
+	return t, err
 }

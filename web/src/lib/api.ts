@@ -26,6 +26,11 @@ export interface RoleTemplate {
    *  grows. Not the same as ResolvedRole.terminal, which is the role that is
    *  finishing this particular pipeline. */
   finisher: boolean
+  /**
+   * What the role is for: 'pipeline' (claims work, has a lane) or 'runner'
+   * (started by the daemon to show you the app, never on the board).
+   */
+  purpose?: 'pipeline' | 'runner'
   builtin: boolean
 }
 
