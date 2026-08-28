@@ -13,6 +13,17 @@ export function tokens(n: number): string {
   return String(n)
 }
 
+/**
+ * Money, to as many places as the number needs.
+ *
+ * Three decimals under a dollar: agent turns cost fractions of a cent, and
+ * rounding them to two places makes a column of real costs read as $0.00.
+ */
+export function money(n: number): string {
+  if (n === 0) return '$0'
+  return n >= 1 ? `$${n.toFixed(2)}` : `$${n.toFixed(3)}`
+}
+
 /** Formats a duration in milliseconds as 2h 41m or 44m. */
 export function duration(ms: number): string {
   const mins = Math.round(ms / 60_000)

@@ -18,7 +18,7 @@
 import { computed, ref, watch } from 'vue'
 import { api, type RoleUsage, type Spend, type SpendRange } from '@/lib/api'
 import { latest } from '@/lib/latest'
-import { tokens as fmtTokens } from '@/lib/utils'
+import { money, tokens as fmtTokens } from '@/lib/utils'
 
 const props = defineProps<{ projectId: string | null }>()
 
@@ -165,10 +165,6 @@ const tokenTotal = computed(
 /** Cards, not card-visits: a task worked by three roles is one card. */
 const taskCount = computed(() => rows.value.reduce((n, r) => Math.max(n, 0) + r.tasks, 0))
 
-function money(n: number): string {
-  if (n === 0) return '$0'
-  return n >= 1 ? `$${n.toFixed(2)}` : `$${n.toFixed(3)}`
-}
 function share(part: number, whole: number): number {
   return whole ? Math.round((part / whole) * 100) : 0
 }

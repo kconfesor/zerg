@@ -209,6 +209,24 @@ export interface Task {
   doing?: string
   /** Put away by a person. Finished work that is still finished. */
   hidden?: boolean
+  /** What happened to the work when the last role finished: it was merged, a
+   *  pull request was opened, or it was left on its branch. Empty on a card
+   *  still being worked, and on one that ended before the daemon recorded
+   *  this. `outcomeRef` is the commit or the pull request's URL. */
+  outcome?: 'merged' | 'pr' | 'branch'
+  outcomeRef?: string
+}
+
+/** One worked task as the history screen reads it. */
+export interface HistoryEntry extends Task {
+  /** The roles that sent a handoff on this task, in the order they first did. */
+  roles: string[]
+}
+
+export interface HistoryPage {
+  entries: HistoryEntry[]
+  /** A position to ask for the next page with, empty on the last one. */
+  next: string
 }
 
 export interface CheckResult {
@@ -428,6 +446,18 @@ export const api = {
   stop: (id: string) => call<{ status: string }>(`/projects/${id}/stop`, { method: 'POST' }),
 
   tasks: (id: string) => call<Task[]>(`/projects/${id}/tasks`),
+  /** Worked tasks, newest first. `before` is the `next` of the page before. */
+  history: (
+    id: string,
+    opts: { before?: string; outcome?: string; role?: string; q?: string; limit?: number } = {},
+  ) => {
+    const query = new URLSearchParams()
+    for (const [key, value] of Object.entries(opts)) {
+      if (value) query.set(key, String(value))
+    }
+    const suffix = query.toString()
+    return call<HistoryPage>(`/projects/${id}/history${suffix ? '?' + suffix : ''}`)
+  },
   newTask: (id: string, name: string, body: string) =>
     call<Task>(`/projects/${id}/tasks`, { method: 'POST', body: JSON.stringify({ name, body }) }),
 

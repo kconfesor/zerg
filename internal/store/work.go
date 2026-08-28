@@ -907,3 +907,146 @@ func (db *DB) DeleteTask(ctx context.Context, projectID, taskID string) error {
 	}
 	return tx.Commit()
 }
+
+// ── history ───────────────────────────────────────────────────────────────
+
+// HistoryEntry is one worked task as the history screen reads it: the card,
+// what it cost, and which roles touched it.
+type HistoryEntry struct {
+	Task
+	// Roles that sent at least one handoff on this task, in the order they
+	// first did. Which agents worked on it is the question a list of names
+	// answers and a lane does not.
+	Roles []string `json:"roles"`
+}
+
+// HistoryFilter narrows the list. Zero values mean no narrowing.
+type HistoryFilter struct {
+	Outcome string // merged, pr, branch, or "none" for a card that ended without one
+	Role    string // touched by this role
+	Query   string // matches the task name
+	// Before is the cursor from a previous page: everything strictly older
+	// than this position. Empty starts at the newest.
+	Before string
+	Limit  int
+}
+
+// ListHistory returns worked tasks newest first, a page at a time.
+//
+// Not ListTasks with a filter. That query carries a per-card subquery for what
+// each agent is doing right now, which the board polls every two seconds and
+// history has no use for, and it returns every card a project has ever had in
+// one answer. This one is ordered by when work ended, pages on a cursor, and
+// includes the cards a person has put away, which are exactly the ones history
+// is for.
+func (db *DB) ListHistory(ctx context.Context, projectID string, f HistoryFilter) ([]HistoryEntry, string, error) {
+	limit := f.Limit
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+
+	where := []string{"t.project_id = ?"}
+	args := []any{projectID}
+	switch {
+	case f.Outcome == "none":
+		where = append(where, "t.outcome = ''")
+	case f.Outcome != "":
+		where = append(where, "t.outcome = ?")
+		args = append(args, f.Outcome)
+	}
+	if f.Role != "" {
+		where = append(where, `EXISTS (SELECT 1 FROM messages r WHERE r.task_id = t.id AND r.from_role = ?)`)
+		args = append(args, f.Role)
+	}
+	if q := strings.TrimSpace(f.Query); q != "" {
+		where = append(where, "t.name LIKE ? ESCAPE '\\'")
+		args = append(args, "%"+likeEscape(q)+"%")
+	}
+	// The cursor is a position, not an offset: a page taken while a task
+	// finishes would otherwise repeat a row or skip one. Row values compare
+	// left to right, so the id breaks ties between tasks that ended in the
+	// same nanosecond.
+	if at, id, ok := splitCursor(f.Before); ok {
+		where = append(where, "(COALESCE(t.completed_at, t.created_at), t.id) < (?, ?)")
+		args = append(args, at, id)
+	}
+
+	args = append(args, limit+1) // one extra says whether there is another page
+	rows, err := db.read.QueryContext(ctx,
+		`SELECT `+taskColsT+`,
+		        COALESCE(u.tokens, 0), COALESCE(u.cost, 0),
+		        COALESCE((SELECT group_concat(role, char(10)) FROM (
+		            SELECT m.from_role AS role, MIN(m.created_at) AS first
+		              FROM messages m WHERE m.task_id = t.id AND m.from_role <> ''
+		             GROUP BY m.from_role ORDER BY first)), '')
+		   FROM tasks t
+		   LEFT JOIN (
+		       SELECT task_id,
+		              SUM(input_tokens + cache_read_tokens + cache_write_tokens + output_tokens) AS tokens,
+		              SUM(cost_usd) AS cost
+		         FROM usage_turns GROUP BY task_id
+		   ) u ON u.task_id = t.id
+		  WHERE `+strings.Join(where, " AND ")+`
+		  ORDER BY COALESCE(t.completed_at, t.created_at) DESC, t.id DESC
+		  LIMIT ?`, args...)
+	if err != nil {
+		return nil, "", fmt.Errorf("reading history: %w", err)
+	}
+	defer rows.Close()
+
+	out := []HistoryEntry{}
+	for rows.Next() {
+		var (
+			e           HistoryEntry
+			sessionID   sql.NullString
+			created     string
+			firstClaim  sql.NullString
+			completedAt sql.NullString
+			stoppedAt   sql.NullString
+			roles       string
+		)
+		if err := rows.Scan(&e.ID, &e.ProjectID, &sessionID, &e.Name, &e.Body, &e.Lane, &e.State,
+			&created, &firstClaim, &completedAt, &e.ActiveMS, &e.ReworkCount, &e.Hidden,
+			&stoppedAt, &e.Outcome, &e.OutcomeRef, &e.Tokens, &e.CostUSD, &roles); err != nil {
+			return nil, "", err
+		}
+		if err := fillTaskTimes(&e.Task, sessionID, created, firstClaim, completedAt, stoppedAt); err != nil {
+			return nil, "", err
+		}
+		e.Roles = []string{}
+		if roles != "" {
+			e.Roles = strings.Split(roles, "\n")
+		}
+		out = append(out, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", err
+	}
+
+	next := ""
+	if len(out) > limit {
+		out = out[:limit]
+		last := out[len(out)-1]
+		at := last.CreatedAt
+		if last.CompletedAt != nil {
+			at = *last.CompletedAt
+		}
+		next = at.Format(time.RFC3339Nano) + " " + last.ID
+	}
+	return out, next, nil
+}
+
+// splitCursor reads a cursor back into the position it names.
+func splitCursor(cursor string) (at, id string, ok bool) {
+	at, id, ok = strings.Cut(cursor, " ")
+	if !ok || at == "" || id == "" {
+		return "", "", false
+	}
+	return at, id, true
+}
+
+// likeEscape keeps a search for "100%" from matching everything.
+func likeEscape(s string) string {
+	r := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	return r.Replace(s)
+}

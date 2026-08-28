@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -253,5 +254,124 @@ func TestMigrationReadsBackThePullRequestItWroteIntoProse(t *testing.T) {
 	}
 	if merged.Outcome != "" {
 		t.Errorf("an ending nothing recorded came back as %q", merged.Outcome)
+	}
+}
+
+// History is the list of what was worked on, newest first, a page at a time.
+func TestListHistoryPagesAndFilters(t *testing.T) {
+	ctx := context.Background()
+	db, p := seeded(t)
+	if err := db.SelectDefaultTeam(ctx, p.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Six cards, each finished a minute after the last, so the order is known.
+	base := time.Date(2026, 1, 1, 9, 0, 0, 0, time.UTC)
+	for i, tc := range []struct {
+		name     string
+		outcome  string
+		role     string
+		finished bool
+	}{
+		{"Factorial", OutcomeMerged, "coder", true},
+		{"Power", OutcomePR, "reviewer", true},
+		{"Readme", OutcomeBranch, "docs", true},
+		{"Percent", OutcomeMerged, "coder", true},
+		{"Quota probe", "", "coder", true},
+		{"Variables", "", "coder", false}, // still running
+	} {
+		task, err := db.CreateTask(ctx, p.ID, tc.name, "body", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		at := base.Add(time.Duration(i) * time.Minute).Format(time.RFC3339Nano)
+		if _, err := db.SQL().ExecContext(ctx,
+			`INSERT INTO messages (id,project_id,task_id,from_role,kind,priority,body,terminal,created_at)
+			 VALUES (?,?,?,?,'handoff',50,'',0,?)`,
+			NewID(), p.ID, task.ID, tc.role, at); err != nil {
+			t.Fatal(err)
+		}
+		if tc.finished {
+			if _, err := db.SQL().ExecContext(ctx,
+				`UPDATE tasks SET state='done', lane='done', completed_at=?, outcome=?, created_at=? WHERE id=?`,
+				at, tc.outcome, at, task.ID); err != nil {
+				t.Fatal(err)
+			}
+		} else if _, err := db.SQL().ExecContext(ctx,
+			`UPDATE tasks SET created_at=? WHERE id=?`, at, task.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	names := func(entries []HistoryEntry) []string {
+		var out []string
+		for _, e := range entries {
+			out = append(out, e.Name)
+		}
+		return out
+	}
+
+	// Newest first, and a card still running is part of history: it is being
+	// worked on, which is what the list is about.
+	page, next, err := db.ListHistory(ctx, p.ID, HistoryFilter{Limit: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := names(page); fmt.Sprint(got) != "[Variables Quota probe Percent Readme]" {
+		t.Errorf("first page is %v", got)
+	}
+	if next == "" {
+		t.Fatal("no cursor, so the older work cannot be reached")
+	}
+
+	// The cursor is a position rather than an offset, so the second page picks
+	// up exactly where the first stopped, with nothing repeated or skipped.
+	rest, last, err := db.ListHistory(ctx, p.ID, HistoryFilter{Limit: 4, Before: next})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := names(rest); fmt.Sprint(got) != "[Power Factorial]" {
+		t.Errorf("second page is %v", got)
+	}
+	if last != "" {
+		t.Errorf("cursor %q on the last page, which has nothing after it", last)
+	}
+
+	// What each card cost and who touched it come back with it.
+	if len(page[3].Roles) != 1 || page[3].Roles[0] != "docs" {
+		t.Errorf("Readme was worked by %v, want docs", page[3].Roles)
+	}
+
+	for _, tc := range []struct {
+		what   string
+		filter HistoryFilter
+		want   string
+	}{
+		{"outcome", HistoryFilter{Outcome: OutcomeMerged}, "[Percent Factorial]"},
+		{"no outcome", HistoryFilter{Outcome: "none"}, "[Variables Quota probe]"},
+		{"role", HistoryFilter{Role: "reviewer"}, "[Power]"},
+		{"name", HistoryFilter{Query: "act"}, "[Factorial]"},
+		{"nothing matches", HistoryFilter{Query: "nothing here"}, "[]"},
+	} {
+		got, _, err := db.ListHistory(ctx, p.ID, tc.filter)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.what, err)
+		}
+		if n := names(got); fmt.Sprint(n) != tc.want && !(len(got) == 0 && tc.want == "[]") {
+			t.Errorf("filter by %s gave %v, want %s", tc.what, n, tc.want)
+		}
+	}
+
+	// A search for a wildcard is a search for that character, not for
+	// everything: "%" typed into the box used to return the whole list.
+	if _, err := db.CreateTask(ctx, p.ID, "100% coverage", "body", ""); err != nil {
+		t.Fatal(err)
+	}
+	hits, _, err := db.ListHistory(ctx, p.ID, HistoryFilter{Query: "100%"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 1 {
+		t.Errorf("searching for a literal %% matched %d cards, want the one named that", len(hits))
 	}
 }

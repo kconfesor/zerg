@@ -15,6 +15,7 @@ import {
   GripVertical,
   Plus,
   Receipt,
+  ScrollText,
   Settings as SettingsIcon,
   Users,
   X,
@@ -321,6 +322,9 @@ const nav = computed(() => [
   // runs on, then what it costs, then how it is configured. Readiness is not
   // here — it is a setup step, and it lives in Settings with the rest of them.
   { key: 'board' as const, label: 'Board', icon: Columns3, count: props.taskCount },
+  // Beside the board it is the past of, rather than at the end with the
+  // configuration: what happened is read as often as what is happening.
+  { key: 'history' as const, label: 'History', icon: ScrollText, count: 0 },
   { key: 'projects' as const, label: 'Projects', icon: FolderGit2, count: props.projectCount },
   { key: 'team' as const, label: 'Team', icon: Users, count: 0 },
   { key: 'chat' as const, label: 'Chat', icon: MessageSquare, count: 0 },

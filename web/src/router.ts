@@ -17,6 +17,7 @@ import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 // and back again afterwards, loses your place both ways.
 export const VIEWS = [
   'board',
+  'history',
   'projects',
   'activity',
   'spend',
