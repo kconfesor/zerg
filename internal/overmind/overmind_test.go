@@ -16,6 +16,7 @@ import (
 
 	"github.com/kconfesor/zerg/internal/adapter"
 	"github.com/kconfesor/zerg/internal/agent"
+	"github.com/kconfesor/zerg/internal/artifact"
 	"github.com/kconfesor/zerg/internal/cerebrate"
 	"github.com/kconfesor/zerg/internal/event"
 	"github.com/kconfesor/zerg/internal/nydus"
@@ -183,7 +184,7 @@ func newHarness(t *testing.T, sh *scriptedHarness) *harness {
 	reg.Register(sh)
 
 	nyd := nydus.New(db, nydus.WithIntegrator(nydus.Git{}))
-	agents := agent.NewServer(db, nyd, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	agents := agent.NewServer(db, nyd, artifact.New(filepath.Join(t.TempDir(), "artifacts")), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	// Short socket path: macOS caps unix socket paths near 104 bytes.
 	socket := filepath.Join("/tmp", store.NewID()[:12]+".sock")
 	if err := agents.Listen(socket); err != nil {

@@ -28,6 +28,7 @@ import (
 	"github.com/kconfesor/zerg/internal/adapter/piharness"
 	"github.com/kconfesor/zerg/internal/agent"
 	"github.com/kconfesor/zerg/internal/api"
+	"github.com/kconfesor/zerg/internal/artifact"
 	"github.com/kconfesor/zerg/internal/chat"
 	"github.com/kconfesor/zerg/internal/devui"
 	"github.com/kconfesor/zerg/internal/event"
@@ -74,6 +75,8 @@ func run(args []string) error {
 		return runDone(args[1:])
 	case "send":
 		return runSend(args[1:])
+	case "artifact":
+		return runArtifact(args[1:])
 	case "ask":
 		return runAsk(args[1:])
 	case "version", "--version", "-v":
@@ -150,6 +153,8 @@ Run by agents, not by you:
   zerg done --lease <id>              acknowledge it
   zerg send --to <role> --commit HEAD --task <id>
   zerg ask "<question>"               ask the operator
+  zerg artifact add <path>            keep a file for a person to look at
+  zerg artifact serve --port <n>      register a service you started
 
   zerg version                        what this binary was built from
 
@@ -305,7 +310,11 @@ func runUp(args []string) error {
 	chatMgr := chat.NewManager(db, registry, bus, log, stateDir)
 	defer chatMgr.StopAll()
 
-	agents := agent.NewServer(db, nyd, log)
+	// Beside the database rather than inside it: a screenshot in a SQLite row
+	// is read into memory to be served and competes for the write lock the
+	// whole daemon shares (internal/artifact).
+	blobs := artifact.New(filepath.Join(filepath.Dir(*dbPath), "artifacts"))
+	agents := agent.NewServer(db, nyd, blobs, log)
 	socket := filepath.Join(stateDir, "agent.sock")
 	if err := agents.Listen(socket); err != nil {
 		return err

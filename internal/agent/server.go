@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/kconfesor/zerg/internal/artifact"
 	"github.com/kconfesor/zerg/internal/nydus"
 	"github.com/kconfesor/zerg/internal/store"
 )
@@ -41,6 +42,10 @@ type Server struct {
 	nyd *nydus.Nydus
 	log *slog.Logger
 
+	// blobs is where a file artifact's bytes go. Nil in a daemon with nowhere
+	// to put them, which answers the verb rather than crashing on it.
+	blobs *artifact.Store
+
 	mu     sync.RWMutex
 	tokens map[string]Identity
 
@@ -49,11 +54,11 @@ type Server struct {
 	path     string
 }
 
-func NewServer(db *store.DB, nyd *nydus.Nydus, log *slog.Logger) *Server {
+func NewServer(db *store.DB, nyd *nydus.Nydus, blobs *artifact.Store, log *slog.Logger) *Server {
 	if log == nil {
 		log = slog.New(slog.NewTextHandler(os.Stderr, nil))
 	}
-	return &Server{db: db, nyd: nyd, log: log, tokens: map[string]Identity{}}
+	return &Server{db: db, nyd: nyd, blobs: blobs, log: log, tokens: map[string]Identity{}}
 }
 
 // Mint issues a token for one role and returns it.
@@ -149,6 +154,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /agent/done", s.done)
 	mux.HandleFunc("POST /agent/send", s.send)
 	mux.HandleFunc("POST /agent/ask", s.ask)
+	mux.HandleFunc("POST /agent/artifact", s.artifact)
 	return mux
 }
 

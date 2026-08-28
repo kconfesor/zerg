@@ -12,7 +12,7 @@ import (
 	"github.com/kconfesor/zerg/internal/agent"
 )
 
-// The agent-facing side of the binary. An agent gets these four verbs and
+// The agent-facing side of the binary. An agent gets these five verbs and
 // nothing else — no scripts synced onto its PATH, no directory to infer its
 // identity from, no tmux to address.
 
@@ -124,4 +124,64 @@ func printJSON(v any) error {
 		return fmt.Errorf("writing output: %w", err)
 	}
 	return nil
+}
+
+// runArtifact records something the agent produced.
+//
+// Two subcommands under one verb because they are one act with two shapes:
+//
+//	zerg artifact add ./coverage.html --label "Coverage report"
+//	zerg artifact serve --port 5173   --label "Dev server"
+//
+// A file is copied into the daemon's store, so the agent's worktree can be
+// pruned and the file survives; a service is a port, which is only true while
+// the process holding it is alive.
+func runArtifact(args []string) error {
+	if len(args) == 0 {
+		return errors.New("artifact needs a subcommand: add <path>, or serve --port <n>")
+	}
+
+	sub, rest := args[0], args[1:]
+	fs := flag.NewFlagSet("artifact "+sub, flag.ContinueOnError)
+	label := fs.String("label", "", "what to call it in the cockpit")
+	task := fs.String("task", "", "the task it belongs to (default: the one this role is holding)")
+	port := fs.Int("port", 0, "the port a service is listening on")
+
+	req := agent.ArtifactArgs{}
+	switch sub {
+	case "add":
+		if err := fs.Parse(rest); err != nil {
+			return err
+		}
+		if fs.NArg() == 0 {
+			return errors.New("artifact add needs a path: zerg artifact add ./report.html")
+		}
+		req.Kind = "file"
+		req.Path = fs.Arg(0)
+	case "serve":
+		if err := fs.Parse(rest); err != nil {
+			return err
+		}
+		if *port == 0 {
+			return errors.New("artifact serve needs --port, the port your service is listening on")
+		}
+		req.Kind = "service"
+		req.Port = *port
+	default:
+		return fmt.Errorf("unknown artifact subcommand %q; it is add or serve", sub)
+	}
+	req.Label, req.TaskID = *label, *task
+
+	client, err := agent.NewClientFromEnv()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	made, err := client.Artifact(ctx, req)
+	if err != nil {
+		return err
+	}
+	return printJSON(made)
 }
