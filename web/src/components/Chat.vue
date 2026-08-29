@@ -22,6 +22,7 @@ import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
 import ModelPicker from '@/components/ModelPicker.vue'
 import PageHeader from '@/components/layout/PageHeader.vue'
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Bot, ChevronDown, FolderGit2, GitBranch, Paperclip, Plus, Square, X } from '@lucide/vue'
 import {
@@ -601,50 +602,60 @@ onBeforeUnmount(() => stream?.close())
          transcript, its own files and its own agent, and closing one takes
          exactly those and nothing else.
 
+         The kit's tabs, so the arrow keys move between them and a screen
+         reader is told it is a tab list. Only the strip: TabsContent would own
+         the panel below, and that panel is one transcript fed by a socket
+         keyed to whichever tab is open, not one panel per tab kept in the DOM.
+
+         Close is a sibling of the trigger rather than inside it, because a
+         button cannot contain a button -- and rename swaps the trigger for an
+         input, which is the same reason.
+
          Scrolls rather than wraps: a row of tabs that reflows moves the one
          you were about to click. -->
-    <div v-if="chats.length" class="hairline-b flex gap-1 overflow-x-auto pb-1.5">
-      <div
-        v-for="c in chats"
-        :key="c.id"
-        class="group flex shrink-0 items-center gap-1 border px-2 py-1 text-[11px]"
-        :class="
-          c.id === openChat
-            ? 'border-primary text-foreground'
-            : 'text-muted-foreground hover:text-foreground border-transparent'
-        "
-      >
-        <!-- Double click renames, which is where every tab strip puts it. -->
-        <input
-          v-if="renaming === c.id"
-          v-model="renameDraft"
-          class="border-input bg-background w-32 border px-1 text-[11px]"
-          :aria-label="`Rename ${tabLabel(c)}`"
-          @keyup.enter="commitRename(c)"
-          @keyup.escape="renaming = null"
-          @blur="commitRename(c)"
-        />
-        <button
-          v-else
-          type="button"
-          class="focus-visible:outline-ring max-w-[12rem] truncate focus-visible:outline-2"
-          :title="tabLabel(c)"
-          @click="openChat = c.id"
-          @dblclick="((renaming = c.id), (renameDraft = c.title))"
+    <Tabs
+      v-if="chats.length"
+      :model-value="openChat ?? undefined"
+      class="hairline-b shrink-0 overflow-x-auto pb-1.5"
+      @update:model-value="(v) => (openChat = String(v))"
+    >
+      <TabsList variant="line" class="w-max">
+        <div
+          v-for="c in chats"
+          :key="c.id"
+          class="group flex shrink-0 items-center"
+          :class="c.id === openChat ? 'text-foreground' : 'text-muted-foreground'"
         >
-          {{ tabLabel(c) }}
-        </button>
-        <button
-          type="button"
-          class="hover:text-destructive focus-visible:outline-ring shrink-0 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 focus-visible:outline-2"
-          :aria-label="`Close ${tabLabel(c)}`"
-          title="Close this chat, and delete it"
-          @click.stop="confirmEnd = c"
-        >
-          <X :size="11" aria-hidden="true" />
-        </button>
-      </div>
-    </div>
+          <input
+            v-if="renaming === c.id"
+            v-model="renameDraft"
+            class="border-input bg-background mx-1 w-32 border px-1 text-[11px]"
+            :aria-label="`Rename ${tabLabel(c)}`"
+            @keyup.enter="commitRename(c)"
+            @keyup.escape="renaming = null"
+            @blur="commitRename(c)"
+          />
+          <TabsTrigger
+            v-else
+            :value="c.id"
+            class="max-w-[12rem] truncate"
+            :title="tabLabel(c)"
+            @dblclick="((renaming = c.id), (renameDraft = c.title))"
+          >
+            {{ tabLabel(c) }}
+          </TabsTrigger>
+          <button
+            type="button"
+            class="hover:text-destructive focus-visible:outline-ring mr-1 shrink-0 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 focus-visible:outline-2"
+            :aria-label="`Close ${tabLabel(c)}`"
+            title="Close this chat, and delete it"
+            @click.stop="confirmEnd = c"
+          >
+            <X :size="11" aria-hidden="true" />
+          </button>
+        </div>
+      </TabsList>
+    </Tabs>
 
     <div
       ref="viewport"

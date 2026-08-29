@@ -106,3 +106,6 @@ If something in `docs/ARCHITECTURE.md` is now false, fix it here rather than lea
 
 Commit messages are prose: a sentence saying what changed, then a body explaining what was wrong and
 why this is the fix. The history is where this project keeps its reasoning.
+
+## Web components
+Never handrole components, always look for shadcn-vue existing components, install it using cli if not already installe
