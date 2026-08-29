@@ -538,9 +538,14 @@ onBeforeUnmount(() => stream?.close())
           <GitBranch :size="11" aria-hidden="true" class="shrink-0" />
           {{ project.baseBranch }}
         </span>
+        <!-- No width of its own: it takes what the row has and gives it back
+             when the row is narrower. It was capped at 30rem, which cut a
+             70-character path five pixels short of fitting while 627 pixels
+             of header sat empty beside it -- a number chosen for a screen I
+             happened to be measuring. -->
         <span
           v-if="openTab?.worktree"
-          class="text-muted-foreground hidden max-w-[30rem] items-center gap-1 truncate font-mono text-[11px] sm:flex"
+          class="text-muted-foreground hidden min-w-0 items-center gap-1 font-mono text-[11px] sm:flex"
           :title="openTab.worktree"
         >
           <FolderGit2 :size="11" aria-hidden="true" class="shrink-0" />
