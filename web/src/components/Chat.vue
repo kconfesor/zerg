@@ -619,13 +619,13 @@ onBeforeUnmount(() => stream?.close())
       class="hairline-b shrink-0 overflow-x-auto pb-1.5"
       @update:model-value="(v) => (openChat = String(v))"
     >
-      <TabsList variant="line" class="w-max">
-        <div
-          v-for="c in chats"
-          :key="c.id"
-          class="group flex shrink-0 items-center"
-          :class="c.id === openChat ? 'text-foreground' : 'text-muted-foreground'"
-        >
+      <!-- The same filled group as every other tab strip here; only w-max is
+           ours, so a project with a dozen conversations scrolls rather than
+           wrapping. The active colour is the trigger's own job -- setting it
+           on this wrapper as well meant two rules describing one state, and
+           the wrapper's won on the half of the tab it covered. -->
+      <TabsList class="w-max">
+        <div v-for="c in chats" :key="c.id" class="group flex shrink-0 items-center">
           <input
             v-if="renaming === c.id"
             v-model="renameDraft"
