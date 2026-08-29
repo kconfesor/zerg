@@ -808,6 +808,9 @@ export interface ActivityEvent {
   fatal?: boolean
   /** Which conversation this belongs to, for the two roles that are one. */
   chatId?: string
+  /** What produced it, when the harness says. The agent behind a conversation
+   *  can be changed while it is open, so this is a fact about the message. */
+  model?: string
 }
 
 export interface UsageTotal {

@@ -155,6 +155,9 @@ interface Line {
   tool?: string
   /** Files sent with this message, for the ones the person wrote. */
   files?: { name: string; artifactId: string }[]
+  /** What answered. Kept per line because the agent can be changed mid
+   *  conversation, and then one thread holds answers from several models. */
+  model?: string
   /** Still being written. A streamed answer is assembled from fragments and
    *  then replaced by the authoritative message when the block closes. */
   live?: boolean
@@ -232,7 +235,7 @@ function accept(e: ActivityEvent) {
     if (last?.who === 'agent' && last.live) {
       last.text += e.text
     } else {
-      lines.value.push({ id: e.id, who: 'agent', text: e.text, live: true })
+      lines.value.push({ id: e.id, who: 'agent', text: e.text, live: true, model: e.model })
     }
   } else if (e.kind === 'message' && e.text) {
     thinking.value = false
@@ -244,8 +247,9 @@ function accept(e: ActivityEvent) {
       last.text = e.text
       last.id = e.id
       last.live = false
+      last.model = e.model || last.model
     } else {
-      lines.value.push({ id: e.id, who: 'agent', text: e.text })
+      lines.value.push({ id: e.id, who: 'agent', text: e.text, model: e.model })
     }
   } else if (e.kind === 'tool_call') {
     // Shown, because "it is reading files" is the difference between working
@@ -725,11 +729,18 @@ onBeforeUnmount(() => stream?.close())
             </p>
           </template>
           <template v-else>
+            <!-- Who said it, and what they were. The agent can be changed
+                 while a conversation is open, so a thread can hold answers
+                 from two models and "agent" alone leaves no way to tell which
+                 is which when reading it back. -->
             <p
               class="mb-0.5 text-[11px] font-semibold"
               :class="l.who === 'you' ? 'text-muted-foreground' : 'text-[var(--chart-1)]'"
             >
               {{ l.who === 'you' ? 'you' : 'agent' }}
+              <span v-if="l.who === 'agent' && l.model" class="text-muted-foreground font-normal">
+                · {{ l.model }}
+              </span>
             </p>
             <!-- The agent writes Markdown, so it is rendered as Markdown. The
                  renderer escapes first and builds tags only from characters it

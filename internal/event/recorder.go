@@ -265,6 +265,7 @@ func (r *Recorder) write(ctx context.Context, db *store.DB, log *slog.Logger, ba
 			ProjectID: ev.ProjectID,
 			TaskID:    taskID,
 			ChatID:    ev.ChatID,
+			Model:     ev.Model,
 			Role:      ev.Role,
 			Kind:      string(ev.Kind),
 			At:        ev.At,

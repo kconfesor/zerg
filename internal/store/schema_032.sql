@@ -1,0 +1,14 @@
+-- Which model produced a message.
+--
+-- The harness and model behind a conversation can be changed while it is open,
+-- and people do: ask one thing of a cheap model, switch, ask the next of a
+-- better one. The transcript said "agent" for all of it, so reading a
+-- conversation back gave no way to tell which answer came from what -- and the
+-- project's current setting answers a different question, since it is what is
+-- selected now rather than what was selected then.
+--
+-- On the event rather than joined from usage_turns: a turn's usage row arrives
+-- at the end of the turn and covers the whole of it, while this has to be true
+-- of one message. Null for everything a person said, and for the harnesses that
+-- do not report it.
+ALTER TABLE events ADD COLUMN model TEXT;

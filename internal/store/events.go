@@ -30,6 +30,11 @@ type Event struct {
 	// one. Empty for everything else, which is almost every event: the
 	// pipeline's work belongs to a card, not to a thread.
 	ChatID string `json:"chatId,omitempty"`
+
+	// Model is what produced this, when a harness says. The agent behind a
+	// conversation can be changed while it is open, so "which model said this"
+	// is a fact about the message and not about the project's current setting.
+	Model string `json:"model,omitempty"`
 }
 
 // RecordEvent appends one event.
@@ -68,10 +73,10 @@ func (db *DB) RecordTurn(ctx context.Context, e *Event, u *UsageTurn) error {
 	defer tx.Rollback()
 
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO events (id, project_id, task_id, role, kind, ts, text, tool, data, fatal, chat_id)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+		`INSERT INTO events (id, project_id, task_id, role, kind, ts, text, tool, data, fatal, chat_id, model)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
 		e.ID, e.ProjectID, e.TaskID, e.Role, e.Kind, e.At.Format(time.RFC3339Nano),
-		e.Text, e.Tool, data, e.Fatal, nullable(e.ChatID)); err != nil {
+		e.Text, e.Tool, data, e.Fatal, nullable(e.ChatID), nullable(e.Model)); err != nil {
 		return fmt.Errorf("recording event: %w", err)
 	}
 
@@ -87,7 +92,7 @@ func (db *DB) RecordTurn(ctx context.Context, e *Event, u *UsageTurn) error {
 }
 
 // eventCols is the row as the cockpit reads it.
-const eventCols = `id, project_id, task_id, role, kind, ts, text, tool, data, fatal, chat_id`
+const eventCols = `id, project_id, task_id, role, kind, ts, text, tool, data, fatal, chat_id, model`
 
 // EventQuery selects a slice of the record.
 type EventQuery struct {
@@ -186,14 +191,15 @@ func (db *DB) ListEvents(ctx context.Context, q EventQuery) ([]Event, error) {
 			task   sql.NullString
 			data   sql.NullString
 			chatID sql.NullString
+			model  sql.NullString
 			at     string
 			fatal  int
 		)
 		if err := rows.Scan(&e.ID, &e.ProjectID, &task, &e.Role, &e.Kind, &at,
-			&e.Text, &e.Tool, &data, &fatal, &chatID); err != nil {
+			&e.Text, &e.Tool, &data, &fatal, &chatID, &model); err != nil {
 			return nil, err
 		}
-		e.ChatID = chatID.String
+		e.ChatID, e.Model = chatID.String, model.String
 		if task.Valid {
 			t := task.String
 			e.TaskID = &t

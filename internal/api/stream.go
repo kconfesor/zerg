@@ -243,6 +243,11 @@ func liveEvent(ev event.Event) store.Event {
 		Kind: string(ev.Kind), At: ev.At,
 		Text: ev.Text, Tool: ev.Tool, Fatal: ev.Fatal,
 		Data: event.Payload(ev),
+		// Both were dropped here, so a live message arrived without the two
+		// things that say where it belongs and what wrote it, and only grew
+		// them on reload when the row came back from the table.
+		ChatID: ev.ChatID,
+		Model:  ev.Model,
 	}
 }
 
