@@ -500,7 +500,7 @@ onBeforeUnmount(() => stream?.close())
 </script>
 
 <template>
-  <div class="flex flex-col gap-3">
+  <div class="flex min-h-0 flex-1 flex-col gap-3">
     <!-- Which agent answers, and the way to start over. Both belong here: the
          choice is about this conversation, and the reset is destructive enough
          that it should not be somewhere you press by accident. -->
@@ -592,7 +592,7 @@ onBeforeUnmount(() => stream?.close())
 
     <div
       ref="viewport"
-      class="bg-card h-[58vh] overflow-y-auto border p-3 md:h-[60vh]"
+      class="bg-card min-h-0 flex-1 overflow-y-auto border p-3"
     >
       <p v-if="!lines.length" class="text-muted-foreground text-xs leading-relaxed">
         Ask about the repository: how something works, where a thing lives, whether an idea is

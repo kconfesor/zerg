@@ -931,17 +931,25 @@ watch(current, () => (banner.value = null))
            can only stick to the box that scrolls it — so on the board the
            scrolling moves inside, and main must not scroll too or the two
            fight over the same gesture. -->
+      <!-- Chat is laid out like the board, and for the same reason: the thing
+           that scrolls is inside it. A conversation whose height is a fraction
+           of the viewport does not know what is above and below it, so every
+           row added around it -- the agent picker, then the tabs -- pushed the
+           box you type in further down until it was off the bottom of a 720px
+           window. -->
       <main
         v-else
         :class="[
           'min-h-0 flex-1',
-          view === 'board' ? 'flex flex-col overflow-hidden' : 'overflow-y-auto',
+          view === 'board' || view === 'chat'
+            ? 'flex flex-col overflow-hidden'
+            : 'overflow-y-auto',
         ]"
       >
         <div
           :class="[
             'w-full p-[var(--gutter)]',
-            view === 'board' && 'flex min-h-0 flex-1 flex-col',
+            (view === 'board' || view === 'chat') && 'flex min-h-0 flex-1 flex-col',
           ]"
         >
           <!-- Board -->
@@ -987,7 +995,7 @@ watch(current, () => (banner.value = null))
               title="Chat"
               subtitle="Ask about the project. This agent reads it and answers; it takes no work."
             />
-            <div class="pt-4">
+            <div class="flex min-h-0 flex-1 flex-col pt-4">
               <Chat
                 :project="current"
                 :harnesses="harnesses"
