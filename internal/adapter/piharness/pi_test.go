@@ -104,14 +104,15 @@ func TestParseIgnoresTheEchoedUserTurn(t *testing.T) {
 	}
 }
 
-// pi emits a text_delta per token. Those would drown the log for no gain, since
-// the completed message follows.
+// The frames that say nothing: starts, ends, acknowledgements and the warnings
+// pi prints around them.
 func TestParseIgnoresStreamingNoise(t *testing.T) {
 	for _, line := range []string{
 		`{"type":"agent_start"}`,
 		`{"type":"turn_start"}`,
 		`{"type":"message_start","message":{"role":"assistant","content":[]}}`,
-		`{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"o"}}`,
+		`{"type":"message_update","assistantMessageEvent":{"type":"text_start","contentIndex":1}}`,
+		`{"type":"message_update","assistantMessageEvent":{"type":"text_end","content":"done"}}`,
 		`{"type":"agent_end","messages":[]}`,
 		lineRPCOK,
 		`Warning: Model "gpt-5.6-sol" not found for provider "openai-codex".`,
@@ -120,6 +121,29 @@ func TestParseIgnoresStreamingNoise(t *testing.T) {
 		if evs := parse(t, line); len(evs) != 0 {
 			t.Errorf("line %.40q produced %+v, want nothing", line, evs)
 		}
+	}
+}
+
+// A fragment of an answer being written is emitted, so a person watching sees
+// the sentence appear.
+//
+// These used to be dropped here, on the reasoning that they would drown the
+// event log -- which was true when nothing consumed them and there was nowhere
+// to put them but the log. Keeping them out of the transcript is the
+// recorder's job now, and it refuses them at the door; the bus carries them to
+// whoever is watching and nobody writes them down.
+func TestParseEmitsTextFragments(t *testing.T) {
+	evs := parse(t, `{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"the quick"}}`)
+	if len(evs) != 1 {
+		t.Fatalf("got %+v, want one event", evs)
+	}
+	if evs[0].Kind != adapter.EventMessageDelta || evs[0].Text != "the quick" {
+		t.Errorf("got %+v, want the fragment as a message_delta", evs[0])
+	}
+
+	// An empty one says nothing and is not worth waking a renderer for.
+	if evs := parse(t, `{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":""}}`); len(evs) != 0 {
+		t.Errorf("an empty fragment produced %+v", evs)
 	}
 }
 

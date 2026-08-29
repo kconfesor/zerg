@@ -50,7 +50,12 @@ func (*Adapter) Capabilities() adapter.Caps {
 		// answers {"type":"response","command":"prompt","success":true} while
 		// streaming the same events as --mode json.
 		StructuredInput: true,
-		InteractiveTUI:  true,
+		// Verified against a live process: rpc mode emits message_update
+		// frames carrying assistantMessageEvent text_delta fragments, the
+		// same shape claude sends, so an answer can be watched as it is
+		// written. Nothing has to be asked for -- pi streams by default.
+		Streaming:      true,
+		InteractiveTUI: true,
 		// pi keeps credentials in auth.json inside its config directory, so a
 		// private directory is safe once that file is seeded across.
 		PrivateConfigDir: true,
@@ -367,6 +372,14 @@ type wire struct {
 		Usage usage `json:"usage"`
 	} `json:"message"`
 
+	// AssistantMessageEvent carries an answer as it is written. Only the text
+	// fragments are read: the starts, ends and thinking are all said again by
+	// the message_end frame, which is the one the transcript keeps.
+	AssistantMessageEvent struct {
+		Type  string `json:"type"`
+		Delta string `json:"delta"`
+	} `json:"assistantMessageEvent"`
+
 	// rpc acknowledgements, which carry command failures.
 	Command string `json:"command"`
 	Success *bool  `json:"success"`
@@ -402,6 +415,17 @@ func (*Adapter) Parse(line []byte) ([]adapter.Event, error) {
 	switch w.Type {
 	case "session":
 		return []adapter.Event{{Kind: adapter.EventReady}}, nil
+
+	case "message_update":
+		// A fragment of an answer being written, for a screen somebody is
+		// watching. Never recorded: the whole message arrives as message_end,
+		// and that is the one the transcript keeps.
+		if w.AssistantMessageEvent.Type == "text_delta" && w.AssistantMessageEvent.Delta != "" {
+			return []adapter.Event{{
+				Kind: adapter.EventMessageDelta, Text: w.AssistantMessageEvent.Delta,
+			}}, nil
+		}
+		return nil, nil
 
 	case "message_end":
 		if w.Message.Role != "assistant" {
