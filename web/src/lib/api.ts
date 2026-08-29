@@ -778,6 +778,10 @@ export interface Chat {
   title: string
   createdAt: string
   lastUsedAt: string
+  /** Where this conversation's agent works, as the daemon names it. Reported
+   *  rather than derived here: the naming is the daemon's rule. */
+  worktree?: string
+  branch?: string
 }
 
 export interface ActivityEvent {

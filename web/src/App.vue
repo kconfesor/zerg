@@ -991,11 +991,12 @@ watch(current, () => (banner.value = null))
 
           <!-- Chat -->
           <template v-else-if="view === 'chat'">
-            <PageHeader
-              title="Chat"
-              subtitle="Ask about the project. This agent reads it and answers; it takes no work."
-            />
-            <div class="flex min-h-0 flex-1 flex-col pt-4">
+            <!-- Chat brings its own header, the way the board does: the
+                 controls that belong in it -- which agent answers, and a new
+                 conversation -- are driven by state this view owns, and a
+                 header rendered out here could only reach them through props
+                 and events that exist for the layout's sake. -->
+            <div class="flex min-h-0 flex-1 flex-col">
               <Chat
                 :project="current"
                 :harnesses="harnesses"

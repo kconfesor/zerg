@@ -1,11 +1,14 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strings"
 
 	"github.com/kconfesor/zerg/internal/adapter"
+	"github.com/kconfesor/zerg/internal/chat"
+	"github.com/kconfesor/zerg/internal/hatchery"
 	"github.com/kconfesor/zerg/internal/store"
 )
 
@@ -23,7 +26,30 @@ func (s *Server) listChats(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
+	s.locate(r.Context(), r.PathValue("id"), chats)
 	writeJSON(w, http.StatusOK, chats)
+}
+
+// locate fills in where each conversation's agent works.
+//
+// Answered by the daemon rather than derived in the browser: the worktree name
+// and the branch are this daemon's naming rules, and a cockpit that
+// reconstructed them would be a second implementation free to drift from the
+// one that actually makes the directory.
+func (s *Server) locate(ctx context.Context, projectID string, chats []store.Chat) {
+	if len(chats) == 0 {
+		return
+	}
+	project, err := s.db.GetProject(ctx, projectID)
+	if err != nil {
+		return
+	}
+	hat := hatchery.New(project.Path)
+	for i := range chats {
+		name := chat.WorktreeName(chats[i].ID)
+		chats[i].Worktree = hat.Path(name)
+		chats[i].Branch = hatchery.BranchPrefix + name
+	}
 }
 
 // newChat opens one.
@@ -41,7 +67,9 @@ func (s *Server) newChat(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, made)
+	one := []store.Chat{*made}
+	s.locate(r.Context(), r.PathValue("id"), one)
+	writeJSON(w, http.StatusCreated, one[0])
 }
 
 // renameChat sets what the tab says.

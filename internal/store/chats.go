@@ -25,6 +25,13 @@ type Chat struct {
 	Title      string    `json:"title"`
 	CreatedAt  time.Time `json:"createdAt"`
 	LastUsedAt time.Time `json:"lastUsedAt"`
+
+	// Worktree and Branch are where this conversation's agent works. Filled in
+	// by the API rather than stored: they are derived from the project's path
+	// and this id by rules the daemon owns, and a copy in the database would
+	// be a second answer able to disagree with the first.
+	Worktree string `json:"worktree,omitempty"`
+	Branch   string `json:"branch,omitempty"`
 }
 
 const chatCols = `id, project_id, title, created_at, last_used_at`

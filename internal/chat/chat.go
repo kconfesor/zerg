@@ -59,6 +59,10 @@ func worktreeFor(chatID string) string {
 	return Role + "-" + chatID
 }
 
+// WorktreeName is the role name a conversation's checkout is filed under, for
+// anything outside this package that has to say where an agent is working.
+func WorktreeName(chatID string) string { return worktreeFor(chatID) }
+
 // Operator is the name the person's own messages carry, so a conversation
 // reads as a conversation rather than a monologue with gaps.
 const Operator = "operator"

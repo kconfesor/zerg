@@ -21,8 +21,9 @@ import {
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
 import ModelPicker from '@/components/ModelPicker.vue'
+import PageHeader from '@/components/layout/PageHeader.vue'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
-import { Bot, ChevronDown, Paperclip, Plus, Square, X } from '@lucide/vue'
+import { Bot, ChevronDown, FolderGit2, GitBranch, Paperclip, Plus, Square, X } from '@lucide/vue'
 import {
   Dialog,
   DialogContent,
@@ -74,6 +75,9 @@ const openChat = ref<string | null>(null)
 const renaming = ref<string | null>(null)
 const renameDraft = ref('')
 const confirmEnd = ref<Chat | null>(null)
+
+/** The conversation being read, for the header's account of where it works. */
+const openTab = computed(() => chats.value.find((c) => c.id === openChat.value) ?? null)
 
 /** What a tab says when nobody has named it and nothing has been said yet. */
 const tabLabel = (c: Chat) => c.title || 'New chat'
@@ -510,66 +514,86 @@ onBeforeUnmount(() => stream?.close())
 
 <template>
   <div class="flex min-h-0 flex-1 flex-col gap-3">
-    <!-- Which agent answers, and the way to open another conversation.
-         The two selects are behind the button that names the current choice:
-         they were two labelled controls sitting above every conversation,
-         which on a phone wrapped to two rows and took 114 of the 648 pixels
-         the screen had -- a permanent cost for a thing that is set once and
-         then read, if ever. -->
-    <div class="flex flex-wrap items-center gap-2">
-      <Popover>
-        <PopoverTrigger as-child>
-          <Button variant="outline" size="sm" class="gap-1.5" :disabled="!projectId">
-            <Bot :size="13" aria-hidden="true" />
-            <span class="max-w-[14rem] truncate">{{ agentSummary }}</span>
-            <ChevronDown :size="12" aria-hidden="true" class="opacity-60" />
-          </Button>
-        </PopoverTrigger>
-        <PopoverContent align="start" class="w-72">
-          <div class="flex flex-col gap-3">
-            <div class="flex flex-col gap-1">
-              <Label :for="harnessId" class="text-[10px]">Harness</Label>
-              <Select
-                :model-value="harness || INHERIT"
-                @update:model-value="(v) => setAgent(v === INHERIT ? '' : String(v), model)"
-              >
-                <SelectTrigger :id="harnessId" size="sm" class="w-full"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem :value="INHERIT">inherit from the team</SelectItem>
-                  <SelectItem v-for="h in harnesses" :key="h" :value="h">{{ h }}</SelectItem>
-                </SelectContent>
-              </Select>
+    <!-- The header carries what the view is and the two controls that act on
+         it. They were a row of their own above the conversation, which is a
+         row of furniture on every screen for a choice made once. -->
+    <PageHeader title="Chat">
+      <template #meta>
+        <!-- What the answers are about: the branch this conversation reads,
+             and the checkout it reads it on. The base branch rather than the
+             worktree's own zerg-chat-01M… name, which is an implementation
+             detail of where the copy lives; what a person wants to know is
+             whether the agent is looking at what they are looking at.
+
+             The path is desktop-only. It is the longest thing on the screen
+             and answers a question you ask once -- and on a phone it wrapped
+             the header to 114 pixels, which is the waste this was meant to
+             remove. -->
+        <span
+          v-if="project?.baseBranch"
+          class="text-muted-foreground flex items-center gap-1 font-mono text-[11px]"
+          title="The branch this conversation reads"
+        >
+          <GitBranch :size="11" aria-hidden="true" class="shrink-0" />
+          {{ project.baseBranch }}
+        </span>
+        <span
+          v-if="openTab?.worktree"
+          class="text-muted-foreground hidden max-w-[30rem] items-center gap-1 truncate font-mono text-[11px] sm:flex"
+          :title="openTab.worktree"
+        >
+          <FolderGit2 :size="11" aria-hidden="true" class="shrink-0" />
+          <span class="truncate">{{ openTab.worktree }}</span>
+        </span>
+      </template>
+
+      <template #actions>
+        <Popover>
+          <PopoverTrigger as-child>
+            <Button variant="outline" size="sm" class="gap-1.5" :disabled="!projectId">
+              <Bot :size="13" aria-hidden="true" />
+              <span class="max-w-[12rem] truncate">{{ agentSummary }}</span>
+              <ChevronDown :size="12" aria-hidden="true" class="opacity-60" />
+            </Button>
+          </PopoverTrigger>
+          <PopoverContent align="end" class="w-72">
+            <div class="flex flex-col gap-3">
+              <div class="flex flex-col gap-1">
+                <Label :for="harnessId" class="text-[10px]">Harness</Label>
+                <Select
+                  :model-value="harness || INHERIT"
+                  @update:model-value="(v) => setAgent(v === INHERIT ? '' : String(v), model)"
+                >
+                  <SelectTrigger :id="harnessId" size="sm" class="w-full"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem :value="INHERIT">inherit from the team</SelectItem>
+                    <SelectItem v-for="h in harnesses" :key="h" :value="h">{{ h }}</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <ModelPicker
+                v-model="model"
+                :models="models[harness] ?? []"
+                label="Model"
+                input-class="h-8 w-full text-xs"
+                @commit="(m) => setAgent(harness, m)"
+              />
+
+              <p class="text-muted-foreground text-[11px] leading-relaxed">
+                Runs in its own worktree with no access to the work queue, so a question cannot
+                disturb anything in flight.
+              </p>
             </div>
+          </PopoverContent>
+        </Popover>
 
-            <ModelPicker
-              v-model="model"
-              :models="models[harness] ?? []"
-              label="Model"
-              input-class="h-8 w-full text-xs"
-              @commit="(m) => setAgent(harness, m)"
-            />
-
-            <!-- Said here rather than under every conversation, where it was
-                 a permanent 54 pixels of explanation you read once. -->
-            <p class="text-muted-foreground text-[11px] leading-relaxed">
-              Runs in its own worktree with no access to the work queue, so a question cannot
-              disturb anything in flight.
-            </p>
-          </div>
-        </PopoverContent>
-      </Popover>
-
-      <Button
-        variant="outline"
-        size="sm"
-        class="ml-auto gap-1.5"
-        :disabled="!projectId"
-        @click="startChat"
-      >
-        <Plus :size="13" aria-hidden="true" />
-        New chat
-      </Button>
-    </div>
+        <Button variant="outline" size="sm" class="gap-1.5" :disabled="!projectId" @click="startChat">
+          <Plus :size="13" aria-hidden="true" />
+          New chat
+        </Button>
+      </template>
+    </PageHeader>
 
     <!-- The conversations, as tabs. A second subject used to be either an
          interruption of the first or a reason to delete it, since ending the
@@ -624,7 +648,7 @@ onBeforeUnmount(() => stream?.close())
 
     <div
       ref="viewport"
-      class="bg-card min-h-0 flex-1 overflow-y-auto border p-3"
+      class="bg-card min-h-32 shrink overflow-y-auto border p-3"
     >
       <p v-if="!lines.length" class="text-muted-foreground text-xs leading-relaxed">
         Ask about the repository: how something works, where a thing lives, whether an idea is
@@ -759,7 +783,6 @@ onBeforeUnmount(() => stream?.close())
           v-model="draft"
           rows="2"
           class="text-xs"
-          placeholder="What does the evaluator do with unary minus?"
           :disabled="!projectId"
           @keydown="onKeydown"
           @paste="onPaste"
@@ -841,13 +864,5 @@ onBeforeUnmount(() => stream?.close())
       </DialogContent>
     </Dialog>
 
-    <!-- Explanation you read once, and not at the cost of the conversation.
-         On a phone this was 54 permanent pixels out of the 648 the screen
-         gave the whole screen; it is in the agent popover, where somebody
-         asking "what is this thing" is already looking. -->
-    <p class="text-muted-foreground hidden text-[11px] sm:block">
-      Runs in its own worktree with no access to the work queue, so a question cannot disturb
-      anything in flight.
-    </p>
   </div>
 </template>
