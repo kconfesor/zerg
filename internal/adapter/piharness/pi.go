@@ -485,6 +485,15 @@ func (*Adapter) EncodeTurn(text string) ([]byte, error) {
 	return append(b, '\n'), nil
 }
 
+// EncodeInterrupt is not offered: pi's rpc mode has no message that ends a turn
+// in place, and the caller is told so rather than being given something that
+// silently does nothing. Stopping this harness means stopping the process,
+// which is a different act with a different cost -- the session goes with it --
+// and belongs to whoever is willing to pay it.
+func (*Adapter) EncodeInterrupt() ([]byte, error) {
+	return nil, adapter.ErrNoInterrupt
+}
+
 // seedConfigDir copies what a private config directory needs from the user's
 // real one: credentials, settings, and the model cache.
 //

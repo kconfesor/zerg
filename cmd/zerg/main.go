@@ -329,7 +329,7 @@ func runUp(args []string) error {
 
 	// Chat runs outside the pipeline: its own process, its own worktree, no
 	// capability token, so a question cannot disturb work in flight.
-	chatMgr := chat.NewManager(db, registry, bus, log, stateDir)
+	chatMgr := chat.NewManager(db, registry, bus, log, stateDir).WithBlobs(blobs)
 	defer chatMgr.StopAll()
 
 	agents := agent.NewServer(db, nyd, blobs, log)

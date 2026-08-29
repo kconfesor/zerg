@@ -226,6 +226,96 @@ func boolInt(b bool) int {
 	return 0
 }
 
+// DeleteChatAttachments removes what was attached to a project's conversation,
+// and reports the digests nothing names any more.
+//
+// Called when a chat is ended, which is the one moment a conversation's files
+// stop being wanted: they are exempt from the sweep precisely because ending it
+// is a decision rather than an age.
+func (db *DB) DeleteChatAttachments(ctx context.Context, projectID string) ([]string, error) {
+	tx, err := db.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("clearing attachments: %w", err)
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.QueryContext(ctx,
+		`SELECT id, sha256 FROM artifacts
+		  WHERE project_id = ? AND role = ? AND task_id IS NULL`, projectID, OperatorRole)
+	if err != nil {
+		return nil, fmt.Errorf("clearing attachments: %w", err)
+	}
+	var ids, digests []string
+	for rows.Next() {
+		var id, digest string
+		if err := rows.Scan(&id, &digest); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		ids = append(ids, id)
+		if digest != "" {
+			digests = append(digests, digest)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(ids) == 0 {
+		return nil, tx.Commit()
+	}
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM artifacts WHERE id IN (`+holes(len(ids))+`)`,
+		anySlice(ids)...); err != nil {
+		return nil, fmt.Errorf("clearing attachments: %w", err)
+	}
+
+	// The same bytes can be named by another row -- the same screenshot
+	// attached to two projects, or produced by an agent -- so only the digests
+	// nothing points at are handed back for deletion.
+	orphans, err := orphanedDigests(ctx, tx, digests)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return orphans, nil
+}
+
+// orphanedDigests is which of these the artifacts table no longer names.
+func orphanedDigests(ctx context.Context, tx *sql.Tx, digests []string) ([]string, error) {
+	if len(digests) == 0 {
+		return nil, nil
+	}
+	rows, err := tx.QueryContext(ctx,
+		`SELECT DISTINCT sha256 FROM artifacts WHERE sha256 IN (`+holes(len(digests))+`)`,
+		anySlice(digests)...)
+	if err != nil {
+		return nil, err
+	}
+	kept := map[string]bool{}
+	for rows.Next() {
+		var d string
+		if err := rows.Scan(&d); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		kept[d] = true
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, d := range digests {
+		if !kept[d] {
+			out = append(out, d)
+		}
+	}
+	return out, nil
+}
+
 // PruneArtifacts drops artifacts of tasks that have aged out, and reports the
 // digests whose bytes are now unreferenced.
 //
@@ -253,12 +343,17 @@ func (db *DB) PruneArtifacts(ctx context.Context, before time.Time) (int, []stri
 	}
 	defer tx.Rollback()
 
+	// A file somebody attached to a conversation is exempt, the way the
+	// conversation itself is. Swept, a chat kept its words and lost its
+	// pictures: "what is wrong with this?" above a gap, with the answer
+	// underneath discussing something no longer on screen.
 	const doomed = `SELECT id, sha256 FROM artifacts
 	                 WHERE created_at < ? AND pinned = 0
+	                   AND role <> ?
 	                   AND (task_id IS NULL
 	                        OR NOT EXISTS (SELECT 1 FROM tasks t
 	                                        WHERE t.id = artifacts.task_id AND t.pinned = 1))`
-	rows, err := tx.QueryContext(ctx, doomed, cut)
+	rows, err := tx.QueryContext(ctx, doomed, cut, OperatorRole)
 	if err != nil {
 		return 0, nil, fmt.Errorf("pruning artifacts: %w", err)
 	}

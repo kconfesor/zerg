@@ -14,6 +14,22 @@ import (
 // machine decides which process to kill.
 const maxBody = 1 << 20
 
+// maxUpload is the largest file that can be attached to a chat message.
+//
+// Twenty-five megabytes: a screenshot is under one, a phone photograph is a
+// few, and a log worth reading is smaller than either. Beyond that the useful
+// answer is "point the agent at the path", not "wait while a browser posts a
+// video".
+const maxUpload = 25 << 20
+
+// uploadPath reports whether a request carries a file rather than JSON.
+//
+// Matched on the suffix rather than parsed, because the project id sits in the
+// middle and this runs on every request.
+func uploadPath(path string) bool {
+	return strings.HasSuffix(path, "/chat/attachments")
+}
+
 // expectedHost reports whether a request arrived addressed to a name this
 // daemon actually serves.
 //
@@ -100,7 +116,14 @@ func (s *Server) expectedHost(r *http.Request) bool {
 // to them, because rebinding defeats exactly that reasoning.
 func (s *Server) guard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		r.Body = http.MaxBytesReader(w, r.Body, maxBody)
+		// One megabyte is right for JSON written by a person or an agent, and
+		// wrong for the one route that carries a file somebody picked. That
+		// route has its own limit, enforced where the bytes are read.
+		if uploadPath(r.URL.Path) {
+			r.Body = http.MaxBytesReader(w, r.Body, maxUpload)
+		} else {
+			r.Body = http.MaxBytesReader(w, r.Body, maxBody)
+		}
 
 		if !s.expectedHost(r) {
 			s.refuseHost(w, r)

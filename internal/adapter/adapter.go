@@ -8,6 +8,7 @@ package adapter
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -59,8 +60,25 @@ type Adapter interface {
 	// process over a pipe, not inferred.
 	EncodeTurn(text string) ([]byte, error)
 
+	// EncodeInterrupt renders "stop what you are doing", for the harnesses that
+	// can be told mid-turn.
+	//
+	// In place rather than by killing the process, which is the whole reason
+	// this exists: the conversation lives in the running harness, so a stop
+	// that kills it answers "cancel this reply" by forgetting everything said
+	// so far. Verified against a live claude: a control_request/interrupt is
+	// answered success, the turn ends with a result frame, and the process is
+	// still there to take the next question.
+	//
+	// Returns ErrNoInterrupt when the harness has no such message, which is a
+	// fact about the harness and not a failure.
+	EncodeInterrupt() ([]byte, error)
+
 	Capabilities() Caps
 }
+
+// ErrNoInterrupt says a harness cannot be told to stop mid-turn.
+var ErrNoInterrupt = errors.New("this harness cannot be interrupted mid-turn")
 
 // Model is one entry from a harness's own catalog.
 type Model struct {
@@ -84,6 +102,10 @@ type Spec struct {
 	// only pi has "off" and "minimal".
 	Thinking  string
 	ExtraArgs []string
+
+	// Streaming asks the harness to emit an answer as it is written. Set for
+	// chat, where a person is watching; not for the pipeline, where nobody is.
+	Streaming bool
 
 	// Env is extra variables this particular agent needs, as NAME=value.
 	//
@@ -225,6 +247,16 @@ type Caps struct {
 	// messages. Without it, a role can receive work only between turns.
 	StructuredInput bool
 
+	// Interruptible means the harness accepts a stop while it is mid-turn,
+	// keeping the session alive. Without it the only way to stop a reply is to
+	// kill the process, which loses the conversation with it.
+	Interruptible bool
+
+	// Streaming means the harness can emit an answer as it is produced rather
+	// than one message at a time. Chat turns it on; the pipeline does not,
+	// because nothing watches a role write and the deltas are pure volume.
+	Streaming bool
+
 	// InteractiveTUI means the harness has a real terminal UI that a human can
 	// drive, used for takeover (see ARCHITECTURE.md §10.1). Takeover is a mode
 	// switch, not a parallel view: a process is either emitting structured
@@ -313,9 +345,17 @@ const (
 	EventToolDone EventKind = "tool_done" // tool returned
 	EventMessage  EventKind = "message"   // assistant prose
 	EventUsage    EventKind = "usage"     // tokens and cost for a turn
-	EventTurnEnd  EventKind = "turn_end"  // finished a turn, likely idle now
-	EventError    EventKind = "error"     // harness-level failure, carries Fatal
-	EventQuota    EventKind = "quota"     // subscription usage, carries Quota
+
+	// EventMessageDelta is a fragment of a message being written.
+	//
+	// Never recorded. The authoritative text arrives as an ordinary message
+	// when the block closes, and persisting both would double every answer in
+	// the transcript and multiply the events table by the number of words in
+	// it. These exist to be watched and thrown away.
+	EventMessageDelta EventKind = "message_delta"
+	EventTurnEnd      EventKind = "turn_end" // finished a turn, likely idle now
+	EventError        EventKind = "error"    // harness-level failure, carries Fatal
+	EventQuota        EventKind = "quota"    // subscription usage, carries Quota
 )
 
 type Event struct {

@@ -16,6 +16,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -23,6 +26,7 @@ import (
 	"log/slog"
 
 	"github.com/kconfesor/zerg/internal/adapter"
+	"github.com/kconfesor/zerg/internal/artifact"
 	"github.com/kconfesor/zerg/internal/cerebrate"
 	"github.com/kconfesor/zerg/internal/event"
 	"github.com/kconfesor/zerg/internal/hatchery"
@@ -65,6 +69,10 @@ type Manager struct {
 	log      *slog.Logger
 	stateDir string
 
+	// blobs holds what people attach, so ending a chat can take the files with
+	// it. Optional: a build without a store simply has nothing to remove.
+	blobs *artifact.Store
+
 	mu       sync.Mutex
 	sessions map[string]*session
 
@@ -72,6 +80,17 @@ type Manager struct {
 	// than a reply addressed to a caller, so two overlapping questions would
 	// each collect the other's sentences.
 	asking sync.Mutex
+
+	// pending is what has been typed while the agent was still answering,
+	// per project, in the order it was typed.
+	//
+	// Refusing it was the honest thing to do when there was nowhere to put it,
+	// and it made the screen behave unlike every other chat a person has used:
+	// a thought had while reading an answer had to be held in the head until
+	// the answer finished. The session still takes one turn at a time -- that
+	// is the harness's constraint, not this one's -- so the queue is drained
+	// when a turn ends.
+	pending map[string][]Message
 
 	// turns is the projects whose chat session is mid-turn.
 	//
@@ -121,6 +140,101 @@ func (m *Manager) Busy(projectID string) bool {
 type session struct {
 	cer    *cerebrate.Cerebrate
 	cancel context.CancelFunc
+
+	// worktree is where this session's agent is running, which is where an
+	// attachment has to be for it to read one.
+	worktree string
+}
+
+// attachDir is where uploads land inside the chat worktree.
+//
+// Named rather than hidden, and inside the worktree rather than beside it: the
+// agent is told a path and may well list the directory to see what else came
+// with it, and a dot-directory is one it would have to be told about twice.
+const attachDir = "attachments"
+
+// materialise copies uploads into the worktree and fills in where they landed.
+//
+// Copied rather than linked or read from the store: the agent's tools are
+// pointed at its own worktree, and a path outside it is both awkward to explain
+// and a route out of the only directory this agent is supposed to touch. The
+// bytes stay in the store as well, which is what keeps the picture in the
+// conversation after the worktree is removed.
+func (m *Manager) materialise(worktree string, files []Attachment) error {
+	if len(files) == 0 {
+		return nil
+	}
+	dir := filepath.Join(worktree, attachDir)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("making room for attachments: %w", err)
+	}
+	for i := range files {
+		dst := filepath.Join(dir, files[i].Name)
+		if err := copyFile(files[i].Source, dst); err != nil {
+			return fmt.Errorf("attaching %s: %w", files[i].Name, err)
+		}
+		files[i].Path = filepath.Join(attachDir, files[i].Name)
+	}
+	return nil
+}
+
+// copyFile writes src to dst, replacing whatever was there.
+//
+// The same name attached twice in one conversation is the ordinary case --
+// screenshot.png, then screenshot.png again -- and the newer one is the one
+// being talked about.
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	return out.Close()
+}
+
+// Message is one thing a person said, and whatever they attached to it.
+type Message struct {
+	Text string
+
+	// Files are paths inside the chat worktree, already written. Named in the
+	// prompt rather than sent as content: the agent has a filesystem and the
+	// tools to read it, and a path works the same for a screenshot, a log and
+	// a CSV.
+	Files []Attachment
+}
+
+// Attachment is one uploaded file, as the agent will see it.
+type Attachment struct {
+	// Name is what the person called it, for the transcript and for the copy
+	// the agent reads.
+	Name string
+
+	// Source is where the bytes are now: the blob store, under their digest.
+	Source string
+
+	// Path is where the agent finds them, filled in when the copy is made.
+	// Inside the chat worktree, because an agent asked to look at something
+	// should not have to be told about a directory belonging to the daemon.
+	Path string
+
+	// ArtifactID is the row holding the bytes, so the conversation can still
+	// show the picture after the worktree is gone.
+	ArtifactID string
+}
+
+// WithBlobs gives the manager the store holding attachments.
+func (m *Manager) WithBlobs(blobs *artifact.Store) *Manager {
+	m.blobs = blobs
+	return m
 }
 
 func NewManager(db *store.DB, reg *adapter.Registry, bus *event.Bus, log *slog.Logger, stateDir string) *Manager {
@@ -128,23 +242,32 @@ func NewManager(db *store.DB, reg *adapter.Registry, bus *event.Bus, log *slog.L
 		db: db, registry: reg, bus: bus, log: log, stateDir: stateDir,
 		sessions: map[string]*session{},
 		turns:    map[string]bool{},
+		pending:  map[string][]Message{},
 	}
 }
 
 // Ask sends a message and returns once the agent has it. The reply arrives as
 // events, the same way every other agent's output does.
-func (m *Manager) Ask(ctx context.Context, projectID, text string) error {
-	if text == "" {
+func (m *Manager) Ask(ctx context.Context, projectID string, msg Message) error {
+	if strings.TrimSpace(msg.Text) == "" && len(msg.Files) == 0 {
 		return fmt.Errorf("nothing to ask")
 	}
+	// Typed while the agent was still writing. It goes on the record now, in
+	// the order it was typed, and is sent when the turn in flight ends: the
+	// alternative was refusing it, which made the screen behave unlike every
+	// chat a person has used.
 	if !m.beginTurn(projectID) {
-		return ErrBusy
+		m.record(projectID, msg)
+		m.mu.Lock()
+		m.pending[projectID] = append(m.pending[projectID], msg)
+		m.mu.Unlock()
+		return nil
 	}
 	// Subscribed before the question is sent: an answer that arrives before
 	// the subscription exists would leave the session marked busy until the
 	// backstop, and every question in between refused.
 	events, cancel := m.bus.Subscribe(256)
-	if err := m.submit(ctx, projectID, text); err != nil {
+	if err := m.submit(ctx, projectID, msg); err != nil {
 		cancel()
 		m.endTurn(projectID)
 		return err
@@ -155,25 +278,112 @@ func (m *Manager) Ask(ctx context.Context, projectID, text string) error {
 	return nil
 }
 
-// submit records the question and hands it to the session.
-func (m *Manager) submit(ctx context.Context, projectID, text string) error {
-	// The question goes on the record before the answer, so a reload shows the
-	// conversation rather than replies with nothing to reply to.
+// Interrupt stops the answer being written, without ending the conversation.
+//
+// The session stays up, because it is where the conversation lives: stopping a
+// reply by killing the process answers "not that, I meant something else" by
+// forgetting everything said so far. Whatever was queued behind this turn is
+// dropped with it -- a follow-up typed against an answer you have just stopped
+// is about a reply that no longer exists.
+func (m *Manager) Interrupt(projectID string) error {
+	m.mu.Lock()
+	s, ok := m.sessions[projectID]
+	delete(m.pending, projectID)
+	m.mu.Unlock()
+	if !ok {
+		return nil
+	}
+	return s.cer.Interrupt()
+}
+
+// Queued is how many messages are waiting behind the answer in flight.
+func (m *Manager) Queued(projectID string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.pending[projectID])
+}
+
+// record puts what the person said on the transcript.
+//
+// Before the answer, and before the message is even sent when it is queued: a
+// reload has to show the conversation, and a question that appears only once
+// its reply arrives reads as a screen that lost what you typed.
+func (m *Manager) record(projectID string, msg Message) {
 	m.bus.Publish(event.Event{
-		Event:     adapter.Event{Kind: adapter.EventMessage, Text: text},
+		Event:     adapter.Event{Kind: adapter.EventMessage, Text: msg.Text, Args: attachmentArgs(msg.Files)},
 		ID:        store.NewID(),
 		ProjectID: projectID,
 		Role:      Operator,
 	})
+}
 
+// attachmentArgs carries the files on the event, so the conversation can show
+// them again after a reload. Nil when there are none, so an ordinary message
+// stores no payload at all.
+func attachmentArgs(files []Attachment) map[string]any {
+	if len(files) == 0 {
+		return nil
+	}
+	out := make([]any, 0, len(files))
+	for _, f := range files {
+		out = append(out, map[string]any{"name": f.Name, "artifactId": f.ArtifactID})
+	}
+	return map[string]any{"attachments": out}
+}
+
+// submit records the question and hands it to the session.
+func (m *Manager) submit(ctx context.Context, projectID string, msg Message) error {
+	// The question goes on the record before the answer, so a reload shows the
+	// conversation rather than replies with nothing to reply to.
+	m.record(projectID, msg)
+	return m.deliver(ctx, projectID, msg)
+}
+
+// deliver hands a message to the session without recording it again, for the
+// queued ones that went on the transcript when they were typed.
+func (m *Manager) deliver(ctx context.Context, projectID string, msg Message) error {
 	s, err := m.ensure(ctx, projectID)
 	if err != nil {
+		return err
+	}
+	if err := m.materialise(s.worktree, msg.Files); err != nil {
 		return err
 	}
 	if err := s.cer.WaitReady(ctx); err != nil {
 		return fmt.Errorf("chat agent did not start: %w", err)
 	}
-	return s.cer.Submit(text)
+	return s.cer.Submit(prompt(msg))
+}
+
+// prompt is what the agent is actually sent: what was said, and where to find
+// whatever came with it.
+//
+// The paths are named rather than the contents inlined. An agent has a
+// filesystem and the tools to read it, so a path works the same for a
+// screenshot, a log and a spreadsheet, and a large file does not have to
+// survive being pasted into a prompt to be read.
+func prompt(msg Message) string {
+	text := strings.TrimSpace(msg.Text)
+	if len(msg.Files) == 0 {
+		return text
+	}
+	var b strings.Builder
+	if text != "" {
+		b.WriteString(text)
+		b.WriteString("\n\n")
+	}
+	if len(msg.Files) == 1 {
+		b.WriteString("Attached, in this worktree: ")
+	} else {
+		b.WriteString("Attached, in this worktree:\n")
+	}
+	for i, f := range msg.Files {
+		if i > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString(f.Path)
+	}
+	return b.String()
 }
 
 // turnBackstop frees a session whose agent never said it had finished.
@@ -183,9 +393,10 @@ func (m *Manager) submit(ctx context.Context, projectID, text string) error {
 // refused. Long enough not to cut a real answer short.
 const turnBackstop = 5 * time.Minute
 
-// releaseAtTurnEnd frees the session when the agent stops talking.
+// releaseAtTurnEnd frees the session when the agent stops talking, and sends
+// whatever was typed while it was.
 func (m *Manager) releaseAtTurnEnd(projectID string, events <-chan event.Event, cancel func()) {
-	defer m.endTurn(projectID)
+	defer m.drainOrRelease(projectID)
 	defer cancel()
 
 	said := false
@@ -217,6 +428,39 @@ func (m *Manager) releaseAtTurnEnd(projectID string, events <-chan event.Event, 
 			}
 		}
 	}
+}
+
+// drainOrRelease sends the next queued message, or frees the session when
+// there is none.
+//
+// The turn is handed straight to the next message rather than released and
+// re-taken: releasing first would let a review's question in between two
+// things a person typed in a row, and that question would then collect the
+// answer to theirs.
+func (m *Manager) drainOrRelease(projectID string) {
+	m.mu.Lock()
+	queued := m.pending[projectID]
+	if len(queued) == 0 {
+		m.mu.Unlock()
+		m.endTurn(projectID)
+		return
+	}
+	next := queued[0]
+	m.pending[projectID] = queued[1:]
+	m.mu.Unlock()
+
+	// Its own context and its own subscription: the turn that just ended owns
+	// neither any more.
+	events, cancel := m.bus.Subscribe(256)
+	ctx, stop := context.WithTimeout(context.Background(), time.Minute)
+	defer stop()
+	if err := m.deliver(ctx, projectID, next); err != nil {
+		m.log.Warn("could not send a queued chat message", "project", projectID, "err", err)
+		cancel()
+		m.endTurn(projectID)
+		return
+	}
+	go m.releaseAtTurnEnd(projectID, events, cancel)
 }
 
 // ensure starts the session for a project if it is not already running.
@@ -293,6 +537,9 @@ func (m *Manager) ensure(ctx context.Context, projectID string) (*session, error
 		Bus:          m.bus,
 		Log:          m.log,
 		SystemPrompt: systemPrompt,
+		// The one session somebody watches being written. A pipeline role's
+		// output is read afterwards, if at all, so it is not asked for there.
+		Streaming: true,
 	})
 
 	// Not tied to the request that started it: the session outlives the message
@@ -304,7 +551,7 @@ func (m *Manager) ensure(ctx context.Context, projectID string) (*session, error
 		}
 	}()
 
-	s := &session{cer: cer, cancel: cancel}
+	s := &session{cer: cer, cancel: cancel, worktree: worktree}
 	m.sessions[projectID] = s
 	return s, nil
 }
@@ -357,8 +604,30 @@ func (m *Manager) Reset(ctx context.Context, projectID string) error {
 	if err := hatchery.New(project.Path).RemoveWorktree(ctx, Role); err != nil {
 		return fmt.Errorf("removing the chat worktree: %w", err)
 	}
-	if err := m.db.DeleteRoleEvents(ctx, projectID, Role); err != nil {
-		return fmt.Errorf("clearing the conversation: %w", err)
+	// Both sides of it. Deleting only the agent's left the person's questions
+	// on screen with nothing answering them, which reads as a chat that lost
+	// its replies rather than one that was ended.
+	for _, role := range []string{Role, Operator} {
+		if err := m.db.DeleteRoleEvents(ctx, projectID, role); err != nil {
+			return fmt.Errorf("clearing the conversation: %w", err)
+		}
+	}
+	// And whatever was attached to it. These are exempt from the ordinary
+	// sweep, so this is the moment they stop being wanted.
+	orphans, err := m.db.DeleteChatAttachments(ctx, projectID)
+	if err != nil {
+		return fmt.Errorf("clearing the conversation's files: %w", err)
+	}
+	if m.blobs != nil {
+		for _, digest := range orphans {
+			if err := m.blobs.Remove(digest); err != nil {
+				// The row is gone, so the conversation is gone; a file left on
+				// disk is waste, not a wrong answer, and the sweep will not
+				// find it again. Said rather than returned.
+				m.log.Warn("could not remove an attachment's bytes",
+					"project", projectID, "digest", digest, "err", err)
+			}
+		}
 	}
 	return nil
 }
@@ -395,7 +664,7 @@ func (m *Manager) AskAndWait(ctx context.Context, projectID, question string) (s
 	events, cancel := m.bus.Subscribe(256)
 	defer cancel()
 
-	if err := m.submit(ctx, projectID, question); err != nil {
+	if err := m.submit(ctx, projectID, Message{Text: question}); err != nil {
 		return "", err
 	}
 

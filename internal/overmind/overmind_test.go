@@ -88,6 +88,10 @@ func (h *scriptedHarness) EncodeTurn(text string) ([]byte, error) {
 	return []byte(text + "\n"), nil
 }
 
+func (h *scriptedHarness) EncodeInterrupt() ([]byte, error) {
+	return []byte("{\"interrupt\":true}\n"), nil
+}
+
 // turns and spawns are read from the test goroutine while the supervisor
 // writes them, so both need the lock. Reading a counter unlocked because "it
 // is only a test" is still a race, and the detector is right to say so.

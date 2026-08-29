@@ -202,13 +202,21 @@ func (db *DB) ListEvents(ctx context.Context, q EventQuery) ([]Event, error) {
 // A pinned task is exempt, however old. That is what pinning is for: the card
 // worth reading in six months is usually the one that went wrong, and the
 // window that is right for a project's ordinary work is wrong for that one.
+//
+// A conversation is exempt too, and for a different reason. These events are a
+// role's working notes, kept for as long as they are worth replaying; a chat is
+// the thing itself, and there is no other copy. A conversation that emptied
+// itself after a fortnight, halfway through, with nothing said and nothing to
+// undo, is not a retention policy anybody chose. It ends when the person ends
+// it, which deletes it outright.
 func (db *DB) PruneEvents(ctx context.Context, before time.Time) (int64, error) {
 	res, err := db.sql.ExecContext(ctx,
 		`DELETE FROM events
 		  WHERE ts < ?
+		    AND role NOT IN (?, ?)
 		    AND (task_id IS NULL
 		         OR NOT EXISTS (SELECT 1 FROM tasks t WHERE t.id = events.task_id AND t.pinned = 1))`,
-		before.UTC().Format(time.RFC3339Nano))
+		before.UTC().Format(time.RFC3339Nano), ChatRole, OperatorRole)
 	if err != nil {
 		return 0, fmt.Errorf("pruning events: %w", err)
 	}

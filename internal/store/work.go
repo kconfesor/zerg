@@ -43,6 +43,12 @@ const (
 // worked on a card without it.
 const OperatorRole = "operator"
 
+// ChatRole is the agent a person talks to about the project, outside the
+// pipeline. Named here rather than imported from internal/chat, because the
+// store cannot depend on it and retention has to know which events are a
+// conversation.
+const ChatRole = "chat"
+
 // LaneDone is the well a finished card lands in.
 const LaneDone = "done"
 

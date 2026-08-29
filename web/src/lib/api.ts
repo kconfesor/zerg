@@ -532,11 +532,45 @@ export const api = {
   answer: (id: string, answer: string) =>
     call<void>(`/clarifications/${id}/answer`, { method: 'POST', body: JSON.stringify({ answer }) }),
 
-  chat: (id: string, message: string) =>
+  chat: (id: string, message: string, attachments: string[] = []) =>
     call<{ status: string }>(`/projects/${id}/chat`, {
       method: 'POST',
-      body: JSON.stringify({ message }),
+      body: JSON.stringify({ message, attachments }),
     }),
+
+  /** Stops the answer being written. The conversation, and the agent's memory
+   *  of it, stay. */
+  interruptChat: (id: string) =>
+    call<void>(`/projects/${id}/chat/interrupt`, { method: 'POST' }),
+
+  /**
+   * Uploads one file to attach to a message.
+   *
+   * Its own request rather than part of the message: a slow upload does not
+   * hold what was typed, a failed one does not lose it, and the browser sets
+   * the multipart boundary itself, which is why the content type is left
+   * alone here.
+   */
+  chatAttach: async (id: string, file: File): Promise<Artifact> => {
+    const form = new FormData()
+    form.append('file', file)
+    const res = await fetch(`/api/projects/${id}/chat/attachments`, {
+      method: 'POST',
+      body: form,
+    })
+    const text = await res.text()
+    const body = text ? JSON.parse(text) : undefined
+    if (!res.ok) {
+      throw new ApiError(
+        body && typeof body === 'object' && 'error' in body
+          ? String((body as { error: unknown }).error)
+          : res.statusText,
+        res.status,
+        body,
+      )
+    }
+    return body as Artifact
+  },
 
   taskDetail: (id: string) => call<TaskDetail>(`/tasks/${id}`),
   /** What a task produced: files to look at, and services to open. */
@@ -736,6 +770,9 @@ export interface ActivityEvent {
     | 'usage'
     | 'turn_end'
     | 'error'
+    /** A fragment of a message being written. Live only: these are never
+     *  recorded, and the whole message follows as an ordinary `message`. */
+    | 'message_delta'
   at: string
   text?: string
   tool?: string

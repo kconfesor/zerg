@@ -10,6 +10,7 @@
 import { computed, nextTick, onBeforeUnmount, ref, useId, watch } from 'vue'
 import {
   api,
+  artifactBytes,
   streamActivity,
   type ActivityEvent,
   type ActivityStream,
@@ -19,7 +20,7 @@ import {
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
 import ModelPicker from '@/components/ModelPicker.vue'
-import { Trash2 } from '@lucide/vue'
+import { Paperclip, Square, Trash2, X } from '@lucide/vue'
 import {
   Dialog,
   DialogContent,
@@ -35,7 +36,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import { renderMarkdown } from '@/lib/markdown'
+import AnswerBody from '@/components/AnswerBody.vue'
 import {
   InputGroup,
   InputGroupAddon,
@@ -68,6 +69,25 @@ interface Line {
   who: 'you' | 'agent'
   text: string
   tool?: string
+  /** Files sent with this message, for the ones the person wrote. */
+  files?: { name: string; artifactId: string }[]
+  /** Still being written. A streamed answer is assembled from fragments and
+   *  then replaced by the authoritative message when the block closes. */
+  live?: boolean
+  /** Sent, but behind an answer still being written. */
+  queued?: boolean
+}
+
+/** A file chosen but not yet sent with a message. */
+interface Pending {
+  /** Local id, so a row can be removed before the upload finishes. */
+  key: string
+  name: string
+  size: number
+  /** The artifact once the upload lands; absent while it is in flight. */
+  artifactId?: string
+  error?: string
+  preview?: string
 }
 
 /**
@@ -77,11 +97,31 @@ interface Line {
  */
 const MAX_LINES = 500
 
+/** Whether to show the file rather than name it. By extension, because the
+ *  transcript records what the file was called and not what it was. */
+function isImage(name: string): boolean {
+  return /\.(png|jpe?g|gif|webp|avif|svg)$/i.test(name)
+}
+
 const lines = ref<Line[]>([])
 const draft = ref('')
 const sending = ref(false)
 const thinking = ref(false)
 const error = ref('')
+
+/** Files chosen for the next message, uploading or uploaded. */
+const attachments = ref<Pending[]>([])
+const stopping = ref(false)
+const fileInput = ref<HTMLInputElement | null>(null)
+const dragging = ref(false)
+
+/** Ready to send: nothing still uploading, and something to say. */
+const canSend = computed(
+  () =>
+    !!projectId.value &&
+    (draft.value.trim() !== '' || attachments.value.some((a) => a.artifactId)) &&
+    !attachments.value.some((a) => !a.artifactId && !a.error),
+)
 const viewport = ref<HTMLElement | null>(null)
 let stream: ActivityStream | null = null
 
@@ -89,10 +129,36 @@ function accept(e: ActivityEvent) {
   if (e.role !== CHAT && e.role !== OPERATOR) return
 
   if (e.role === OPERATOR) {
-    lines.value.push({ id: e.id, who: 'you', text: e.text ?? '' })
+    const files = (e.data?.attachments as Line['files']) ?? undefined
+    // Typed while the agent was still writing. The daemon queues it and
+    // answers it next; saying so is the difference between "it is coming" and
+    // "did that send?".
+    const queued = thinking.value
+    lines.value.push({ id: e.id, who: 'you', text: e.text ?? '', files, queued })
+  } else if (e.kind === 'message_delta' && e.text) {
+    // A fragment of the answer being written. Assembled into one line rather
+    // than pushed as many: the reader is watching a sentence appear, not a
+    // list of syllables.
+    thinking.value = false
+    const last = lines.value[lines.value.length - 1]
+    if (last?.who === 'agent' && last.live) {
+      last.text += e.text
+    } else {
+      lines.value.push({ id: e.id, who: 'agent', text: e.text, live: true })
+    }
   } else if (e.kind === 'message' && e.text) {
     thinking.value = false
-    lines.value.push({ id: e.id, who: 'agent', text: e.text })
+    // The authoritative text for something already on screen in pieces. It
+    // replaces the assembled version rather than following it, or every
+    // streamed answer would appear twice.
+    const last = lines.value[lines.value.length - 1]
+    if (last?.who === 'agent' && last.live) {
+      last.text = e.text
+      last.id = e.id
+      last.live = false
+    } else {
+      lines.value.push({ id: e.id, who: 'agent', text: e.text })
+    }
   } else if (e.kind === 'tool_call') {
     // Shown, because "it is reading files" is the difference between working
     // and hung, and an answer about the repository should be traceable to what
@@ -100,6 +166,14 @@ function accept(e: ActivityEvent) {
     lines.value.push({ id: e.id, who: 'agent', text: '', tool: e.tool })
   } else if (e.kind === 'turn_end') {
     thinking.value = false
+    // Whatever was still marked live is finished, streamed or not.
+    for (const l of lines.value) l.live = false
+    // The first queued message is now the one being answered.
+    const next = lines.value.find((l) => l.queued)
+    if (next) {
+      next.queued = false
+      thinking.value = true
+    }
   } else if (e.kind === 'error') {
     thinking.value = false
     error.value = e.text ?? 'the agent failed'
@@ -198,6 +272,76 @@ async function resetChat() {
   }
 }
 
+/**
+ * Takes files from the picker, a drop, or a paste.
+ *
+ * Uploaded as they are chosen rather than when the message is sent: a slow
+ * upload does not hold what was typed, and one that fails does not take the
+ * message with it. The row appears immediately so the person can see it
+ * arriving and remove it if they picked the wrong thing.
+ */
+async function attach(files: FileList | File[] | null) {
+  if (!files || !projectId.value) return
+  for (const file of Array.from(files)) {
+    const key = `${file.name}-${file.size}-${Math.random().toString(36).slice(2)}`
+    const row: Pending = { key, name: file.name, size: file.size }
+    // A picture is shown before it has finished uploading: it is how you tell
+    // at a glance that you attached the right screenshot.
+    if (file.type.startsWith('image/')) row.preview = URL.createObjectURL(file)
+    attachments.value.push(row)
+    try {
+      const made = await api.chatAttach(projectId.value, file)
+      row.artifactId = made.id
+      row.name = made.name || row.name
+    } catch (e) {
+      row.error = e instanceof Error ? e.message : String(e)
+    }
+  }
+}
+
+function removeAttachment(key: string) {
+  const row = attachments.value.find((a) => a.key === key)
+  if (row?.preview) URL.revokeObjectURL(row.preview)
+  attachments.value = attachments.value.filter((a) => a.key !== key)
+}
+
+/** A screenshot pasted straight in, which is how most of them arrive. */
+function onPaste(ev: ClipboardEvent) {
+  const files = Array.from(ev.clipboardData?.files ?? [])
+  if (files.length) {
+    ev.preventDefault()
+    void attach(files)
+  }
+}
+
+function onDrop(ev: DragEvent) {
+  dragging.value = false
+  const files = ev.dataTransfer?.files
+  if (files?.length) void attach(files)
+}
+
+/**
+ * Stops the answer being written.
+ *
+ * Not the conversation: the session stays up, so the next question still has
+ * everything said before it. Ending the chat is a different button with a
+ * confirmation on it.
+ */
+async function stop() {
+  if (!projectId.value || stopping.value) return
+  stopping.value = true
+  try {
+    await api.interruptChat(projectId.value)
+    thinking.value = false
+    // Anything queued behind it was about the answer just stopped.
+    lines.value = lines.value.filter((l) => !l.queued)
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    stopping.value = false
+  }
+}
+
 function scrollToEnd() {
   nextTick(() => {
     const el = viewport.value
@@ -207,14 +351,23 @@ function scrollToEnd() {
 
 async function send() {
   const text = draft.value.trim()
-  if (!text || !projectId.value) return
+  const files = attachments.value.filter((a) => a.artifactId)
+  if (!canSend.value) return
   sending.value = true
   error.value = ''
   try {
-    await api.chat(projectId.value, text)
+    await api.chat(
+      projectId.value!,
+      text,
+      files.map((f) => f.artifactId!),
+    )
     draft.value = ''
+    for (const f of attachments.value) if (f.preview) URL.revokeObjectURL(f.preview)
+    attachments.value = []
     // The agent's first output can be a minute away on a large repository, so
-    // say it is working rather than leaving the panel looking inert.
+    // say it is working rather than leaving the panel looking inert. A message
+    // sent while it is already writing is queued by the daemon and answered
+    // next, so this stays true either way.
     thinking.value = true
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e)
@@ -286,9 +439,10 @@ onBeforeUnmount(() => stream?.close())
       </p>
 
       <div class="flex flex-col gap-3">
-        <!-- A line never changes once it is in the transcript, so it never
-             needs patching again. -->
-        <div v-for="l in lines" :key="l.id" v-memo="[]" class="text-xs">
+        <!-- A finished line never changes again, so it is memoised on the
+             two things that can: the text while it is still being written,
+             and whether it is still queued behind an answer. -->
+        <div v-for="l in lines" :key="l.id" v-memo="[l.text, l.live, l.queued]" class="text-xs">
           <template v-if="l.tool">
             <p class="text-muted-foreground font-mono text-[11px]">
               <span class="opacity-60">read</span> {{ l.tool }}
@@ -306,8 +460,41 @@ onBeforeUnmount(() => stream?.close())
                  put there, so nothing an agent read out of the repository can
                  become HTML. Your own messages stay literal — you typed them,
                  and showing them back reformatted is confusing. -->
-            <p v-if="l.who === 'you'" class="leading-relaxed whitespace-pre-wrap">{{ l.text }}</p>
-            <div v-else class="md leading-relaxed" v-html="renderMarkdown(l.text)" />
+            <p v-if="l.who === 'you' && l.text" class="leading-relaxed whitespace-pre-wrap">
+              {{ l.text }}
+            </p>
+            <AnswerBody v-else-if="l.who === 'agent'" :text="l.text" />
+
+            <!-- What was attached. The picture is shown, because a screenshot
+                 you sent is the subject of the answer under it and a file name
+                 is not; anything else is a link, since the agent read it from
+                 the worktree and you may want to read it too. -->
+            <div v-if="l.files?.length" class="mt-1.5 flex flex-wrap gap-2">
+              <a
+                v-for="f in l.files"
+                :key="f.artifactId"
+                :href="artifactBytes(f.artifactId)"
+                target="_blank"
+                rel="noopener noreferrer"
+                class="focus-visible:outline-ring block border focus-visible:outline-2"
+                :title="f.name"
+              >
+                <img
+                  v-if="isImage(f.name)"
+                  :src="artifactBytes(f.artifactId)"
+                  :alt="f.name"
+                  class="max-h-40 max-w-full object-contain"
+                  loading="lazy"
+                />
+                <span v-else class="text-muted-foreground block px-2 py-1 text-[11px]">
+                  {{ f.name }}
+                </span>
+              </a>
+            </div>
+
+            <p v-if="l.queued" class="text-muted-foreground mt-0.5 text-[10px] italic">
+              waiting for the answer above
+            </p>
           </template>
         </div>
 
@@ -319,29 +506,114 @@ onBeforeUnmount(() => stream?.close())
 
     <!-- One control rather than a field with a button parked beside it. The
          two belong together — the button does nothing except to this text —
-         and a separate box made them read as two decisions. -->
-    <InputGroup>
-      <InputGroupTextarea
-        v-model="draft"
-        rows="2"
-        class="text-xs"
-        placeholder="What does the evaluator do with unary minus?"
-        :disabled="!projectId"
-        @keydown="onKeydown"
-      />
-      <InputGroupAddon align="block-end">
-        <span class="text-muted-foreground text-[10px]">enter to send</span>
-        <InputGroupButton
-          variant="default"
-          size="sm"
-          class="ml-auto"
-          :disabled="sending || !draft.trim() || !projectId"
-          @click="send"
+         and a separate box made them read as two decisions.
+
+         The whole thing is a drop target: a screenshot is dragged in as often
+         as it is picked, and a zone that only accepts a drop on the exact
+         button is one people miss. -->
+    <div
+      class="relative"
+      @dragover.prevent="dragging = true"
+      @dragleave="dragging = false"
+      @drop.prevent="onDrop"
+    >
+      <div
+        v-if="dragging"
+        class="border-primary bg-primary/5 text-primary pointer-events-none absolute inset-0 z-10 flex items-center justify-center border-2 border-dashed text-xs"
+      >
+        drop to attach
+      </div>
+
+      <!-- What is going with the next message. Shown before it is sent, so a
+           wrong file can be taken off rather than discovered in the answer. -->
+      <div v-if="attachments.length" class="mb-1.5 flex flex-wrap gap-2">
+        <div
+          v-for="a in attachments"
+          :key="a.key"
+          class="flex items-center gap-1.5 border px-1.5 py-1 text-[11px]"
+          :class="a.error ? 'border-destructive text-destructive' : 'text-muted-foreground'"
         >
-          {{ sending ? '…' : 'Ask' }}
-        </InputGroupButton>
-      </InputGroupAddon>
-    </InputGroup>
+          <img
+            v-if="a.preview"
+            :src="a.preview"
+            :alt="a.name"
+            class="size-6 object-cover"
+          />
+          <span class="max-w-[12rem] truncate" :title="a.error || a.name">{{ a.name }}</span>
+          <span v-if="!a.artifactId && !a.error" class="opacity-60">sending…</span>
+          <span v-else-if="a.error" class="opacity-80">failed</span>
+          <button
+            type="button"
+            class="hover:text-foreground focus-visible:outline-ring focus-visible:outline-2"
+            :aria-label="`Remove ${a.name}`"
+            @click="removeAttachment(a.key)"
+          >
+            <X :size="11" aria-hidden="true" />
+          </button>
+        </div>
+      </div>
+
+      <InputGroup>
+        <InputGroupTextarea
+          v-model="draft"
+          rows="2"
+          class="text-xs"
+          placeholder="What does the evaluator do with unary minus?"
+          :disabled="!projectId"
+          @keydown="onKeydown"
+          @paste="onPaste"
+        />
+        <InputGroupAddon align="block-end" class="gap-2">
+          <input
+            ref="fileInput"
+            type="file"
+            multiple
+            class="hidden"
+            @change="attach(($event.target as HTMLInputElement).files); ($event.target as HTMLInputElement).value = ''"
+          />
+          <InputGroupButton
+            variant="ghost"
+            size="sm"
+            :disabled="!projectId"
+            title="Attach a file or an image"
+            aria-label="Attach a file"
+            @click="fileInput?.click()"
+          >
+            <Paperclip :size="14" aria-hidden="true" />
+          </InputGroupButton>
+          <span class="text-muted-foreground text-[10px]">
+            enter to send · drop or paste a file
+          </span>
+
+          <!-- Stopping the answer, not the conversation: the session and
+               everything said before it stay, which is why this is not the
+               same control as End this chat. -->
+          <InputGroupButton
+            v-if="thinking"
+            variant="outline"
+            size="sm"
+            class="ml-auto gap-1.5"
+            :disabled="stopping"
+            title="Stop this answer. The conversation stays."
+            @click="stop"
+          >
+            <Square :size="11" aria-hidden="true" />
+            Stop
+          </InputGroupButton>
+          <InputGroupButton
+            v-else
+            variant="default"
+            size="sm"
+            class="ml-auto"
+            :disabled="sending || !canSend"
+            @click="send"
+          >
+            {{ sending ? '…' : 'Ask' }}
+          </InputGroupButton>
+        </InputGroupAddon>
+      </InputGroup>
+    </div>
+
     <Dialog v-model:open="confirmReset">
       <DialogContent class="sm:max-w-md">
         <DialogHeader>

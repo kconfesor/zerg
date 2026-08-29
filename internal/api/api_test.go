@@ -891,3 +891,36 @@ func TestTheAskPromptCarriesTheHunkAndAsksForAnAnswer(t *testing.T) {
 		}
 	}
 }
+
+// A name a browser sent must not choose where the file lands.
+//
+// It becomes a path inside the chat worktree, so "../../.ssh/authorized_keys"
+// -- from a hostile page, or from somebody who genuinely named a file that --
+// has to come out as a plain name and nothing else.
+func TestAnUploadedNameCannotEscapeTheDirectory(t *testing.T) {
+	for _, tc := range []struct{ sent, want string }{
+		{"screenshot.png", "screenshot.png"},
+		{"../../.ssh/authorized_keys", "authorized_keys"},
+		{"/etc/passwd", "passwd"},
+		{"..", "attachment"},
+		{".", "attachment"},
+		{"", "attachment"},
+		{"   ", "attachment"},
+		{".hidden", "hidden"},
+		{"C:\\Users\\me\\notes.txt", "C:\\Users\\me\\notes.txt"},
+	} {
+		got := safeName(tc.sent)
+		if got != tc.want {
+			t.Errorf("safeName(%q) = %q, want %q", tc.sent, got, tc.want)
+		}
+		if strings.Contains(got, "/") || got == "." || got == ".." {
+			t.Errorf("safeName(%q) = %q, which is still a path", tc.sent, got)
+		}
+	}
+
+	// A very long name is cut rather than refused: the file is what matters
+	// and the name is decoration.
+	if got := safeName(strings.Repeat("a", 300) + ".png"); len(got) != 120 {
+		t.Errorf("a 300-character name came back %d long", len(got))
+	}
+}

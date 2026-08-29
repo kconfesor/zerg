@@ -228,6 +228,11 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/projects/{id}/icon", s.projectIcon)
 	mux.HandleFunc("POST /api/projects/{id}/chat", s.askChat)
 	mux.HandleFunc("DELETE /api/projects/{id}/chat", s.resetChat)
+	mux.HandleFunc("POST /api/projects/{id}/chat/attachments", s.attachToChat)
+	// A stop for the answer, not for the conversation: DELETE /chat ends the
+	// whole thing, worktree and transcript included, and these are two very
+	// different buttons to press by accident.
+	mux.HandleFunc("POST /api/projects/{id}/chat/interrupt", s.interruptChat)
 	mux.HandleFunc("PUT /api/projects/{id}/chat-agent", s.setChatAgent)
 	mux.HandleFunc("GET /api/settings/shared-instructions", s.getSharedInstructions)
 	mux.HandleFunc("PUT /api/settings/shared-instructions", s.setSharedInstructions)

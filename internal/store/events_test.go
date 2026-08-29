@@ -11,7 +11,7 @@ import (
 // The sweep is what makes history affordable, and it is also what would take
 // the one card somebody wanted to read in six months. Pinning is the exemption,
 // and it has to hold on the delete itself rather than in a caller.
-func TestPruneKeepsAPinnedTasksTranscript(t *testing.T) {
+func TestPruneKeepsAPinnedTasksTranscriptAndEveryConversation(t *testing.T) {
 	ctx := context.Background()
 	db, p := seeded(t)
 
@@ -43,19 +43,37 @@ func TestPruneKeepsAPinnedTasksTranscript(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// And an event belonging to no task at all, which is what a chat leaves.
-	if err := db.RecordEvent(ctx, &Event{
-		ID: NewID(), ProjectID: p.ID, Role: "chat", Kind: "message", At: old, Text: "hello",
-	}); err != nil {
-		t.Fatal(err)
+	// And a conversation, which belongs to no task and is not a transcript of
+	// work: there is no other copy of it, and it ends when the person ends it.
+	for _, said := range []struct{ role, text string }{
+		{OperatorRole, "why is the evaluator recursive?"},
+		{ChatRole, "because the grammar is"},
+	} {
+		if err := db.RecordEvent(ctx, &Event{
+			ID: NewID(), ProjectID: p.ID, Role: said.role, Kind: "message", At: old, Text: said.text,
+		}); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	n, err := db.PruneEvents(ctx, time.Now().Add(-30*24*time.Hour))
 	if err != nil {
 		t.Fatalf("PruneEvents: %v", err)
 	}
-	if n != 2 {
-		t.Errorf("swept %d events, want the unpinned card's and the chat's", n)
+	if n != 1 {
+		t.Errorf("swept %d events, want only the unpinned card's", n)
+	}
+
+	// The conversation is still there, both halves of it. It used to go with
+	// the rest, so a chat emptied itself after a fortnight with nothing said.
+	for _, role := range []string{OperatorRole, ChatRole} {
+		said, err := db.ListEvents(ctx, EventQuery{ProjectID: p.ID, Role: role})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(said) != 1 {
+			t.Errorf("%s kept %d of its messages, want 1", role, len(said))
+		}
 	}
 
 	left, err := db.ListEvents(ctx, EventQuery{ProjectID: p.ID, Task: kept})

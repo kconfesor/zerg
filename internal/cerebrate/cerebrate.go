@@ -103,6 +103,12 @@ type Config struct {
 	// HarnessFlags apply to every role on this harness, from settings.
 	HarnessFlags []string
 
+	// Streaming asks for the answer as it is written, for a session somebody
+	// is watching. Chat sets it; the pipeline does not, because nothing reads
+	// a role's output as it appears and the fragments are volume on the bus
+	// for no reader.
+	Streaming bool
+
 	// SystemPrompt is composed from shared instructions plus the role prompt.
 	// It is the value to use when Refresh is nil or fails.
 	SystemPrompt string
@@ -171,6 +177,11 @@ type Cerebrate struct {
 	// init, no ready, no turn. What matters is whether the agent is mid-turn,
 	// which is a thing the supervisor knows without being told.
 	busy bool
+
+	// interrupting is set between asking a harness to stop and it saying it
+	// has. Exactly one event is affected: the error the harness reports for the
+	// turn it just abandoned, which is not a fault and must not read as one.
+	interrupting bool
 
 	// spoke is when this agent last produced anything at all.
 	//
@@ -508,6 +519,11 @@ func (c *Cerebrate) runOnce(ctx context.Context) (fatal bool, ranFor time.Durati
 		Token:     c.cfg.Token,
 		BinDir:    c.cfg.BinDir,
 		Env:       c.cfg.Env,
+		// Only where somebody is watching the words appear, and only where the
+		// harness can do it. Asking a harness that cannot would either be
+		// ignored or refused at spawn, and neither is worth finding out per
+		// role at runtime.
+		Streaming: c.cfg.Streaming && c.sessionAdapter().Capabilities().Streaming,
 	}
 
 	// Preflight runs before every spawn, not only at Start: a token expires, a
@@ -643,6 +659,18 @@ func (c *Cerebrate) readStream(stdout io.Reader) error {
 			continue
 		}
 		for _, ev := range events {
+			// A turn stopped on request ends the way a failed one does: the
+			// harness reports a result marked as an error, with nothing to say
+			// about it. The adapter cannot tell those apart -- it did not ask
+			// for the stop -- so it is untangled here, where the asking
+			// happened. Without this, pressing stop put "the harness reported
+			// an error without describing it" on screen underneath the answer
+			// somebody had just chosen to cut short.
+			if ev.Kind == adapter.EventError && c.tookInterrupt() {
+				c.observe(adapter.Event{Kind: adapter.EventTurnEnd})
+				c.publish(adapter.Event{Kind: adapter.EventTurnEnd})
+				continue
+			}
 			c.observe(ev)
 			c.publish(ev)
 			if ev.Kind == adapter.EventQuota && ev.Quota != nil {
@@ -696,6 +724,16 @@ func (c *Cerebrate) observe(ev adapter.Event) {
 	}
 }
 
+// tookInterrupt reports whether this error belongs to a stop somebody asked
+// for, and clears the flag either way: one interrupt ends one turn.
+func (c *Cerebrate) tookInterrupt() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	was := c.interrupting
+	c.interrupting = false
+	return was
+}
+
 func (c *Cerebrate) publish(ev adapter.Event) {
 	c.mu.Lock()
 	c.spoke = c.cfg.clock()
@@ -735,6 +773,46 @@ func (c *Cerebrate) Idle() bool {
 // the shape. Nothing here injects keystrokes: this is a write to a pipe, and a
 // closed pipe is an error the caller can see, rather than a tmux exit code of 0
 // that only ever meant "the keys were accepted".
+// Interrupt ends the turn in flight, keeping the session.
+//
+// The conversation is inside the running harness, so stopping a reply by
+// killing the process answers "cancel this" by forgetting everything said so
+// far. Where a harness has a message for it, that is what is sent; where it
+// does not, the caller is told rather than left believing something happened.
+func (c *Cerebrate) Interrupt() error {
+	c.mu.RLock()
+	w, busy := c.stdin, c.busy
+	c.mu.RUnlock()
+	if w == nil {
+		return fmt.Errorf("%s is not running", c.name())
+	}
+	// Nothing to stop is not a failure: the answer arrived while the button was
+	// being pressed, which is the common case for a short turn.
+	if !busy {
+		return nil
+	}
+
+	payload, err := c.sessionAdapter().EncodeInterrupt()
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	c.interrupting = true
+	c.mu.Unlock()
+
+	if _, err := w.Write(payload); err != nil {
+		c.mu.Lock()
+		c.interrupting = false
+		c.mu.Unlock()
+		return fmt.Errorf("interrupting %s: %w", c.name(), err)
+	}
+	// Deliberately not clearing busy here. The turn is over when the harness
+	// says it is over, and it reports that the same way it reports any other
+	// ending; assuming otherwise would let the next question in while this one
+	// is still unwinding.
+	return nil
+}
+
 func (c *Cerebrate) Submit(text string) error {
 	c.mu.RLock()
 	w := c.stdin
