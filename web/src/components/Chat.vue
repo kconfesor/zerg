@@ -403,20 +403,49 @@ async function setAgent(h: string, m: string) {
 async function attach(files: FileList | File[] | null) {
   if (!files || !projectId.value || !openChat.value) return
   for (const file of Array.from(files)) {
-    const key = `${file.name}-${file.size}-${Math.random().toString(36).slice(2)}`
-    const row: Pending = { key, name: file.name, size: file.size }
+    const key = `${file.name || 'pasted'}-${file.size}-${Math.random().toString(36).slice(2)}`
+    const row: Pending = { key, name: file.name || pastedName(file), size: file.size }
+    // Something pasted arrives with no name at all, and a multipart part with
+    // no filename is a form value rather than a file: the daemon answered
+    // "attach a file under the form field file" for a picture that was right
+    // there. Sent under the name the chip is already showing, so the two
+    // cannot disagree.
+    const sending = file.name ? file : new File([file], row.name, { type: file.type })
     // A picture is shown before it has finished uploading: it is how you tell
     // at a glance that you attached the right screenshot.
     if (file.type.startsWith('image/')) row.preview = URL.createObjectURL(file)
     attachments.value.push(row)
     try {
-      const made = await api.chatAttach(projectId.value, openChat.value!, file)
-      row.artifactId = made.id
-      row.name = made.name || row.name
+      const made = await api.chatAttach(projectId.value, openChat.value, sending)
+      update(key, { artifactId: made.id, name: made.name || row.name })
     } catch (e) {
-      row.error = e instanceof Error ? e.message : String(e)
+      update(key, { error: e instanceof Error ? e.message : String(e) })
     }
   }
+}
+
+/**
+ * Writes to a pending row through the array that holds it.
+ *
+ * The object pushed in is not the object the template renders: the ref wraps
+ * it in a proxy, and writing to the original changes the data without telling
+ * anything to look again. A pasted screenshot uploaded fine, was recorded, and
+ * sat on screen saying "sending…" for as long as the tab was open.
+ */
+function update(key: string, patch: Partial<Pending>) {
+  attachments.value = attachments.value.map((a) => (a.key === key ? { ...a, ...patch } : a))
+}
+
+/**
+ * A name for something pasted, which arrives without one.
+ *
+ * The browser hands over a File called "image.png" at best and "" at worst,
+ * and a row labelled nothing is one you cannot tell from the next one.
+ */
+function pastedName(file: File): string {
+  const ext = (file.type.split('/')[1] || 'bin').replace(/[^a-z0-9]/gi, '')
+  const stamp = new Date().toISOString().slice(11, 19).replace(/:/g, '')
+  return `pasted-${stamp}.${ext}`
 }
 
 function removeAttachment(key: string) {
@@ -427,7 +456,20 @@ function removeAttachment(key: string) {
 
 /** A screenshot pasted straight in, which is how most of them arrive. */
 function onPaste(ev: ClipboardEvent) {
-  const files = Array.from(ev.clipboardData?.files ?? [])
+  const data = ev.clipboardData
+  if (!data) return
+  // Both, because they disagree: a screenshot copied from a viewer often
+  // arrives only in items, while a file copied from a file manager arrives in
+  // files. Reading one of them works until the day somebody pastes from the
+  // other.
+  const files = Array.from(data.files)
+  if (!files.length) {
+    for (const item of Array.from(data.items)) {
+      if (item.kind !== 'file') continue
+      const file = item.getAsFile()
+      if (file) files.push(file)
+    }
+  }
   if (files.length) {
     ev.preventDefault()
     void attach(files)
