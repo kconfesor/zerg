@@ -205,7 +205,6 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/projects/{id}/run/touch", s.touchRun)
 	mux.HandleFunc("DELETE /api/projects/{id}/run", s.stopRun)
 	mux.HandleFunc("PUT /api/projects/{id}/run/note", s.saveRunNote)
-	mux.HandleFunc("PUT /api/projects/{id}/auto-run", s.setAutoRun)
 
 	mux.HandleFunc("GET /api/tasks/{id}/artifacts", s.taskArtifacts)
 	mux.HandleFunc("GET /api/artifacts/{id}/bytes", s.artifactBytes)

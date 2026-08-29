@@ -318,7 +318,11 @@ function showTip(ev: MouseEvent | FocusEvent, r: RoleUsage, c: { label: string; 
             {{ rows.length === 1 ? 'role' : 'roles' }}
           </span>
         </div>
-        <p class="text-muted-foreground mb-3 max-w-[64ch] text-[11px] leading-snug">
+        <!-- Full width of the card it explains. A measure cap left it stopping
+             halfway across the page with the chart it describes running on
+             past it, which reads as a layout fault rather than a choice.
+             text-pretty rather than a cap, so the last line is not one word. -->
+        <p class="text-muted-foreground mb-3 text-[11px] leading-relaxed text-pretty">
           Segments run cheapest to dearest, so a lighter band is a more expensive one. Input is
           never one number: cached and uncached tokens differ by roughly 50× in price, and summing
           them hides the only lever you control.
@@ -530,7 +534,7 @@ function showTip(ev: MouseEvent | FocusEvent, r: RoleUsage, c: { label: string; 
         </div>
       </section>
 
-      <p class="text-muted-foreground max-w-[70ch] text-[11px] leading-snug">
+      <p class="text-muted-foreground text-[11px] leading-relaxed text-pretty">
         Tokens are always real; dollars sometimes are not. A role on a subscription is billed by
         plan, not per token, so its figure is what those tokens would have cost at API rates:
         useful for comparing roles against each other, useless as an invoice.

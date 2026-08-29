@@ -45,24 +45,3 @@ func TestARunNoteIsWhatIsCurrentlyKnown(t *testing.T) {
 		t.Error("an empty note was accepted")
 	}
 }
-
-// Off by default, because every automatic run is an agent turn and therefore
-// money.
-func TestAutomaticRunningIsOffUntilItIsAskedFor(t *testing.T) {
-	ctx := context.Background()
-	db, p := seeded(t)
-
-	if p.AutoRun {
-		t.Error("a new project runs automatically without being asked to")
-	}
-	if err := db.SetAutoRun(ctx, p.ID, true); err != nil {
-		t.Fatal(err)
-	}
-	again, err := db.GetProject(ctx, p.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !again.AutoRun {
-		t.Error("the setting did not stick")
-	}
-}

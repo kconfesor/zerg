@@ -306,8 +306,9 @@ const taskBody = ref('')
  * Decided here, when the card is written, because this is the only moment
  * anybody knows whether the work will be worth looking at. It was a project-
  * wide switch first, which is either off and never used, or on and paying an
- * agent turn to preview a README fix. The project's own setting is the
- * starting position for a new card, not the decision.
+ * agent turn to preview a README fix. There is deliberately no project-level
+ * default behind it: a second control that only changes where this one starts
+ * is a setting to find, read and reason about in exchange for one click.
  */
 const taskDeploy = ref(false)
 const composing = ref(false)
@@ -623,9 +624,10 @@ async function stop() {
   })
 }
 
-/** Opens the composer with this project's default answer already in it. */
+/** Opens the composer. Deploy starts off: it costs an agent turn, so it is
+ *  asked for rather than assumed. */
 function openComposer() {
-  taskDeploy.value = current.value?.autoRun ?? false
+  taskDeploy.value = false
   composing.value = true
 }
 
@@ -658,6 +660,20 @@ async function createTask() {
  * stopping has to reach the server itself or the port stays held by something
  * the cockpit says is stopped.
  */
+/**
+ * Roles that are mid-turn and have gone quiet, by role name.
+ *
+ * The board shows it on the card that role is working, because that is the
+ * card whose progress is in question.
+ */
+const quietRoles = computed(() => {
+  const out = new Map<string, number>()
+  for (const r of status.value.roles) {
+    if (r.quietFor) out.set(r.role, r.quietFor)
+  }
+  return out
+})
+
 async function stopDeploy(_task: Task) {
   const project = current.value
   if (!project) return
@@ -953,6 +969,7 @@ watch(current, () => (banner.value = null))
                 :blocked-on="attentionByTask"
                 :services="status.services"
                 :deploy="status.deploy"
+                :quiet="quietRoles"
                 @open="(t) => (openTask = t)"
                 @review="() => (attentionOpen = true)"
                 @hide="(t: Task) => setHidden(t, true)"

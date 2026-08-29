@@ -112,10 +112,6 @@ const saveNote = () =>
     editingNote.value = false
   })
 
-const toggleAuto = () =>
-  act(async () => {
-    if (props.projectId) await api.setAutoRun(props.projectId, !state.value?.autoRun)
-  })
 
 /** Whether this commit is the one running, so "run" and "run again" are
  *  different offers. */
@@ -265,15 +261,6 @@ const says = computed(() => {
         </div>
       </template>
     </div>
-
-    <!-- The default for new cards, not the decision. Whether a particular card
-         is worth a preview is answered on the card, by whoever writes it; this
-         is only where the switch in the composer starts. -->
-    <label class="text-muted-foreground flex items-center gap-2 text-[10px]">
-      <input type="checkbox" class="size-3" :checked="state?.autoRun" @change="toggleAuto" />
-      new tasks here start with "deploy locally" on
-      <span class="text-muted-foreground/70">· each deploy costs an agent turn</span>
-    </label>
 
     <p v-if="error" class="text-destructive text-[11px]">{{ error }}</p>
   </div>

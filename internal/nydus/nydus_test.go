@@ -1776,3 +1776,137 @@ func TestLandingReportsTheCommitThatLanded(t *testing.T) {
 		}
 	})
 }
+
+// An event a role emits when it is holding nothing belongs to no card.
+//
+// It belonged to the last card the role ever held, for as long as the daemon
+// ran. Three days of "ready" events -- what a role emits when it comes back up
+// after a restart -- were recorded against cards that had finished hours
+// earlier, so a card's own activity showed another card's work and any measure
+// of how long a role was silent on a card was nonsense.
+func TestAnEventEmittedWhileHoldingNothingBelongsToNoCard(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+
+	task := f.task(t, "First")
+	lease, err := f.n.Claim(ctx, f.project.ID, "planner")
+	if err != nil || lease == nil {
+		t.Fatalf("claiming: %v", err)
+	}
+	during := f.clock.now()
+	if err := f.n.Ack(ctx, lease.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// What the role emitted while it held the card is still that card's.
+	held, err := f.db.TaskForAt(ctx, f.project.ID, "planner", during)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if held == nil || *held != task.ID {
+		t.Errorf("an event from during the work is on %v, want %s", held, task.ID)
+	}
+
+	// And so is the one that lands just after `zerg done`, which is where a
+	// turn's final usage routinely arrives.
+	f.clock.advance(20 * time.Second)
+	trailing, err := f.db.TaskForAt(ctx, f.project.ID, "planner", f.clock.now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if trailing == nil || *trailing != task.ID {
+		t.Errorf("the trailing event is on %v, want %s", trailing, task.ID)
+	}
+
+	// An hour later the role is holding nothing, and what it says belongs to
+	// nothing. This is the restart case.
+	f.clock.advance(time.Hour)
+	after, err := f.db.TaskForAt(ctx, f.project.ID, "planner", f.clock.now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after != nil {
+		t.Errorf("an event an hour after the card finished was recorded against %s", *after)
+	}
+
+	// Nor is the role holding anything, which is what decides where an
+	// artifact or a note goes.
+	now, err := f.db.CurrentTaskFor(ctx, f.project.ID, "planner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if now != nil {
+		t.Errorf("the role is reported as holding %s after acking it", *now)
+	}
+}
+
+// A gated role sending work backward does not ask permission; sending it
+// forward still does.
+//
+// The gate is about work moving on. A reviewer that finds a problem and returns
+// the card to the coder is not advancing anything, and holding that made the
+// operator approve twice to get one change made: once for the verdict, again
+// for the retry the verdict asked for. A card going round and round is caught
+// by the rework counter, which is what puts it in Attention.
+func TestReworkFromAGatedRoleIsNotHeld(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+
+	if _, err := f.db.SQL().ExecContext(ctx,
+		`UPDATE role_templates SET gate = ? WHERE name = 'reviewer'`, store.GateApproval); err != nil {
+		t.Fatal(err)
+	}
+
+	task := f.task(t, "Calculator")
+	if _, err := f.n.Send(ctx, f.project.ID, "reviewer", SendRequest{
+		TaskID: task.ID, To: "coder", Commit: "aaaaaaaaaa", Body: "needs a test"}); err != nil {
+		t.Fatalf("returning the card: %v", err)
+	}
+
+	// Nobody is asked, and the coder can pick it up straight away.
+	pending, err := f.db.ListPendingApprovals(ctx, f.project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 0 {
+		t.Errorf("%d approvals for a card sent backward, want none", len(pending))
+	}
+	lease, err := f.n.Claim(ctx, f.project.ID, "coder")
+	if err != nil {
+		t.Fatalf("coder Claim: %v", err)
+	}
+	if lease == nil {
+		t.Fatal("the coder could not claim work that was returned to it")
+	}
+	if got := f.reload(t, task.ID); got.Lane != "coder" {
+		t.Errorf("card is in %s, want coder", got.Lane)
+	}
+	// Still counted, because that is what catches a pipeline going round.
+	if got := f.reload(t, task.ID).ReworkCount; got != 1 {
+		t.Errorf("rework count = %d, want 1", got)
+	}
+
+	// Forward from the same role is still gated.
+	if _, err := f.n.Send(ctx, f.project.ID, "coder", SendRequest{
+		TaskID: task.ID, To: "reviewer", Commit: "bbbbbbbbbb", Body: "fixed"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.n.Ack(ctx, lease.ID); err != nil {
+		t.Fatal(err)
+	}
+	rl, err := f.n.Claim(ctx, f.project.ID, "reviewer")
+	if err != nil || rl == nil {
+		t.Fatalf("reviewer Claim: %v", err)
+	}
+	if _, err := f.n.Send(ctx, f.project.ID, "reviewer", SendRequest{
+		TaskID: task.ID, Commit: "cccccccccc", Body: "approved"}); err != nil {
+		t.Fatal(err)
+	}
+	pending, err = f.db.ListPendingApprovals(ctx, f.project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 1 {
+		t.Errorf("%d approvals when the gated role finished the card, want 1", len(pending))
+	}
+}

@@ -127,6 +127,13 @@ type Task struct {
 	// whoever wrote the card. Empty for most of them: a preview costs an agent
 	// turn, and only some work is worth looking at.
 	Deploy string `json:"deploy,omitempty"`
+
+	// Models are the models that have actually spent tokens on this card, in
+	// the order they first did. What a role is configured with is a live value
+	// and answers a different question: this says what produced the work in
+	// front of you, which is the one worth asking when a card came out well or
+	// badly.
+	Models []string `json:"models,omitempty"`
 }
 
 // Where a finished card gets deployed. Empty is the default and means nowhere.
@@ -284,13 +291,23 @@ func (db *DB) ListTasks(ctx context.Context, projectID string) ([]Task, error) {
 	// twenty-one round trips every two seconds.
 	rows, err := db.read.QueryContext(ctx,
 		`SELECT `+taskColsT+`,
-		        COALESCE(u.tokens, 0), COALESCE(u.cost, 0),
+		        COALESCE(u.tokens, 0), COALESCE(u.cost, 0), COALESCE(u.models, ''),
 		        COALESCE(e.doing, '')
 		 FROM tasks t
 		 LEFT JOIN (
 		     SELECT task_id,
 		            SUM(input_tokens + cache_read_tokens + cache_write_tokens + output_tokens) AS tokens,
-		            SUM(cost_usd) AS cost
+		            SUM(cost_usd) AS cost,
+		            -- Which models did the work, first use first. A subselect
+		            -- rather than group_concat(DISTINCT ...), which SQLite
+		            -- returns in no defined order: a card whose models
+		            -- reshuffled between polls would flicker on the board.
+		            (SELECT group_concat(model, char(10)) FROM (
+		                SELECT model, MIN(ts) AS first
+		                  FROM usage_turns m
+		                 WHERE m.task_id = usage_turns.task_id AND model <> ''
+		                 GROUP BY model ORDER BY first
+		            )) AS models
 		       FROM usage_turns GROUP BY task_id
 		 ) u ON u.task_id = t.id
 		 LEFT JOIN (
@@ -332,11 +349,15 @@ func scanTaskWithSummary(s scanner) (*Task, error) {
 		completedAt sql.NullString
 		stoppedAt   sql.NullString
 	)
+	var models string
 	if err := s.Scan(&t.ID, &t.ProjectID, &sessionID, &t.Name, &t.Body, &t.Lane, &t.State,
 		&created, &firstClaim, &completedAt, &t.ActiveMS, &t.ReworkCount, &t.Hidden, &stoppedAt,
 		&t.Outcome, &t.OutcomeRef, &t.Pinned, &t.Deploy,
-		&t.Tokens, &t.CostUSD, &t.Doing); err != nil {
+		&t.Tokens, &t.CostUSD, &models, &t.Doing); err != nil {
 		return nil, err
+	}
+	if models != "" {
+		t.Models = strings.Split(models, "\n")
 	}
 	if err := fillTaskTimes(&t, sessionID, created, firstClaim, completedAt, stoppedAt); err != nil {
 		return nil, err

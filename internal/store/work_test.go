@@ -690,3 +690,58 @@ func TestHistoryPagingDoesNotDropACardThatFinishesMidway(t *testing.T) {
 		t.Errorf("second page is %s, want the two below the cursor and nothing repeated", got)
 	}
 }
+
+// A card says which models did its work, in the order they first spent on it.
+//
+// What a role is configured with is a live value and answers a different
+// question. This one is about the work in front of you: a card that came out
+// well or badly was produced by particular models, and after the role's model
+// is changed the card must still say what actually made it.
+func TestACardReportsTheModelsThatWorkedIt(t *testing.T) {
+	ctx := context.Background()
+	db, project := seeded(t)
+
+	task, err := db.CreateTask(ctx, project.ID, "Calculator", "", "coder")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// planner first, then coder twice on a different model, then the reviewer
+	// on a third. Recorded out of order on purpose: the report is by first
+	// use, not by insertion.
+	for _, u := range []struct {
+		role, model string
+		at          time.Time
+	}{
+		{"coder", "claude-sonnet-5", time.Now().Add(-8 * time.Minute)},
+		{"planner", "claude-opus-5", time.Now().Add(-10 * time.Minute)},
+		{"coder", "claude-sonnet-5", time.Now().Add(-7 * time.Minute)},
+		{"reviewer", "gpt-5.6-sol", time.Now().Add(-2 * time.Minute)},
+	} {
+		if err := db.RecordUsage(ctx, UsageTurn{
+			ProjectID: project.ID, TaskID: &task.ID, Role: u.role, Model: u.model,
+			Harness: "claude", At: u.at, OutputTokens: 10, CostUSD: 0.01,
+		}); err != nil {
+			t.Fatalf("RecordUsage: %v", err)
+		}
+	}
+
+	tasks, err := db.ListTasks(ctx, project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("%d cards, want 1", len(tasks))
+	}
+	got := tasks[0].Models
+	want := []string{"claude-opus-5", "claude-sonnet-5", "gpt-5.6-sol"}
+	if len(got) != len(want) {
+		t.Fatalf("models = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("models = %v, want %v (first use first)", got, want)
+			break
+		}
+	}
+}

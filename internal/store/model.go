@@ -95,12 +95,6 @@ type Project struct {
 	// when it is empty, so nothing has to be set for a project to be
 	// recognisable — this is for when the derived mark is not the one you want.
 	Icon string `json:"icon"`
-
-	// AutoRun is the answer a new card in this project starts with, for the
-	// question of whether to deploy it when it lands. Not the decision itself:
-	// that is on the card, made by whoever wrote it, because a run is an agent
-	// turn and most cards are not worth one.
-	AutoRun bool `json:"autoRun"`
 }
 
 // What a role is for; see RoleTemplate.Purpose.

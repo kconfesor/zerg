@@ -26,8 +26,6 @@ type runStatus struct {
 	// it. Shown, because "the agent thinks this" and "you told it this" are
 	// different claims.
 	NoteAuthor string `json:"noteAuthor,omitempty"`
-	// AutoRun is whether finishing a task starts one of these.
-	AutoRun bool `json:"autoRun"`
 	// Services is what is being served, with an address. The panel said
 	// "running" and stopped there, which answers the wrong question: the
 	// reason to run a preview is to open it.
@@ -42,9 +40,6 @@ func (s *Server) runState(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	out := runStatus{Status: s.runner.Status(id)}
 
-	if project, err := s.db.GetProject(r.Context(), id); err == nil {
-		out.AutoRun = project.AutoRun
-	}
 	if note, err := s.db.RunNoteFor(r.Context(), id); err == nil {
 		out.Note, out.NoteAuthor = note.Note, note.Author
 	}
@@ -132,21 +127,6 @@ func (s *Server) saveRunNote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.db.SaveRunNote(r.Context(), r.PathValue("id"), req.Note, store.OperatorRole); err != nil {
-		s.fail(w, r, err)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
-// setAutoRun decides whether finishing a task starts a preview of it.
-func (s *Server) setAutoRun(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		AutoRun bool `json:"autoRun"`
-	}
-	if !decode(w, r, &req) {
-		return
-	}
-	if err := s.db.SetAutoRun(r.Context(), r.PathValue("id"), req.AutoRun); err != nil {
 		s.fail(w, r, err)
 		return
 	}

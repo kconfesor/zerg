@@ -110,9 +110,6 @@ export interface Project {
   icon?: string
   createdAt: string
   lastOpenedAt?: string
-  /** What a new card here starts with for "deploy when it lands". The default,
-   *  not the decision: that is per card. */
-  autoRun?: boolean
 }
 
 /** One subdirectory the folder picker can descend into or select. */
@@ -227,6 +224,10 @@ export interface Task {
    *  this. `outcomeRef` is the commit or the pull request's URL. */
   outcome?: 'merged' | 'pr' | 'branch'
   outcomeRef?: string
+  /** The models that actually spent tokens on this card, first use first.
+   *  Not what the roles are configured with now, which is a live value and a
+   *  different question. */
+  models?: string[]
   /** Where this card's work gets put when it lands. Decided when the card is
    *  written: a preview costs an agent turn, and most cards are not worth
    *  looking at. Empty means nowhere. */
@@ -282,6 +283,9 @@ export interface RoleStatus {
   terminal: boolean
   /** When a spent provider quota is expected to lift. Only while throttled. */
   throttledUntil?: string
+  /** Seconds this role has been mid-turn without producing anything. Absent
+   *  until silence stops being explainable by a long build. */
+  quietFor?: number
 }
 
 export interface Workspace {
@@ -564,11 +568,6 @@ export const api = {
       body: JSON.stringify({ note }),
     }),
   /** Whether finishing a task starts a preview of it. */
-  setAutoRun: (projectId: string, autoRun: boolean) =>
-    call<void>(`/projects/${projectId}/auto-run`, {
-      method: 'PUT',
-      body: JSON.stringify({ autoRun }),
-    }),
 
   /** Keep an artifact after its task's transcript ages out. */
   pinArtifact: (id: string, pinned: boolean) =>
@@ -1075,7 +1074,6 @@ export interface RunState {
    *  runner or corrected by the operator. */
   note?: string
   noteAuthor?: string
-  autoRun: boolean
   /** What is being served right now, with an address. */
   services?: LiveService[]
 }

@@ -528,3 +528,48 @@ func TestARoleRemovedFromTheTeamStopsInsteadOfRespawning(t *testing.T) {
 		t.Errorf("spawned %d times after removal, want 0", a.Spawns())
 	}
 }
+
+// An agent that is mid-turn and producing nothing is distinguishable from one
+// that is working.
+//
+// Nothing could tell them apart. A reviewer ran a headless browser against a
+// dev server whose hot-reload socket never idles, the screenshot never
+// returned, and the role sat in "working" holding a lease with an empty
+// transcript until a person happened to look. Silence is only measured inside
+// a turn: an idle agent is quiet for a good reason.
+func TestSilenceIsMeasuredOnlyWhileMidTurn(t *testing.T) {
+	now := time.Date(2026, 8, 28, 23, 0, 0, 0, time.UTC)
+	c, _ := newCerebrate(t, &scriptedAdapter{}, func(cfg *Config) {
+		cfg.clock = func() time.Time { return now }
+	})
+
+	// Nothing said yet, and not in a turn: no claim either way.
+	if got := c.Silence(); got != 0 {
+		t.Errorf("silence before anything happened = %s, want 0", got)
+	}
+
+	c.setBusy(true)
+	c.publish(adapter.Event{Kind: adapter.EventMessage, Text: "starting"})
+	if got := c.Silence(); got != 0 {
+		t.Errorf("silence right after speaking = %s, want 0", got)
+	}
+
+	// Eight minutes of nothing, mid-turn.
+	now = now.Add(8 * time.Minute)
+	if got := c.Silence(); got != 8*time.Minute {
+		t.Errorf("silence = %s, want 8m", got)
+	}
+
+	// Anything at all resets it, including a tool call that produces no text.
+	c.publish(adapter.Event{Kind: adapter.EventToolCall, Tool: "bash"})
+	if got := c.Silence(); got != 0 {
+		t.Errorf("silence after a tool call = %s, want 0", got)
+	}
+
+	// And an agent between turns is not silent, it is finished.
+	now = now.Add(time.Hour)
+	c.setBusy(false)
+	if got := c.Silence(); got != 0 {
+		t.Errorf("an idle agent reported %s of silence", got)
+	}
+}

@@ -62,13 +62,3 @@ func (db *DB) SaveRunNote(ctx context.Context, projectID, note, author string) e
 	}
 	return nil
 }
-
-// SetAutoRun decides whether finishing a task starts a preview of it.
-func (db *DB) SetAutoRun(ctx context.Context, projectID string, on bool) error {
-	res, err := db.sql.ExecContext(ctx,
-		`UPDATE projects SET auto_run = ? WHERE id = ?`, boolInt(on), projectID)
-	if err != nil {
-		return fmt.Errorf("saving the automatic run setting: %w", err)
-	}
-	return mustAffect(res, fmt.Sprintf("project %s", projectID))
-}

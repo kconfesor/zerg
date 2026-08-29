@@ -171,6 +171,16 @@ type Cerebrate struct {
 	// init, no ready, no turn. What matters is whether the agent is mid-turn,
 	// which is a thing the supervisor knows without being told.
 	busy bool
+
+	// spoke is when this agent last produced anything at all.
+	//
+	// A process that is up and a process that is working are different states,
+	// and nothing here could tell them apart: an agent that ran a command which
+	// never returned stayed "working" with a held lease and an empty transcript
+	// until the lease expired twenty minutes later. A headless browser
+	// screenshotting a dev server did exactly that, and it was noticed by a
+	// person watching a board, which is not a mechanism.
+	spoke time.Time
 }
 
 func New(cfg Config) *Cerebrate {
@@ -200,6 +210,21 @@ func (c *Cerebrate) State() State {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.state
+}
+
+// Silence is how long this agent has produced nothing while mid-turn.
+//
+// Zero when it is not in a turn, or has said something since the last check:
+// an idle agent is quiet for a good reason and a working one is not. This is
+// what the supervisor watches, because "working" on its own cannot distinguish
+// a long build from a command that will never return.
+func (c *Cerebrate) Silence() time.Duration {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if !c.busy || c.spoke.IsZero() {
+		return 0
+	}
+	return c.cfg.clock().Sub(c.spoke)
 }
 
 // LastError is why a role is blocked or failed, for the cockpit to show.
@@ -672,6 +697,10 @@ func (c *Cerebrate) observe(ev adapter.Event) {
 }
 
 func (c *Cerebrate) publish(ev adapter.Event) {
+	c.mu.Lock()
+	c.spoke = c.cfg.clock()
+	c.mu.Unlock()
+
 	if c.cfg.Bus == nil {
 		return
 	}

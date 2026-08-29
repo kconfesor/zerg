@@ -641,22 +641,58 @@ func (db *DB) CurrentTaskFor(ctx context.Context, projectID, role string) (*stri
 // role held when the event was produced. Zero means now, which is what the
 // live callers want.
 func (db *DB) TaskForAt(ctx context.Context, projectID, role string, at time.Time) (*string, error) {
-	where, args := "", []any{projectID, role}
-	if !at.IsZero() {
-		// granted_at only. A lease that was acked before the event still owns
-		// it: a turn's final usage event routinely lands just after `zerg
-		// done`, and the tokens were spent on that card.
-		where = " AND l.granted_at <= ?"
-		args = append(args, at.UTC().Format(time.RFC3339Nano))
+	// "Now" and "at this moment in the past" are different questions and are
+	// answered differently on purpose. Asking what a role holds now must not
+	// compare a lease against the wall clock: leases are written with whatever
+	// clock made them, and a comparison across two clocks is a coin flip.
+	if at.IsZero() {
+		return db.openLeaseTask(ctx, projectID, role)
 	}
+
+	var (
+		taskID    sql.NullString
+		acked     sql.NullString
+		expired   sql.NullString
+		expiresAt string
+	)
+	err := db.read.QueryRowContext(ctx,
+		`SELECT m.task_id, l.acked_at, l.expired_at, l.expires_at
+		   FROM leases l
+		   JOIN lease_items li ON li.lease_id = l.id
+		   JOIN messages m ON m.id = li.message_id
+		  WHERE l.project_id = ? AND l.role = ? AND m.task_id IS NOT NULL
+		    AND l.granted_at <= ?
+		  ORDER BY l.granted_at DESC LIMIT 1`,
+		projectID, role, at.UTC().Format(time.RFC3339Nano)).Scan(&taskID, &acked, &expired, &expiresAt)
+	if errors.Is(err, sql.ErrNoRows) || !taskID.Valid {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !leaseOwns(at, acked, expired, expiresAt) {
+		return nil, nil
+	}
+	return &taskID.String, nil
+}
+
+// openLeaseTask is the card a role is holding right now: the newest lease, and
+// only if it is still open.
+//
+// A role that has acked its lease is holding nothing, and saying otherwise is
+// what put three days of events onto cards that had already finished. Nothing
+// here reads a clock, so it answers the same under a test's clock as under the
+// daemon's.
+func (db *DB) openLeaseTask(ctx context.Context, projectID, role string) (*string, error) {
 	var taskID sql.NullString
 	err := db.read.QueryRowContext(ctx,
 		`SELECT m.task_id
 		   FROM leases l
 		   JOIN lease_items li ON li.lease_id = l.id
 		   JOIN messages m ON m.id = li.message_id
-		  WHERE l.project_id = ? AND l.role = ? AND m.task_id IS NOT NULL`+where+`
-		  ORDER BY l.granted_at DESC LIMIT 1`, args...).Scan(&taskID)
+		  WHERE l.project_id = ? AND l.role = ? AND m.task_id IS NOT NULL
+		    AND l.acked_at IS NULL AND l.expired_at IS NULL
+		  ORDER BY l.granted_at DESC LIMIT 1`, projectID, role).Scan(&taskID)
 	if errors.Is(err, sql.ErrNoRows) || !taskID.Valid {
 		return nil, nil
 	}
@@ -664,4 +700,47 @@ func (db *DB) TaskForAt(ctx context.Context, projectID, role string, at time.Tim
 		return nil, err
 	}
 	return &taskID.String, nil
+}
+
+// leaseTrailingGrace is how long after a lease closes its card still owns what
+// the role emitted.
+//
+// Not zero: a turn's final usage event routinely arrives just after the agent
+// has run `zerg done`, and those tokens were spent on that card. Not unbounded,
+// which is what it was: with no end at all, every event a role produced for the
+// rest of the daemon's life attributed to the last card it happened to hold.
+// Three days of "ready" events landed on cards that had finished hours earlier,
+// so a card's activity showed another card's work.
+const leaseTrailingGrace = 2 * time.Minute
+
+// leaseOwns reports whether a lease still owned what was emitted at a moment.
+//
+// A lease ends when the role acks it, when the daemon expires it, or when it
+// runs out; the earliest of those is the end, and anything past it plus the
+// grace belongs to no card rather than to the wrong one.
+func leaseOwns(at time.Time, acked, expired sql.NullString, expiresAt string) bool {
+	end := parseLeaseTime(expiresAt)
+	for _, closed := range []sql.NullString{acked, expired} {
+		if !closed.Valid || closed.String == "" {
+			continue
+		}
+		if t := parseLeaseTime(closed.String); !t.IsZero() && (end.IsZero() || t.Before(end)) {
+			end = t
+		}
+	}
+	// An unreadable timestamp is not a reason to lose the attribution: this
+	// package writes the column, so a parse failure means something stranger
+	// than a stale lease.
+	if end.IsZero() {
+		return true
+	}
+	return !at.After(end.Add(leaseTrailingGrace))
+}
+
+func parseLeaseTime(s string) time.Time {
+	t, err := time.Parse(time.RFC3339Nano, s)
+	if err != nil {
+		return time.Time{}
+	}
+	return t
 }

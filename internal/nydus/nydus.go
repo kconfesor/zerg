@@ -418,8 +418,17 @@ func (n *Nydus) sendIn(ctx context.Context, tx *sql.Tx, msg *store.Message, req 
 	// A gated handoff is held; everything else is immediately claimable. The
 	// message and its routes are written together, so there is no window in
 	// which a message exists with nobody to deliver it to.
+	//
+	// Rework is not held, though the sender is gated. A gate asks a person
+	// before work moves *on*: toward the next role, and eventually toward the
+	// base branch. Sending work back to the role that produced it advances
+	// nothing and can reach nothing, so holding it only made the operator
+	// approve twice to get one change made -- once for the reviewer's verdict
+	// and again for the retry that verdict asked for. A loop of them is caught
+	// by the rework counter, which is what surfaces a card going round in
+	// Attention; an approval per lap is not that mechanism.
 	state := store.RouteQueued
-	if req.gate == store.GateApproval && req.Kind == store.KindHandoff {
+	if req.gate == store.GateApproval && req.Kind == store.KindHandoff && !req.rework {
 		state = store.RouteHeld
 	}
 	for _, to := range req.ToRoles {

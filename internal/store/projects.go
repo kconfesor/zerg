@@ -517,13 +517,16 @@ func scanProject(s scanner) (*Project, error) {
 		lastOpened sql.NullString
 	)
 	var presetID sql.NullString
-	var draft, autoRun int
+	var draft int
+	// auto_run is still selected and discarded: whether a card deploys is the
+	// card's own answer now, and the column stays because a shipped migration
+	// is not edited.
+	var unusedAutoRun int
 	if err := s.Scan(&p.ID, &p.Path, &p.Name, &p.BaseBranch, &p.Integration, &draft, &created, &lastOpened,
-		&p.ChatHarness, &p.ChatModel, &p.Icon, &presetID, &autoRun); err != nil {
+		&p.ChatHarness, &p.ChatModel, &p.Icon, &presetID, &unusedAutoRun); err != nil {
 		return nil, err
 	}
 	p.PRDraft = draft != 0
-	p.AutoRun = autoRun != 0
 	if presetID.Valid {
 		v := presetID.String
 		p.TeamPresetID = &v

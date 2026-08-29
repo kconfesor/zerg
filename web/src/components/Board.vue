@@ -32,6 +32,7 @@ import {
   Eye,
   EyeOff,
   ExternalLink,
+  Hourglass,
   LoaderCircle,
   MessageCircleQuestion,
   ScrollText,
@@ -53,6 +54,8 @@ const props = defineProps<{
   services?: LiveService[]
   /** A deploy in flight, for the card that is waiting on it. */
   deploy?: SwarmStatus['deploy']
+  /** Roles that are mid-turn and have gone quiet, keyed by role name. */
+  quiet?: Map<string, number>
 }>()
 const emit = defineEmits<{
   open: [task: Task]
@@ -81,6 +84,34 @@ const deployFor = computed(() => (task: Task) => {
   }
   return null
 })
+
+/**
+ * The models that did the work, short enough to sit on a card.
+ *
+ * "claude-sonnet-5" and "gpt-5.6-sol" are the identifiers, and the vendor
+ * prefix is the least interesting part of them on a board where every card
+ * carries one. The full names are in the title, since the short form is
+ * ambiguous the moment two vendors ship a "5".
+ */
+function shortModel(model: string): string {
+  return model.replace(/^(claude|openai|anthropic|google)-/, '')
+}
+
+/**
+ * How long the role working this card has been silent, in words.
+ *
+ * A card that says "working" says the same thing whether the agent is running
+ * a long test suite or sitting in a command that will never return. One of
+ * those wants patience and the other wants a person, and until this there was
+ * nothing on screen that told them apart -- a wedged agent was found because
+ * somebody happened to be watching.
+ */
+function quietFor(task: Task): string {
+  const seconds = props.quiet?.get(task.lane)
+  if (!seconds || task.state !== 'working') return ''
+  const mins = Math.round(seconds / 60)
+  return `quiet ${mins}m`
+}
 
 /** What the strip says, which is different in each of the three states. */
 function deploySays(state: string): string {
@@ -298,24 +329,60 @@ const byLane = computed(() => {
               <span v-else-if="task.firstClaimedAt">started {{ ago(task.firstClaimedAt) }}</span>
               <span v-else>queued {{ ago(task.createdAt) }}</span>
 
-              <span v-if="task.tokens" class="tabular ml-auto">
-                {{ compactTokens(task.tokens) }} · {{ money(task.costUsd) }}
+              <span
+                v-if="quietFor(task)"
+                class="flex items-center gap-1 text-[var(--status-warning)]"
+                title="This agent is mid-turn and has produced nothing for a while. A long build looks like this; so does a command that will never return."
+              >
+                <Hourglass :size="10" aria-hidden="true" />
+                {{ quietFor(task) }}
+              </span>
+
+              <!-- Which models produced this. On the card because it is the
+                   card you are judging: "this came out well" and "this came
+                   out badly" are both worth attaching to what made it, and a
+                   role's configured model is a live value that will not
+                   remember. -->
+              <span
+                v-if="task.models?.length"
+                class="truncate"
+                :title="`Worked by ${task.models.join(', ')}`"
+              >
+                {{ task.models.map(shortModel).join(' · ') }}
               </span>
             </div>
           </button>
 
-            <!-- Put away, on the card itself. Finished work accumulates, and
-                 the person reading a card is the one who knows whether they
-                 will want it again — which no age cutoff can guess. -->
-            <button
-              v-if="task.state === 'done'"
-              type="button"
-              class="hairline-t text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-ring flex w-full items-center gap-1.5 px-2.5 py-1.5 text-left text-[11px] focus-visible:outline-2 focus-visible:-outline-offset-2"
-              @click="task.hidden ? emit('unhide', task) : emit('hide', task)"
+            <!-- The card's foot: putting it away, and what it cost.
+                 Together on one row because both are about the card as a whole
+                 rather than about the work in it, and the spend was taking a
+                 third of the line above while the row underneath held one
+                 word. Put away is on the card itself because finished work
+                 accumulates, and the person reading a card is the one who
+                 knows whether they will want it again -- which no age cutoff
+                 can guess. -->
+            <div
+              v-if="task.state === 'done' || task.tokens"
+              class="hairline-t text-muted-foreground flex items-center text-[11px]"
             >
-              <component :is="task.hidden ? Eye : EyeOff" :size="12" aria-hidden="true" />
-              {{ task.hidden ? 'Unhide' : 'Hide' }}
-            </button>
+              <button
+                v-if="task.state === 'done'"
+                type="button"
+                class="hover:bg-muted hover:text-foreground focus-visible:outline-ring flex items-center gap-1.5 px-2.5 py-1.5 text-left transition-colors focus-visible:outline-2 focus-visible:-outline-offset-2"
+                @click="task.hidden ? emit('unhide', task) : emit('hide', task)"
+              >
+                <component :is="task.hidden ? Eye : EyeOff" :size="12" aria-hidden="true" />
+                {{ task.hidden ? 'Unhide' : 'Hide' }}
+              </button>
+
+              <span
+                v-if="task.tokens"
+                class="tabular ml-auto px-2.5 py-1.5 text-[10px]"
+                :title="`${task.tokens.toLocaleString()} tokens across every role and every lap`"
+              >
+                {{ compactTokens(task.tokens) }} · {{ money(task.costUsd) }}
+              </span>
+            </div>
 
             <!-- What this card's change is doing when it is running somewhere.
                  On the card rather than in the top bar: an app running is only
