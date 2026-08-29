@@ -154,6 +154,9 @@ interface Line {
   live?: boolean
   /** Sent, but behind an answer still being written. */
   queued?: boolean
+  /** A turn that failed, as it happened. Kept in place rather than raised as a
+   *  banner, because the conversation carried on after it. */
+  failed?: string
 }
 
 /** A file chosen but not yet sent with a message. */
@@ -255,7 +258,18 @@ function accept(e: ActivityEvent) {
     }
   } else if (e.kind === 'error') {
     thinking.value = false
-    error.value = e.text ?? 'the agent failed'
+    // A failure that already happened is part of the conversation, not news.
+    //
+    // The banner said "the harness reported an error without describing it"
+    // on opening a tab whose transcript contained one, however old, and again
+    // on every tab after it: an error from another conversation an hour ago,
+    // presented as though it had just happened to the thing being read. Live
+    // failures still interrupt; replayed ones are a line where they happened.
+    if (replaying) {
+      lines.value.push({ id: e.id, who: 'agent', text: '', failed: e.text || 'the agent failed' })
+    } else {
+      error.value = e.text ?? 'the agent failed'
+    }
   }
   queueFlush()
 }
@@ -270,6 +284,15 @@ function accept(e: ActivityEvent) {
  * actually appears.
  */
 let frame = 0
+
+/**
+ * Whether the events arriving are history rather than news.
+ *
+ * A replay delivers everything the conversation ever said, including whatever
+ * went wrong in it. Treating those the same as live events made an hour-old
+ * failure look like the state of the thing you had just opened.
+ */
+let replaying = true
 
 function queueFlush() {
   if (frame) return
@@ -293,9 +316,19 @@ function connect() {
   if (!projectId.value || !openChat.value) return
   // One conversation, asked for by id. Without it the socket carries every
   // tab's answers into whichever one happens to be open.
+  // Each tab starts clean: a banner from the last conversation is not about
+  // this one, and it used to follow the reader from tab to tab.
+  error.value = ''
+  replaying = true
   stream = streamActivity(
     projectId.value,
-    { onEvent: accept, onCaughtUp: scrollToEnd },
+    {
+      onEvent: accept,
+      onCaughtUp: () => {
+        replaying = false
+        scrollToEnd()
+      },
+    },
     { chat: openChat.value },
   )
 }
@@ -592,7 +625,14 @@ onBeforeUnmount(() => stream?.close())
             <p v-if="l.who === 'you' && l.text" class="leading-relaxed whitespace-pre-wrap">
               {{ l.text }}
             </p>
-            <AnswerBody v-else-if="l.who === 'agent'" :text="l.text" />
+            <AnswerBody v-else-if="l.who === 'agent' && l.text" :text="l.text" />
+
+            <!-- Something that failed, where it failed. The conversation
+                 carried on afterwards, so it reads as part of the account
+                 rather than as the state of the screen. -->
+            <p v-if="l.failed" class="text-[var(--status-warning)] text-[11px] italic">
+              {{ l.failed }}
+            </p>
 
             <!-- What was attached. The picture is shown, because a screenshot
                  you sent is the subject of the answer under it and a file name
