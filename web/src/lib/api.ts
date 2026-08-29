@@ -532,16 +532,32 @@ export const api = {
   answer: (id: string, answer: string) =>
     call<void>(`/clarifications/${id}/answer`, { method: 'POST', body: JSON.stringify({ answer }) }),
 
-  chat: (id: string, message: string, attachments: string[] = []) =>
-    call<{ status: string }>(`/projects/${id}/chat`, {
+  /** The conversations a project holds, most recently used first. */
+  chats: (id: string) => call<Chat[]>(`/projects/${id}/chats`),
+
+  newChat: (id: string, title = '') =>
+    call<Chat>(`/projects/${id}/chats`, { method: 'POST', body: JSON.stringify({ title }) }),
+
+  renameChat: (id: string, chat: string, title: string) =>
+    call<void>(`/projects/${id}/chats/${chat}`, {
+      method: 'PUT',
+      body: JSON.stringify({ title }),
+    }),
+
+  /** Closes one, taking its transcript, its files and its worktree with it. */
+  endChat: (id: string, chat: string) =>
+    call<void>(`/projects/${id}/chats/${chat}`, { method: 'DELETE' }),
+
+  chat: (id: string, chat: string, message: string, attachments: string[] = []) =>
+    call<{ status: string }>(`/projects/${id}/chats/${chat}/messages`, {
       method: 'POST',
       body: JSON.stringify({ message, attachments }),
     }),
 
   /** Stops the answer being written. The conversation, and the agent's memory
    *  of it, stay. */
-  interruptChat: (id: string) =>
-    call<void>(`/projects/${id}/chat/interrupt`, { method: 'POST' }),
+  interruptChat: (id: string, chat: string) =>
+    call<void>(`/projects/${id}/chats/${chat}/interrupt`, { method: 'POST' }),
 
   /**
    * Uploads one file to attach to a message.
@@ -551,10 +567,10 @@ export const api = {
    * the multipart boundary itself, which is why the content type is left
    * alone here.
    */
-  chatAttach: async (id: string, file: File): Promise<Artifact> => {
+  chatAttach: async (id: string, chat: string, file: File): Promise<Artifact> => {
     const form = new FormData()
     form.append('file', file)
-    const res = await fetch(`/api/projects/${id}/chat/attachments`, {
+    const res = await fetch(`/api/projects/${id}/chats/${chat}/attachments`, {
       method: 'POST',
       body: form,
     })
@@ -630,8 +646,6 @@ export const api = {
     )
   },
   workspace: (projectId: string) => call<Workspace>(`/projects/${projectId}/workspace`),
-  resetChat: (projectId: string) =>
-    call<void>(`/projects/${projectId}/chat`, { method: 'DELETE' }),
   setChatAgent: (projectId: string, harness: string, model: string) =>
     call<Project>(`/projects/${projectId}/chat-agent`, {
       method: 'PUT',
@@ -756,6 +770,16 @@ export const api = {
 // ── activity ────────────────────────────────────────────────────────────────
 
 /** One thing an agent did. */
+/** One conversation with the project's chat agent: a tab. */
+export interface Chat {
+  id: string
+  projectId: string
+  /** What the tab says. Taken from the first message when nobody named it. */
+  title: string
+  createdAt: string
+  lastUsedAt: string
+}
+
 export interface ActivityEvent {
   id: string
   projectId: string
@@ -778,6 +802,8 @@ export interface ActivityEvent {
   tool?: string
   data?: Record<string, unknown>
   fatal?: boolean
+  /** Which conversation this belongs to, for the two roles that are one. */
+  chatId?: string
 }
 
 export interface UsageTotal {
@@ -828,7 +854,7 @@ export function streamActivity(
      *  to say so, which is why this is not the same as a dropped socket. */
     onError?: (message: string) => void
   },
-  opts: { role?: string; limit?: number; task?: string } = {},
+  opts: { role?: string; limit?: number; task?: string; chat?: string } = {},
 ): ActivityStream {
   const RETRY_MIN = 500
   const RETRY_MAX = 15_000
@@ -864,6 +890,7 @@ export function streamActivity(
           after,
           role: opts.role,
           task: opts.task,
+          chat: opts.chat,
           limit: opts.limit,
         }),
       )

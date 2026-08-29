@@ -30,6 +30,11 @@ type Event struct {
 	// only by joining through the team as it is configured now, which is not
 	// what it was when the turn happened.
 	Harness string `json:"harness,omitempty"`
+
+	// ChatID is which conversation this belongs to, for the two roles that are
+	// one. It travels with the event so a browser watching one tab can ignore
+	// the others without asking the database which is which.
+	ChatID string `json:"chatId,omitempty"`
 }
 
 // Bus fans events out to subscribers.

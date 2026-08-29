@@ -27,7 +27,7 @@ const maxUpload = 25 << 20
 // Matched on the suffix rather than parsed, because the project id sits in the
 // middle and this runs on every request.
 func uploadPath(path string) bool {
-	return strings.HasSuffix(path, "/chat/attachments")
+	return strings.HasSuffix(path, "/attachments")
 }
 
 // expectedHost reports whether a request arrived addressed to a name this

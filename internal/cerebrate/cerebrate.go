@@ -109,6 +109,14 @@ type Config struct {
 	// for no reader.
 	Streaming bool
 
+	// ChatID is the conversation this agent belongs to, stamped on everything
+	// it says. Empty for a pipeline role, which belongs to a card instead.
+	//
+	// It travels on the event because that is the only thing the reader has:
+	// several conversations can be answering at once, and a browser watching
+	// one tab has no other way to tell whose sentence it is looking at.
+	ChatID string
+
 	// SystemPrompt is composed from shared instructions plus the role prompt.
 	// It is the value to use when Refresh is nil or fails.
 	SystemPrompt string
@@ -748,6 +756,7 @@ func (c *Cerebrate) publish(ev adapter.Event) {
 		ProjectID: c.cfg.ProjectID,
 		Role:      c.name(),
 		Harness:   c.Harness(),
+		ChatID:    c.cfg.ChatID,
 		At:        c.cfg.clock(),
 	})
 }

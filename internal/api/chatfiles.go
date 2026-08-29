@@ -32,8 +32,8 @@ func (s *Server) attachToChat(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "this build cannot store files")
 		return
 	}
-	projectID := r.PathValue("id")
-	if _, err := s.db.GetProject(r.Context(), projectID); err != nil {
+	c, err := s.chatFor(r)
+	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
@@ -92,7 +92,10 @@ func (s *Server) attachToChat(w http.ResponseWriter, r *http.Request) {
 
 	name := safeName(header.Filename)
 	a := &store.Artifact{
-		ProjectID: projectID,
+		ProjectID: c.ProjectID,
+		// The conversation it was attached to, so closing that tab takes it and
+		// leaves the other tabs' files alone.
+		ChatID: c.ID,
 		// The person, not an agent. The transcript says who attached it, and
 		// the retention rules treat a conversation's files as the conversation.
 		Role:   chat.Operator,

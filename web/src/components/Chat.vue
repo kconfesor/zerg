@@ -14,13 +14,14 @@ import {
   streamActivity,
   type ActivityEvent,
   type ActivityStream,
+  type Chat,
   type Model,
   type Project,
 } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
 import ModelPicker from '@/components/ModelPicker.vue'
-import { Paperclip, Square, Trash2, X } from '@lucide/vue'
+import { Paperclip, Plus, Square, X } from '@lucide/vue'
 import {
   Dialog,
   DialogContent,
@@ -56,8 +57,85 @@ const props = defineProps<{
 }>()
 const emit = defineEmits<{ updated: [project: Project] }>()
 
-/** The project id, which is all the stream and the ask endpoint need. */
+/** The project id, which scopes every conversation in it. */
 const projectId = computed(() => props.project?.id ?? null)
+
+/**
+ * The conversations this project holds, and the one being read.
+ *
+ * Tabs rather than one thread: a second subject used to be either an
+ * interruption of the first or a reason to delete it, since ending the chat was
+ * the only way to start fresh. Each tab has its own transcript, its own files
+ * and its own agent, and closing one takes exactly those.
+ */
+const chats = ref<Chat[]>([])
+const openChat = ref<string | null>(null)
+const renaming = ref<string | null>(null)
+const renameDraft = ref('')
+const confirmEnd = ref<Chat | null>(null)
+
+/** What a tab says when nobody has named it and nothing has been said yet. */
+const tabLabel = (c: Chat) => c.title || 'New chat'
+
+async function loadChats(keepOpen = true) {
+  if (!projectId.value) {
+    chats.value = []
+    openChat.value = null
+    return
+  }
+  try {
+    chats.value = await api.chats(projectId.value)
+    // An empty project starts with one, because a chat screen with no chat in
+    // it is a screen asking you to press something before you can type.
+    if (!chats.value.length) {
+      const made = await api.newChat(projectId.value)
+      chats.value = [made]
+    }
+    if (!keepOpen || !chats.value.some((c) => c.id === openChat.value)) {
+      openChat.value = chats.value[0]?.id ?? null
+    }
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : String(e)
+  }
+}
+
+async function startChat() {
+  if (!projectId.value) return
+  try {
+    const made = await api.newChat(projectId.value)
+    chats.value = [made, ...chats.value]
+    openChat.value = made.id
+    draft.value = ''
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : String(e)
+  }
+}
+
+async function endChat(c: Chat) {
+  if (!projectId.value) return
+  try {
+    await api.endChat(projectId.value, c.id)
+    confirmEnd.value = null
+    chats.value = chats.value.filter((x) => x.id !== c.id)
+    if (openChat.value === c.id) openChat.value = chats.value[0]?.id ?? null
+    // Closing the last one leaves nowhere to type, so a fresh one opens.
+    if (!chats.value.length) await loadChats(false)
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : String(e)
+  }
+}
+
+async function commitRename(c: Chat) {
+  const title = renameDraft.value.trim()
+  renaming.value = null
+  if (!projectId.value || !title || title === c.title) return
+  try {
+    await api.renameChat(projectId.value, c.id, title)
+    c.title = title
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : String(e)
+  }
+}
 
 /** Only these two roles are part of the conversation. Everything else on the
  *  stream is the pipeline working, which belongs in Activity. */
@@ -119,6 +197,7 @@ const dragging = ref(false)
 const canSend = computed(
   () =>
     !!projectId.value &&
+    !!openChat.value &&
     (draft.value.trim() !== '' || attachments.value.some((a) => a.artifactId)) &&
     !attachments.value.some((a) => !a.artifactId && !a.error),
 )
@@ -210,8 +289,15 @@ function connect() {
     frame = 0
   }
   lines.value = []
-  if (!projectId.value) return
-  stream = streamActivity(projectId.value, { onEvent: accept, onCaughtUp: scrollToEnd })
+  thinking.value = false
+  if (!projectId.value || !openChat.value) return
+  // One conversation, asked for by id. Without it the socket carries every
+  // tab's answers into whichever one happens to be open.
+  stream = streamActivity(
+    projectId.value,
+    { onEvent: accept, onCaughtUp: scrollToEnd },
+    { chat: openChat.value },
+  )
 }
 
 /** The effective harness: what is set, or the team's. */
@@ -225,7 +311,6 @@ const model = ref(props.project?.chatModel ?? '')
  */
 const INHERIT = 'inherit:team'
 
-const confirmReset = ref(false)
 
 watch(
   () => props.project,
@@ -239,7 +324,6 @@ watch(
 // flight at once would end two sessions and leave the later answer describing
 // the earlier choice.
 const changingAgent = ref(false)
-const resetting = ref(false)
 
 async function setAgent(h: string, m: string) {
   if (!projectId.value || changingAgent.value) return
@@ -250,7 +334,9 @@ async function setAgent(h: string, m: string) {
     // The running session was built from the old choice, so the daemon ends it;
     // the next question starts one that matches.
     emit('updated', await api.setChatAgent(projectId.value, h, m))
-    lines.value = []
+    // The sessions are gone, not the conversations: what was said stays, and
+    // the next question is answered by the agent just chosen.
+    connect()
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e)
   } finally {
@@ -258,19 +344,6 @@ async function setAgent(h: string, m: string) {
   }
 }
 
-async function resetChat() {
-  if (!projectId.value || resetting.value) return
-  resetting.value = true
-  try {
-    await api.resetChat(projectId.value)
-    confirmReset.value = false
-    lines.value = []
-  } catch (e) {
-    error.value = e instanceof Error ? e.message : String(e)
-  } finally {
-    resetting.value = false
-  }
-}
 
 /**
  * Takes files from the picker, a drop, or a paste.
@@ -281,7 +354,7 @@ async function resetChat() {
  * arriving and remove it if they picked the wrong thing.
  */
 async function attach(files: FileList | File[] | null) {
-  if (!files || !projectId.value) return
+  if (!files || !projectId.value || !openChat.value) return
   for (const file of Array.from(files)) {
     const key = `${file.name}-${file.size}-${Math.random().toString(36).slice(2)}`
     const row: Pending = { key, name: file.name, size: file.size }
@@ -290,7 +363,7 @@ async function attach(files: FileList | File[] | null) {
     if (file.type.startsWith('image/')) row.preview = URL.createObjectURL(file)
     attachments.value.push(row)
     try {
-      const made = await api.chatAttach(projectId.value, file)
+      const made = await api.chatAttach(projectId.value, openChat.value!, file)
       row.artifactId = made.id
       row.name = made.name || row.name
     } catch (e) {
@@ -328,10 +401,10 @@ function onDrop(ev: DragEvent) {
  * confirmation on it.
  */
 async function stop() {
-  if (!projectId.value || stopping.value) return
+  if (!projectId.value || !openChat.value || stopping.value) return
   stopping.value = true
   try {
-    await api.interruptChat(projectId.value)
+    await api.interruptChat(projectId.value, openChat.value!)
     thinking.value = false
     // Anything queued behind it was about the answer just stopped.
     lines.value = lines.value.filter((l) => !l.queued)
@@ -358,9 +431,13 @@ async function send() {
   try {
     await api.chat(
       projectId.value!,
+      openChat.value!,
       text,
       files.map((f) => f.artifactId!),
     )
+    // The tab may have just been named by this message, and its order changes
+    // with use.
+    void loadChats()
     draft.value = ''
     for (const f of attachments.value) if (f.preview) URL.revokeObjectURL(f.preview)
     attachments.value = []
@@ -384,7 +461,8 @@ function onKeydown(ev: KeyboardEvent) {
   }
 }
 
-watch(projectId, connect, { immediate: true })
+watch(projectId, () => loadChats(false), { immediate: true })
+watch(openChat, connect)
 onBeforeUnmount(() => stream?.close())
 </script>
 
@@ -421,11 +499,62 @@ onBeforeUnmount(() => stream?.close())
         size="sm"
         class="ml-auto gap-1.5"
         :disabled="!projectId"
-        @click="confirmReset = true"
+        @click="startChat"
       >
-        <Trash2 :size="13" aria-hidden="true" />
-        End this chat
+        <Plus :size="13" aria-hidden="true" />
+        New chat
       </Button>
+    </div>
+
+    <!-- The conversations, as tabs. A second subject used to be either an
+         interruption of the first or a reason to delete it, since ending the
+         chat was the only way to start fresh. Each of these has its own
+         transcript, its own files and its own agent, and closing one takes
+         exactly those and nothing else.
+
+         Scrolls rather than wraps: a row of tabs that reflows moves the one
+         you were about to click. -->
+    <div v-if="chats.length" class="hairline-b flex gap-1 overflow-x-auto pb-1.5">
+      <div
+        v-for="c in chats"
+        :key="c.id"
+        class="group flex shrink-0 items-center gap-1 border px-2 py-1 text-[11px]"
+        :class="
+          c.id === openChat
+            ? 'border-primary text-foreground'
+            : 'text-muted-foreground hover:text-foreground border-transparent'
+        "
+      >
+        <!-- Double click renames, which is where every tab strip puts it. -->
+        <input
+          v-if="renaming === c.id"
+          v-model="renameDraft"
+          class="border-input bg-background w-32 border px-1 text-[11px]"
+          :aria-label="`Rename ${tabLabel(c)}`"
+          @keyup.enter="commitRename(c)"
+          @keyup.escape="renaming = null"
+          @blur="commitRename(c)"
+        />
+        <button
+          v-else
+          type="button"
+          class="focus-visible:outline-ring max-w-[12rem] truncate focus-visible:outline-2"
+          :title="tabLabel(c)"
+          @click="openChat = c.id"
+          @dblclick="((renaming = c.id), (renameDraft = c.title))"
+        >
+          {{ tabLabel(c) }}
+        </button>
+        <button
+          type="button"
+          class="hover:text-destructive focus-visible:outline-ring shrink-0 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 focus-visible:outline-2"
+          :aria-label="`Close ${tabLabel(c)}`"
+          title="Close this chat, and delete it"
+          @click.stop="confirmEnd = c"
+        >
+          <X :size="11" aria-hidden="true" />
+        </button>
+      </div>
     </div>
 
     <div
@@ -614,19 +743,28 @@ onBeforeUnmount(() => stream?.close())
       </InputGroup>
     </div>
 
-    <Dialog v-model:open="confirmReset">
+    <!-- Closing a tab is a deletion, and says so. It is the one thing here
+         that cannot be undone: the transcript, the files attached to it and
+         the worktree it ran in all go. -->
+    <Dialog :open="!!confirmEnd" @update:open="(v: boolean) => !v && (confirmEnd = null)">
       <DialogContent class="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>End this chat?</DialogTitle>
+          <DialogTitle>Close “{{ confirmEnd ? tabLabel(confirmEnd) : '' }}”?</DialogTitle>
           <DialogDescription>
-            The conversation is deleted and the chat worktree is removed, along with anything the
-            agent left in it. Your own checkout and every role's worktree are untouched, and no
-            task history is affected. The next question starts a fresh one.
+            This conversation is deleted, along with the files attached to it and the worktree it
+            ran in. Your other chats, your own checkout, every role's worktree and all task history
+            are untouched.
           </DialogDescription>
         </DialogHeader>
         <DialogFooter>
-          <Button variant="outline" @click="confirmReset = false">Cancel</Button>
-          <Button variant="destructive" :disabled="resetting" @click="resetChat">End it</Button>
+          <Button variant="outline" @click="confirmEnd = null">Cancel</Button>
+          <Button
+            variant="destructive"
+            :disabled="!confirmEnd"
+            @click="confirmEnd && endChat(confirmEnd)"
+          >
+            Close it
+          </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

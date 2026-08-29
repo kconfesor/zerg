@@ -226,13 +226,18 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("PUT /api/projects/{id}/icon", s.setProjectIcon)
 	mux.HandleFunc("GET /api/projects/{id}/icons", s.projectIcons)
 	mux.HandleFunc("GET /api/projects/{id}/icon", s.projectIcon)
-	mux.HandleFunc("POST /api/projects/{id}/chat", s.askChat)
-	mux.HandleFunc("DELETE /api/projects/{id}/chat", s.resetChat)
-	mux.HandleFunc("POST /api/projects/{id}/chat/attachments", s.attachToChat)
-	// A stop for the answer, not for the conversation: DELETE /chat ends the
-	// whole thing, worktree and transcript included, and these are two very
+	// Conversations. A project holds several, and each is addressed by id:
+	// they have separate transcripts, separate attachments and separate agents.
+	mux.HandleFunc("GET /api/projects/{id}/chats", s.listChats)
+	mux.HandleFunc("POST /api/projects/{id}/chats", s.newChat)
+	mux.HandleFunc("PUT /api/projects/{id}/chats/{chat}", s.renameChat)
+	// Closing one takes its transcript, its files and its worktree. A stop for
+	// the answer is a different verb on a different path, because they are very
 	// different buttons to press by accident.
-	mux.HandleFunc("POST /api/projects/{id}/chat/interrupt", s.interruptChat)
+	mux.HandleFunc("DELETE /api/projects/{id}/chats/{chat}", s.endChat)
+	mux.HandleFunc("POST /api/projects/{id}/chats/{chat}/messages", s.askChat)
+	mux.HandleFunc("POST /api/projects/{id}/chats/{chat}/attachments", s.attachToChat)
+	mux.HandleFunc("POST /api/projects/{id}/chats/{chat}/interrupt", s.interruptChat)
 	mux.HandleFunc("PUT /api/projects/{id}/chat-agent", s.setChatAgent)
 	mux.HandleFunc("GET /api/settings/shared-instructions", s.getSharedInstructions)
 	mux.HandleFunc("PUT /api/settings/shared-instructions", s.setSharedInstructions)

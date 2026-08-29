@@ -38,6 +38,9 @@ type clientFrame struct {
 	After string `json:"after,omitempty"`
 	Role  string `json:"role,omitempty"`
 	Task  string `json:"task,omitempty"`
+	// Chat narrows to one conversation. A project holds several, and a tab
+	// wants its own thread rather than every thread laid on top of each other.
+	Chat  string `json:"chat,omitempty"`
 	Limit int    `json:"limit,omitempty"`
 }
 
@@ -171,6 +174,10 @@ type streamState struct {
 	// seen is the last id written. An event already sent during replay must not
 	// be sent again when it also arrives on the bus.
 	seen string
+
+	// chat is the conversation this connection is watching, when it is
+	// watching one.
+	chat string
 }
 
 func (st *streamState) wants(ev event.Event, projectID string) bool {
@@ -178,6 +185,9 @@ func (st *streamState) wants(ev event.Event, projectID string) bool {
 		return false
 	}
 	if st.role != "" && ev.Role != st.role {
+		return false
+	}
+	if st.chat != "" && ev.ChatID != st.chat {
 		return false
 	}
 	if st.seen != "" && ev.ID <= st.seen {
@@ -191,10 +201,11 @@ func (s *Server) replay(ctx context.Context, conn *websocket.Conn,
 	projectID string, f clientFrame, st *streamState) error {
 
 	st.subscribed = true
-	st.role, st.task = f.Role, f.Task
+	st.role, st.task, st.chat = f.Role, f.Task, f.Chat
 
 	history, err := s.db.ListEvents(ctx, store.EventQuery{
-		ProjectID: projectID, After: f.After, Role: f.Role, Task: f.Task, Limit: f.Limit,
+		ProjectID: projectID, After: f.After, Role: f.Role, Task: f.Task,
+		Chat: f.Chat, Limit: f.Limit,
 	})
 	if err != nil {
 		s.log.Error("stream: could not read history", "project", projectID, "err", err)

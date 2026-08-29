@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/kconfesor/zerg/internal/adapter"
 	"github.com/kconfesor/zerg/internal/chat"
 	"github.com/kconfesor/zerg/internal/hatchery"
 	"github.com/kconfesor/zerg/internal/store"
@@ -169,15 +168,19 @@ func (s *Server) askChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	projectID := r.PathValue("id")
-	files, err := s.chatAttachments(r, projectID, req.Attachments)
+	c, err := s.chatFor(r)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	files, err := s.chatAttachments(r, c, req.Attachments)
 	if err != nil {
 		badRequest(w, err.Error())
 		return
 	}
 
 	msg := chat.Message{Text: strings.TrimSpace(req.Message), Files: files}
-	if err := s.chatMgr.Ask(r.Context(), projectID, msg); err != nil {
+	if err := s.chatMgr.Ask(r.Context(), c.ProjectID, c.ID, msg); err != nil {
 		// One session answers both this screen and the questions asked from a
 		// review, and its output carries nobody's name, so the two take turns.
 		// Being second is not a fault and is over in a moment: say so rather
@@ -192,32 +195,12 @@ func (s *Server) askChat(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "asked"})
 }
 
-// interruptChat stops the answer being written, keeping the conversation.
-func (s *Server) interruptChat(w http.ResponseWriter, r *http.Request) {
-	if s.chatMgr == nil {
-		writeError(w, http.StatusServiceUnavailable, "chat is not available")
-		return
-	}
-	if err := s.chatMgr.Interrupt(r.PathValue("id")); err != nil {
-		// A harness with no way to stop mid-turn is a fact about the harness,
-		// and the operator can act on it: they chose the model behind this
-		// chat and can choose another.
-		if errors.Is(err, adapter.ErrNoInterrupt) {
-			badRequest(w, "this chat's harness cannot be stopped mid-answer; it will finish on its own")
-			return
-		}
-		s.fail(w, r, err)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
 // chatAttachments resolves uploaded ids into files the agent can read.
 //
 // Refused rather than skipped when one does not resolve: a message whose
 // picture quietly did not arrive gets an answer about the text alone, and the
 // person reads it as the agent's opinion of the picture.
-func (s *Server) chatAttachments(r *http.Request, projectID string, ids []string) ([]chat.Attachment, error) {
+func (s *Server) chatAttachments(r *http.Request, c *store.Chat, ids []string) ([]chat.Attachment, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
@@ -230,10 +213,11 @@ func (s *Server) chatAttachments(r *http.Request, projectID string, ids []string
 		if err != nil {
 			return nil, fmt.Errorf("attachment %s is not there any more", id)
 		}
-		// Somebody else's project cannot be read into this conversation by
-		// naming its id.
-		if a.ProjectID != projectID {
-			return nil, fmt.Errorf("attachment %s belongs to another project", id)
+		// Somebody else's conversation cannot be read into this one by naming
+		// an id: the tabs are separate threads, and an attachment belongs to
+		// the one it was uploaded to.
+		if a.ProjectID != c.ProjectID || (a.ChatID != "" && a.ChatID != c.ID) {
+			return nil, fmt.Errorf("attachment %s belongs to another conversation", id)
 		}
 		if a.SHA256 == "" {
 			return nil, fmt.Errorf("attachment %s has no file behind it", id)
@@ -1118,19 +1102,6 @@ func (s *Server) deleteTask(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// resetChat ends a conversation and removes its worktree and transcript.
-func (s *Server) resetChat(w http.ResponseWriter, r *http.Request) {
-	if s.chatMgr == nil {
-		s.fail(w, r, fmt.Errorf("chat is not available in this build"))
-		return
-	}
-	if err := s.chatMgr.Reset(r.Context(), r.PathValue("id")); err != nil {
-		s.fail(w, r, err)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
 // setChatAgent chooses what answers questions. Empty values mean inherit from
 // the terminal role, which is the default.
 func (s *Server) setChatAgent(w http.ResponseWriter, r *http.Request) {
@@ -1156,7 +1127,10 @@ func (s *Server) setChatAgent(w http.ResponseWriter, r *http.Request) {
 	// The running session was built from the old choice, so end it. The next
 	// question starts one that matches what the setting now says.
 	if s.chatMgr != nil {
-		s.chatMgr.Stop(r.PathValue("id"))
+		// Every conversation in the project: they were all built from the old
+		// choice, and one left running would keep answering as the model the
+		// person has just stopped using.
+		s.chatMgr.StopProject(r.Context(), r.PathValue("id"))
 	}
 	writeJSON(w, http.StatusOK, project)
 }

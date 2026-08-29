@@ -51,6 +51,10 @@ type Artifact struct {
 	// Owner is agent or daemon; see the constants above.
 	Owner string `json:"owner,omitempty"`
 
+	// ChatID is the conversation a file was attached to. Empty for everything
+	// an agent produced, which is what the rest of this table is.
+	ChatID string `json:"chatId,omitempty"`
+
 	CreatedAt time.Time `json:"createdAt"`
 	Pinned    bool      `json:"pinned"`
 }
@@ -86,11 +90,12 @@ func (db *DB) AddArtifact(ctx context.Context, a *Artifact) (*Artifact, error) {
 	}
 	if _, err := db.sql.ExecContext(ctx,
 		`INSERT INTO artifacts (id, project_id, task_id, role, kind, label,
-		   sha256, mime, bytes, name, port, created_at, pinned, owner)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		   sha256, mime, bytes, name, port, created_at, pinned, owner, chat_id)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		a.ID, a.ProjectID, a.TaskID, a.Role, a.Kind, a.Label,
 		a.SHA256, a.MIME, a.Bytes, a.Name, a.Port,
-		a.CreatedAt.Format(time.RFC3339Nano), boolInt(a.Pinned), a.Owner); err != nil {
+		a.CreatedAt.Format(time.RFC3339Nano), boolInt(a.Pinned), a.Owner,
+		nullable(a.ChatID)); err != nil {
 		return nil, fmt.Errorf("recording the artifact: %w", err)
 	}
 	return a, nil
@@ -117,6 +122,27 @@ func (db *DB) ArtifactsForTask(ctx context.Context, taskID string) ([]Artifact, 
 	defer rows.Close()
 
 	var out []Artifact
+	for rows.Next() {
+		a, err := scanArtifact(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *a)
+	}
+	return out, rows.Err()
+}
+
+// ArtifactsForChat lists what was attached to one conversation, oldest first so
+// it reads in the order it was said.
+func (db *DB) ArtifactsForChat(ctx context.Context, chatID string) ([]Artifact, error) {
+	rows, err := db.read.QueryContext(ctx,
+		`SELECT `+artifactCols+` FROM artifacts WHERE chat_id = ? ORDER BY created_at, id`, chatID)
+	if err != nil {
+		return nil, fmt.Errorf("reading a conversation's files: %w", err)
+	}
+	defer rows.Close()
+
+	out := []Artifact{}
 	for rows.Next() {
 		a, err := scanArtifact(rows)
 		if err != nil {
@@ -191,21 +217,23 @@ func (db *DB) SetArtifactPinned(ctx context.Context, id string, pinned bool) err
 }
 
 const artifactCols = `id, project_id, task_id, role, kind, label, sha256, mime, bytes, name,
-	port, stopped_at, created_at, pinned, owner`
+	port, stopped_at, created_at, pinned, owner, chat_id`
 
 func scanArtifact(s scanner) (*Artifact, error) {
 	var (
 		a         Artifact
 		taskID    sql.NullString
 		stoppedAt sql.NullString
+		chatID    sql.NullString
 		createdAt string
 		pinned    int
 	)
 	if err := s.Scan(&a.ID, &a.ProjectID, &taskID, &a.Role, &a.Kind, &a.Label,
 		&a.SHA256, &a.MIME, &a.Bytes, &a.Name, &a.Port, &stoppedAt, &createdAt, &pinned,
-		&a.Owner); err != nil {
+		&a.Owner, &chatID); err != nil {
 		return nil, err
 	}
+	a.ChatID = chatID.String
 	if taskID.Valid {
 		a.TaskID = &taskID.String
 	}

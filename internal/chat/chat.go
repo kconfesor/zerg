@@ -33,11 +33,31 @@ import (
 	"github.com/kconfesor/zerg/internal/store"
 )
 
-// Role is the name chat events carry, and the worktree they run in.
+// Role is the name chat events carry.
 //
 // A name rather than a flag on the event, so the existing role filter, colour
-// assignment and replay all work on it with no special case.
+// assignment and replay all work on it with no special case. Which conversation
+// an event belongs to is a column beside it: encoding an id in the role would
+// make every one of those a string match.
 const Role = "chat"
+
+// reviewChat is the conversation a question asked from a diff runs in.
+//
+// Derived rather than stored, and with no row in the chats table, so it is a
+// working session and never a tab. One per project, because these questions
+// take turns anyway.
+func reviewChat(projectID string) string { return "review-" + projectID }
+
+// worktreeFor is where one conversation's agent runs.
+//
+// A checkout per conversation, named after it. They are separate agents holding
+// separate threads, and sharing a directory would mean one tab's attachments
+// appearing in another's listing and two agents writing to the same place when
+// both are answering. The id is the name, so ending a tab removes exactly its
+// own.
+func worktreeFor(chatID string) string {
+	return Role + "-" + chatID
+}
 
 // Operator is the name the person's own messages carry, so a conversation
 // reads as a conversation rather than a monologue with gaps.
@@ -73,6 +93,8 @@ type Manager struct {
 	// it. Optional: a build without a store simply has nothing to remove.
 	blobs *artifact.Store
 
+	// Everything below is keyed by conversation, not by project: a person can
+	// have several open, and each is its own thread with its own agent.
 	mu       sync.Mutex
 	sessions map[string]*session
 
@@ -109,32 +131,32 @@ type Manager struct {
 // out, and the API turns it into a 409 rather than a 500.
 var ErrBusy = errors.New("the agent is in the middle of an answer; ask again when it finishes")
 
-// beginTurn claims the session for one question, or reports it taken.
-func (m *Manager) beginTurn(projectID string) bool {
+// beginTurn claims a conversation for one question, or reports it taken.
+func (m *Manager) beginTurn(chatID string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.turns[projectID] {
+	if m.turns[chatID] {
 		return false
 	}
 	if m.turns == nil {
 		m.turns = map[string]bool{}
 	}
-	m.turns[projectID] = true
+	m.turns[chatID] = true
 	return true
 }
 
-func (m *Manager) endTurn(projectID string) {
+func (m *Manager) endTurn(chatID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	delete(m.turns, projectID)
+	delete(m.turns, chatID)
 }
 
-// Busy reports whether the project's session is mid-answer. Advisory: the
-// caller that wants the session still has to win beginTurn.
-func (m *Manager) Busy(projectID string) bool {
+// Busy reports whether a conversation is mid-answer. Advisory: the caller that
+// wants it still has to win beginTurn.
+func (m *Manager) Busy(chatID string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.turns[projectID]
+	return m.turns[chatID]
 }
 
 type session struct {
@@ -248,18 +270,32 @@ func NewManager(db *store.DB, reg *adapter.Registry, bus *event.Bus, log *slog.L
 
 // Ask sends a message and returns once the agent has it. The reply arrives as
 // events, the same way every other agent's output does.
-func (m *Manager) Ask(ctx context.Context, projectID string, msg Message) error {
+func (m *Manager) Ask(ctx context.Context, projectID, chatID string, msg Message) error {
 	if strings.TrimSpace(msg.Text) == "" && len(msg.Files) == 0 {
 		return fmt.Errorf("nothing to ask")
+	}
+	if chatID == "" {
+		return fmt.Errorf("a message belongs to a conversation")
+	}
+	// The tab moves to the front, and takes its name from the first thing said
+	// in it when nobody has named it: "Chat 3" says nothing about which one it
+	// is, and the opening sentence nearly always does.
+	if err := m.db.TouchChat(ctx, chatID); err != nil {
+		m.log.Warn("could not mark a conversation used", "chat", chatID, "err", err)
+	}
+	if c, err := m.db.GetChat(ctx, projectID, chatID); err == nil && c.Title == "" {
+		if err := m.db.NameChat(ctx, chatID, firstLine(msg.Text)); err != nil {
+			m.log.Warn("could not name a conversation", "chat", chatID, "err", err)
+		}
 	}
 	// Typed while the agent was still writing. It goes on the record now, in
 	// the order it was typed, and is sent when the turn in flight ends: the
 	// alternative was refusing it, which made the screen behave unlike every
 	// chat a person has used.
-	if !m.beginTurn(projectID) {
-		m.record(projectID, msg)
+	if !m.beginTurn(chatID) {
+		m.record(projectID, chatID, msg)
 		m.mu.Lock()
-		m.pending[projectID] = append(m.pending[projectID], msg)
+		m.pending[chatID] = append(m.pending[chatID], msg)
 		m.mu.Unlock()
 		return nil
 	}
@@ -267,15 +303,27 @@ func (m *Manager) Ask(ctx context.Context, projectID string, msg Message) error 
 	// the subscription exists would leave the session marked busy until the
 	// backstop, and every question in between refused.
 	events, cancel := m.bus.Subscribe(256)
-	if err := m.submit(ctx, projectID, msg); err != nil {
+	if err := m.submit(ctx, projectID, chatID, msg); err != nil {
 		cancel()
-		m.endTurn(projectID)
+		m.endTurn(chatID)
 		return err
 	}
 	// The chat screen does not wait for its own answer, so something has to:
-	// the session is this question's until the agent stops talking.
-	go m.releaseAtTurnEnd(projectID, events, cancel)
+	// the conversation is this question's until the agent stops talking.
+	go m.releaseAtTurnEnd(projectID, chatID, events, cancel)
 	return nil
+}
+
+// firstLine is a title taken from what somebody opened with.
+func firstLine(text string) string {
+	line := strings.TrimSpace(text)
+	if i := strings.IndexByte(line, '\n'); i >= 0 {
+		line = line[:i]
+	}
+	if len([]rune(line)) > 60 {
+		line = strings.TrimSpace(string([]rune(line)[:60]))
+	}
+	return line
 }
 
 // Interrupt stops the answer being written, without ending the conversation.
@@ -285,10 +333,10 @@ func (m *Manager) Ask(ctx context.Context, projectID string, msg Message) error 
 // forgetting everything said so far. Whatever was queued behind this turn is
 // dropped with it -- a follow-up typed against an answer you have just stopped
 // is about a reply that no longer exists.
-func (m *Manager) Interrupt(projectID string) error {
+func (m *Manager) Interrupt(chatID string) error {
 	m.mu.Lock()
-	s, ok := m.sessions[projectID]
-	delete(m.pending, projectID)
+	s, ok := m.sessions[chatID]
+	delete(m.pending, chatID)
 	m.mu.Unlock()
 	if !ok {
 		return nil
@@ -297,10 +345,10 @@ func (m *Manager) Interrupt(projectID string) error {
 }
 
 // Queued is how many messages are waiting behind the answer in flight.
-func (m *Manager) Queued(projectID string) int {
+func (m *Manager) Queued(chatID string) int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return len(m.pending[projectID])
+	return len(m.pending[chatID])
 }
 
 // record puts what the person said on the transcript.
@@ -308,12 +356,13 @@ func (m *Manager) Queued(projectID string) int {
 // Before the answer, and before the message is even sent when it is queued: a
 // reload has to show the conversation, and a question that appears only once
 // its reply arrives reads as a screen that lost what you typed.
-func (m *Manager) record(projectID string, msg Message) {
+func (m *Manager) record(projectID, chatID string, msg Message) {
 	m.bus.Publish(event.Event{
 		Event:     adapter.Event{Kind: adapter.EventMessage, Text: msg.Text, Args: attachmentArgs(msg.Files)},
 		ID:        store.NewID(),
 		ProjectID: projectID,
 		Role:      Operator,
+		ChatID:    chatID,
 	})
 }
 
@@ -332,17 +381,17 @@ func attachmentArgs(files []Attachment) map[string]any {
 }
 
 // submit records the question and hands it to the session.
-func (m *Manager) submit(ctx context.Context, projectID string, msg Message) error {
+func (m *Manager) submit(ctx context.Context, projectID, chatID string, msg Message) error {
 	// The question goes on the record before the answer, so a reload shows the
 	// conversation rather than replies with nothing to reply to.
-	m.record(projectID, msg)
-	return m.deliver(ctx, projectID, msg)
+	m.record(projectID, chatID, msg)
+	return m.deliver(ctx, projectID, chatID, msg)
 }
 
 // deliver hands a message to the session without recording it again, for the
 // queued ones that went on the transcript when they were typed.
-func (m *Manager) deliver(ctx context.Context, projectID string, msg Message) error {
-	s, err := m.ensure(ctx, projectID)
+func (m *Manager) deliver(ctx context.Context, projectID, chatID string, msg Message) error {
+	s, err := m.ensure(ctx, projectID, chatID)
 	if err != nil {
 		return err
 	}
@@ -395,8 +444,8 @@ const turnBackstop = 5 * time.Minute
 
 // releaseAtTurnEnd frees the session when the agent stops talking, and sends
 // whatever was typed while it was.
-func (m *Manager) releaseAtTurnEnd(projectID string, events <-chan event.Event, cancel func()) {
-	defer m.drainOrRelease(projectID)
+func (m *Manager) releaseAtTurnEnd(projectID, chatID string, events <-chan event.Event, cancel func()) {
+	defer m.drainOrRelease(projectID, chatID)
 	defer cancel()
 
 	said := false
@@ -409,7 +458,10 @@ func (m *Manager) releaseAtTurnEnd(projectID string, events <-chan event.Event, 
 			if !ok {
 				return
 			}
-			if ev.ProjectID != projectID || ev.Role != Role {
+			// This conversation's agent, not another tab's: several can be
+			// answering at once, and a turn that ended over there says nothing
+			// about the one being waited on here.
+			if ev.ProjectID != projectID || ev.Role != Role || ev.ChatID != chatID {
 				continue
 			}
 			switch ev.Kind {
@@ -437,16 +489,16 @@ func (m *Manager) releaseAtTurnEnd(projectID string, events <-chan event.Event, 
 // re-taken: releasing first would let a review's question in between two
 // things a person typed in a row, and that question would then collect the
 // answer to theirs.
-func (m *Manager) drainOrRelease(projectID string) {
+func (m *Manager) drainOrRelease(projectID, chatID string) {
 	m.mu.Lock()
-	queued := m.pending[projectID]
+	queued := m.pending[chatID]
 	if len(queued) == 0 {
 		m.mu.Unlock()
-		m.endTurn(projectID)
+		m.endTurn(chatID)
 		return
 	}
 	next := queued[0]
-	m.pending[projectID] = queued[1:]
+	m.pending[chatID] = queued[1:]
 	m.mu.Unlock()
 
 	// Its own context and its own subscription: the turn that just ended owns
@@ -454,13 +506,13 @@ func (m *Manager) drainOrRelease(projectID string) {
 	events, cancel := m.bus.Subscribe(256)
 	ctx, stop := context.WithTimeout(context.Background(), time.Minute)
 	defer stop()
-	if err := m.deliver(ctx, projectID, next); err != nil {
-		m.log.Warn("could not send a queued chat message", "project", projectID, "err", err)
+	if err := m.deliver(ctx, projectID, chatID, next); err != nil {
+		m.log.Warn("could not send a queued chat message", "chat", chatID, "err", err)
 		cancel()
-		m.endTurn(projectID)
+		m.endTurn(chatID)
 		return
 	}
-	go m.releaseAtTurnEnd(projectID, events, cancel)
+	go m.releaseAtTurnEnd(projectID, chatID, events, cancel)
 }
 
 // ensure starts the session for a project if it is not already running.
@@ -468,11 +520,11 @@ func (m *Manager) drainOrRelease(projectID string) {
 // One long-lived process per project rather than one per message: a follow-up
 // question that has forgotten the previous answer is not a conversation, and
 // re-spawning would also re-read the repository every time.
-func (m *Manager) ensure(ctx context.Context, projectID string) (*session, error) {
+func (m *Manager) ensure(ctx context.Context, projectID, chatID string) (*session, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if s, ok := m.sessions[projectID]; ok && s.cer.State() != cerebrate.StateFailed {
+	if s, ok := m.sessions[chatID]; ok && s.cer.State() != cerebrate.StateFailed {
 		return s, nil
 	}
 
@@ -518,7 +570,7 @@ func (m *Manager) ensure(ctx context.Context, projectID string) (*session, error
 	// Its own worktree: a question must never be able to touch the operator's
 	// checkout, and the base branch is the state worth answering about.
 	hat := hatchery.New(project.Path)
-	worktree, err := hat.EnsureWorktree(ctx, Role, project.BaseBranch)
+	worktree, err := hat.EnsureWorktree(ctx, worktreeFor(chatID), project.BaseBranch)
 	if err != nil {
 		return nil, fmt.Errorf("preparing a worktree for chat: %w", err)
 	}
@@ -540,6 +592,9 @@ func (m *Manager) ensure(ctx context.Context, projectID string) (*session, error
 		// The one session somebody watches being written. A pipeline role's
 		// output is read afterwards, if at all, so it is not asked for there.
 		Streaming: true,
+		// Which conversation this is, stamped on everything it says: several
+		// tabs can be answering at once.
+		ChatID: chatID,
 	})
 
 	// Not tied to the request that started it: the session outlives the message
@@ -552,18 +607,37 @@ func (m *Manager) ensure(ctx context.Context, projectID string) (*session, error
 	}()
 
 	s := &session{cer: cer, cancel: cancel, worktree: worktree}
-	m.sessions[projectID] = s
+	m.sessions[chatID] = s
 	return s, nil
 }
 
-// Stop ends a project's chat session, if one is running.
-func (m *Manager) Stop(projectID string) {
+// Stop ends one conversation's session, if it is running.
+func (m *Manager) Stop(chatID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if s, ok := m.sessions[projectID]; ok {
+	if s, ok := m.sessions[chatID]; ok {
 		s.cancel()
-		delete(m.sessions, projectID)
+		delete(m.sessions, chatID)
 	}
+	delete(m.pending, chatID)
+	delete(m.turns, chatID)
+}
+
+// StopProject ends every conversation in a project.
+//
+// The agent behind them was chosen per project, so changing it has to reach all
+// of them: a tab left running would keep answering as the model the person just
+// stopped using.
+func (m *Manager) StopProject(ctx context.Context, projectID string) {
+	chats, err := m.db.ListChats(ctx, projectID)
+	if err != nil {
+		m.log.Warn("could not list conversations to stop", "project", projectID, "err", err)
+		return
+	}
+	for _, c := range chats {
+		m.Stop(c.ID)
+	}
+	m.Stop(reviewChat(projectID))
 }
 
 // StopAll ends every session, for daemon shutdown.
@@ -577,55 +651,49 @@ func (m *Manager) StopAll() {
 }
 
 // Running reports whether a project has a live chat session.
-func (m *Manager) Running(projectID string) bool {
+func (m *Manager) Running(chatID string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	s, ok := m.sessions[projectID]
+	s, ok := m.sessions[chatID]
 	return ok && s.cer.State() != cerebrate.StateFailed
 }
 
-// Reset ends a chat and removes what it left behind.
+// End closes one conversation and removes everything it had.
 //
-// The worktree is the reason this exists: chat gets its own checkout so a
-// question can never touch the operator's, and that checkout accumulates
-// whatever the conversation did — built artefacts, scratch files, a branch that
-// has drifted from base. Stopping the session leaves all of it.
+// The worktree is the reason this exists at all: a conversation gets its own
+// checkout so a question can never touch the operator's, and that checkout
+// accumulates whatever the conversation did -- attachments, scratch files, a
+// branch that has drifted from base. Stopping the session leaves all of it.
 //
-// The transcript goes too. It is a conversation rather than a record of work:
-// nothing downstream refers to it, and a chat you have deliberately ended is
-// not one whose history you wanted.
-func (m *Manager) Reset(ctx context.Context, projectID string) error {
-	m.Stop(projectID)
+// The transcript and the files go too, which is the whole contract of a tab:
+// closing one is a decision, and what it removes is everything that was only
+// ever part of it.
+func (m *Manager) End(ctx context.Context, projectID, chatID string) error {
+	if _, err := m.db.GetChat(ctx, projectID, chatID); err != nil {
+		return err
+	}
+	m.Stop(chatID)
 
 	project, err := m.db.GetProject(ctx, projectID)
 	if err != nil {
 		return err
 	}
-	if err := hatchery.New(project.Path).RemoveWorktree(ctx, Role); err != nil {
-		return fmt.Errorf("removing the chat worktree: %w", err)
+	if err := hatchery.New(project.Path).RemoveWorktree(ctx, worktreeFor(chatID)); err != nil {
+		return fmt.Errorf("removing the conversation's worktree: %w", err)
 	}
-	// Both sides of it. Deleting only the agent's left the person's questions
-	// on screen with nothing answering them, which reads as a chat that lost
-	// its replies rather than one that was ended.
-	for _, role := range []string{Role, Operator} {
-		if err := m.db.DeleteRoleEvents(ctx, projectID, role); err != nil {
-			return fmt.Errorf("clearing the conversation: %w", err)
-		}
-	}
-	// And whatever was attached to it. These are exempt from the ordinary
-	// sweep, so this is the moment they stop being wanted.
-	orphans, err := m.db.DeleteChatAttachments(ctx, projectID)
+
+	orphans, err := m.db.DeleteChat(ctx, projectID, chatID)
 	if err != nil {
-		return fmt.Errorf("clearing the conversation's files: %w", err)
+		return fmt.Errorf("clearing the conversation: %w", err)
 	}
 	if m.blobs != nil {
 		for _, digest := range orphans {
 			if err := m.blobs.Remove(digest); err != nil {
-				// The row is gone, so the conversation is gone; a file left on
-				// disk is waste, not a wrong answer, and the sweep will not
-				// find it again. Said rather than returned.
+				// The rows are gone, so the conversation is gone; a file left
+				// on disk is waste, not a wrong answer, and nothing will look
+				// for it again. Said rather than returned.
 				m.log.Warn("could not remove an attachment's bytes",
-					"project", projectID, "digest", digest, "err", err)
+					"chat", chatID, "digest", digest, "err", err)
 			}
 		}
 	}
@@ -650,13 +718,20 @@ func (m *Manager) AskAndWait(ctx context.Context, projectID, question string) (s
 	m.asking.Lock()
 	defer m.asking.Unlock()
 
+	// A conversation of its own, with no row in the tab list. A question asked
+	// from inside a diff is not one of the person's threads: its answer belongs
+	// on the review it was asked from, and putting it in a tab would mean their
+	// conversations filling with questions they did not type. The events are
+	// still tagged, so they never surface in a tab either.
+	chatID := reviewChat(projectID)
+
 	// Waits for the session rather than talking over it, and holds it until
 	// the answer is in hand: everything this collects has to belong to this
 	// question.
-	if !m.beginTurn(projectID) {
+	if !m.beginTurn(chatID) {
 		return "", ErrBusy
 	}
-	defer m.endTurn(projectID)
+	defer m.endTurn(chatID)
 
 	// Subscribed before the question is sent: a fast agent can answer before a
 	// subscription taken afterwards exists, and the answer would be lost to a
@@ -664,7 +739,7 @@ func (m *Manager) AskAndWait(ctx context.Context, projectID, question string) (s
 	events, cancel := m.bus.Subscribe(256)
 	defer cancel()
 
-	if err := m.submit(ctx, projectID, Message{Text: question}); err != nil {
+	if err := m.submit(ctx, projectID, chatID, Message{Text: question}); err != nil {
 		return "", err
 	}
 
@@ -679,7 +754,7 @@ func (m *Manager) AskAndWait(ctx context.Context, projectID, question string) (s
 			if !ok {
 				return strings.TrimSpace(strings.Join(said, "\n\n")), nil
 			}
-			if ev.ProjectID != projectID || ev.Role != Role {
+			if ev.ProjectID != projectID || ev.Role != Role || ev.ChatID != chatID {
 				continue
 			}
 			switch ev.Kind {
