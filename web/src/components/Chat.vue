@@ -911,7 +911,7 @@ onBeforeUnmount(() => stream?.close())
          that cannot be undone: the transcript, the files attached to it and
          the worktree it ran in all go. -->
     <Dialog :open="!!confirmEnd" @update:open="(v: boolean) => !v && (confirmEnd = null)">
-      <DialogContent class="sm:max-w-md">
+      <DialogContent variant="confirm" class="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>Close “{{ confirmEnd ? tabLabel(confirmEnd) : '' }}”?</DialogTitle>
           <DialogDescription>

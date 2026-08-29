@@ -1138,7 +1138,7 @@ watch(current, () => (banner.value = null))
          stays. The spend stays: the money was real, and a cost total that fell
          when a card was tidied away would disagree with the bill. -->
     <Dialog :open="!!confirmDeleteTask" @update:open="(v) => !v && (confirmDeleteTask = null)">
-      <DialogContent class="sm:max-w-md">
+      <DialogContent variant="confirm" class="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>Delete “{{ confirmDeleteTask?.name }}”?</DialogTitle>
           <DialogDescription>

@@ -532,7 +532,7 @@ async function sweep() {
     <!-- Removing is destructive and permanent for zerg's own record of the
          work, so it asks, and says exactly what survives. -->
     <Dialog :open="!!confirmDelete" @update:open="(v) => !v && (confirmDelete = null)">
-      <DialogContent class="sm:max-w-md">
+      <DialogContent variant="confirm" class="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>Remove {{ confirmDelete?.name }}?</DialogTitle>
           <DialogDescription>
