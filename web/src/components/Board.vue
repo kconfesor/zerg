@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import type { ResolvedRole, Task } from '@/lib/api'
+import type { LiveService, ResolvedRole, SwarmStatus, Task } from '@/lib/api'
 import { duration, taskState } from '@/lib/utils'
 
 /**
@@ -27,7 +27,18 @@ function compactTokens(n: number): string {
 function money(n: number): string {
   return n >= 1 ? `$${n.toFixed(2)}` : `$${n.toFixed(3)}`
 }
-import { Bell, Eye, EyeOff, MessageCircleQuestion, ScrollText, Square, Trash2 } from '@lucide/vue'
+import {
+  Bell,
+  Eye,
+  EyeOff,
+  ExternalLink,
+  Hourglass,
+  LoaderCircle,
+  MessageCircleQuestion,
+  ScrollText,
+  Square,
+  Trash2,
+} from '@lucide/vue'
 import { Badge } from '@/components/ui/badge'
 
 const props = defineProps<{
@@ -39,6 +50,12 @@ const props = defineProps<{
   blockedOn?: Map<string, 'question' | 'approval'>
   /** Whether cards a person has put away are shown. */
   showHidden?: boolean
+  /** Apps running right now, so the card that asked for one can link to it. */
+  services?: LiveService[]
+  /** A deploy in flight, for the card that is waiting on it. */
+  deploy?: SwarmStatus['deploy']
+  /** Roles that are mid-turn and have gone quiet, keyed by role name. */
+  quiet?: Map<string, number>
 }>()
 const emit = defineEmits<{
   open: [task: Task]
@@ -48,7 +65,61 @@ const emit = defineEmits<{
   stop: [task: Task]
   activity: [task: Task]
   remove: [task: Task]
+  stopDeploy: [task: Task]
 }>()
+
+/**
+ * What a card's deployment is doing, if it has one.
+ *
+ * On the card that asked for it. It was in the top bar, which is the wrong
+ * place twice over: it says a thing is running without saying what produced
+ * it, and it is nowhere near the card whose change you want to look at.
+ */
+const deployFor = computed(() => (task: Task) => {
+  const live = (props.services ?? []).find((s) => s.taskId === task.id)
+  if (live) return { state: 'serving' as const, url: live.url, label: live.label }
+  const d = props.deploy
+  if (d && d.taskId === task.id && d.state !== 'idle') {
+    return { state: d.state, url: '', label: '', message: d.message }
+  }
+  return null
+})
+
+/**
+ * The models that did the work, short enough to sit on a card.
+ *
+ * "claude-sonnet-5" and "gpt-5.6-sol" are the identifiers, and the vendor
+ * prefix is the least interesting part of them on a board where every card
+ * carries one. The full names are in the title, since the short form is
+ * ambiguous the moment two vendors ship a "5".
+ */
+function shortModel(model: string): string {
+  return model.replace(/^(claude|openai|anthropic|google)-/, '')
+}
+
+/**
+ * How long the role working this card has been silent, in words.
+ *
+ * A card that says "working" says the same thing whether the agent is running
+ * a long test suite or sitting in a command that will never return. One of
+ * those wants patience and the other wants a person, and until this there was
+ * nothing on screen that told them apart -- a wedged agent was found because
+ * somebody happened to be watching.
+ */
+function quietFor(task: Task): string {
+  const seconds = props.quiet?.get(task.lane)
+  if (!seconds || task.state !== 'working') return ''
+  const mins = Math.round(seconds / 60)
+  return `quiet ${mins}m`
+}
+
+/** What the strip says, which is different in each of the three states. */
+function deploySays(state: string): string {
+  if (state === 'serving') return 'Deployment done'
+  if (state === 'gave up') return 'Deployment failed'
+  if (state === 'asking') return 'Deployment needs an answer'
+  return 'Deploying'
+}
 
 /** Lanes are the enabled roles in pipeline order, then the Done well. */
 const lanes = computed(() => {
@@ -258,24 +329,110 @@ const byLane = computed(() => {
               <span v-else-if="task.firstClaimedAt">started {{ ago(task.firstClaimedAt) }}</span>
               <span v-else>queued {{ ago(task.createdAt) }}</span>
 
-              <span v-if="task.tokens" class="tabular ml-auto">
-                {{ compactTokens(task.tokens) }} · {{ money(task.costUsd) }}
+              <span
+                v-if="quietFor(task)"
+                class="flex items-center gap-1 text-[var(--status-warning)]"
+                title="This agent is mid-turn and has produced nothing for a while. A long build looks like this; so does a command that will never return."
+              >
+                <Hourglass :size="10" aria-hidden="true" />
+                {{ quietFor(task) }}
+              </span>
+
+              <!-- Which models produced this. On the card because it is the
+                   card you are judging: "this came out well" and "this came
+                   out badly" are both worth attaching to what made it, and a
+                   role's configured model is a live value that will not
+                   remember. -->
+              <span
+                v-if="task.models?.length"
+                class="truncate"
+                :title="`Worked by ${task.models.join(', ')}`"
+              >
+                {{ task.models.map(shortModel).join(' · ') }}
               </span>
             </div>
           </button>
 
-            <!-- Put away, on the card itself. Finished work accumulates, and
-                 the person reading a card is the one who knows whether they
-                 will want it again — which no age cutoff can guess. -->
-            <button
-              v-if="task.state === 'done'"
-              type="button"
-              class="hairline-t text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-ring flex w-full items-center gap-1.5 px-2.5 py-1.5 text-left text-[11px] focus-visible:outline-2 focus-visible:-outline-offset-2"
-              @click="task.hidden ? emit('unhide', task) : emit('hide', task)"
+            <!-- The card's foot: putting it away, and what it cost.
+                 Together on one row because both are about the card as a whole
+                 rather than about the work in it, and the spend was taking a
+                 third of the line above while the row underneath held one
+                 word. Put away is on the card itself because finished work
+                 accumulates, and the person reading a card is the one who
+                 knows whether they will want it again -- which no age cutoff
+                 can guess. -->
+            <div
+              v-if="task.state === 'done' || task.tokens"
+              class="hairline-t text-muted-foreground flex items-center text-[11px]"
             >
-              <component :is="task.hidden ? Eye : EyeOff" :size="12" aria-hidden="true" />
-              {{ task.hidden ? 'Unhide' : 'Hide' }}
-            </button>
+              <button
+                v-if="task.state === 'done'"
+                type="button"
+                class="hover:bg-muted hover:text-foreground focus-visible:outline-ring flex items-center gap-1.5 px-2.5 py-1.5 text-left transition-colors focus-visible:outline-2 focus-visible:-outline-offset-2"
+                @click="task.hidden ? emit('unhide', task) : emit('hide', task)"
+              >
+                <component :is="task.hidden ? Eye : EyeOff" :size="12" aria-hidden="true" />
+                {{ task.hidden ? 'Unhide' : 'Hide' }}
+              </button>
+
+              <span
+                v-if="task.tokens"
+                class="tabular ml-auto px-2.5 py-1.5 text-[10px]"
+                :title="`${task.tokens.toLocaleString()} tokens across every role and every lap`"
+              >
+                {{ compactTokens(task.tokens) }} · {{ money(task.costUsd) }}
+              </span>
+            </div>
+
+            <!-- What this card's change is doing when it is running somewhere.
+                 On the card rather than in the top bar: an app running is only
+                 meaningful next to the change that produced it, and this is
+                 where somebody is already looking when they want to see it. -->
+            <div
+              v-if="deployFor(task)"
+              class="hairline-t flex items-center gap-1.5 px-2.5 py-1.5 text-[11px]"
+              :class="
+                deployFor(task)!.state === 'gave up'
+                  ? 'text-[var(--status-warning)]'
+                  : 'text-muted-foreground'
+              "
+            >
+              <span
+                v-if="deployFor(task)!.state === 'serving'"
+                class="pulse-dot size-1.5 shrink-0 rounded-full bg-[var(--status-good)]"
+              />
+              <LoaderCircle
+                v-else-if="deployFor(task)!.state === 'working'"
+                :size="11"
+                aria-hidden="true"
+                class="spin shrink-0"
+              />
+              <span class="truncate">{{ deploySays(deployFor(task)!.state) }}</span>
+
+              <a
+                v-if="deployFor(task)!.state === 'serving'"
+                :href="deployFor(task)!.url"
+                target="_blank"
+                rel="noopener noreferrer"
+                class="text-primary hover:bg-muted focus-visible:outline-ring ml-auto grid size-5 shrink-0 place-items-center transition-colors focus-visible:outline-2"
+                :title="`Open ${deployFor(task)!.label || 'it'} in a new tab`"
+                :aria-label="`Open ${deployFor(task)!.label || 'this deployment'} in a new tab`"
+                @click.stop
+              >
+                <ExternalLink :size="12" aria-hidden="true" />
+              </a>
+
+              <button
+                type="button"
+                class="text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-ring grid size-5 shrink-0 place-items-center transition-colors focus-visible:outline-2"
+                :class="deployFor(task)!.state === 'serving' ? '' : 'ml-auto'"
+                title="Stop this deployment"
+                aria-label="Stop this deployment"
+                @click.stop="emit('stopDeploy', task)"
+              >
+                <Square :size="11" aria-hidden="true" />
+              </button>
+            </div>
 
             <!-- The action the card is waiting for, on the card. Reaching a
                  decision through a notification means finding the card again

@@ -1,0 +1,12 @@
+-- What to bring into a preview checkout that git does not track.
+--
+-- A preview runs in a worktree made from a commit, so it contains exactly what
+-- was committed -- and .env is in .gitignore in almost every project that has
+-- one. `docker compose up` then fails with "env file .env not found" on the
+-- very first run, which is a wall rather than a message.
+--
+-- One path per line, relative to the project, copied from the operator's own
+-- checkout before the command runs. Not inferred: copying anything that looks
+-- like a secret into a directory the daemon serves from should be a thing
+-- somebody wrote down.
+ALTER TABLE deploy_targets ADD COLUMN copy_files TEXT NOT NULL DEFAULT '';

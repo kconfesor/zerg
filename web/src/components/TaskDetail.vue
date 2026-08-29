@@ -7,13 +7,15 @@
  * handoff points at a commit, and usage is totalled per task — it simply had
  * nowhere to be read.
  */
-import { ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { api, type Project, type Task, type TaskDetail } from '@/lib/api'
 import { latest } from '@/lib/latest'
 import { renderMarkdown } from '@/lib/markdown'
 import { duration, taskState } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import TaskFlow from '@/components/TaskFlow.vue'
+import Artifacts from '@/components/Artifacts.vue'
+import RunPanel from '@/components/RunPanel.vue'
 import {
   Dialog,
   DialogBody,
@@ -35,6 +37,19 @@ const emit = defineEmits<{ close: [] }>()
 
 const detail = ref<TaskDetail | null>(null)
 const failed = ref('')
+
+/** The artifact list, so a preview that starts can make it look again. */
+const artifacts = ref<{ load: (taskId: string | undefined) => void } | null>(null)
+
+/**
+ * The commit this card left behind: the last handoff that carried one.
+ *
+ * The last rather than the first, because that is the state the work ended in
+ * and the one worth looking at.
+ */
+const landed = computed(() =>
+  [...(detail.value?.history ?? [])].reverse().find((s) => s.commit)?.commit,
+)
 
 // Opening one card and then another leaves two requests in flight, and the
 // first can answer last — putting task A's history and spend under task B's
@@ -106,6 +121,23 @@ function tokensOf(u: TaskDetail['usage']): number {
       </DialogHeader>
 
       <DialogBody>
+        <!-- Running what this card produced, after the fact.
+             "What did this actually look like" is a question asked of a
+             finished card at least as often as of one at a gate, and the
+             commit is right here in the trail. -->
+        <RunPanel
+          :project-id="project?.id"
+          :commit="landed"
+          :task-id="task?.id"
+          class="mb-4"
+          @served="artifacts?.load(task?.id)"
+        />
+
+        <!-- What the work produced, above the account of how it happened: on a
+             finished card this is the answer to the question people actually
+             open it with. -->
+        <Artifacts ref="artifacts" :task-id="task?.id" class="mb-4" />
+
         <p v-if="failed" class="text-destructive text-xs">{{ failed }}</p>
         <p v-else-if="!detail" class="text-muted-foreground text-xs">Reading the history…</p>
 

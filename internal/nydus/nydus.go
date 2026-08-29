@@ -58,7 +58,7 @@ type Integrator interface {
 type Nydus struct {
 	db         *store.DB
 	integrator Integrator
-	onTaskDone func(ctx context.Context, projectID, taskID string)
+	onTaskDone func(ctx context.Context, projectID, taskID, commit string)
 	leaseFor   time.Duration
 	now        func() time.Time
 }
@@ -81,7 +81,7 @@ func WithIntegrator(i Integrator) Option { return func(n *Nydus) { n.integrator 
 // half the system to move a message. It runs after the transaction commits and
 // its failure never affects the completion, because a task is finished whether
 // or not the tidying afterwards worked.
-func WithOnTaskDone(fn func(ctx context.Context, projectID, taskID string)) Option {
+func WithOnTaskDone(fn func(ctx context.Context, projectID, taskID, commit string)) Option {
 	return func(n *Nydus) { n.onTaskDone = fn }
 }
 
@@ -100,7 +100,7 @@ func New(db *store.DB, opts ...Option) *Nydus {
 // ── starting work ─────────────────────────────────────────────────────────
 
 // NewTask opens a card and queues it for the first enabled role.
-func (n *Nydus) NewTask(ctx context.Context, projectID, name, body string) (*store.Task, error) {
+func (n *Nydus) NewTask(ctx context.Context, projectID, name, body, deploy string) (*store.Task, error) {
 	team, err := n.db.ResolveTeam(ctx, projectID)
 	if err != nil {
 		return nil, err
@@ -112,6 +112,12 @@ func (n *Nydus) NewTask(ctx context.Context, projectID, name, body string) (*sto
 
 	if name == "" {
 		return nil, invalid("a task needs a name; the name follows the card through the whole pipeline")
+	}
+	// Refused here rather than stored. A target this build cannot reach would
+	// be a card that looks like it deploys and never does, and the person who
+	// asked would find out by it not happening.
+	if !store.ValidDeploy(deploy) {
+		return nil, invalid("%q is not somewhere this can deploy; it is local, or nothing", deploy)
 	}
 
 	// The card and the message that starts it are written together. Created
@@ -133,12 +139,13 @@ func (n *Nydus) NewTask(ctx context.Context, projectID, name, body string) (*sto
 		Lane:      first.Name,
 		State:     store.TaskQueued,
 		CreatedAt: now.UTC(),
+		Deploy:    deploy,
 	}
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO tasks (id, project_id, name, body, lane, state, created_at)
-		 VALUES (?,?,?,?,?,?,?)`,
+		`INSERT INTO tasks (id, project_id, name, body, lane, state, created_at, deploy)
+		 VALUES (?,?,?,?,?,?,?,?)`,
 		task.ID, task.ProjectID, task.Name, task.Body, task.Lane, task.State,
-		task.CreatedAt.Format(time.RFC3339Nano)); err != nil {
+		task.CreatedAt.Format(time.RFC3339Nano), task.Deploy); err != nil {
 		return nil, fmt.Errorf("creating task %q: %w", name, err)
 	}
 
@@ -411,8 +418,17 @@ func (n *Nydus) sendIn(ctx context.Context, tx *sql.Tx, msg *store.Message, req 
 	// A gated handoff is held; everything else is immediately claimable. The
 	// message and its routes are written together, so there is no window in
 	// which a message exists with nobody to deliver it to.
+	//
+	// Rework is not held, though the sender is gated. A gate asks a person
+	// before work moves *on*: toward the next role, and eventually toward the
+	// base branch. Sending work back to the role that produced it advances
+	// nothing and can reach nothing, so holding it only made the operator
+	// approve twice to get one change made -- once for the reviewer's verdict
+	// and again for the retry that verdict asked for. A loop of them is caught
+	// by the rework counter, which is what surfaces a card going round in
+	// Attention; an approval per lap is not that mechanism.
 	state := store.RouteQueued
-	if req.gate == store.GateApproval && req.Kind == store.KindHandoff {
+	if req.gate == store.GateApproval && req.Kind == store.KindHandoff && !req.rework {
 		state = store.RouteHeld
 	}
 	for _, to := range req.ToRoles {
@@ -579,7 +595,11 @@ func (n *Nydus) complete(ctx context.Context, projectID string, sender store.Res
 		return nil, fmt.Errorf("committing completion: %w", err)
 	}
 	if n.onTaskDone != nil {
-		n.onTaskDone(ctx, projectID, task.ID)
+		var sha string
+		if msg.CommitSHA != nil {
+			sha = *msg.CommitSHA
+		}
+		n.onTaskDone(ctx, projectID, task.ID, sha)
 	}
 	return msg, nil
 }
@@ -1223,7 +1243,21 @@ func (n *Nydus) decide(ctx context.Context, approvalID, decision, note string) e
 		}
 	}
 
-	return tx.Commit()
+	// A gated completion lands here rather than in complete(), and this hook
+	// was only wired to the ungated one: on any project with an approval gate
+	// at the end -- which is the arrangement the gate exists for -- nothing
+	// that runs when a card lands ran at all. The disk sweep was the first
+	// casualty and nobody noticed, because a swarm that never reclaims looks
+	// exactly like a swarm that produces a lot of build output.
+	finished := decision == store.ApprovalApproved && terminal != 0 && taskID.Valid
+
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if finished && n.onTaskDone != nil {
+		n.onTaskDone(ctx, projectID, taskID.String, commit.String)
+	}
+	return nil
 }
 
 // rejectionNote is what the author is told: the reason, and every remark still

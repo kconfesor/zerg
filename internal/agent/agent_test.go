@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kconfesor/zerg/internal/artifact"
 	"github.com/kconfesor/zerg/internal/nydus"
 	"github.com/kconfesor/zerg/internal/store"
 )
@@ -21,6 +22,7 @@ type fixture struct {
 	srv     *Server
 	project *store.Project
 	socket  string
+	blobs   *artifact.Store
 }
 
 // merges records terminal integration without needing a repository.
@@ -81,7 +83,8 @@ func newFixture(t *testing.T) *fixture {
 	}
 
 	nyd := nydus.New(db, nydus.WithIntegrator(&recordingIntegrator{}))
-	srv := NewServer(db, nyd, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	blobs := artifact.New(filepath.Join(t.TempDir(), "artifacts"))
+	srv := NewServer(db, nyd, blobs, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	// A short socket path: macOS caps unix socket paths near 104 bytes, and a
 	// t.TempDir() under /var/folders/... plus a filename can exceed it.
@@ -95,7 +98,7 @@ func newFixture(t *testing.T) *fixture {
 	}
 	t.Cleanup(func() { srv.Close() })
 
-	return &fixture{db: db, nyd: nyd, srv: srv, project: p, socket: socket}
+	return &fixture{db: db, nyd: nyd, srv: srv, project: p, socket: socket, blobs: blobs}
 }
 
 func (f *fixture) client(t *testing.T, role string) *Client {
@@ -109,7 +112,7 @@ func TestAgentClaimsWorksAndHandsOn(t *testing.T) {
 	ctx := context.Background()
 	f := newFixture(t)
 
-	task, err := f.nyd.NewTask(ctx, f.project.ID, "Calculator", "build a calculator")
+	task, err := f.nyd.NewTask(ctx, f.project.ID, "Calculator", "build a calculator", "")
 	if err != nil {
 		t.Fatalf("NewTask: %v", err)
 	}
@@ -180,7 +183,7 @@ func TestNextWaitsForWorkToArrive(t *testing.T) {
 
 	go func() {
 		time.Sleep(300 * time.Millisecond)
-		if _, err := f.nyd.NewTask(ctx, f.project.ID, "Later", "arrives after the wait began"); err != nil {
+		if _, err := f.nyd.NewTask(ctx, f.project.ID, "Later", "arrives after the wait began", ""); err != nil {
 			t.Errorf("NewTask: %v", err)
 		}
 	}()
@@ -204,7 +207,7 @@ func TestTokenScopesTheSender(t *testing.T) {
 	ctx := context.Background()
 	f := newFixture(t)
 
-	if _, err := f.nyd.NewTask(ctx, f.project.ID, "Calculator", "x"); err != nil {
+	if _, err := f.nyd.NewTask(ctx, f.project.ID, "Calculator", "x", ""); err != nil {
 		t.Fatalf("NewTask: %v", err)
 	}
 
@@ -247,7 +250,7 @@ func TestRevokedTokenStopsWorking(t *testing.T) {
 func TestDoneIsIdempotent(t *testing.T) {
 	ctx := context.Background()
 	f := newFixture(t)
-	if _, err := f.nyd.NewTask(ctx, f.project.ID, "Calculator", "x"); err != nil {
+	if _, err := f.nyd.NewTask(ctx, f.project.ID, "Calculator", "x", ""); err != nil {
 		t.Fatalf("NewTask: %v", err)
 	}
 
@@ -331,7 +334,7 @@ func TestTerminalRoleCompletesTheTask(t *testing.T) {
 	integrator := &recordingIntegrator{}
 	f := newFixture(t)
 	f.nyd = nydus.New(f.db, nydus.WithIntegrator(integrator))
-	f.srv = NewServer(f.db, f.nyd, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	f.srv = NewServer(f.db, f.nyd, f.blobs, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	socket := filepath.Join("/tmp", store.NewID()[:12]+".sock")
 	if err := f.srv.Listen(socket); err != nil {
@@ -340,7 +343,7 @@ func TestTerminalRoleCompletesTheTask(t *testing.T) {
 	t.Cleanup(func() { f.srv.Close() })
 	f.socket = socket
 
-	task, err := f.nyd.NewTask(ctx, f.project.ID, "Calculator", "x")
+	task, err := f.nyd.NewTask(ctx, f.project.ID, "Calculator", "x", "")
 	if err != nil {
 		t.Fatalf("NewTask: %v", err)
 	}
@@ -426,7 +429,7 @@ func TestAnAgentCannotNameAnotherProjectsTask(t *testing.T) {
 
 	// The agent's own project still works by id and by name, once it is
 	// actually holding the card.
-	mine, err := f.nyd.NewTask(ctx, f.project.ID, "Mine", "yours")
+	mine, err := f.nyd.NewTask(ctx, f.project.ID, "Mine", "yours", "")
 	if err != nil {
 		t.Fatalf("NewTask: %v", err)
 	}
@@ -448,7 +451,7 @@ func TestSendRequiresHoldingTheTask(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
 
-	task, err := f.nyd.NewTask(ctx, f.project.ID, "Calculator", "build a calculator")
+	task, err := f.nyd.NewTask(ctx, f.project.ID, "Calculator", "build a calculator", "")
 	if err != nil {
 		t.Fatalf("NewTask: %v", err)
 	}
@@ -477,7 +480,7 @@ func TestRepeatedSendIsAbsorbed(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
 
-	task, err := f.nyd.NewTask(ctx, f.project.ID, "Calculator", "build a calculator")
+	task, err := f.nyd.NewTask(ctx, f.project.ID, "Calculator", "build a calculator", "")
 	if err != nil {
 		t.Fatalf("NewTask: %v", err)
 	}

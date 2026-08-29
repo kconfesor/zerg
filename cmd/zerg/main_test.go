@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"path/filepath"
 	"testing"
 
 	"github.com/kconfesor/zerg/internal/store"
@@ -109,5 +111,50 @@ func TestResolvingTheNameDoesNotChangeTheSavedListener(t *testing.T) {
 	}
 	if cfg.Listener().TailnetHost != "" {
 		t.Error("the discovered name reached the listener, which is what made restartNeeded stick")
+	}
+}
+
+// Deploying when a card lands is the card's decision.
+//
+// It was the project's: one checkbox meaning "preview everything here", which
+// is either off and never used or on and paying an agent turn to preview a
+// README fix. The card carries the answer now, and this is that answer being
+// read back from the database rather than from the thing that wrote it.
+func TestOnlyACardThatAskedIsDeployedWhenItLands(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "r.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer db.Close()
+
+	project, err := db.CreateProject(ctx, t.TempDir(), "Ledger", "main")
+	if err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+
+	asked, err := db.CreateTask(ctx, project.ID, "Add the settings page", "", "")
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	if _, err := db.SQL().ExecContext(ctx,
+		`UPDATE tasks SET deploy = ? WHERE id = ?`, store.DeployLocal, asked.ID); err != nil {
+		t.Fatal(err)
+	}
+	quiet, err := db.CreateTask(ctx, project.ID, "Fix a typo", "", "")
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+
+	if !deploysOnLanding(ctx, db, asked.ID, "abc1234") {
+		t.Error("a card that asked to be deployed was not")
+	}
+	if deploysOnLanding(ctx, db, quiet.ID, "abc1234") {
+		t.Error("a card that did not ask was deployed anyway, which is somebody's money")
+	}
+	// Rejected work, or work that changed nothing, leaves no commit and there
+	// is nothing to put anywhere.
+	if deploysOnLanding(ctx, db, asked.ID, "") {
+		t.Error("a card with no commit was deployed")
 	}
 }

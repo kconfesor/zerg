@@ -1,0 +1,15 @@
+-- Whether a task is meant to be deployed when it lands, and where to.
+--
+-- Previously one checkbox per project: "run a preview whenever a task here
+-- finishes". That is the wrong place for the decision. Most cards in a project
+-- are not worth a preview -- a rename, a test, a README -- and every preview is
+-- an agent turn and therefore money, so a project-wide switch is either off
+-- (and the feature is never used) or on (and it pays for previews of work
+-- nobody wanted to look at). The person who knows whether a card is worth
+-- looking at is the person writing the card, at the moment they write it.
+--
+-- Text rather than a boolean because 'local' is the first of several: dev and
+-- staging are the same decision made at task creation, with a different place
+-- to put the result. Empty means no deploy, which is what every card written
+-- before this migration asked for by not being able to ask for anything.
+ALTER TABLE tasks ADD COLUMN deploy TEXT NOT NULL DEFAULT '';

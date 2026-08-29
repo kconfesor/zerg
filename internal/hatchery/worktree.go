@@ -196,6 +196,74 @@ func (h *Hatchery) EnsureWorktree(ctx context.Context, role, baseBranch string) 
 	return path, nil
 }
 
+// PreviewDir is the worktree a local preview runs in.
+//
+// One per project, reused and checked out detached at whatever commit is being
+// previewed. Its own worktree rather than the operator's checkout for two
+// reasons: running a build in the directory somebody is working in is rude,
+// and a detached checkout can show a commit that has not merged, which is the
+// whole point of previewing at the approval gate.
+const PreviewDir = "preview"
+
+// Resolve turns a ref into the commit it names.
+//
+// For "run this project", where the thing to run is the base branch as it
+// stands and only the repository knows what that is.
+func (h *Hatchery) Resolve(ctx context.Context, ref string) (string, error) {
+	out, err := git(ctx, h.repoPath, "rev-parse", ref)
+	if err != nil {
+		return "", fmt.Errorf("%w: %s in %s", ErrNoSuchRevision, ref, h.repoPath)
+	}
+	return strings.TrimSpace(out), nil
+}
+
+// PreviewWorktree checks a commit out into the preview worktree and returns
+// its path.
+//
+// Detached on purpose: this is a copy to run, not a branch to work on, and a
+// branch here would be a thing that could drift, be committed to, or be
+// confused with a role's.
+func (h *Hatchery) PreviewWorktree(ctx context.Context, commit string) (string, error) {
+	path := h.Path(PreviewDir)
+
+	// The same rule the role worktrees need, for the same reason and one more:
+	// a preview can be the first worktree a project ever gets, if somebody runs
+	// a change before starting a swarm. Without it .worktrees/preview is an
+	// untracked directory in the operator's own `git status`, and an agent
+	// running `git add -A` commits an embedded repository into the project.
+	if err := h.ensureIgnored(ctx); err != nil {
+		return "", err
+	}
+
+	if isWorktree(ctx, path) {
+		// Reused rather than recreated: a rebuild between two commits should
+		// not throw away a node_modules or a target directory that the build
+		// is about to want again.
+		if _, err := git(ctx, path, "checkout", "--detach", "--force", commit); err != nil {
+			return "", fmt.Errorf("checking out %s to preview: %w", short(commit), err)
+		}
+		return path, nil
+	}
+	if _, err := os.Stat(path); err == nil {
+		return "", fmt.Errorf("%s already exists and is not a git worktree; move it aside", path)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return "", fmt.Errorf("creating %s: %w", filepath.Dir(path), err)
+	}
+	if _, err := git(ctx, h.repoPath, "worktree", "add", "--force", "--detach", path, commit); err != nil {
+		return "", fmt.Errorf("creating the preview worktree at %s: %w", short(commit), err)
+	}
+	return path, nil
+}
+
+// short is a commit as a person would write it.
+func short(commit string) string {
+	if len(commit) > 8 {
+		return commit[:8]
+	}
+	return commit
+}
+
 // RemoveWorktree detaches a role's worktree, leaving its branch behind so any
 // commits it made remain reachable.
 func (h *Hatchery) RemoveWorktree(ctx context.Context, role string) error {

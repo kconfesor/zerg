@@ -26,6 +26,11 @@ export interface RoleTemplate {
    *  grows. Not the same as ResolvedRole.terminal, which is the role that is
    *  finishing this particular pipeline. */
   finisher: boolean
+  /**
+   * What the role is for: 'pipeline' (claims work, has a lane) or 'runner'
+   * (started by the daemon to show you the app, never on the board).
+   */
+  purpose?: 'pipeline' | 'runner'
   builtin: boolean
 }
 
@@ -219,6 +224,14 @@ export interface Task {
    *  this. `outcomeRef` is the commit or the pull request's URL. */
   outcome?: 'merged' | 'pr' | 'branch'
   outcomeRef?: string
+  /** The models that actually spent tokens on this card, first use first.
+   *  Not what the roles are configured with now, which is a live value and a
+   *  different question. */
+  models?: string[]
+  /** Where this card's work gets put when it lands. Decided when the card is
+   *  written: a preview costs an agent turn, and most cards are not worth
+   *  looking at. Empty means nowhere. */
+  deploy?: 'local'
 }
 
 /** One worked task as the history screen reads it. */
@@ -270,6 +283,9 @@ export interface RoleStatus {
   terminal: boolean
   /** When a spent provider quota is expected to lift. Only while throttled. */
   throttledUntil?: string
+  /** Seconds this role has been mid-turn without producing anything. Absent
+   *  until silence stops being explainable by a long build. */
+  quietFor?: number
 }
 
 export interface Workspace {
@@ -299,6 +315,12 @@ export interface SwarmStatus {
   roles: RoleStatus[]
   /** Subscription headroom, keyed by provider — one account, many roles. */
   quotas?: Record<string, QuotaReport>
+  /** Apps an agent has running for this project, each with a link. On the
+   *  status poll because a preview nobody can find is a preview nobody has. */
+  services?: LiveService[]
+  /** A deploy in flight, so the card that asked for one can say so while it
+   *  is happening rather than only when it finishes. */
+  deploy?: { state: RunState['state']; taskId?: string; message?: string }
 }
 
 export interface Approval {
@@ -497,8 +519,11 @@ export const api = {
     const suffix = query.toString()
     return call<HistoryPage>(`/projects/${id}/history${suffix ? '?' + suffix : ''}`)
   },
-  newTask: (id: string, name: string, body: string) =>
-    call<Task>(`/projects/${id}/tasks`, { method: 'POST', body: JSON.stringify({ name, body }) }),
+  newTask: (id: string, name: string, body: string, deploy: string) =>
+    call<Task>(`/projects/${id}/tasks`, {
+      method: 'POST',
+      body: JSON.stringify({ name, body, deploy }),
+    }),
 
   attention: (id: string) => call<Attention>(`/projects/${id}/attention`),
   approve: (id: string) => call<void>(`/approvals/${id}/approve`, { method: 'POST' }),
@@ -514,6 +539,42 @@ export const api = {
     }),
 
   taskDetail: (id: string) => call<TaskDetail>(`/tasks/${id}`),
+  /** What a task produced: files to look at, and services to open. */
+  taskArtifacts: (id: string) => call<Artifact[]>(`/tasks/${id}/artifacts`),
+  /**
+   * The state of this project's runner: what it is doing, and what it has
+   * learned about running the project.
+   */
+  runState: (projectId: string) => call<RunState>(`/projects/${projectId}/run`),
+  /** Ask the runner to serve a commit. Returns as soon as the agent is
+   *  started; the state says what happens next. */
+  startRun: (projectId: string, body: { commit: string; taskId?: string }) =>
+    call<RunState>(`/projects/${projectId}/run`, { method: 'POST', body: JSON.stringify(body) }),
+  /** Tell the running agent something: which app, which compose file, what it
+   *  got wrong. It still has the context of what it just tried. */
+  guideRun: (projectId: string, text: string) =>
+    call<RunState>(`/projects/${projectId}/run/guide`, {
+      method: 'POST',
+      body: JSON.stringify({ text }),
+    }),
+  stopRun: (projectId: string) => call<void>(`/projects/${projectId}/run`, { method: 'DELETE' }),
+  /** Say somebody is still looking, which is what the idle timer measures. */
+  touchRun: (projectId: string) =>
+    call<void>(`/projects/${projectId}/run/touch`, { method: 'POST' }),
+  /** Correct what the agent believes about running this project. */
+  saveRunNote: (projectId: string, note: string) =>
+    call<void>(`/projects/${projectId}/run/note`, {
+      method: 'PUT',
+      body: JSON.stringify({ note }),
+    }),
+  /** Whether finishing a task starts a preview of it. */
+
+  /** Keep an artifact after its task's transcript ages out. */
+  pinArtifact: (id: string, pinned: boolean) =>
+    call<Artifact>(`/artifacts/${id}/pinned`, {
+      method: 'PUT',
+      body: JSON.stringify({ pinned }),
+    }),
   /**
    * One step's transcript: what a role did while it held the work.
    *
@@ -961,6 +1022,64 @@ export interface ReviewGuide {
   body: string
   createdAt: string
 }
+
+/**
+ * Something an agent produced for a person to look at.
+ *
+ * A file is bytes the daemon kept; a service is a port a process was listening
+ * on, which is only true while that process is alive, so `url` is present only
+ * while it is.
+ */
+export interface Artifact {
+  id: string
+  projectId: string
+  taskId?: string
+  role?: string
+  kind: 'file' | 'image' | 'service'
+  label?: string
+  sha256?: string
+  mime?: string
+  bytes?: number
+  name?: string
+  port?: number
+  stoppedAt?: string
+  createdAt: string
+  pinned: boolean
+  /** Where a running service can be opened, on the proxy's own origin. */
+  url?: string
+}
+
+/**
+ * What the runner is doing, and what it knows.
+ *
+ * `working` it is reading the repository and trying things; `asking` it put a
+ * question in Attention and is waiting; `serving` a port is registered and the
+ * link works; `gave up` the turn ended without anything serving.
+ */
+/** A service an agent started, as a link somebody can click. */
+export interface LiveService {
+  id: string
+  label?: string
+  taskId?: string
+  url: string
+}
+
+export interface RunState {
+  state: 'idle' | 'working' | 'asking' | 'serving' | 'gave up'
+  commit?: string
+  taskId?: string
+  message?: string
+  since?: string
+  /** What has been learned about running this project. Prose, written by the
+   *  runner or corrected by the operator. */
+  note?: string
+  noteAuthor?: string
+  /** What is being served right now, with an address. */
+  services?: LiveService[]
+}
+
+/** Where the bytes of a file artifact live. */
+export const artifactBytes = (id: string) => `/api/artifacts/${id}/bytes`
 
 /** One file a commit touched, with both its content and its diff. */
 export interface ChangedFile {

@@ -1011,10 +1011,10 @@ Because roles are global (§4.1) and rollups carry `project_id`, the same querie
 projects: cost per project, which project a role earns its keep in, whether a prompt change helped
 everywhere or only in one repo. That falls out of the schema rather than needing a second one.
 
-## 13. Artifacts, planned
+## 13. Artifacts
 
-*Not in the first build. Recorded now because it constrains the transport and storage decisions
-above, and those are cheaper to get right than to retrofit.*
+*Built. `zerg artifact add` and `zerg artifact serve`, schema 025, and a second listener for
+proxied services. What follows describes what is there; the deployment half of issue #9 is not.*
 
 An artifact is anything an agent produces that a human wants to look at: a generated file, a
 screenshot, a chart, a report, a diff, or a **running service**: a dev server the agent started that
@@ -1039,7 +1039,14 @@ zerg artifact serve --port 5173 --label "Dev server"
 ```
 
 Files are stored content-addressed under `~/.zerg/artifacts/<sha256>`, which dedupes the same output
-across tasks and survives worktree cleanup. `serve` registers a port rather than bytes.
+across tasks and survives worktree cleanup. `serve` registers a port rather than bytes, and dials it
+first: a typo otherwise becomes a link that fails only when somebody clicks it.
+
+Two rules the implementation added. A file has to come from the project's tree, symlinks resolved
+before the check — an agent can already run code in its worktree, so this is not a wall, but without
+it one line in a poisoned file (`zerg artifact add ~/.ssh/id_rsa`) copies a key onto an HTTP surface
+with no authentication. And the card is inferred from the lease the role is holding, like a
+clarification's, with `--task` to override.
 
 ```sql
 artifacts (id, project_id, task_id, role, kind,      -- file | image | service | diff
@@ -1048,12 +1055,16 @@ artifacts (id, project_id, task_id, role, kind,      -- file | image | service |
 
 ### 13.3 Serving
 
-- `GET /artifacts/{id}`: bytes, correct `Content-Type`, `ETag` = sha256, immutable caching, range
-  requests. The browser does what browsers already do well.
-- `GET /artifacts/{id}/preview`: inline render for the kinds that have one: images, text, diffs.
-- `GET /proxy/{id}/*`: reverse-proxies a `service` artifact, so an app bound to `127.0.0.1:5173`
-  is reachable from the cockpit without CORS, without exposing the port, and without the user
-  hunting for which port an agent happened to pick.
+- `GET /api/artifacts/{id}/bytes`: bytes, correct `Content-Type`, `ETag` = sha256, immutable
+  caching, range requests. The browser does what browsers already do well.
+- `GET /api/tasks/{id}/artifacts`: what a card produced, with a `url` for each running service.
+- The service origin's `/{id}/*`: reverse-proxies a `service` artifact, so an app bound to
+  `127.0.0.1:5173` is reachable from the cockpit without CORS, without exposing the port, and
+  without the user hunting for which port an agent happened to pick.
+
+There is no `/preview`: the cockpit decides how to render from the type, and only pictures and plain
+text are ever rendered inline. HTML and SVG are downloads, SVG because it is a document format that
+can carry script.
 
 ### 13.4 The security constraint that shapes 13.3
 
@@ -1062,16 +1073,28 @@ cockpit's own origin would give it same-origin access to cockpit state, session 
 command API. An agent bug, or a prompt injection in a file it read, could drive the orchestrator.
 
 So proxied services are served from a **separate origin** (a distinct loopback port), embedded in a
-sandboxed iframe, and never share the cockpit's origin or credentials. This is the reason `/proxy`
-is specified as a reverse proxy on its own origin rather than a path on the main one, and it is
-easier to build that way from the start than to unpick later.
+sandboxed iframe, and never share the cockpit's origin or credentials. This is the reason the proxy
+is a reverse proxy on its own origin rather than a path on the main one, and it is easier to build
+that way from the start than to unpick later.
+
+As built: the port is chosen by the operating system, not configured, because it is an
+implementation detail of a link the daemon builds itself from the request that asked — loopback for
+a browser here, the tailnet name for a phone. It binds loopback only and serves TLS with the
+cockpit's certificate when there is one, since an https page cannot embed an http iframe. That
+origin serves proxied services and nothing else: no cockpit, no API, and no redirect back to
+either, because a link from the untrusted origin to the trusted one is the shape of the thing this
+prevents.
 
 ### 13.5 Retention
 
 Artifacts are the largest tier by bytes and slot into the §12.1 policy: content-addressed storage
 dedupes, artifacts of completed tasks age out with their events on the same rolling window, and
 `pinned` exempts anything worth keeping. A pinned artifact keeps its bytes even after its task's
-transcript is gone.
+transcript is gone, and so does one belonging to a pinned task.
+
+Removing the row is not permission to remove the file: two rows can name one digest, so the sweep
+asks which digests nothing references any more, in the transaction that deletes, and only those
+leave the disk.
 
 ## 14. Stack
 
@@ -1183,7 +1206,8 @@ and §6.1 are almost entirely coordination bugs caught without spending a token.
 11. **Provider-limit handling** (§16): a spent quota window pauses a role
     instead of failing it.
 
-Still open: pty attach and takeover (§10.1, needs `github.com/creack/pty`), artifacts (§13),
+Still open: pty attach and takeover (§10.1, needs `github.com/creack/pty`), deploying an artifact
+somewhere (issue #9's second half, which has four open questions in it and no answers yet),
 authentication (§17), detaching the daemon from its terminal, and harness session resume across a
 respawn (§7.4). Nothing resumes a swarm after a daemon restart. Agents stop and stay stopped until
 Start is pressed, which is deliberate while spawning an LLM process costs money, but it is a

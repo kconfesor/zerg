@@ -87,15 +87,19 @@ func TestListRolesReturnsTheSeededLibrary(t *testing.T) {
 	var roles []store.RoleTemplate
 	decodeInto(t, rec, &roles)
 
-	if len(roles) != 9 {
-		t.Fatalf("library has %d roles, want the 9 built-ins", len(roles))
+	// Nine pipeline roles and the runner, which is a role like any other so
+	// that its harness, model, thinking and prompt are editable here rather
+	// than being the one agent nobody can configure. It is not in the nine
+	// because it is never part of a team.
+	if len(roles) != 10 {
+		t.Fatalf("library has %d roles, want nine built-ins and the runner", len(roles))
 	}
 	names := map[string]bool{}
 	for _, r := range roles {
 		names[r.Name] = true
 	}
 	for _, want := range []string{"planner", "coder", "reviewer", "debugger", "cleaner",
-		"architect", "hardener", "security", "docs"} {
+		"architect", "hardener", "security", "docs", "runner"} {
 		if !names[want] {
 			t.Errorf("built-in %q is missing from the library", want)
 		}

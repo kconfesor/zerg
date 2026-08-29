@@ -18,7 +18,10 @@ vi.mock('@/lib/api', () => ({
     resolveReviewThread: vi.fn(),
     approvalGuide: vi.fn(),
     requestGuide: vi.fn(),
+    taskArtifacts: vi.fn(),
+    pinArtifact: vi.fn(),
   },
+  artifactBytes: (id: string) => `/api/artifacts/${id}/bytes`,
 }))
 enableAutoUnmount(afterEach)
 
@@ -38,6 +41,7 @@ const attention = (files: ChangedFile[], threads: ReviewThread[] = []): Attentio
   diff.mockResolvedValue({ files, range: true, base: 'main', seen: [] })
   mergeable.mockResolvedValue({ clean: true, conflicts: [], baseAhead: 0 })
   review.mockResolvedValue(threads)
+  vi.mocked(api.taskArtifacts).mockResolvedValue([])
   seen.mockResolvedValue({ seen: [] })
   return {
     approvals: [
@@ -275,5 +279,69 @@ describe('a change too large to send in one piece', () => {
   it('says why a binary file shows nothing', async () => {
     const w = await open([file('logo.png', { status: 'A', added: 0, removed: 0, binary: true })])
     expect(row(w, 'logo.png')).toContain('Binary file')
+  })
+})
+
+// A gated planner commits a spec, so the approval renders a diff of one
+// markdown file surrounded by the tools for interrogating code. None of them
+// is the question in front of you: the document already says what it is for,
+// "this file" is the only file, and the way to push back on a plan is to
+// reject it with a reason.
+describe('approving a plan rather than a change', () => {
+  it('does not offer the tools for interrogating code', async () => {
+    const w = await open([
+      file('docs/specs/a-plan.md', { diff: '@@ -0,0 +1 @@\n+the plan\n' }),
+    ])
+    const labels = w.findAll('button').map((b) => b.text())
+    expect(labels).not.toContain('Ask about this file')
+    expect(labels).not.toContain('Remark on this file')
+    expect(labels.some((l) => l.includes('Map this change'))).toBe(false)
+    // The plan itself is still there to read.
+    expect(w.text()).toContain('docs/specs/a-plan.md')
+  })
+
+  it('still offers them as soon as the change touches code', async () => {
+    const w = await open([
+      file('docs/specs/a-plan.md', { diff: '@@ -0,0 +1 @@\n+the plan\n' }),
+      file('src/main.ts', { diff: '@@ -0,0 +1 @@\n+const x = 1\n' }),
+    ])
+    const labels = w.findAll('button').map((b) => b.text())
+    expect(labels).toContain('Ask about this file')
+  })
+})
+
+// Merge readiness belongs to the gate that merges.
+//
+// Every gate was told "will not fast-forward: this is behind main" and "main
+// has moved 6 commits", including a planner handing a spec to the coder, where
+// approving merges nothing and the next role rebases as a matter of course. A
+// warning that shows where it cannot apply is one people learn to scroll past.
+describe('merge readiness', () => {
+  it('is neither shown nor asked for at a handoff', async () => {
+    const data = attention([file('src/main.ts', { diff: '@@ -0,0 +1 @@\n+x\n' })])
+    data.approvals[0].terminal = false
+    mergeable.mockClear()
+
+    const w = mount(Attention, { props: { attention: data } })
+    await flushPromises()
+
+    expect(mergeable).not.toHaveBeenCalled()
+    expect(w.text()).not.toContain('will not fast-forward')
+    expect(w.text()).not.toContain('has moved')
+    expect(w.text()).not.toContain('merges cleanly')
+  })
+
+  it('is shown at the gate that lands the work', async () => {
+    const data = attention([file('src/main.ts', { diff: '@@ -0,0 +1 @@\n+x\n' })])
+    mergeable.mockClear()
+    // Set after attention(), which stubs a clean merge of its own.
+    mergeable.mockResolvedValue({ clean: false, diverged: true, conflicts: [], baseAhead: 6 })
+
+    const w = mount(Attention, { props: { attention: data } })
+    await flushPromises()
+
+    expect(mergeable).toHaveBeenCalled()
+    expect(w.text()).toContain('will not fast-forward')
+    expect(w.text()).toContain('has moved 6')
   })
 })

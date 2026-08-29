@@ -12,7 +12,7 @@
  * than having it threaded down through the shell.
  */
 import { computed, onMounted, ref, useId, watch } from 'vue'
-import { Flag, Plus, Trash2 } from '@lucide/vue'
+import { Flag, Play, Plus, Trash2 } from '@lucide/vue'
 import { api, type Model, type RoleTemplate, type TeamPreset } from '@/lib/api'
 import { latest } from '@/lib/latest'
 import { usePending } from '@/lib/pending'
@@ -258,6 +258,14 @@ async function remove(tpl: RoleTemplate) {
             <Badge v-if="tpl.gate === 'approval'" variant="secondary" class="text-[9px]">
               approval gate
             </Badge>
+            <!-- A role that is not in any pipeline. Said here because
+                 everything else on this screen is something you put in a team,
+                 and this one is not: the daemon starts it when somebody asks
+                 to see the app running. -->
+            <Badge v-if="tpl.purpose === 'runner'" variant="secondary" class="gap-1 text-[9px]">
+              <Play :size="9" aria-hidden="true" />
+              runs your app
+            </Badge>
           </span>
           <span class="text-muted-foreground mt-0.5 block truncate font-mono text-[10px]">
             {{ tpl.harness }}<span v-if="tpl.model"> · {{ tpl.model }}</span>
@@ -321,6 +329,20 @@ async function remove(tpl: RoleTemplate) {
         </DialogHeader>
 
         <DialogBody class="grid gap-3 sm:grid-cols-2">
+          <!-- What this role is, before the fields that configure it. Spanning
+               both columns because it is about the whole role rather than any
+               one setting, which is what it looked like sitting in a column of
+               its own. -->
+          <p
+            v-if="editing.purpose === 'runner'"
+            class="bg-muted/30 border-l-primary border border-l-2 p-2.5 text-[11px] leading-relaxed sm:col-span-2"
+          >
+            Not part of any pipeline. This one is started when somebody asks to see the app
+            running: it reads the project, works out how it serves itself, and starts it. It never
+            claims work, never appears on the board, and cannot be added to a team. Its harness,
+            model, thinking and prompt are yours to change, like any other role's.
+          </p>
+
           <div class="flex flex-col gap-1.5">
             <Label :for="nameId">Name</Label>
             <Input :id="nameId" v-model="editing.name" />
@@ -370,7 +392,7 @@ async function remove(tpl: RoleTemplate) {
             </span>
           </div>
 
-          <div class="flex flex-col gap-1.5">
+          <div v-if="editing.purpose !== 'runner'" class="flex flex-col gap-1.5">
             <Label :for="receiveId">Receive</Label>
             <Select v-model="editing.receive">
               <SelectTrigger :id="receiveId"><SelectValue /></SelectTrigger>
@@ -381,7 +403,7 @@ async function remove(tpl: RoleTemplate) {
             </Select>
           </div>
 
-          <div class="flex flex-col gap-1.5">
+          <div v-if="editing.purpose !== 'runner'" class="flex flex-col gap-1.5">
             <Label :for="gateId">Gate</Label>
             <Select v-model="editing.gate">
               <SelectTrigger :id="gateId"><SelectValue /></SelectTrigger>
@@ -398,7 +420,7 @@ async function remove(tpl: RoleTemplate) {
           <!-- Where this role belongs in a pipeline, which is a fact about the
                role rather than about any one team: a reviewer or a cleaner ends
                the work wherever it appears, and a planner never does. -->
-          <div class="flex flex-col gap-1.5">
+          <div v-if="editing.purpose !== 'runner'" class="flex flex-col gap-1.5">
             <Label :for="finisherId">Ends a pipeline</Label>
             <label class="flex items-start gap-2.5 text-xs">
               <Switch

@@ -17,11 +17,13 @@ import (
 	"time"
 
 	"github.com/kconfesor/zerg/internal/adapter"
+	"github.com/kconfesor/zerg/internal/artifact"
 	"github.com/kconfesor/zerg/internal/chat"
 	"github.com/kconfesor/zerg/internal/event"
 	"github.com/kconfesor/zerg/internal/nydus"
 	"github.com/kconfesor/zerg/internal/overmind"
 	"github.com/kconfesor/zerg/internal/preflight"
+	"github.com/kconfesor/zerg/internal/runner"
 	"github.com/kconfesor/zerg/internal/store"
 )
 
@@ -50,6 +52,15 @@ type Server struct {
 
 	// catalog remembers what each harness said its models were; see catalog.go.
 	catalog *catalog
+
+	// blobs is where artifact bytes live; see artifacts.go.
+	blobs *artifact.Store
+
+	// viewer owns the origins services are reached on; see proxy.go.
+	viewer *Viewer
+
+	// runner starts previews; see run.go.
+	runner *runner.Manager
 }
 
 // Deps are what the API needs to serve the cockpit.
@@ -67,6 +78,19 @@ type Deps struct {
 
 	// Recorder is optional; health reports its lag and losses when present.
 	Recorder *event.Recorder
+
+	// Blobs is where artifact bytes live. Without it the endpoints that serve
+	// them say so rather than failing on a nil.
+	Blobs *artifact.Store
+
+	// Runner starts a project so a person can look at it. Optional: without it
+	// those endpoints say so rather than failing on a nil.
+	Runner *runner.Manager
+
+	// Viewer owns the origins running services are reached on, so a link can
+	// be built for whoever is asking. Nil when previews are unavailable, which
+	// makes those links absent rather than broken.
+	Viewer *Viewer
 
 	// Applied is the listener configuration the daemon bound at startup.
 	Applied store.Listener
@@ -97,7 +121,7 @@ func New(d Deps) *Server {
 		db: d.DB, log: d.Log, registry: d.Registry,
 		preflt: pf, over: d.Overmind, nyd: d.Nydus, bus: d.Bus, applied: d.Applied, chatMgr: d.Chat,
 		recorder: d.Recorder, ui: d.UI, tailnetHost: d.TailnetHost,
-		catalog: newCatalog(),
+		catalog: newCatalog(), blobs: d.Blobs, viewer: d.Viewer, runner: d.Runner,
 	}
 }
 
@@ -172,6 +196,20 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/approvals/{id}/diff", s.approvalDiff)
 	mux.HandleFunc("GET /api/approvals/{id}/mergeable", s.approvalMergeable)
 	mux.HandleFunc("GET /api/approvals/{id}/file", s.approvalFile)
+	// Artifacts: what a task produced, and its bytes. See §13.
+	// Running a project so somebody can look at it. The daemon starts an agent;
+	// it does not run the project itself.
+	mux.HandleFunc("GET /api/projects/{id}/run", s.runState)
+	mux.HandleFunc("POST /api/projects/{id}/run", s.startRun)
+	mux.HandleFunc("POST /api/projects/{id}/run/guide", s.guideRun)
+	mux.HandleFunc("POST /api/projects/{id}/run/touch", s.touchRun)
+	mux.HandleFunc("DELETE /api/projects/{id}/run", s.stopRun)
+	mux.HandleFunc("PUT /api/projects/{id}/run/note", s.saveRunNote)
+
+	mux.HandleFunc("GET /api/tasks/{id}/artifacts", s.taskArtifacts)
+	mux.HandleFunc("GET /api/artifacts/{id}/bytes", s.artifactBytes)
+	mux.HandleFunc("PUT /api/artifacts/{id}/pinned", s.pinArtifact)
+
 	mux.HandleFunc("GET /api/approvals/{id}/guide", s.approvalGuide)
 	mux.HandleFunc("POST /api/approvals/{id}/guide", s.requestGuide)
 	mux.HandleFunc("PUT /api/approvals/{id}/seen", s.markFileSeen)
@@ -646,12 +684,61 @@ func (s *Server) statusBody(w http.ResponseWriter, r *http.Request, projectID st
 	body := map[string]any{
 		"running": s.over.Running(projectID),
 		"roles":   orEmpty(roles),
+		// What is being served right now. On the status poll rather than
+		// somewhere of its own because this is what makes a running preview
+		// visible at all: it was reachable only by opening the card that
+		// produced it, so the board said "no agents running" while an app was
+		// serving, and the link to it existed on one screen nobody was on.
+		"services": s.liveServices(r, projectID),
+	}
+	// A deploy in flight, so the card that asked for one can say so while it is
+	// happening rather than only once it has finished. In memory already, so
+	// this costs the poll nothing.
+	if s.runner != nil {
+		if st := s.runner.Status(projectID); st.State != "idle" {
+			body["deploy"] = st
+		}
 	}
 	// Per harness, not per role: one subscription serves every role on it.
 	if q := s.over.Quotas(projectID); len(q) > 0 {
 		body["quotas"] = q
 	}
 	writeJSON(w, http.StatusOK, body)
+}
+
+// liveService is a running service as a link somebody can click.
+type liveService struct {
+	ID     string `json:"id"`
+	Label  string `json:"label,omitempty"`
+	TaskID string `json:"taskId,omitempty"`
+	URL    string `json:"url"`
+}
+
+// liveServices is what this project has running, with an address for whoever
+// is asking. Never an error: a preview link is a convenience, and losing it
+// must not take the status poll with it.
+func (s *Server) liveServices(r *http.Request, projectID string) []liveService {
+	out := []liveService{}
+	if s.viewer == nil {
+		return out
+	}
+	live, err := s.db.LiveServices(r.Context(), projectID)
+	if err != nil {
+		s.log.Warn("could not read running services", "project", projectID, "err", err)
+		return out
+	}
+	for _, a := range live {
+		url := ServiceURL(r, s.viewer.PortFor(&a))
+		if url == "" {
+			continue
+		}
+		item := liveService{ID: a.ID, Label: a.Label, URL: url}
+		if a.TaskID != nil {
+			item.TaskID = *a.TaskID
+		}
+		out = append(out, item)
+	}
+	return out
 }
 
 // ── board ─────────────────────────────────────────────────────────────────
@@ -668,6 +755,10 @@ func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
 type newTaskRequest struct {
 	Name string `json:"name"`
 	Body string `json:"body"`
+	// Deploy is where this card should be put when it lands: "local", or empty
+	// for nowhere. Decided when the card is written, because that is when
+	// somebody knows whether the work is worth looking at.
+	Deploy string `json:"deploy"`
 }
 
 // newTask opens a card and queues it for the first role in the pipeline.
@@ -680,7 +771,7 @@ func (s *Server) newTask(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	task, err := s.nyd.NewTask(r.Context(), r.PathValue("id"), req.Name, req.Body)
+	task, err := s.nyd.NewTask(r.Context(), r.PathValue("id"), req.Name, req.Body, req.Deploy)
 	if err != nil {
 		s.fail(w, r, err)
 		return

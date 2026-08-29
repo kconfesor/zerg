@@ -28,12 +28,14 @@ import (
 	"github.com/kconfesor/zerg/internal/adapter/piharness"
 	"github.com/kconfesor/zerg/internal/agent"
 	"github.com/kconfesor/zerg/internal/api"
+	"github.com/kconfesor/zerg/internal/artifact"
 	"github.com/kconfesor/zerg/internal/chat"
 	"github.com/kconfesor/zerg/internal/devui"
 	"github.com/kconfesor/zerg/internal/event"
 	"github.com/kconfesor/zerg/internal/nydus"
 	"github.com/kconfesor/zerg/internal/overmind"
 	"github.com/kconfesor/zerg/internal/preflight"
+	"github.com/kconfesor/zerg/internal/runner"
 	"github.com/kconfesor/zerg/internal/store"
 	"github.com/kconfesor/zerg/internal/tailnet"
 )
@@ -74,6 +76,10 @@ func run(args []string) error {
 		return runDone(args[1:])
 	case "send":
 		return runSend(args[1:])
+	case "artifact":
+		return runArtifact(args[1:])
+	case "remember":
+		return runRemember(args[1:])
 	case "ask":
 		return runAsk(args[1:])
 	case "version", "--version", "-v":
@@ -150,6 +156,9 @@ Run by agents, not by you:
   zerg done --lease <id>              acknowledge it
   zerg send --to <role> --commit HEAD --task <id>
   zerg ask "<question>"               ask the operator
+  zerg artifact add <path>            keep a file for a person to look at
+  zerg artifact serve --port <n>      register a service you started
+  zerg remember "<what you learned>"  how this project runs, for next time
 
   zerg version                        what this binary was built from
 
@@ -186,6 +195,10 @@ func tailnetHostFor(cfg store.Config, probe func() tailnet.Status) (string, tail
 	return st.DNSName, st
 }
 
+// runners is the preview manager, held here because the completion hook that
+// starts an automatic preview is built before the manager exists.
+var runners *runner.Manager
+
 func runUp(args []string) error {
 	fs := flag.NewFlagSet("up", flag.ContinueOnError)
 	addr := fs.String("addr", "", "override the stored bind address for this run only")
@@ -211,6 +224,15 @@ func runUp(args []string) error {
 			return err
 		}
 		*dbPath = p
+	}
+	// Resolved before anything is derived from it. The agent socket, the
+	// worktrees and the blob store are all built from this path, and an agent
+	// runs in a worktree: `zerg up --db ./r.db` handed every agent the socket
+	// as "state/agent.sock", which resolves against its own directory and is
+	// not there. The agent then spends a turn hunting for the daemon it is
+	// already connected to, and the failure names nothing.
+	if abs, err := filepath.Abs(*dbPath); err == nil {
+		*dbPath = abs
 	}
 
 	// Signals cancel the context, which shuts the server down gracefully.
@@ -242,8 +264,9 @@ func runUp(args []string) error {
 		// Reclaiming disk when a card lands is the policy that keeps a long
 		// run bounded: build output is per role, and nothing needs it once the
 		// work is merged.
-		nydus.WithOnTaskDone(func(ctx context.Context, projectID, _ string) {
+		nydus.WithOnTaskDone(func(ctx context.Context, projectID, taskID, commit string) {
 			sweepOnDone(ctx, db, projectID, log)
+			autoRun(ctx, db, projectID, taskID, commit, log)
 		}))
 	bus := event.NewBus()
 
@@ -277,7 +300,11 @@ func runUp(args []string) error {
 	// age out. Costs and outcomes live elsewhere and do not. The window is read
 	// on each sweep, so changing it in Settings takes effect without a restart —
 	// which is what Settings has always said it does.
-	api.PruneEvents(ctx, db, log, retentionSweep)
+	// Beside the database rather than inside it: a screenshot in a SQLite row
+	// is read into memory to be served and competes for the write lock the
+	// whole daemon shares (internal/artifact).
+	blobs := artifact.New(filepath.Join(filepath.Dir(*dbPath), "artifacts"))
+	api.PruneEvents(ctx, db, blobs, log, retentionSweep)
 
 	// Agents are children of this process, so any lease still open belongs to a
 	// process that no longer exists. Requeue it now rather than letting the
@@ -305,7 +332,7 @@ func runUp(args []string) error {
 	chatMgr := chat.NewManager(db, registry, bus, log, stateDir)
 	defer chatMgr.StopAll()
 
-	agents := agent.NewServer(db, nyd, log)
+	agents := agent.NewServer(db, nyd, blobs, log)
 	socket := filepath.Join(stateDir, "agent.sock")
 	if err := agents.Listen(socket); err != nil {
 		return err
@@ -353,11 +380,42 @@ func runUp(args []string) error {
 	// One probe for the certificate, the guard and the banner.
 	tailnetHost, tailnetStatus := tailnetHostFor(cfg, func() tailnet.Status { return tailnet.Probe(ctx) })
 
+	// The services an agent started, proxied on an origin of their own.
+	//
+	// A separate listener rather than a route on the cockpit, which is §13.4:
+	// a dev server an agent wrote is code running in a browser, and on the
+	// cockpit's origin it would have same-origin access to a command API with
+	// no authentication. A different port is a different origin, and that is
+	// the entire mechanism.
+	//
+	// The port is chosen by the operating system and not configured. It is an
+	// implementation detail of a link the daemon builds itself, and asking
+	// somebody to pick a second port -- and to keep it free -- buys nothing.
+	// A failure here costs the service viewer and not the daemon.
+	viewer := newViewer(db, cfg.Addr, log)
+	defer viewer.CloseAll()
+
+	// Starting a project so somebody can look at it. An agent does the work:
+	// the daemon spawns it with a commit checked out and three verbs, and it
+	// reads the repository to find out how this project serves itself.
+	// The same staged binary a pipeline role is given. A runner is spawned
+	// without a swarm, so nothing else has put it there.
+	agentBin, err := over.AgentBin()
+	if err != nil {
+		log.Warn("agents may not find the zerg command", "err", err)
+	}
+	runners = runner.NewManager(db, registry, bus, agents, agentBin, log)
+	agents.Watch(runners)
+	// Its sessions are children of this process, and the servers they started
+	// are children of those.
+	defer runners.StopAll(context.Background())
+
 	srv := &http.Server{
 		Handler: api.New(api.Deps{
 			DB: db, Log: log, Registry: registry,
 			Overmind: over, Nydus: nyd, Bus: bus, Recorder: recorder, Applied: cfg.Listener(), Chat: chatMgr,
-			TailnetHost: tailnetHost, UI: ui,
+			TailnetHost: tailnetHost, UI: ui, Blobs: blobs, Viewer: viewer,
+			Runner: runners,
 		}).Routes(),
 		ReadHeaderTimeout: 10 * time.Second,
 		// A body that arrives a byte at a time holds a connection open
@@ -412,6 +470,11 @@ func runUp(args []string) error {
 		}
 	}
 
+	// Same scheme as the cockpit, necessarily: an https page cannot embed an
+	// http iframe, so a plain proxy beside a TLS cockpit would be a viewer
+	// that never loads and a browser console nobody reads.
+	viewer.WithTLS(tlsCert, tlsKey)
+
 	log.Info("overmind up", "url", scheme+"://"+shown, "db", *dbPath, "socket", socket)
 	fmt.Printf("Cockpit: %s://%s\n", scheme, shown)
 	if localLn != nil {
@@ -446,6 +509,13 @@ func runUp(args []string) error {
 		return err
 	case <-ctx.Done():
 		log.Info("shutting down")
+		// Every service belonged to a process this daemon owned, so none of
+		// them survives it.
+		if n, err := db.StopServices(context.Background(), "", ""); err != nil {
+			log.Warn("could not mark services stopped", "err", err)
+		} else if n > 0 {
+			log.Info("services stopped with the daemon", "services", n)
+		}
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		return srv.Shutdown(shutdownCtx)

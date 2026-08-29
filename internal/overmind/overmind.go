@@ -32,6 +32,15 @@ const (
 	// idle agents that have work waiting.
 	tick = 2 * time.Second
 
+	// silenceLimit is how long an agent may be mid-turn and produce nothing
+	// before the daemon says so.
+	//
+	// Five minutes: a build, a test suite or an install can legitimately run
+	// that long with no output, and nothing legitimate is quiet for longer
+	// while holding a card. A lease lasts twenty minutes, so this leaves time
+	// to notice and act before the work is silently requeued.
+	silenceLimit = 5 * time.Minute
+
 	// quotaEvery is how often a harness that has to be asked for its
 	// subscription quota is asked. Slow on purpose: the figure moves in
 	// percent over hours, the call leaves the machine, and a gauge is not
@@ -125,6 +134,10 @@ type roleProc struct {
 	cancel    context.CancelFunc
 	token     string
 	harness   string
+
+	// reportedSilence stops one quiet agent from writing a line every tick.
+	// Guarded by the swarm's lock, like the map that holds this.
+	reportedSilence bool
 }
 
 // snapshot copies the live roles, so callers iterate without holding the lock
@@ -182,8 +195,14 @@ type Status struct {
 
 	// Quota is what this role's subscription has left. Absent for a metered
 	// API key, which has no window to report.
-	Quota    *QuotaReport `json:"quota,omitempty"`
-	Terminal bool         `json:"terminal"`
+	Quota *QuotaReport `json:"quota,omitempty"`
+
+	// QuietFor is how many seconds this role has been mid-turn without
+	// producing anything. Zero unless it has passed the point where silence
+	// stops being a long build: "working" and "wedged" look identical on a
+	// board, and this is the difference.
+	QuietFor int  `json:"quietFor,omitempty"`
+	Terminal bool `json:"terminal"`
 }
 
 // Running reports whether a project's swarm is up.
@@ -254,6 +273,9 @@ func (o *Overmind) Status(ctx context.Context, projectID string) ([]Status, erro
 			st.State, st.LastError, st.Restarts = c.State(), c.LastError(), c.Restarts()
 			if until := c.ThrottledUntil(); !until.IsZero() {
 				st.ThrottledUntil = &until
+			}
+			if quiet := c.Silence(); quiet >= silenceLimit {
+				st.QuietFor = int(quiet.Seconds())
 			}
 		}
 		out = append(out, st)
@@ -716,6 +738,20 @@ func (o *Overmind) stop(ctx context.Context, projectID, reason string) error {
 		o.log.Info("returned in-flight work to the queue", "project", projectID, "leases", n)
 	}
 
+	// The services those agents started went with them. The rows outlive the
+	// processes, and a port that is free again is a port something else can
+	// take: a link to a stopped dev server that silently reaches whatever
+	// bound 5173 afterwards is worse than a link that says it is gone.
+	//
+	// The agents' only. A preview the daemon is running belongs to whoever
+	// wanted to click the app, and the pipeline finishing is when they want to
+	// click it.
+	if n, err := o.db.StopServices(ctx, projectID, store.OwnerAgent); err != nil {
+		o.log.Warn("could not mark this project's services stopped", "project", projectID, "err", err)
+	} else if n > 0 {
+		o.log.Info("services stopped with the swarm", "project", projectID, "services", n)
+	}
+
 	o.log.Info("swarm down", "project", projectID, "reason", reason)
 	return nil
 }
@@ -790,7 +826,46 @@ func (o *Overmind) keepMoving(ctx context.Context, projectID string, s *swarm) {
 				o.log.Info("returned unacknowledged work to the queue", "leases", n)
 			}
 			o.nudgeIdle(ctx, projectID, s)
+			o.watchForSilence(projectID, s)
 		}
+	}
+}
+
+// watchForSilence reports an agent that is mid-turn and has stopped producing
+// anything.
+//
+// Reported, not killed. A long build is indistinguishable from a hung command
+// from out here, and the daemon guessing wrong would throw away a turn somebody
+// paid for. What this buys is that a person is told: the alternative was
+// finding out because a card sat in "working" for eight minutes and somebody
+// happened to be watching the board.
+//
+// Once per stretch of silence, not once per tick, which would be a line every
+// two seconds for as long as it lasts.
+func (o *Overmind) watchForSilence(projectID string, s *swarm) {
+	type report struct {
+		role  string
+		quiet time.Duration
+	}
+	var say []report
+
+	s.mu.Lock()
+	for role, p := range s.roles {
+		quiet := p.cerebrate.Silence()
+		switch {
+		case quiet < silenceLimit:
+			p.reportedSilence = false
+		case !p.reportedSilence:
+			p.reportedSilence = true
+			say = append(say, report{role, quiet})
+		}
+	}
+	s.mu.Unlock()
+
+	for _, r := range say {
+		o.log.Warn("an agent is mid-turn and has gone quiet",
+			"project", projectID, "role", r.role, "quiet", r.quiet.Round(time.Second),
+			"note", "a long build looks like this; so does a command that will never return")
 	}
 }
 
@@ -927,6 +1002,15 @@ func composePrompt(shared, role string) string {
 // directory, from anywhere not already on PATH — and when it does not resolve
 // the agent simply cannot do what it was asked, with no way to report why. A
 // symlink under the state directory makes the name true regardless.
+// AgentBin stages the zerg binary agents are told to run and returns the
+// directory holding it.
+//
+// Exported because agents outside the pipeline need it too: a runner is
+// spawned without a swarm and must still be able to call `zerg artifact
+// serve`. Without it the first real session spent part of its turn hunting for
+// the binary.
+func (o *Overmind) AgentBin() (string, error) { return o.ensureAgentBin() }
+
 func (o *Overmind) ensureAgentBin() (string, error) {
 	self, err := os.Executable()
 	if err != nil {

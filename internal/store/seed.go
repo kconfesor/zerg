@@ -95,10 +95,16 @@ type seedRole struct {
 	// finisher marks a role that ends a pipeline wherever it appears, so that
 	// adding one puts it at the end and adding anything else puts it in front.
 	finisher bool
+	// purpose is what the role is for; empty is the pipeline.
+	purpose string
+	// thinking is the reasoning level, where the job wants one set.
+	thinking string
 }
 
-// builtinRoles is the library that ships. Nine templates cover every team shape
-// worth presetting, as rows in a picker rather than branches you check out.
+// builtinRoles is the library that ships. Nine pipeline templates cover every
+// team shape worth presetting, as rows in a picker rather than branches you
+// check out, and one more that is not in any pipeline: the runner the daemon
+// starts to show you the app.
 //
 // Reviewing roles run the stronger model deliberately: catching a wrong change
 // is harder than making a plausible one.
@@ -165,6 +171,66 @@ went too far.
 
 Leave the design alone. Restructuring modules is the architect's job; you are
 tidying inside the shape that exists.`,
+	},
+	{
+		// Not in any pipeline: the daemon starts this one when somebody asks to
+		// see the app. It is a role so that its harness, model, thinking level
+		// and prompt are edited exactly where every other role's are, rather
+		// than being the one agent here that nobody can configure.
+		name: "runner", model: "sonnet", receive: ReceiveTask, gate: GateNone,
+		purpose: PurposeRunner,
+		prompt: `You are starting this project so a person can open it and use it.
+
+The repository is checked out at the commit being reviewed. Work out how this
+project serves itself and start it. Read what is actually here: compose files,
+package scripts, a justfile or Makefile, the README, how the app is configured.
+
+Rules:
+
+  Bind $PORT. It is set in your environment and the daemon is proxying it. A
+  server on any other port cannot be reached and does not count as started.
+  Do not pick a port yourself and do not use the project's default: another
+  preview may be on it, and only the ports given here are proxied.
+
+  If this project is genuinely more than one server -- an API and the web app
+  in front of it is the usual case -- $ZERG_PORTS is the whole block you have
+  been given, comma separated, with $PORT first. Configure each part onto one
+  of them, point the front end at the API's port, and register each separately.
+  Do not start what nobody needs: one server that serves the app is better than
+  three that have to be assembled by whoever is looking.
+
+  Start it in the background and leave it running. Your turn ends; the server
+  must not end with it. Then register each one:
+
+      zerg artifact serve --port $PORT --label "<what it is>"
+
+  The label is read by somebody deciding which link to click, so say what the
+  thing is: "the app", "the admin portal", "the API". It becomes a link they
+  open in a tab, not a frame, so a server that refuses to be embedded is fine.
+
+  Wait until it answers before registering it. A link to a port that is still
+  compiling opens on a connection refused, which reads as broken. Ask for the
+  page you would expect a person to open first, and register once it comes
+  back.
+
+  Say what you learned, so the next run does not repeat the search:
+
+      zerg remember "serves with: <command>. needs: <what, if anything>.
+                     takes about <n> seconds to be ready."
+
+  Ask rather than guess. If the project needs a file that is not in the
+  repository, a secret, a database, or if there are several apps and no way to
+  tell which one is wanted:
+
+      zerg ask "which of these should I serve: admin, customer, or the API?"
+
+  It blocks until somebody answers, and the answer is worth remembering too.
+
+  If it will not start, say why in a sentence and stop. Do not rewrite the
+  project to make it start: you are showing what is there, not fixing it.
+
+You cannot claim work, hand work on, or finish a task. Those verbs are not
+yours; this is the whole of your job.`,
 	},
 	{
 		name: "architect", model: "opus", receive: ReceiveBatch, gate: GateNone,
@@ -266,6 +332,8 @@ func Seed(ctx context.Context, db *DB, harness string) error {
 			Prompt:         r.prompt,
 			Gate:           r.gate,
 			Finisher:       r.finisher,
+			Purpose:        r.purpose,
+			Thinking:       r.thinking,
 			Builtin:        true,
 		}
 		if _, err := db.CreateTemplate(ctx, t); err != nil {

@@ -16,6 +16,7 @@ import (
 
 	"github.com/kconfesor/zerg/internal/adapter"
 	"github.com/kconfesor/zerg/internal/agent"
+	"github.com/kconfesor/zerg/internal/artifact"
 	"github.com/kconfesor/zerg/internal/cerebrate"
 	"github.com/kconfesor/zerg/internal/event"
 	"github.com/kconfesor/zerg/internal/nydus"
@@ -183,7 +184,7 @@ func newHarness(t *testing.T, sh *scriptedHarness) *harness {
 	reg.Register(sh)
 
 	nyd := nydus.New(db, nydus.WithIntegrator(nydus.Git{}))
-	agents := agent.NewServer(db, nyd, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	agents := agent.NewServer(db, nyd, artifact.New(filepath.Join(t.TempDir(), "artifacts")), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	// Short socket path: macOS caps unix socket paths near 104 bytes.
 	socket := filepath.Join("/tmp", store.NewID()[:12]+".sock")
 	if err := agents.Listen(socket); err != nil {
@@ -260,7 +261,7 @@ func TestFullPipelineWithScriptedAgents(t *testing.T) {
 	if err := h.over.Start(ctx, h.project.ID); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	task, err := h.nyd.NewTask(ctx, h.project.ID, "Calculator", "build a calculator")
+	task, err := h.nyd.NewTask(ctx, h.project.ID, "Calculator", "build a calculator", "")
 	if err != nil {
 		t.Fatalf("NewTask: %v", err)
 	}
@@ -449,7 +450,7 @@ func TestIdleAgentsAreNudgedWhenWorkArrives(t *testing.T) {
 	}, 15*time.Second, "coder never became ready")
 
 	before := h.script.turns()
-	if _, err := h.nyd.NewTask(ctx, h.project.ID, "Calculator", "x"); err != nil {
+	if _, err := h.nyd.NewTask(ctx, h.project.ID, "Calculator", "x", ""); err != nil {
 		t.Fatalf("NewTask: %v", err)
 	}
 	waitFor(t, func() bool { return h.script.turns() > before }, 10*time.Second,
@@ -531,7 +532,7 @@ func TestStoppingReturnsInFlightWorkToTheQueue(t *testing.T) {
 	if err := h.over.Start(ctx, h.project.ID); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	task, err := h.nyd.NewTask(ctx, h.project.ID, "Held", "do it")
+	task, err := h.nyd.NewTask(ctx, h.project.ID, "Held", "do it", "")
 	if err != nil {
 		t.Fatalf("NewTask: %v", err)
 	}

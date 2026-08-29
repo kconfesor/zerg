@@ -16,6 +16,7 @@ import { api, type ChangedFile, type Mergeable, type ReviewThread } from '@/lib/
 import { renderMarkdown } from '@/lib/markdown'
 import DiffView from '@/components/DiffView.vue'
 import ReviewThreadView from '@/components/ReviewThread.vue'
+import Artifacts from '@/components/Artifacts.vue'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -36,6 +37,9 @@ const narrow = useMediaQuery('(max-width: 639px)')
 
 const props = defineProps<{
   attention: Attention | null
+  /** The project these approvals belong to, so the gate can offer to run the
+   *  commit it is deciding about. */
+  projectId?: string | null
   compact?: boolean
   /**
    * Whether an operation is in flight, asked by key. A decision runs a merge or
@@ -321,6 +325,26 @@ function focusFile(path: string) {
   requestAnimationFrame(() => {
     document.querySelector(`[data-file="${CSS.escape(path)}"]`)?.scrollIntoView({ block: 'start' })
   })
+}
+
+/**
+ * Whether what is being approved is a plan rather than a change to the code.
+ *
+ * A gated planner commits a spec, so the approval shows a diff of one markdown
+ * file and, around it, the tools for interrogating code: map this change, ask
+ * about this file, remark on this file. None of them is the question in front
+ * of you. The document already says what it is for, "this file" is the only
+ * file, and the way to push back on a plan is to reject it with a reason, which
+ * goes to the role that wrote it.
+ *
+ * Judged by what is in the change rather than by who sent it: a role is
+ * whatever somebody named it, and a change made only of prose is the thing
+ * these tools do not apply to, whoever produced it.
+ */
+const prose = /\.(md|markdown|txt|rst|adoc)$/i
+function isPlan(id: string): boolean {
+  const files = diffs.value[id]?.files
+  return !!files?.length && files.every((f) => prose.test(f.path))
 }
 
 /** The panel's root, so the scroll tracking can find what scrolls it. */
@@ -638,11 +662,18 @@ async function settle(taskId: string | undefined, thread: ReviewThread) {
 /**
  * Whether approving would actually land the work.
  *
- * Asked when the diff is, and separately from it: the merge runs in memory, so
- * it costs nothing and leaves nothing behind, and the answer is the one thing
- * about an approval that the diff cannot show. A diff read against a base that
- * has moved since the work was written is not a diff of what will land, which
- * is the ordinary way a clean-looking approval fails at the merge.
+ * Asked only where approving lands something. Every gate used to be told it
+ * would not fast-forward and that the base had moved six commits, including a
+ * planner handing a spec to the coder -- where approving merges nothing, the
+ * next role rebases as a matter of course, and the warning describes a merge
+ * that is several roles away. A warning that appears where it cannot apply is
+ * one people learn to scroll past, which costs it the gate where it is the
+ * whole point.
+ *
+ * The merge itself runs in memory, so it costs nothing and leaves nothing
+ * behind, and the answer is the one thing about a completion that the diff
+ * cannot show: a diff read against a base that has moved is not a diff of what
+ * will land, which is the ordinary way a clean-looking approval fails.
  */
 const merges = ref<Record<string, Mergeable | { error: string } | undefined>>({})
 
@@ -726,7 +757,7 @@ watch(
     for (const a of props.attention?.approvals ?? []) {
       if (a.commit && !diffs.value[a.id]) void loadFiles(a.id)
       if (a.commit && !guides.value[a.id]) void loadGuide(a.id)
-      if (a.commit && !merges.value[a.id]) void loadMergeable(a.id)
+      if (a.terminal && a.commit && !merges.value[a.id]) void loadMergeable(a.id)
       if (a.taskId && !threads.value[a.taskId]) void loadThreads(a.taskId)
     }
   },
@@ -814,6 +845,18 @@ function empty(a: Attention | null): boolean {
         </button>
       </div>
 
+      <!-- What this produced, at the moment somebody is deciding about it.
+           For anything with a screen, "what does it look like" is the question
+           that comes before "what changed".
+
+           Deliberately without the run controls that used to sit above this.
+           A gate is a decision about a change, and starting a preview from
+           inside it put a second job -- with its own state, its own guidance
+           box and its own errors -- in front of the diff somebody opened this
+           to read. Deploying is asked for on the card and happens when the
+           work lands; whatever is already running still shows up here. -->
+      <Artifacts :task-id="a.taskId" class="mb-2.5" />
+
       <!-- And what it actually wrote. Deciding from a description of a change
            rather than the change is approving blind, and for a planner's spec
            the committed file *is* the deliverable. Loaded on demand: most
@@ -878,7 +921,7 @@ function empty(a: Attention | null): boolean {
             />
           </div>
           <div
-            v-else-if="diffs[a.id]?.files.length"
+            v-else-if="diffs[a.id]?.files.length && !isPlan(a.id)"
             class="bg-muted/20 mb-1.5 flex flex-wrap items-center gap-2 border border-dashed px-2 py-1.5"
           >
             <template v-if="guides[a.id]?.pending">
@@ -1160,7 +1203,7 @@ function empty(a: Attention | null): boolean {
                  saying "comment on this file" covered both and named neither,
                  and what it mostly opened was a question to an agent. -->
             <div
-              v-if="defaultOpen(a, f) && !composingHere(a.taskId, f.path)"
+              v-if="defaultOpen(a, f) && !composingHere(a.taskId, f.path) && !isPlan(a.id)"
               class="hairline-t flex"
             >
               <button
@@ -1229,7 +1272,7 @@ function empty(a: Attention | null): boolean {
            is the moment a person decides, and until now nothing said whether
            the decision could be carried out. -->
       <p
-        v-if="a.commit && (mergeState(a.id) || mergeError(a.id))"
+        v-if="a.terminal && a.commit && (mergeState(a.id) || mergeError(a.id))"
         class="mt-1 mb-2.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px]"
       >
         <template v-if="mergeState(a.id)?.clean">
@@ -1264,44 +1307,54 @@ function empty(a: Attention | null): boolean {
 
       <!-- The note and the two decisions are one control: the text only means
            anything to Reject, and a field floating beside two buttons did not
-           say which. -->
-      <InputGroup class="h-11 has-[>[data-align=block-end]]:h-auto">
-        <InputGroupInput
-          v-model="notes[a.id]"
-          class="h-11 text-sm md:text-sm"
-          placeholder="reason, if rejecting"
-        />
-        <InputGroupAddon :align="narrow ? 'block-end' : 'inline-end'" class="gap-1.5">
-          <!-- The mark rather than the word. Two buttons whose text differs by
-               one syllable are read by shape long before they are read by
-               letter, and the shapes here should be as different as the two
-               outcomes are: a tick that lands the work, a cross that sends it
-               back. Both keep their name for anyone hovering, tabbing or
-               listening, since an icon alone tells a screen reader nothing. -->
-          <InputGroupButton
-            variant="default"
-            size="sm"
-            class="h-9 w-11 [&>svg]:size-4.5"
-            :disabled="deciding(a.id)"
-            title="Approve: land this work"
-            aria-label="Approve"
-            @click="emit('approve', a.id)"
-          >
-            <Check aria-hidden="true" />
-          </InputGroupButton>
-          <InputGroupButton
-            variant="destructive"
-            size="sm"
-            class="h-9 w-11 [&>svg]:size-4.5"
-            :disabled="deciding(a.id)"
-            title="Reject: send it back to whoever wrote it, with the review"
-            aria-label="Reject"
-            @click="emit('reject', a.id, notes[a.id] ?? '')"
-          >
-            <X aria-hidden="true" />
-          </InputGroupButton>
-        </InputGroupAddon>
-      </InputGroup>
+           say which.
+
+           Stuck to the bottom of the panel while this approval is the one you
+           are in. A diff is as long as it is, and the decision was at the end
+           of it: opening the panel put the two buttons at the very edge of the
+           viewport or past it, so the first move on every approval was to
+           scroll to find the thing you came to press. Sticky rather than moved
+           above the diff, because the decision belongs after the evidence and
+           should still be reachable during it. -->
+      <div class="bg-card sticky bottom-0 z-10 -mx-3 -mb-3 px-3 pt-2 pb-3">
+        <InputGroup class="h-11 has-[>[data-align=block-end]]:h-auto">
+          <InputGroupInput
+            v-model="notes[a.id]"
+            class="h-11 text-sm md:text-sm"
+            placeholder="reason, if rejecting"
+          />
+          <InputGroupAddon :align="narrow ? 'block-end' : 'inline-end'" class="gap-1.5">
+            <!-- The mark rather than the word. Two buttons whose text differs by
+                 one syllable are read by shape long before they are read by
+                 letter, and the shapes here should be as different as the two
+                 outcomes are: a tick that lands the work, a cross that sends it
+                 back. Both keep their name for anyone hovering, tabbing or
+                 listening, since an icon alone tells a screen reader nothing. -->
+            <InputGroupButton
+              variant="default"
+              size="sm"
+              class="h-9 w-11 [&>svg]:size-4.5"
+              :disabled="deciding(a.id)"
+              title="Approve: land this work"
+              aria-label="Approve"
+              @click="emit('approve', a.id)"
+            >
+              <Check aria-hidden="true" />
+            </InputGroupButton>
+            <InputGroupButton
+              variant="destructive"
+              size="sm"
+              class="h-9 w-11 [&>svg]:size-4.5"
+              :disabled="deciding(a.id)"
+              title="Reject: send it back to whoever wrote it, with the review"
+              aria-label="Reject"
+              @click="emit('reject', a.id, notes[a.id] ?? '')"
+            >
+              <X aria-hidden="true" />
+            </InputGroupButton>
+          </InputGroupAddon>
+        </InputGroup>
+      </div>
     </article>
 
     <!-- Questions. Without somewhere to put these, an agent waiting on an

@@ -300,6 +300,17 @@ const banner = ref<{ tone: 'bad' | 'ok'; text: string; transient?: boolean } | n
 const newPath = ref('')
 const taskName = ref('')
 const taskBody = ref('')
+/**
+ * Whether this card gets deployed when it lands.
+ *
+ * Decided here, when the card is written, because this is the only moment
+ * anybody knows whether the work will be worth looking at. It was a project-
+ * wide switch first, which is either off and never used, or on and paying an
+ * agent turn to preview a README fix. There is deliberately no project-level
+ * default behind it: a second control that only changes where this one starts
+ * is a setting to find, read and reason about in exchange for one click.
+ */
+const taskDeploy = ref(false)
 const composing = ref(false)
 const addingProject = ref(false)
 
@@ -613,13 +624,25 @@ async function stop() {
   })
 }
 
+/** Opens the composer. Deploy starts off: it costs an agent turn, so it is
+ *  asked for rather than assumed. */
+function openComposer() {
+  taskDeploy.value = false
+  composing.value = true
+}
+
 async function createTask() {
   const project = current.value
   if (!project || !taskName.value.trim()) return
   await busy.run('newTask', async () => {
     try {
       dialogError.value = ''
-      await api.newTask(project.id, taskName.value.trim(), taskBody.value)
+      await api.newTask(
+        project.id,
+        taskName.value.trim(),
+        taskBody.value,
+        taskDeploy.value ? 'local' : '',
+      )
       taskName.value = ''
       taskBody.value = ''
       composing.value = false
@@ -628,6 +651,38 @@ async function createTask() {
       failIn(err)
     }
   })
+}
+
+/**
+ * Stop the deployment a card is running.
+ *
+ * The session, not just the row: what an agent started outlives the agent, so
+ * stopping has to reach the server itself or the port stays held by something
+ * the cockpit says is stopped.
+ */
+/**
+ * Roles that are mid-turn and have gone quiet, by role name.
+ *
+ * The board shows it on the card that role is working, because that is the
+ * card whose progress is in question.
+ */
+const quietRoles = computed(() => {
+  const out = new Map<string, number>()
+  for (const r of status.value.roles) {
+    if (r.quietFor) out.set(r.role, r.quietFor)
+  }
+  return out
+})
+
+async function stopDeploy(_task: Task) {
+  const project = current.value
+  if (!project) return
+  try {
+    await api.stopRun(project.id)
+    await refresh()
+  } catch (err) {
+    fail(err)
+  }
 }
 
 async function setTeam(update: ProjectTeamUpdate) {
@@ -903,7 +958,7 @@ watch(current, () => (banner.value = null))
                     Show hidden
                   </Label>
                 </div>
-                <Button @click="composing = true">New task</Button>
+                <Button @click="openComposer">New task</Button>
               </template>
             </BoardHeader>
             <div class="flex min-h-0 flex-1 flex-col pt-4"><Board
@@ -912,6 +967,9 @@ watch(current, () => (banner.value = null))
                 :show-hidden="showHidden"
                 :needs-attention="attentionTaskIds"
                 :blocked-on="attentionByTask"
+                :services="status.services"
+                :deploy="status.deploy"
+                :quiet="quietRoles"
                 @open="(t) => (openTask = t)"
                 @review="() => (attentionOpen = true)"
                 @hide="(t: Task) => setHidden(t, true)"
@@ -919,6 +977,7 @@ watch(current, () => (banner.value = null))
                 @stop="stopTask"
                 @activity="showTaskActivity"
                 @remove="(t: Task) => (confirmDeleteTask = t)"
+                @stop-deploy="stopDeploy"
               /></div>
           </template>
 
@@ -1159,6 +1218,7 @@ watch(current, () => (banner.value = null))
           <Attention
             class="pt-4"
             :attention="attention"
+            :project-id="current?.id ?? null"
             :busy="busy.is"
             @approve="act.approve"
             @reject="act.reject"
@@ -1254,6 +1314,23 @@ watch(current, () => (banner.value = null))
               This is the whole brief. The agent has the repository and nothing else. Concrete
               cases and what must not break are worth more than length.
             </span>
+          </div>
+
+          <!-- Whether this one gets run when it lands. Here rather than in the
+               project's settings: a preview costs an agent turn, and whether
+               this particular card is worth looking at is known now and by
+               nobody else. Dev and staging are the same control with more
+               places to send it. -->
+          <div class="hairline-t flex items-start gap-3 pt-3">
+            <Switch
+              v-model="taskDeploy"
+              aria-label="Deploy this task locally when it lands"
+              class="mt-0.5 shrink-0"
+            />
+            <div class="min-w-0">
+              <p class="text-xs font-medium">Deploy locally when it lands</p>
+              <p class="text-muted-foreground mt-0.5 text-[11px]">An agent starts it. One turn.</p>
+            </div>
           </div>
         </DialogBody>
 

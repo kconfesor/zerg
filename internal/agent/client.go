@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"os"
 	"time"
+
+	"github.com/kconfesor/zerg/internal/store"
 )
 
 // Env vars an agent is spawned with. Identity arrives here rather than being
@@ -106,6 +108,23 @@ func (c *Client) Ask(ctx context.Context, question, taskID string, wait time.Dur
 		return nil, err
 	}
 	return &out, nil
+}
+
+// Artifact records something the agent produced: a file to keep, or a port
+// something it started is listening on.
+func (c *Client) Artifact(ctx context.Context, req ArtifactArgs) (*store.Artifact, error) {
+	var out store.Artifact
+	if _, err := c.call(ctx, "/agent/artifact", req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// Remember writes down what this agent learned about serving the project, for
+// the next one to read.
+func (c *Client) Remember(ctx context.Context, note string) error {
+	_, err := c.call(ctx, "/agent/remember", map[string]string{"note": note}, nil)
+	return err
 }
 
 func (c *Client) call(ctx context.Context, path string, body, out any) (int, error) {
