@@ -21,7 +21,8 @@ import {
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
 import ModelPicker from '@/components/ModelPicker.vue'
-import { Paperclip, Plus, Square, X } from '@lucide/vue'
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
+import { Bot, ChevronDown, Paperclip, Plus, Square, X } from '@lucide/vue'
 import {
   Dialog,
   DialogContent,
@@ -344,6 +345,14 @@ const model = ref(props.project?.chatModel ?? '')
  */
 const INHERIT = 'inherit:team'
 
+/** What the collapsed control says: the choice, not the labels around it. */
+const agentSummary = computed(() => {
+  const h = harness.value || props.project?.chatHarness || ''
+  const m = model.value || props.project?.chatModel || ''
+  if (!h && !m) return "the team's agent"
+  return [h || "the team's harness", m].filter(Boolean).join(' · ')
+})
+
 
 watch(
   () => props.project,
@@ -501,31 +510,54 @@ onBeforeUnmount(() => stream?.close())
 
 <template>
   <div class="flex min-h-0 flex-1 flex-col gap-3">
-    <!-- Which agent answers, and the way to start over. Both belong here: the
-         choice is about this conversation, and the reset is destructive enough
-         that it should not be somewhere you press by accident. -->
-    <div class="flex flex-wrap items-end gap-2">
-      <div class="flex flex-col gap-1">
-        <Label :for="harnessId" class="text-[10px]">Harness</Label>
-        <Select
-          :model-value="harness || INHERIT"
-          @update:model-value="(v) => setAgent(v === INHERIT ? '' : String(v), model)"
-        >
-          <SelectTrigger :id="harnessId" size="sm" class="w-36"><SelectValue /></SelectTrigger>
-          <SelectContent>
-            <SelectItem :value="INHERIT">inherit from the team</SelectItem>
-            <SelectItem v-for="h in harnesses" :key="h" :value="h">{{ h }}</SelectItem>
-          </SelectContent>
-        </Select>
-      </div>
+    <!-- Which agent answers, and the way to open another conversation.
+         The two selects are behind the button that names the current choice:
+         they were two labelled controls sitting above every conversation,
+         which on a phone wrapped to two rows and took 114 of the 648 pixels
+         the screen had -- a permanent cost for a thing that is set once and
+         then read, if ever. -->
+    <div class="flex flex-wrap items-center gap-2">
+      <Popover>
+        <PopoverTrigger as-child>
+          <Button variant="outline" size="sm" class="gap-1.5" :disabled="!projectId">
+            <Bot :size="13" aria-hidden="true" />
+            <span class="max-w-[14rem] truncate">{{ agentSummary }}</span>
+            <ChevronDown :size="12" aria-hidden="true" class="opacity-60" />
+          </Button>
+        </PopoverTrigger>
+        <PopoverContent align="start" class="w-72">
+          <div class="flex flex-col gap-3">
+            <div class="flex flex-col gap-1">
+              <Label :for="harnessId" class="text-[10px]">Harness</Label>
+              <Select
+                :model-value="harness || INHERIT"
+                @update:model-value="(v) => setAgent(v === INHERIT ? '' : String(v), model)"
+              >
+                <SelectTrigger :id="harnessId" size="sm" class="w-full"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem :value="INHERIT">inherit from the team</SelectItem>
+                  <SelectItem v-for="h in harnesses" :key="h" :value="h">{{ h }}</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
 
-      <ModelPicker
-        v-model="model"
-        :models="models[harness] ?? []"
-        label="Model"
-        input-class="h-8 w-56 text-xs"
-        @commit="(m) => setAgent(harness, m)"
-      />
+            <ModelPicker
+              v-model="model"
+              :models="models[harness] ?? []"
+              label="Model"
+              input-class="h-8 w-full text-xs"
+              @commit="(m) => setAgent(harness, m)"
+            />
+
+            <!-- Said here rather than under every conversation, where it was
+                 a permanent 54 pixels of explanation you read once. -->
+            <p class="text-muted-foreground text-[11px] leading-relaxed">
+              Runs in its own worktree with no access to the work queue, so a question cannot
+              disturb anything in flight.
+            </p>
+          </div>
+        </PopoverContent>
+      </Popover>
 
       <Button
         variant="outline"
@@ -809,7 +841,11 @@ onBeforeUnmount(() => stream?.close())
       </DialogContent>
     </Dialog>
 
-    <p class="text-muted-foreground text-[11px]">
+    <!-- Explanation you read once, and not at the cost of the conversation.
+         On a phone this was 54 permanent pixels out of the 648 the screen
+         gave the whole screen; it is in the agent popover, where somebody
+         asking "what is this thing" is already looking. -->
+    <p class="text-muted-foreground hidden text-[11px] sm:block">
       Runs in its own worktree with no access to the work queue, so a question cannot disturb
       anything in flight.
     </p>
