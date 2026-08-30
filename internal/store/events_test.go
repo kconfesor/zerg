@@ -45,23 +45,46 @@ func TestPruneKeepsAPinnedTasksTranscriptAndEveryConversation(t *testing.T) {
 	}
 	// And a conversation, which belongs to no task and is not a transcript of
 	// work: there is no other copy of it, and it ends when the person ends it.
+	conversation, err := db.CreateChat(ctx, p.ID, "the parser")
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, said := range []struct{ role, text string }{
 		{OperatorRole, "why is the evaluator recursive?"},
 		{ChatRole, "because the grammar is"},
 	} {
 		if err := db.RecordEvent(ctx, &Event{
-			ID: NewID(), ProjectID: p.ID, Role: said.role, Kind: "message", At: old, Text: said.text,
+			ID: NewID(), ProjectID: p.ID, Role: said.role, Kind: "message", At: old,
+			Text: said.text, ChatID: conversation.ID,
 		}); err != nil {
 			t.Fatal(err)
 		}
+	}
+
+	// A question asked from inside a diff runs in a conversation of its own
+	// with no row in the table: no tab, nothing to end, and nobody to read it.
+	// Exempting the role rather than the conversation kept those for the life
+	// of the database, growing with every review.
+	if err := db.RecordEvent(ctx, &Event{
+		ID: NewID(), ProjectID: p.ID, Role: ChatRole, Kind: "message", At: old,
+		Text: "is this loop bounded?", ChatID: "review-" + p.ID,
+	}); err != nil {
+		t.Fatal(err)
 	}
 
 	n, err := db.PruneEvents(ctx, time.Now().Add(-30*24*time.Hour))
 	if err != nil {
 		t.Fatalf("PruneEvents: %v", err)
 	}
-	if n != 1 {
-		t.Errorf("swept %d events, want only the unpinned card's", n)
+	if n != 2 {
+		t.Errorf("swept %d events, want the unpinned card's and the review question's", n)
+	}
+
+	// The review question is gone; it belonged to no conversation anybody has.
+	if left, err := db.ListEvents(ctx, EventQuery{ProjectID: p.ID, Chat: "review-" + p.ID}); err != nil {
+		t.Fatal(err)
+	} else if len(left) != 0 {
+		t.Errorf("a review's transcript survived the sweep: %d events", len(left))
 	}
 
 	// The conversation is still there, both halves of it. It used to go with

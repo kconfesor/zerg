@@ -667,6 +667,14 @@ func (c *Cerebrate) readStream(stdout io.Reader) error {
 			continue
 		}
 		for _, ev := range events {
+			// Fragments only where they were asked for. pi streams whether or
+			// not anybody wants it, so a pipeline role on that harness put a
+			// delta per token onto the bus that every subscriber then had to
+			// read past. The recorder drops them, but a bounded subscriber can
+			// shed an authoritative event to make room for one.
+			if ev.Kind == adapter.EventMessageDelta && !c.cfg.Streaming {
+				continue
+			}
 			// A turn stopped on request ends the way a failed one does: the
 			// harness reports a result marked as an error, with nothing to say
 			// about it. The adapter cannot tell those apart -- it did not ask

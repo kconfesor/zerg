@@ -237,14 +237,20 @@ func (db *DB) ListEvents(ctx context.Context, q EventQuery) ([]Event, error) {
 // itself after a fortnight, halfway through, with nothing said and nothing to
 // undo, is not a retention policy anybody chose. It ends when the person ends
 // it, which deletes it outright.
+//
+// Exempt by having a conversation, not by carrying its role. A question asked
+// from inside a diff runs in a synthetic chat with no row in the table -- no
+// tab, nothing to end -- so exempting the role instead kept those transcripts
+// for the life of the database, growing with every review and reachable from
+// nowhere.
 func (db *DB) PruneEvents(ctx context.Context, before time.Time) (int64, error) {
 	res, err := db.sql.ExecContext(ctx,
 		`DELETE FROM events
 		  WHERE ts < ?
-		    AND role NOT IN (?, ?)
+		    AND NOT EXISTS (SELECT 1 FROM chats c WHERE c.id = events.chat_id)
 		    AND (task_id IS NULL
 		         OR NOT EXISTS (SELECT 1 FROM tasks t WHERE t.id = events.task_id AND t.pinned = 1))`,
-		before.UTC().Format(time.RFC3339Nano), ChatRole, OperatorRole)
+		before.UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return 0, fmt.Errorf("pruning events: %w", err)
 	}

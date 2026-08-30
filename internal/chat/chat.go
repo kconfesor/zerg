@@ -107,6 +107,14 @@ type Manager struct {
 	// each collect the other's sentences.
 	asking sync.Mutex
 
+	// closing is the conversations being torn down.
+	//
+	// End stops the session and removes the worktree, and a queue drain that
+	// was already in flight would build both again a moment later: a directory
+	// and a process belonging to a tab that is gone, with nothing left to find
+	// or stop them. Delivery checks this under the same lock that sets it.
+	closing map[string]bool
+
 	// pending is what has been typed while the agent was still answering,
 	// per project, in the order it was typed.
 	//
@@ -128,6 +136,13 @@ type Manager struct {
 	// them apart, so they take turns instead.
 	turns map[string]bool
 }
+
+// ErrClosed is returned when a conversation is being ended.
+//
+// Not a fault: it is a message that lost a race with the person closing the
+// tab it was addressed to, and the right answer is to stop rather than to
+// rebuild what was just removed.
+var ErrClosed = errors.New("this conversation has been closed")
 
 // ErrBusy is returned when the project's chat session is already answering.
 //
@@ -167,6 +182,10 @@ type session struct {
 	cer    *cerebrate.Cerebrate
 	cancel context.CancelFunc
 
+	// projectID is which project this conversation belongs to, for the things
+	// the manager says on its behalf.
+	projectID string
+
 	// worktree is where this session's agent is running, which is where an
 	// attachment has to be for it to read one.
 	worktree string
@@ -194,14 +213,40 @@ func (m *Manager) materialise(worktree string, files []Attachment) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("making room for attachments: %w", err)
 	}
+	// Two files picked in one go are routinely called the same thing --
+	// screenshot.png and screenshot.png, from two folders -- and copying both
+	// to one name left the prompt naming that path twice, with the second file
+	// answering for both. Names are made unique within the message.
+	taken := map[string]bool{}
 	for i := range files {
-		dst := filepath.Join(dir, files[i].Name)
-		if err := copyFile(files[i].Source, dst); err != nil {
+		name := uniqueName(files[i].Name, taken)
+		taken[name] = true
+		if err := copyFile(files[i].Source, filepath.Join(dir, name)); err != nil {
 			return fmt.Errorf("attaching %s: %w", files[i].Name, err)
 		}
-		files[i].Path = filepath.Join(attachDir, files[i].Name)
+		files[i].Path = filepath.Join(attachDir, name)
 	}
 	return nil
+}
+
+// uniqueName keeps a name unless this message already used it, in which case it
+// numbers it the way a file manager does: screenshot.png, screenshot-2.png.
+//
+// Only within one message. The same name attached again later is the ordinary
+// case -- a screenshot retaken after a fix -- and the newer one replacing the
+// older is what somebody talking about "the screenshot" means.
+func uniqueName(name string, taken map[string]bool) string {
+	if !taken[name] {
+		return name
+	}
+	ext := filepath.Ext(name)
+	stem := strings.TrimSuffix(name, ext)
+	for n := 2; ; n++ {
+		candidate := fmt.Sprintf("%s-%d%s", stem, n, ext)
+		if !taken[candidate] {
+			return candidate
+		}
+	}
 }
 
 // copyFile writes src to dst, replacing whatever was there.
@@ -269,6 +314,7 @@ func NewManager(db *store.DB, reg *adapter.Registry, bus *event.Bus, log *slog.L
 		sessions: map[string]*session{},
 		turns:    map[string]bool{},
 		pending:  map[string][]Message{},
+		closing:  map[string]bool{},
 	}
 }
 
@@ -340,12 +386,39 @@ func firstLine(text string) string {
 func (m *Manager) Interrupt(chatID string) error {
 	m.mu.Lock()
 	s, ok := m.sessions[chatID]
-	delete(m.pending, chatID)
 	m.mu.Unlock()
 	if !ok {
 		return nil
 	}
-	return s.cer.Interrupt()
+	// The stop first, the queue after. Dropping what was typed before asking
+	// meant a harness that cannot be interrupted -- pi says so rather than
+	// pretending -- answered "cannot stop mid-answer" with the follow-ups
+	// already gone: they were on the transcript, so they came back on reload
+	// having never reached the agent.
+	if err := s.cer.Interrupt(); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	dropped := m.pending[chatID]
+	delete(m.pending, chatID)
+	m.mu.Unlock()
+
+	// Said, not silently discarded. A message that was typed, recorded, and
+	// then dropped by a stop is a hole in the conversation unless the
+	// conversation says so.
+	for range dropped {
+		m.bus.Publish(event.Event{
+			Event: adapter.Event{
+				Kind: adapter.EventMessage,
+				Text: "(not sent: the answer it was waiting behind was stopped)",
+			},
+			ID:        store.NewID(),
+			ProjectID: s.projectID,
+			Role:      Role,
+			ChatID:    chatID,
+		})
+	}
+	return nil
 }
 
 // Queued is how many messages are waiting behind the answer in flight.
@@ -528,6 +601,12 @@ func (m *Manager) ensure(ctx context.Context, projectID, chatID string) (*sessio
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	// A conversation being closed does not get a new session. Without this a
+	// drain already in flight rebuilds the worktree and the process just after
+	// End removed them, and nothing is left holding either.
+	if m.closing[chatID] {
+		return nil, ErrClosed
+	}
 	if s, ok := m.sessions[chatID]; ok && s.cer.State() != cerebrate.StateFailed {
 		return s, nil
 	}
@@ -610,7 +689,7 @@ func (m *Manager) ensure(ctx context.Context, projectID, chatID string) (*sessio
 		}
 	}()
 
-	s := &session{cer: cer, cancel: cancel, worktree: worktree}
+	s := &session{cer: cer, cancel: cancel, worktree: worktree, projectID: projectID}
 	m.sessions[chatID] = s
 	return s, nil
 }
@@ -676,6 +755,17 @@ func (m *Manager) End(ctx context.Context, projectID, chatID string) error {
 	if _, err := m.db.GetChat(ctx, projectID, chatID); err != nil {
 		return err
 	}
+	// Marked before anything is removed, so a drain that is mid-flight is
+	// refused rather than rebuilding what this is about to delete.
+	m.mu.Lock()
+	m.closing[chatID] = true
+	m.mu.Unlock()
+	defer func() {
+		m.mu.Lock()
+		delete(m.closing, chatID)
+		m.mu.Unlock()
+	}()
+
 	m.Stop(chatID)
 
 	project, err := m.db.GetProject(ctx, projectID)

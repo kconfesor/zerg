@@ -22,6 +22,14 @@ vi.mock('@/lib/api', () => ({
 enableAutoUnmount(afterEach)
 
 const project = { id: 'P1', name: 'arto', baseBranch: 'main' } as Project
+const second: Conversation = {
+  id: 'C2',
+  projectId: 'P1',
+  title: 'deploying',
+  createdAt: '2026-01-01T00:00:00Z',
+  lastUsedAt: '2026-01-01T00:00:00Z',
+}
+
 const conversation: Conversation = {
   id: 'C1',
   projectId: 'P1',
@@ -38,6 +46,20 @@ async function open() {
   const w = mount(Chat, { props: { project, harnesses: ['claude'], models: {} } })
   await flushPromises()
   return w
+}
+
+/**
+ * Clicks a tab.
+ *
+ * mousedown as well as click: the tab strip responds to the press, and a
+ * synthetic click alone leaves the selection where it was — which made this
+ * test pass against a component that had not switched.
+ */
+async function switchTo(w: Awaited<ReturnType<typeof open>>, index: number) {
+  const tab = w.findAll('[role="tab"]')[index]
+  await tab.trigger('mousedown', { button: 0 })
+  await tab.trigger('click')
+  await flushPromises()
 }
 
 /** Pastes one file the way a screenshot arrives: in items, with no name. */
@@ -98,5 +120,58 @@ describe('pasting a file into a chat', () => {
 
     expect(w.text()).toContain('failed')
     expect(w.text()).not.toContain('sending')
+  })
+})
+
+
+// The composer belongs to the conversation, not to the screen.
+//
+// One composer served every tab, so a half-written question followed you into
+// another conversation and could be sent there, and a file uploaded against
+// one chat sat in the next one's composer until the daemon refused it.
+describe('switching conversations', () => {
+  beforeEach(() => {
+    vi.mocked(api.chats).mockResolvedValue([conversation, second])
+  })
+
+  it('keeps what was typed with the conversation it was typed in', async () => {
+    const w = await open()
+    await w.find('textarea').setValue('why is the evaluator recursive?')
+
+    // Switch to the other tab: the box is empty, because nothing was typed here.
+    await switchTo(w, 1)
+    expect((w.find('textarea').element as HTMLTextAreaElement).value).toBe('')
+
+    // And back: what was typed is where it was left.
+    await switchTo(w, 0)
+    expect((w.find('textarea').element as HTMLTextAreaElement).value).toBe(
+      'why is the evaluator recursive?',
+    )
+  })
+
+  it('uploads to the conversation that was open when the file was chosen', async () => {
+    type Landed = Awaited<ReturnType<typeof api.chatAttach>>
+    let settle: (v: Landed) => void = () => {}
+    vi.mocked(api.chatAttach).mockReturnValue(
+      new Promise<Landed>((resolve) => {
+        settle = resolve
+      }),
+    )
+
+    const w = await open()
+    await paste(w, new File([new Uint8Array([1])], 'diagram.png', { type: 'image/png' }))
+
+    // The upload is still in flight; move to the other conversation.
+    await switchTo(w, 1)
+    expect(w.text()).not.toContain('diagram.png')
+
+    // It lands in the one it was started from, not the one now on screen.
+    settle({ id: 'A1', name: 'diagram.png' } as Landed)
+    await flushPromises()
+    expect(w.text()).not.toContain('diagram.png')
+
+    await switchTo(w, 0)
+    expect(w.text()).toContain('diagram.png')
+    expect(vi.mocked(api.chatAttach).mock.calls[0][1]).toBe('C1')
   })
 })

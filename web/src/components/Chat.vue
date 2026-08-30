@@ -122,6 +122,11 @@ async function endChat(c: Chat) {
   try {
     await api.endChat(projectId.value, c.id)
     confirmEnd.value = null
+    // Its composer too: a draft for a conversation that no longer exists has
+    // nowhere to be sent, and its previews are holding object URLs open.
+    clearPending(c.id)
+    const { [c.id]: _gone, ...rest } = drafts.value
+    drafts.value = rest
     chats.value = chats.value.filter((x) => x.id !== c.id)
     if (openChat.value === c.id) openChat.value = chats.value[0]?.id ?? null
     // Closing the last one leaves nowhere to type, so a fresh one opens.
@@ -194,13 +199,43 @@ function isImage(name: string): boolean {
 }
 
 const lines = ref<Line[]>([])
-const draft = ref('')
+
+/**
+ * What is typed and attached, per conversation.
+ *
+ * One composer used to serve every tab, so a half-written question followed
+ * you into another conversation and could be sent there, and a file uploaded
+ * against one chat sat in the next one's composer until the daemon refused it.
+ * Both are the same mistake: the composer belongs to the thread, not to the
+ * screen.
+ */
+const drafts = ref<Record<string, string>>({})
+const pending = ref<Record<string, Pending[]>>({})
+
+const draft = computed({
+  get: () => (openChat.value ? (drafts.value[openChat.value] ?? '') : ''),
+  set: (v: string) => {
+    if (openChat.value) drafts.value = { ...drafts.value, [openChat.value]: v }
+  },
+})
+
+const attachments = computed(() => (openChat.value ? (pending.value[openChat.value] ?? []) : []))
 const sending = ref(false)
+
+/**
+ * Two facts, not one.
+ *
+ * `thinking` is "nothing has arrived yet", which stops being true the moment
+ * the first word of an answer appears. `turnActive` is "the agent is still
+ * working", which stays true until the turn ends. They were the same flag, so
+ * the first fragment of a streamed answer replaced Stop with Ask while the
+ * agent was mid-sentence, and a message typed after that was shown as though
+ * it had been sent when it was queued.
+ */
 const thinking = ref(false)
+const turnActive = ref(false)
 const error = ref('')
 
-/** Files chosen for the next message, uploading or uploaded. */
-const attachments = ref<Pending[]>([])
 const stopping = ref(false)
 const fileInput = ref<HTMLInputElement | null>(null)
 const dragging = ref(false)
@@ -224,9 +259,10 @@ function accept(e: ActivityEvent) {
     // Typed while the agent was still writing. The daemon queues it and
     // answers it next; saying so is the difference between "it is coming" and
     // "did that send?".
-    const queued = thinking.value
+    const queued = turnActive.value
     lines.value.push({ id: e.id, who: 'you', text: e.text ?? '', files, queued })
   } else if (e.kind === 'message_delta' && e.text) {
+    turnActive.value = true
     // A fragment of the answer being written. Assembled into one line rather
     // than pushed as many: the reader is watching a sentence appear, not a
     // list of syllables.
@@ -258,6 +294,7 @@ function accept(e: ActivityEvent) {
     lines.value.push({ id: e.id, who: 'agent', text: '', tool: e.tool })
   } else if (e.kind === 'turn_end') {
     thinking.value = false
+    turnActive.value = false
     // Whatever was still marked live is finished, streamed or not.
     for (const l of lines.value) l.live = false
     // The first queued message is now the one being answered.
@@ -265,9 +302,11 @@ function accept(e: ActivityEvent) {
     if (next) {
       next.queued = false
       thinking.value = true
+      turnActive.value = true
     }
   } else if (e.kind === 'error') {
     thinking.value = false
+    turnActive.value = false
     // A failure that already happened is part of the conversation, not news.
     //
     // The banner said "the harness reported an error without describing it"
@@ -405,25 +444,31 @@ async function setAgent(h: string, m: string) {
  * arriving and remove it if they picked the wrong thing.
  */
 async function attach(files: FileList | File[] | null) {
-  if (!files || !projectId.value || !openChat.value) return
+  const project = projectId.value
+  // Captured once, not read per file: switching tabs during a multi-file
+  // upload otherwise split one selection across two conversations, with half
+  // the pictures arriving in a chat nobody attached them to.
+  const chat = openChat.value
+  if (!files || !project || !chat) return
+
   for (const file of Array.from(files)) {
     const key = `${file.name || 'pasted'}-${file.size}-${Math.random().toString(36).slice(2)}`
     const row: Pending = { key, name: file.name || pastedName(file), size: file.size }
+    // A picture is shown before it has finished uploading: it is how you tell
+    // at a glance that you attached the right screenshot.
+    if (file.type.startsWith('image/')) row.preview = URL.createObjectURL(file)
     // Something pasted arrives with no name at all, and a multipart part with
     // no filename is a form value rather than a file: the daemon answered
     // "attach a file under the form field file" for a picture that was right
     // there. Sent under the name the chip is already showing, so the two
     // cannot disagree.
     const sending = file.name ? file : new File([file], row.name, { type: file.type })
-    // A picture is shown before it has finished uploading: it is how you tell
-    // at a glance that you attached the right screenshot.
-    if (file.type.startsWith('image/')) row.preview = URL.createObjectURL(file)
-    attachments.value.push(row)
+    addPending(chat, row)
     try {
-      const made = await api.chatAttach(projectId.value, openChat.value, sending)
-      update(key, { artifactId: made.id, name: made.name || row.name })
+      const made = await api.chatAttach(project, chat, sending)
+      update(chat, key, { artifactId: made.id, name: made.name || row.name })
     } catch (e) {
-      update(key, { error: e instanceof Error ? e.message : String(e) })
+      update(chat, key, { error: e instanceof Error ? e.message : String(e) })
     }
   }
 }
@@ -436,8 +481,21 @@ async function attach(files: FileList | File[] | null) {
  * anything to look again. A pasted screenshot uploaded fine, was recorded, and
  * sat on screen saying "sending…" for as long as the tab was open.
  */
-function update(key: string, patch: Partial<Pending>) {
-  attachments.value = attachments.value.map((a) => (a.key === key ? { ...a, ...patch } : a))
+function update(chat: string, key: string, patch: Partial<Pending>) {
+  const rows = (pending.value[chat] ?? []).map((a) => (a.key === key ? { ...a, ...patch } : a))
+  pending.value = { ...pending.value, [chat]: rows }
+}
+
+/** Adds a row to one conversation's composer, whichever is on screen now. */
+function addPending(chat: string, row: Pending) {
+  pending.value = { ...pending.value, [chat]: [...(pending.value[chat] ?? []), row] }
+}
+
+/** Clears one conversation's composer, and lets go of its previews. */
+function clearPending(chat: string) {
+  for (const row of pending.value[chat] ?? []) if (row.preview) URL.revokeObjectURL(row.preview)
+  const { [chat]: _gone, ...rest } = pending.value
+  pending.value = rest
 }
 
 /**
@@ -453,9 +511,14 @@ function pastedName(file: File): string {
 }
 
 function removeAttachment(key: string) {
-  const row = attachments.value.find((a) => a.key === key)
+  const chat = openChat.value
+  if (!chat) return
+  const row = (pending.value[chat] ?? []).find((a) => a.key === key)
   if (row?.preview) URL.revokeObjectURL(row.preview)
-  attachments.value = attachments.value.filter((a) => a.key !== key)
+  pending.value = {
+    ...pending.value,
+    [chat]: (pending.value[chat] ?? []).filter((a) => a.key !== key),
+  }
 }
 
 /** A screenshot pasted straight in, which is how most of them arrive. */
@@ -499,6 +562,7 @@ async function stop() {
   try {
     await api.interruptChat(projectId.value, openChat.value!)
     thinking.value = false
+    turnActive.value = false
     // Anything queued behind it was about the answer just stopped.
     lines.value = lines.value.filter((l) => !l.queued)
   } catch (e) {
@@ -516,31 +580,45 @@ function scrollToEnd() {
 }
 
 async function send() {
+  const project = projectId.value
+  const chat = openChat.value
   const text = draft.value.trim()
   const files = attachments.value.filter((a) => a.artifactId)
-  if (!canSend.value) return
+  if (!canSend.value || !project || !chat) return
+
   sending.value = true
   error.value = ''
+  // Said before the request, not after it. A short answer can arrive -- and
+  // its turn end with it -- while the POST is still in flight, and setting
+  // this afterwards left the panel saying "thinking…" with a Stop button over
+  // a finished turn, for as long as the tab stayed open.
+  thinking.value = true
+  turnActive.value = true
+
+  // The conversation is cleared now rather than when the request returns: what
+  // was typed belongs to the message that has been sent, and leaving it in the
+  // box invites sending it twice.
+  drafts.value = { ...drafts.value, [chat]: '' }
+  clearPending(chat)
+
   try {
     await api.chat(
-      projectId.value!,
-      openChat.value!,
+      project,
+      chat,
       text,
       files.map((f) => f.artifactId!),
     )
     // The tab may have just been named by this message, and its order changes
     // with use.
     void loadChats()
-    draft.value = ''
-    for (const f of attachments.value) if (f.preview) URL.revokeObjectURL(f.preview)
-    attachments.value = []
-    // The agent's first output can be a minute away on a large repository, so
-    // say it is working rather than leaving the panel looking inert. A message
-    // sent while it is already writing is queued by the daemon and answered
-    // next, so this stays true either way.
-    thinking.value = true
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e)
+    // Nothing was sent, so nothing is being written. Give back what was typed
+    // rather than making somebody retype it because the daemon was restarting.
+    drafts.value = { ...drafts.value, [chat]: text }
+    pending.value = { ...pending.value, [chat]: files }
+    thinking.value = false
+    turnActive.value = false
   } finally {
     sending.value = false
   }
@@ -882,7 +960,7 @@ onBeforeUnmount(() => stream?.close())
                everything said before it stay, which is why this is not the
                same control as End this chat. -->
           <InputGroupButton
-            v-if="thinking"
+            v-if="turnActive"
             variant="outline"
             size="sm"
             class="ml-auto gap-1.5"

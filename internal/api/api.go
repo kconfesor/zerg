@@ -507,6 +507,13 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request) {
 			"this project's swarm is running; stop it before deleting the project")
 		return
 	}
+	// The pipeline is not the only thing running in a project. A conversation
+	// holds an agent process and a worktree of its own, and neither is reached
+	// by the swarm check: deleting the project left them running against a row
+	// that no longer exists, spending on a project nobody can open.
+	if s.chatMgr != nil {
+		s.chatMgr.StopProject(r.Context(), id)
+	}
 	if err := s.db.DeleteProject(r.Context(), id); err != nil {
 		s.fail(w, r, err)
 		return
