@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import { isDark } from '@/lib/theme'
 import { computed, ref, watch } from 'vue'
 import {
   Activity as ActivityIcon,
@@ -100,12 +99,6 @@ const props = defineProps<{
  * `status.roles` is empty then — so the one place that shows what a team is
  * made of was blank exactly when you were deciding whether to start it.
  */
-/** Which mark to draw. The logo is a tile, so the ground is part of the
- *  artwork and there is a file per theme. */
-const mark = computed(() =>
-  isDark() ? '/android-chrome-192x192.png' : '/logo-icon-light-192.png',
-)
-
 const rolesShown = computed<{ role: string; live: RoleStatus | null }[]>(() => {
   if (props.status.roles.length) {
     return props.status.roles.map((r) => ({ role: r.role, live: r }))
@@ -399,13 +392,16 @@ function live(r: RoleStatus): boolean {
            baked in at 192px, which is five times what 36 CSS pixels need on a
            3x display, and no filter to resolve at render time.
 
-           One per ground. The mark is a tile: its background, the hairline
-           round it, the holes in the node circles and the centre pulse are all
-           part of the artwork, so no CSS makes the dark one work on a light
-           rail — it is simply a black square there. The beams are the same
-           hues in both, which is what makes this one logo rather than two. -->
+           No tile behind it. The app icon has one -- a launcher needs a
+           rectangle to fill -- and in the rail that tile was the whole
+           problem: it is part of the artwork, so on a light rail it was a
+           black square and no CSS could reach it. Dropped, the beams draw on
+           whatever is behind them and one file serves both grounds. What that
+           cost is the node interiors, which used to be holes punched in the
+           beams using the tile's colour; unfilled, the beam runs through the
+           ring and the ring still reads as a node. -->
       <img
-        :src="mark"
+        src="/logo-mark-192.png"
         alt=""
         width="36"
         height="36"

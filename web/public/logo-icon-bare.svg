@@ -1,22 +1,13 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
-  <!-- The same mark on a light tile.
-       Square corners throughout, deliberately: every surface in the cockpit is
+  <!-- Square corners throughout, deliberately: every surface in the cockpit is
        rounded-none, and a mark with softer corners than the product it stands
-       for reads as somebody else's logo.
-
-       Only what the ground decides is changed: the tile, the hairline around
-       it, the fills inside the nodes (they are holes in the beams, so they
-       take the tile's colour, not black), the hex grid's weight, and the
-       centre pulse, which was white on near-black and would be invisible on
-       near-white. The beams keep their hues -- they are mid-tone and carry on
-       either ground, which is what makes this the same logo rather than a
-       second one. -->
+       for reads as somebody else's logo. -->
   <defs>
     <!-- Background Gradient -->
     <linearGradient id="bg-grad" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#ffffff" />
-      <stop offset="50%" stop-color="#f8fafc" />
-      <stop offset="100%" stop-color="#f1f5f9" />
+      <stop offset="0%" stop-color="#0f172a" />
+      <stop offset="50%" stop-color="#090d16" />
+      <stop offset="100%" stop-color="#05070c" />
     </linearGradient>
 
     <!-- Node & Path Gradients -->
@@ -57,12 +48,12 @@
     </filter>
   </defs>
 
-  <!-- Container Box / Base Shield -->
-  <rect width="512" height="512" fill="url(#bg-grad)" />
-  <rect width="508" height="508" x="2" y="2" fill="none" stroke="#0f172a" stroke-opacity="0.10" stroke-width="2" />
+  <!-- No tile and no border: this mark is drawn on whatever is behind it, so
+       one file serves a light rail and a dark one. What that costs is the two
+       places the artwork assumed a ground -- see the nodes below. -->
 
   <!-- Background Cyber Hex Grid overlay -->
-  <g opacity="0.18" stroke="#8b5cf6" stroke-width="1.5" fill="none">
+  <g opacity="0.12" stroke="#8b5cf6" stroke-width="1.5" fill="none">
     <polygon points="256,40 336,86 336,178 256,224 176,178 176,86" />
     <polygon points="256,288 336,334 336,426 256,472 176,426 176,334" />
     <polygon points="128,164 208,210 208,302 128,348 48,302 48,210" />
@@ -88,27 +79,31 @@
 
   <!-- Swarm Node Points (Agents in Orchestration Grid) -->
   <g filter="url(#subtle-glow)">
+    <!-- The node interiors are unfilled now. They were the tile's colour,
+         which read as a hole in the beam; with nothing behind the mark the
+         beam runs through the ring instead, and the ring still reads as a
+         node on either ground. -->
     <!-- Top Left Node (Planner) -->
-    <circle cx="136" cy="140" r="24" fill="#ffffff" stroke="#38bdf8" stroke-width="6" />
+    <circle cx="136" cy="140" r="24" fill="none" stroke="#38bdf8" stroke-width="6" />
     <circle cx="136" cy="140" r="10" fill="#38bdf8" />
 
     <!-- Top Right Node (Coder) -->
-    <circle cx="376" cy="140" r="28" fill="#ffffff" stroke="#c084fc" stroke-width="7" />
+    <circle cx="376" cy="140" r="28" fill="none" stroke="#c084fc" stroke-width="7" />
     <circle cx="376" cy="140" r="12" fill="#c084fc" />
 
     <!-- Center Bridge Node (Overmind Orchestrator) -->
-    <circle cx="256" cy="256" r="32" fill="#ffffff" stroke="url(#primary-grad)" stroke-width="8" />
+    <circle cx="256" cy="256" r="32" fill="none" stroke="url(#primary-grad)" stroke-width="8" />
     <circle cx="256" cy="256" r="14" fill="#a855f7" />
 
     <!-- Bottom Left Node (Reviewer) -->
-    <circle cx="136" cy="372" r="28" fill="#ffffff" stroke="#8b5cf6" stroke-width="7" />
+    <circle cx="136" cy="372" r="28" fill="none" stroke="#8b5cf6" stroke-width="7" />
     <circle cx="136" cy="372" r="12" fill="#8b5cf6" />
 
     <!-- Bottom Right Node (Merge / Hardener) -->
-    <circle cx="376" cy="372" r="24" fill="#ffffff" stroke="#34d399" stroke-width="6" />
+    <circle cx="376" cy="372" r="24" fill="none" stroke="#34d399" stroke-width="6" />
     <circle cx="376" cy="372" r="10" fill="#34d399" />
   </g>
 
   <!-- Central Energy Core Pulse -->
-  <circle cx="256" cy="256" r="6" fill="#1e1b3a" />
+  <circle cx="256" cy="256" r="6" fill="#ffffff" />
 </svg>
