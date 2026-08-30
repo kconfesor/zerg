@@ -1369,55 +1369,58 @@ watch(current, () => (banner.value = null))
             </span>
           </div>
 
-          <!-- Whether this one gets run when it lands. Here rather than in the
-               project's settings: a preview costs an agent turn, and whether
-               this particular card is worth looking at is known now and by
-               nobody else. Dev and staging are the same control with more
-               places to send it. -->
-          <div class="hairline-t flex items-start gap-3 pt-3">
-            <Switch
-              v-model="taskDeploy"
-              aria-label="Deploy this task locally when it lands"
-              class="mt-0.5 shrink-0"
-            />
-            <div class="min-w-0">
-              <p class="text-xs font-medium">Deploy locally when it lands</p>
-              <p class="text-muted-foreground mt-0.5 text-[11px]">An agent starts it. One turn.</p>
+          <!-- The two decisions a card carries beyond its brief, side by side
+               because they are one glance: where the work goes, and whether it
+               gets run when it lands. Both belong here rather than in the
+               project's settings -- a preview costs an agent turn, and which
+               roles this particular card needs is known now and by nobody
+               else. One column on a phone, where two would leave each label
+               wrapping over three lines. -->
+          <div class="hairline-t grid gap-3 pt-3 sm:grid-cols-2 sm:gap-4">
+            <div class="flex items-start gap-3">
+              <Switch
+                v-model="taskDeploy"
+                aria-label="Deploy this task locally when it lands"
+                class="mt-0.5 shrink-0"
+              />
+              <div class="min-w-0">
+                <p class="text-xs font-medium">Deploy locally when it lands</p>
+                <p class="text-muted-foreground mt-0.5 text-[11px]">An agent starts it. One turn.</p>
+              </div>
             </div>
-          </div>
 
-          <!-- Roles this one card does not visit. The team is untouched: this
-               is the exception for a card that does not need all of the
-               pipeline, and editing the team to get it would change every card
-               after this one as well. -->
-          <div class="hairline-t flex items-start gap-3 pt-3">
-            <Switch
-              v-model="skipping"
-              aria-label="Skip some roles on this task"
-              class="mt-0.5 shrink-0"
-              @update:model-value="(on: boolean) => !on && (taskSkip = [])"
-            />
-            <div class="min-w-0 flex-1">
-              <p class="text-xs font-medium">Skip roles on this task</p>
-              <p class="text-muted-foreground mt-0.5 text-[11px]">
-                The pipeline stays as it is. Only this card misses them.
-              </p>
+            <div class="flex items-start gap-3">
+              <Switch
+                v-model="skipping"
+                aria-label="Skip some roles on this task"
+                class="mt-0.5 shrink-0"
+                @update:model-value="(on: boolean) => !on && (taskSkip = [])"
+              />
+              <div class="min-w-0">
+                <p class="text-xs font-medium">Skip roles on this task</p>
+                <p class="text-muted-foreground mt-0.5 text-[11px]">
+                  The pipeline stays as it is.
+                </p>
+              </div>
+            </div>
 
-              <div v-if="skipping" class="mt-2 flex flex-col gap-2">
-                <div
-                  v-for="role in team.filter((r) => r.enabled)"
-                  :key="role.id"
-                  class="flex items-center gap-2"
-                >
-                  <Checkbox
-                    :id="`skip-${role.id}`"
-                    :model-value="taskSkip.includes(role.id)"
-                    @update:model-value="(v) => toggleSkip(role.id, v === true)"
-                  />
-                  <Label :for="`skip-${role.id}`" class="cursor-pointer text-xs font-normal">
-                    {{ role.name }}
-                  </Label>
-                </div>
+            <!-- Full width under both, not inside the skip column: four role
+                 names in half a dialog is a list of one-word lines with the
+                 tick boxes crowded against them. -->
+            <div v-if="skipping" class="flex flex-wrap gap-x-5 gap-y-2 sm:col-span-2">
+              <div
+                v-for="role in team.filter((r) => r.enabled)"
+                :key="role.id"
+                class="flex items-center gap-2"
+              >
+                <Checkbox
+                  :id="`skip-${role.id}`"
+                  :model-value="taskSkip.includes(role.id)"
+                  @update:model-value="(v) => toggleSkip(role.id, v === true)"
+                />
+                <Label :for="`skip-${role.id}`" class="cursor-pointer text-xs font-normal">
+                  {{ role.name }}
+                </Label>
               </div>
             </div>
           </div>
