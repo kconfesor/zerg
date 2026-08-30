@@ -776,9 +776,13 @@ type newTaskRequest struct {
 	// for nowhere. Decided when the card is written, because that is when
 	// somebody knows whether the work is worth looking at.
 	Deploy string `json:"deploy"`
+	// Skip is the roles this card does not visit, as role template ids. Almost
+	// always empty; it is the exception a particular card asks for, not a
+	// setting.
+	Skip []string `json:"skip"`
 }
 
-// newTask opens a card and queues it for the first role in the pipeline.
+// newTask opens a card and queues it for the first role it will visit.
 func (s *Server) newTask(w http.ResponseWriter, r *http.Request) {
 	if s.nyd == nil {
 		writeError(w, http.StatusNotImplemented, "this build cannot route work")
@@ -788,7 +792,7 @@ func (s *Server) newTask(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	task, err := s.nyd.NewTask(r.Context(), r.PathValue("id"), req.Name, req.Body, req.Deploy)
+	task, err := s.nyd.NewTask(r.Context(), r.PathValue("id"), req.Name, req.Body, req.Deploy, req.Skip)
 	if err != nil {
 		s.fail(w, r, err)
 		return

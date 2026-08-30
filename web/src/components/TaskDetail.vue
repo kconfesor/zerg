@@ -32,6 +32,10 @@ const props = defineProps<{
   roles?: string[]
   /** Read for where finished work lands; see lib/utils landing(). */
   project?: Project | null
+  /** Roles this card was told to skip, by name. Resolved by the caller, which
+   *  is the one holding the team: the card stores template ids so that
+   *  renaming a role cannot silently un-skip it. */
+  skipped?: string[]
 }>()
 const emit = defineEmits<{ close: [] }>()
 
@@ -109,6 +113,11 @@ function tokensOf(u: TaskDetail['usage']): number {
           <Badge v-if="(task?.reworkCount ?? 0) > 0" variant="secondary">
             ↩ {{ task?.reworkCount }} rework
           </Badge>
+          <!-- Why this card's route is not the pipeline. Without it the
+               diagram below reads as a card that lost a role somewhere. -->
+          <Badge v-if="skipped?.length" variant="secondary">
+            skipped {{ skipped.join(', ') }}
+          </Badge>
           <span v-if="task?.activeMs" class="text-muted-foreground">
             {{ duration(task.activeMs) }} of agent time
           </span>
@@ -153,6 +162,7 @@ function tokensOf(u: TaskDetail['usage']): number {
           :outcome="task?.outcome"
           :outcome-ref="task?.outcomeRef"
           :current="task?.lane"
+          :skipped="skipped"
         >
           <template #note="{ step }">
             <div

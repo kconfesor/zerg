@@ -265,7 +265,7 @@ func TestFullPipelineWithScriptedAgents(t *testing.T) {
 	if err := h.over.Start(ctx, h.project.ID); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	task, err := h.nyd.NewTask(ctx, h.project.ID, "Calculator", "build a calculator", "")
+	task, err := h.nyd.NewTask(ctx, h.project.ID, "Calculator", "build a calculator", "", nil)
 	if err != nil {
 		t.Fatalf("NewTask: %v", err)
 	}
@@ -454,7 +454,7 @@ func TestIdleAgentsAreNudgedWhenWorkArrives(t *testing.T) {
 	}, 15*time.Second, "coder never became ready")
 
 	before := h.script.turns()
-	if _, err := h.nyd.NewTask(ctx, h.project.ID, "Calculator", "x", ""); err != nil {
+	if _, err := h.nyd.NewTask(ctx, h.project.ID, "Calculator", "x", "", nil); err != nil {
 		t.Fatalf("NewTask: %v", err)
 	}
 	waitFor(t, func() bool { return h.script.turns() > before }, 10*time.Second,
@@ -536,7 +536,7 @@ func TestStoppingReturnsInFlightWorkToTheQueue(t *testing.T) {
 	if err := h.over.Start(ctx, h.project.ID); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	task, err := h.nyd.NewTask(ctx, h.project.ID, "Held", "do it", "")
+	task, err := h.nyd.NewTask(ctx, h.project.ID, "Held", "do it", "", nil)
 	if err != nil {
 		t.Fatalf("NewTask: %v", err)
 	}

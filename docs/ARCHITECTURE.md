@@ -431,6 +431,21 @@ Work envelope:
 `merged` states whether the overmind got that commit into the role's worktree, and it is set from
 the merge attempt's result. Never infer it from the presence of a commit: §6.1 is what that costs.
 
+**`next` and `terminal` are the card's, not the project's.** A task can be written to skip roles
+(`tasks.skip`, §9), and then the route is the team's enabled roles minus those: the role after the
+skipped one is `next`, and the last one left is `terminal`, so skipping the reviewer means the coder
+merges. `store.Route` and `store.Onward` are the only two functions that decide this, because the
+opening lane, the envelope and the check in `nydus.Send` that refuses a completion from a
+non-terminal role have to agree — three copies of the filter disagreeing is not a visible bug, it is
+a card routed one way and told it went another.
+
+A lease therefore carries one route, which is why `nydus.Claim` will not batch two cards that skip
+differently: batched together, whichever card lost would be handed the other's `next`.
+
+Skipping governs automatic forward routing only. An explicit `--to` still reaches a skipped role,
+because rework has to work: a reviewer that finds a problem on a card whose coder was skipped still
+has to be able to send the work back, and that role is then told to rejoin the route after itself.
+
 **Leases.** A claim has a deadline. Ack closes it; expiry returns the work to the queue and marks the
 role degraded. This is the answer to "lost wake-up ⇒ permanent stall, no timer, no retry".
 
@@ -613,6 +628,8 @@ tasks       (id, project_id, session_id, name, body, lane, state,
              created_at, first_claimed_at, completed_at,
              active_ms,           -- summed lease time; wall time is completed−created
              rework_count,        -- laps backward through the pipeline
+             deploy,              -- where this card's work is put when it lands; empty for most
+             skip,                -- role template ids this card does not visit (§7.2); empty for most
              hidden)              -- put away by a person; §9.3
 
 messages    (id, project_id, task_id, from_role, kind, priority,

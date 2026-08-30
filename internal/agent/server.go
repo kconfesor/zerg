@@ -389,21 +389,6 @@ func (s *Server) describe(ctx context.Context, id Identity, lease *store.Lease) 
 	if err != nil {
 		return out, err
 	}
-	var enabled []store.ResolvedRole
-	for _, r := range team {
-		if r.Enabled {
-			enabled = append(enabled, r)
-		}
-	}
-	for i, r := range enabled {
-		if r.Name != id.Role {
-			continue
-		}
-		out.Terminal = r.Terminal
-		if !r.Terminal && i+1 < len(enabled) {
-			out.Next = enabled[i+1].Name
-		}
-	}
 	for _, m := range lease.Items {
 		item := Item{
 			MessageID: m.ID, From: m.FromRole, Kind: m.Kind,
@@ -420,6 +405,18 @@ func (s *Server) describe(ctx context.Context, id Identity, lease *store.Lease) 
 		}
 		out.Items = append(out.Items, item)
 	}
+
+	// The route belongs to the card, not to the project: a card can be told to
+	// skip a role, and then the role after it is what comes next and the last
+	// one left is what finishes. One route per lease is what nydus.Claim
+	// guarantees by refusing to batch cards that skip differently, so the task
+	// read above answers for every item in it.
+	var skip []string
+	if out.Task != nil {
+		skip = out.Task.Skip
+	}
+	route := store.Route(team, skip)
+	out.Next, out.Terminal = store.Onward(team, route, id.Role)
 	return out, nil
 }
 

@@ -680,3 +680,104 @@ func (db *DB) SetChatAgent(ctx context.Context, projectID, harness, model string
 	}
 	return db.GetProject(ctx, projectID)
 }
+
+// Route is the roles a task actually visits, in order: the team's enabled
+// roles, minus the ones this card was told to skip.
+//
+// One function rather than a filter written out at each of the three places
+// that decide where work goes -- the opening lane in nydus.NewTask, the `next`
+// and `terminal` in the envelope an agent claims, and the check in nydus.Send
+// that only the last role may finish a task. Those three disagreeing is not a
+// visible bug: it is a card that routes one way and is told it routed another.
+//
+// The last element is terminal for this task, which is what makes skipping the
+// merging role mean "the one before it merges" rather than "nothing does".
+// Returns nil when every enabled role is skipped; callers refuse that where a
+// person can still be told about it.
+func Route(team []ResolvedRole, skip []string) []ResolvedRole {
+	skipped := make(map[string]bool, len(skip))
+	for _, id := range skip {
+		skipped[id] = true
+	}
+	out := make([]ResolvedRole, 0, len(team))
+	for _, r := range team {
+		if !r.Enabled || skipped[r.ID] {
+			continue
+		}
+		r.Terminal = false
+		out = append(out, r)
+	}
+	if len(out) > 0 {
+		out[len(out)-1].Terminal = true
+	}
+	return out
+}
+
+// Onward answers where a role's work goes: the next role on this card's route,
+// or terminal if there is nothing after it.
+//
+// The claiming role is usually on the route. It is not when a card skipped it
+// and somebody sent to it anyway, which is allowed and is what rework is: a
+// reviewer that finds a problem on a card whose coder was skipped still has to
+// be able to send the work back. A role in that position rejoins the route at
+// the first role past its own place in the pipeline -- for the reviewer's
+// example, straight back to the reviewer.
+func Onward(team, route []ResolvedRole, role string) (next string, terminal bool) {
+	for i, r := range route {
+		if r.Name == role {
+			if r.Terminal {
+				return "", true
+			}
+			return route[i+1].Name, false
+		}
+	}
+	for _, r := range team {
+		if r.Name != role {
+			continue
+		}
+		for _, candidate := range route {
+			if candidate.Position > r.Position {
+				return candidate.Name, false
+			}
+		}
+		// Skipped, and every role after it skipped too. Terminal rather than
+		// nothing: an agent told neither where to send its work nor that it
+		// may finish has no move left, and a card that cannot move is worse
+		// than one finished by a role the operator meant to leave out.
+		return "", true
+	}
+	return "", false
+}
+
+// NormaliseSkip sorts and deduplicates a skip list.
+//
+// Stored in a canonical form so that two cards skipping the same roles hold the
+// same bytes: nydus.Claim compares the column as a string to keep one lease to
+// one route, and would otherwise batch two cards that skip the same roles in a
+// different order as though they were different.
+func NormaliseSkip(skip []string) []string {
+	if len(skip) == 0 {
+		return nil
+	}
+	seen := map[string]bool{}
+	out := make([]string, 0, len(skip))
+	for _, id := range skip {
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	slices.Sort(out)
+	return out
+}
+
+// EncodeSkip renders a skip list for the column. Empty stays empty rather than
+// becoming "[]", so a card that skips nothing reads the same as every card
+// written before this column existed.
+func EncodeSkip(skip []string) (string, error) {
+	if len(skip) == 0 {
+		return "", nil
+	}
+	return marshalArgs(skip)
+}

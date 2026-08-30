@@ -134,6 +134,18 @@ type Task struct {
 	// turn, and only some work is worth looking at.
 	Deploy string `json:"deploy,omitempty"`
 
+	// Skip is the roles this one card does not visit, as role template ids.
+	// The pipeline belongs to the project and most cards want all of it; a
+	// one-line fix does not want a plan, and editing the team to get that
+	// changes every card that follows. Empty for almost every card.
+	//
+	// It governs automatic forward routing only -- the opening lane, the
+	// `next` an agent is handed, and which role is terminal. An explicit
+	// recipient still reaches a skipped role, because a reviewer that finds a
+	// problem on a card whose coder was skipped still has to be able to send
+	// the work back to it.
+	Skip []string `json:"skip,omitempty"`
+
 	// Models are the models that have actually spent tokens on this card, in
 	// the order they first did. What a role is configured with is a live value
 	// and answers a different question: this says what produced the work in
@@ -253,14 +265,14 @@ func (db *DB) CreateTask(ctx context.Context, projectID, name, body, lane string
 
 const taskCols = `id, project_id, session_id, name, body, lane, state,
 	created_at, first_claimed_at, completed_at, active_ms, rework_count, hidden, stopped_at,
-	outcome, outcome_ref, pinned, deploy`
+	outcome, outcome_ref, pinned, deploy, skip`
 
 // taskColsT is the same list qualified to the tasks table, for the queries that
 // join. Unqualified names resolve today and would become ambiguous the moment a
 // joined table gained a column of the same name.
 const taskColsT = `t.id, t.project_id, t.session_id, t.name, t.body, t.lane, t.state,
 	t.created_at, t.first_claimed_at, t.completed_at, t.active_ms, t.rework_count, t.hidden,
-	t.stopped_at, t.outcome, t.outcome_ref, t.pinned, t.deploy`
+	t.stopped_at, t.outcome, t.outcome_ref, t.pinned, t.deploy, t.skip`
 
 // GetTaskIn resolves a task that must belong to this project.
 //
@@ -355,12 +367,16 @@ func scanTaskWithSummary(s scanner) (*Task, error) {
 		completedAt sql.NullString
 		stoppedAt   sql.NullString
 	)
-	var models string
+	var models, skip string
 	if err := s.Scan(&t.ID, &t.ProjectID, &sessionID, &t.Name, &t.Body, &t.Lane, &t.State,
 		&created, &firstClaim, &completedAt, &t.ActiveMS, &t.ReworkCount, &t.Hidden, &stoppedAt,
-		&t.Outcome, &t.OutcomeRef, &t.Pinned, &t.Deploy,
+		&t.Outcome, &t.OutcomeRef, &t.Pinned, &t.Deploy, &skip,
 		&t.Tokens, &t.CostUSD, &models, &t.Doing); err != nil {
 		return nil, err
+	}
+	var err error
+	if t.Skip, err = unmarshalArgs(skip); err != nil {
+		return nil, fmt.Errorf("task %s has an unreadable skip list: %w", t.ID, err)
 	}
 	if models != "" {
 		t.Models = strings.Split(models, "\n")
@@ -380,10 +396,15 @@ func scanTask(s scanner) (*Task, error) {
 		completedAt sql.NullString
 		stoppedAt   sql.NullString
 	)
+	var skip string
 	if err := s.Scan(&t.ID, &t.ProjectID, &sessionID, &t.Name, &t.Body, &t.Lane, &t.State,
 		&created, &firstClaim, &completedAt, &t.ActiveMS, &t.ReworkCount, &t.Hidden,
-		&stoppedAt, &t.Outcome, &t.OutcomeRef, &t.Pinned, &t.Deploy); err != nil {
+		&stoppedAt, &t.Outcome, &t.OutcomeRef, &t.Pinned, &t.Deploy, &skip); err != nil {
 		return nil, err
+	}
+	var err error
+	if t.Skip, err = unmarshalArgs(skip); err != nil {
+		return nil, fmt.Errorf("task %s has an unreadable skip list: %w", t.ID, err)
 	}
 	if err := fillTaskTimes(&t, sessionID, created, firstClaim, completedAt, stoppedAt); err != nil {
 		return nil, err
@@ -1119,12 +1140,17 @@ func (db *DB) ListHistory(ctx context.Context, projectID string, f HistoryFilter
 			completedAt sql.NullString
 			stoppedAt   sql.NullString
 			roles       string
+			skip        string
 		)
 		if err := rows.Scan(&e.ID, &e.ProjectID, &sessionID, &e.Name, &e.Body, &e.Lane, &e.State,
 			&created, &firstClaim, &completedAt, &e.ActiveMS, &e.ReworkCount, &e.Hidden,
-			&stoppedAt, &e.Outcome, &e.OutcomeRef, &e.Pinned, &e.Deploy,
+			&stoppedAt, &e.Outcome, &e.OutcomeRef, &e.Pinned, &e.Deploy, &skip,
 			&e.Tokens, &e.CostUSD, &e.HasTranscript, &roles); err != nil {
 			return nil, "", err
+		}
+		var err error
+		if e.Skip, err = unmarshalArgs(skip); err != nil {
+			return nil, "", fmt.Errorf("task %s has an unreadable skip list: %w", e.ID, err)
 		}
 		if err := fillTaskTimes(&e.Task, sessionID, created, firstClaim, completedAt, stoppedAt); err != nil {
 			return nil, "", err

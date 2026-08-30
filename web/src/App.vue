@@ -55,6 +55,7 @@ import ProjectBar from '@/components/layout/ProjectBar.vue'
 import PageHeader from '@/components/layout/PageHeader.vue'
 import BoardHeader from '@/components/BoardHeader.vue'
 import { Switch } from '@/components/ui/switch'
+import { Checkbox } from '@/components/ui/checkbox'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -311,7 +312,39 @@ const taskBody = ref('')
  * is a setting to find, read and reason about in exchange for one click.
  */
 const taskDeploy = ref(false)
+/**
+ * Roles this one card does not visit, as template ids.
+ *
+ * The pipeline belongs to the project and most cards want all of it. The
+ * exception -- a one-line fix that does not need a plan, a docs change that
+ * does not need a reviewer -- used to mean editing the team, which changes
+ * every card after it as well. This is that exception, made once and spent on
+ * one card.
+ */
+const taskSkip = ref<string[]>([])
+const skipping = ref(false)
 const composing = ref(false)
+
+/** The roles a card would visit, in order, given what is ticked. */
+const taskRoute = computed(() =>
+  team.value.filter((r) => r.enabled && !taskSkip.value.includes(r.id)),
+)
+
+/**
+ * The roles the open card skipped, by name.
+ *
+ * Resolved here because the team lives here: a card stores template ids, so a
+ * role renamed in the library still reads correctly on a card written before
+ * the rename, and one deleted from the team is simply not named.
+ */
+const openTaskSkipped = computed(() => {
+  const ids = openTask.value?.skip ?? []
+  return team.value.filter((r) => ids.includes(r.id)).map((r) => r.name)
+})
+
+function toggleSkip(id: string, on: boolean) {
+  taskSkip.value = on ? [...taskSkip.value, id] : taskSkip.value.filter((x) => x !== id)
+}
 const addingProject = ref(false)
 
 let timer: number | undefined
@@ -628,6 +661,8 @@ async function stop() {
  *  asked for rather than assumed. */
 function openComposer() {
   taskDeploy.value = false
+  taskSkip.value = []
+  skipping.value = false
   composing.value = true
 }
 
@@ -642,6 +677,7 @@ async function createTask() {
         taskName.value.trim(),
         taskBody.value,
         taskDeploy.value ? 'local' : '',
+        taskSkip.value,
       )
       taskName.value = ''
       taskBody.value = ''
@@ -1276,6 +1312,7 @@ watch(current, () => (banner.value = null))
       :task="openTask"
       :roles="team.filter((r) => r.enabled).map((r) => r.name)"
       :project="current"
+      :skipped="openTaskSkipped"
       @close="openTask = null"
     />
 
@@ -1290,9 +1327,16 @@ watch(current, () => (banner.value = null))
       >
         <DialogHeader class="hairline-b shrink-0 px-5 py-4 pr-12">
           <DialogTitle>New task</DialogTitle>
-          <DialogDescription>
-            Goes to {{ team.find((r) => r.enabled)?.name ?? 'the first role' }} first, then down
-            the pipeline. The last role merges it to {{ current?.baseBranch ?? 'the base branch' }}.
+          <!-- Recomputed from what is ticked below, which is what makes a
+               skip legible before it is queued rather than after: naming the
+               role that will merge is the part people get wrong. -->
+          <DialogDescription v-if="taskRoute.length">
+            Goes to {{ taskRoute[0].name }} first, then down the pipeline.
+            {{ taskRoute[taskRoute.length - 1].name }} merges it to
+            {{ current?.baseBranch ?? 'the base branch' }}.
+          </DialogDescription>
+          <DialogDescription v-else>
+            Every role is skipped, so there is nobody to do the work. Leave at least one.
           </DialogDescription>
         </DialogHeader>
 
@@ -1341,13 +1385,52 @@ watch(current, () => (banner.value = null))
               <p class="text-muted-foreground mt-0.5 text-[11px]">An agent starts it. One turn.</p>
             </div>
           </div>
+
+          <!-- Roles this one card does not visit. The team is untouched: this
+               is the exception for a card that does not need all of the
+               pipeline, and editing the team to get it would change every card
+               after this one as well. -->
+          <div class="hairline-t flex items-start gap-3 pt-3">
+            <Switch
+              v-model="skipping"
+              aria-label="Skip some roles on this task"
+              class="mt-0.5 shrink-0"
+              @update:model-value="(on: boolean) => !on && (taskSkip = [])"
+            />
+            <div class="min-w-0 flex-1">
+              <p class="text-xs font-medium">Skip roles on this task</p>
+              <p class="text-muted-foreground mt-0.5 text-[11px]">
+                The pipeline stays as it is. Only this card misses them.
+              </p>
+
+              <div v-if="skipping" class="mt-2 flex flex-col gap-2">
+                <div
+                  v-for="role in team.filter((r) => r.enabled)"
+                  :key="role.id"
+                  class="flex items-center gap-2"
+                >
+                  <Checkbox
+                    :id="`skip-${role.id}`"
+                    :model-value="taskSkip.includes(role.id)"
+                    @update:model-value="(v) => toggleSkip(role.id, v === true)"
+                  />
+                  <Label :for="`skip-${role.id}`" class="cursor-pointer text-xs font-normal">
+                    {{ role.name }}
+                  </Label>
+                </div>
+              </div>
+            </div>
+          </div>
         </DialogBody>
 
         <!-- Outside the body, so Queue it is reachable without scrolling to the
              end of a brief you are still writing. -->
         <DialogFooter class="hairline-t shrink-0 px-5 py-4">
           <Button variant="outline" @click="composing = false">Cancel</Button>
-          <Button :disabled="!taskName.trim() || busy.is('newTask')" @click="createTask">
+          <Button
+            :disabled="!taskName.trim() || !taskRoute.length || busy.is('newTask')"
+            @click="createTask"
+          >
             {{ busy.is('newTask') ? 'Queueing…' : 'Queue it' }}
           </Button>
         </DialogFooter>

@@ -39,6 +39,10 @@ const props = defineProps<{
   outcomeRef?: string
   /** Which role is holding the card now, if any — the lane it sits in. */
   current?: string
+  /** Roles this card was told to skip, by name. Drawn rather than left out:
+   *  the column is why the work jumped from one role to another, and a gap
+   *  where a role should be reads as something having gone wrong. */
+  skipped?: string[]
 }>()
 
 const MERGED = '(merged)'
@@ -238,9 +242,16 @@ const pullRequest = computed(() =>
                 : p === MERGED
                   ? 'text-muted-foreground border-dashed'
                   : 'text-muted-foreground',
+              skipped?.includes(p) ? 'border-dashed opacity-45' : '',
             ]"
           >
             {{ label(p) }}
+          </span>
+          <span
+            v-if="skipped?.includes(p)"
+            class="text-muted-foreground mt-0.5 block text-[9px] tracking-wide uppercase"
+          >
+            skipped
           </span>
         </span>
       </div>
