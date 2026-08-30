@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import type { Project, SwarmStatus } from '@/lib/api'
 import { computed } from 'vue'
-import { Bell, Hourglass, Play, Square } from '@lucide/vue'
+import { Bell, Hourglass, Monitor, Moon, Play, Square, Sun } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 import UsageSummary from '@/components/layout/UsageSummary.vue'
+import { isDark, theme, type Theme } from '@/lib/theme'
 
 const props = defineProps<{
   current: Project | null
@@ -20,6 +21,14 @@ const emit = defineEmits<{
   start: []
   stop: []
 }>()
+
+/** system -> light -> dark -> system. Named so the control can say what is
+ *  next rather than leaving somebody to press it and find out. */
+const order: Theme[] = ['system', 'light', 'dark']
+const nextTheme = computed(() => order[(order.indexOf(theme.value) + 1) % order.length])
+function cycleTheme() {
+  theme.value = nextTheme.value
+}
 
 /** How many agents are actually up, as opposed to configured. */
 function liveCount(s: SwarmStatus): number {
@@ -161,6 +170,24 @@ const resumesIn = computed(() => {
            you are already looking at what the work is doing; spend is the thing
            you want to notice while looking at something else. -->
       <UsageSummary v-if="current" :project-id="current.id" :refresh-key="usageKey" />
+
+      <!-- Light or dark. In the bar because it applies to the whole app rather
+           than to a project, and because a preference you cannot find is one
+           people ask for again.
+
+           Three states, not a switch: "follow the system" is what most people
+           want and a two-way toggle cannot say it. The icon shows what is on
+           screen now; the title says what pressing it will do next. -->
+      <Button
+        size="icon-sm"
+        variant="ghost"
+        class="text-muted-foreground hover:text-foreground"
+        :title="`Theme: ${theme} — press for ${nextTheme}`"
+        :aria-label="`Theme: ${theme}. Press for ${nextTheme}.`"
+        @click="cycleTheme"
+      >
+        <component :is="theme === 'system' ? Monitor : isDark() ? Moon : Sun" :size="15" aria-hidden="true" />
+      </Button>
     </div>
   </div>
 </template>

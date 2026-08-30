@@ -7,8 +7,12 @@
 
 @custom-variant dark (&:is(.dark *));
 
-/* The cockpit is a dark tool. The theme defines both modes, but the shell
-   stamps .dark so a viewer never gets a light board over a dark terminal. */
+/* The cockpit is a dark tool by default and says so in both directions: the
+   theme defines both modes, and index.html stamps .dark before first paint
+   from the stored choice, so nobody watches a light board turn dark as the
+   bundle lands. color-scheme follows the class, because it is what makes the
+   browser paint its own scrollbars, form controls and canvas to match --
+   pinned to dark it left a light board with black scrollbars down the side. */
 @layer base {
   * {
     border-color: var(--border);
@@ -37,6 +41,10 @@
      still win on specificity, which is what keeps .no-scrollbar working in the
      command palette. */
   :root {
+    color-scheme: light;
+  }
+
+  .dark {
     color-scheme: dark;
   }
 
@@ -193,7 +201,17 @@
        have to meet: matched by hand they drifted the moment the logo grew. */
     --topbar: 3.5rem;
 
-    /* Surfaces, darkest to lightest. */
+    /* Surfaces and the line between them.
+       Light: the shell recedes by being slightly darker than the working
+       surface, which is white. Dark inverts that -- see .dark below. The
+       relationship is what matters, not the direction: the thing being worked
+       on sits forward of the thing around it. */
+    --surface-sunken: oklch(96.5% 0.004 305);
+    --surface-raised: oklch(100% 0 0);
+    --hairline: oklch(91.5% 0.006 300);
+  }
+
+  .dark {
     --surface-sunken: oklch(15.5% 0.017 305);
     --surface-raised: oklch(22.5% 0.030 301.6);
     --hairline: oklch(24.5% 0.038 300);
@@ -202,14 +220,24 @@
   html, body, #app { height: 100%; }
 
   body {
-    /* A faint glow behind the working area, so the page has a top and the
-       eye starts where the content does. */
+    /* A faint wash behind the working area, so the page has a top and the eye
+       starts where the content does. Tinted rather than lit on a light ground:
+       a glow is a light source against something darker, and the same
+       gradient over white reads as a smudge. */
+    background-image: radial-gradient(
+      120rem 45rem at 60% -12rem,
+      oklch(62% 0.055 302 / 0.10),
+      transparent 60%
+    );
+    background-attachment: fixed;
+  }
+
+  .dark body {
     background-image: radial-gradient(
       120rem 45rem at 60% -12rem,
       oklch(28% 0.055 302 / 0.5),
       transparent 60%
     );
-    background-attachment: fixed;
   }
 
   /* Numbers in a column must line up or the eye cannot compare them. */
