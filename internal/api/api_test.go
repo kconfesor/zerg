@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"github.com/kconfesor/zerg/internal/adapter"
 	"github.com/kconfesor/zerg/internal/adapter/claudeharness"
+	"github.com/kconfesor/zerg/internal/nydus"
 	"github.com/kconfesor/zerg/internal/store"
 	"time"
 )
@@ -922,5 +923,128 @@ func TestAnUploadedNameCannotEscapeTheDirectory(t *testing.T) {
 	// and the name is decoration.
 	if got := safeName(strings.Repeat("a", 300) + ".png"); len(got) != 120 {
 		t.Errorf("a 300-character name came back %d long", len(got))
+	}
+}
+
+// ── skipping a role, over HTTP ────────────────────────────────────────────
+
+// newRoutingServer is newTestServer with a router, for the endpoints that
+// move work rather than describe it.
+func newRoutingServer(t *testing.T) (http.Handler, *store.DB, *store.Project) {
+	t.Helper()
+	ctx := context.Background()
+
+	db, err := store.Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if err := store.Seed(ctx, db, "claude"); err != nil {
+		t.Fatalf("Seed: %v", err)
+	}
+
+	dir := t.TempDir()
+	p, err := db.CreateProject(ctx, dir, "", "")
+	if err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+	if err := db.SelectDefaultTeam(ctx, p.ID); err != nil {
+		t.Fatalf("SelectDefaultTeam: %v", err)
+	}
+
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	reg := adapter.NewRegistry()
+	reg.Register(claudeharness.New())
+	h := New(Deps{DB: db, Log: log, Registry: reg, Nydus: nydus.New(db)}).Routes()
+	return h, db, p
+}
+
+func roleIDNamed(t *testing.T, db *store.DB, name string) string {
+	t.Helper()
+	tpl, err := db.GetTemplateByName(context.Background(), name)
+	if err != nil {
+		t.Fatalf("GetTemplateByName(%q): %v", name, err)
+	}
+	return tpl.ID
+}
+
+// The whole path, as the cockpit uses it: the field is decoded, stored, and
+// comes back on the card. A round trip through the store alone would not have
+// caught the request type missing the field.
+func TestPostingATaskCarriesItsSkippedRoles(t *testing.T) {
+	h, db, p := newRoutingServer(t)
+	reviewer := roleIDNamed(t, db, "reviewer")
+
+	rec := do(t, h, "POST", "/api/projects/"+p.ID+"/tasks", map[string]any{
+		"name": "Fix a typo", "body": "one line", "skip": []string{reviewer},
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201: %s", rec.Code, rec.Body.String())
+	}
+	var created store.Task
+	decodeInto(t, rec, &created)
+	if !slices.Equal(created.Skip, []string{reviewer}) {
+		t.Errorf("skip = %v in the response, want the reviewer", created.Skip)
+	}
+
+	// And it is on the card the board reads, not only on the one just made.
+	rec = do(t, h, "GET", "/api/projects/"+p.ID+"/tasks", nil)
+	var board []store.Task
+	decodeInto(t, rec, &board)
+	if len(board) != 1 {
+		t.Fatalf("board has %d cards, want 1", len(board))
+	}
+	if !slices.Equal(board[0].Skip, []string{reviewer}) {
+		t.Errorf("skip = %v on the board, want the reviewer", board[0].Skip)
+	}
+	// The coder is the first role the default team runs, and the reviewer is
+	// the one after it, so skipping the reviewer must not move the opening
+	// lane -- the point being that skip is stored, not merely echoed.
+	if board[0].Lane == "reviewer" {
+		t.Error("the card opened in the lane it was told to skip")
+	}
+}
+
+// Both ways a skip can be wrong are the operator's to fix, so both are 400s
+// that name what is wrong rather than faults.
+func TestABadSkipIsRefusedWithAReason(t *testing.T) {
+	h, db, p := newRoutingServer(t)
+
+	// A role the team does not run.
+	rec := do(t, h, "POST", "/api/projects/"+p.ID+"/tasks", map[string]any{
+		"name": "Fix a typo", "body": "one line", "skip": []string{roleIDNamed(t, db, "architect")},
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d for a role off the team, want 400: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "architect") {
+		t.Errorf("body = %s, want it to name the role", rec.Body.String())
+	}
+
+	// Every role at once, which leaves nobody to do the work.
+	team, err := db.ResolveTeam(context.Background(), p.ID)
+	if err != nil {
+		t.Fatalf("ResolveTeam: %v", err)
+	}
+	var all []string
+	for _, r := range team {
+		if r.Enabled {
+			all = append(all, r.ID)
+		}
+	}
+	rec = do(t, h, "POST", "/api/projects/"+p.ID+"/tasks", map[string]any{
+		"name": "Nothing", "body": "do it", "skip": all,
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d for skipping the whole team, want 400: %s", rec.Code, rec.Body.String())
+	}
+
+	// Neither wrote a card.
+	tasks, err := db.ListTasks(context.Background(), p.ID)
+	if err != nil {
+		t.Fatalf("ListTasks: %v", err)
+	}
+	if len(tasks) != 0 {
+		t.Errorf("%d cards exist, want none: a refused request must not leave one", len(tasks))
 	}
 }
