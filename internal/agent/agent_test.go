@@ -112,7 +112,7 @@ func TestAgentClaimsWorksAndHandsOn(t *testing.T) {
 	ctx := context.Background()
 	f := newFixture(t)
 
-	task, err := f.nyd.NewTask(ctx, f.project.ID, "Calculator", "build a calculator", "")
+	task, err := f.nyd.NewTask(ctx, f.project.ID, "Calculator", "build a calculator", "", nil)
 	if err != nil {
 		t.Fatalf("NewTask: %v", err)
 	}
@@ -183,7 +183,7 @@ func TestNextWaitsForWorkToArrive(t *testing.T) {
 
 	go func() {
 		time.Sleep(300 * time.Millisecond)
-		if _, err := f.nyd.NewTask(ctx, f.project.ID, "Later", "arrives after the wait began", ""); err != nil {
+		if _, err := f.nyd.NewTask(ctx, f.project.ID, "Later", "arrives after the wait began", "", nil); err != nil {
 			t.Errorf("NewTask: %v", err)
 		}
 	}()
@@ -207,7 +207,7 @@ func TestTokenScopesTheSender(t *testing.T) {
 	ctx := context.Background()
 	f := newFixture(t)
 
-	if _, err := f.nyd.NewTask(ctx, f.project.ID, "Calculator", "x", ""); err != nil {
+	if _, err := f.nyd.NewTask(ctx, f.project.ID, "Calculator", "x", "", nil); err != nil {
 		t.Fatalf("NewTask: %v", err)
 	}
 
@@ -250,7 +250,7 @@ func TestRevokedTokenStopsWorking(t *testing.T) {
 func TestDoneIsIdempotent(t *testing.T) {
 	ctx := context.Background()
 	f := newFixture(t)
-	if _, err := f.nyd.NewTask(ctx, f.project.ID, "Calculator", "x", ""); err != nil {
+	if _, err := f.nyd.NewTask(ctx, f.project.ID, "Calculator", "x", "", nil); err != nil {
 		t.Fatalf("NewTask: %v", err)
 	}
 
@@ -343,7 +343,7 @@ func TestTerminalRoleCompletesTheTask(t *testing.T) {
 	t.Cleanup(func() { f.srv.Close() })
 	f.socket = socket
 
-	task, err := f.nyd.NewTask(ctx, f.project.ID, "Calculator", "x", "")
+	task, err := f.nyd.NewTask(ctx, f.project.ID, "Calculator", "x", "", nil)
 	if err != nil {
 		t.Fatalf("NewTask: %v", err)
 	}
@@ -429,7 +429,7 @@ func TestAnAgentCannotNameAnotherProjectsTask(t *testing.T) {
 
 	// The agent's own project still works by id and by name, once it is
 	// actually holding the card.
-	mine, err := f.nyd.NewTask(ctx, f.project.ID, "Mine", "yours", "")
+	mine, err := f.nyd.NewTask(ctx, f.project.ID, "Mine", "yours", "", nil)
 	if err != nil {
 		t.Fatalf("NewTask: %v", err)
 	}
@@ -451,7 +451,7 @@ func TestSendRequiresHoldingTheTask(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
 
-	task, err := f.nyd.NewTask(ctx, f.project.ID, "Calculator", "build a calculator", "")
+	task, err := f.nyd.NewTask(ctx, f.project.ID, "Calculator", "build a calculator", "", nil)
 	if err != nil {
 		t.Fatalf("NewTask: %v", err)
 	}
@@ -480,7 +480,7 @@ func TestRepeatedSendIsAbsorbed(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
 
-	task, err := f.nyd.NewTask(ctx, f.project.ID, "Calculator", "build a calculator", "")
+	task, err := f.nyd.NewTask(ctx, f.project.ID, "Calculator", "build a calculator", "", nil)
 	if err != nil {
 		t.Fatalf("NewTask: %v", err)
 	}
@@ -503,5 +503,88 @@ func TestRepeatedSendIsAbsorbed(t *testing.T) {
 	}
 	if n != 1 {
 		t.Errorf("reviewer has %d queued items after one send retried; want 1", n)
+	}
+}
+
+// ── a card that skips a role ──────────────────────────────────────────────
+
+// roleID is the library id of a role by name, which is what a skip list holds.
+func (f *fixture) roleID(t *testing.T, name string) string {
+	t.Helper()
+	tpl, err := f.db.GetTemplateByName(context.Background(), name)
+	if err != nil {
+		t.Fatalf("GetTemplateByName(%q): %v", name, err)
+	}
+	return tpl.ID
+}
+
+// The envelope is the only thing that tells an agent where its work goes, so a
+// card that skips a role has to be answered there. Skipping the role that
+// merges makes the one before it terminal, and it has to be told so: an agent
+// that reads "terminal": false hands the work to a role this card does not
+// visit, and the card stops.
+func TestTheEnvelopeRoutesRoundASkippedRole(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+
+	if _, err := f.nyd.NewTask(ctx, f.project.ID, "Fix a typo", "one line", "",
+		[]string{f.roleID(t, "reviewer")}); err != nil {
+		t.Fatalf("NewTask: %v", err)
+	}
+
+	work, err := f.client(t, "coder").Next(ctx, 2*time.Second)
+	if err != nil {
+		t.Fatalf("coder Next: %v", err)
+	}
+	if !work.Terminal {
+		t.Error("terminal = false; the reviewer is skipped, so the coder finishes this card")
+	}
+	if work.Next != "" {
+		t.Errorf("next = %q, want nothing — there is no role after the coder on this card", work.Next)
+	}
+}
+
+// A skipped role that is sent to anyway still gets an answer. That is what
+// rework is: a reviewer that finds a problem on a card whose coder was skipped
+// has to be able to send the work back, and the coder then has to know where
+// to return it.
+func TestASkippedRoleThatIsSentToIsStillToldWhereWorkGoes(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+
+	task, err := f.nyd.NewTask(ctx, f.project.ID, "Docs", "just words", "",
+		[]string{f.roleID(t, "coder")})
+	if err != nil {
+		t.Fatalf("NewTask: %v", err)
+	}
+
+	// The card opened on the reviewer, since the coder is not on its route.
+	reviewer := f.client(t, "reviewer")
+	work, err := reviewer.Next(ctx, 2*time.Second)
+	if err != nil {
+		t.Fatalf("reviewer Next: %v", err)
+	}
+	if !work.Terminal {
+		t.Error("terminal = false on the only role this card visits")
+	}
+
+	// It sends the work back to the coder anyway, which is allowed.
+	if _, err := reviewer.Send(ctx, SendArgs{
+		To: "coder", TaskID: task.ID, Commit: "aaaaaaaaaa", Body: "needs a change"}); err != nil {
+		t.Fatalf("reviewer Send to a skipped role: %v", err)
+	}
+	if err := reviewer.Done(ctx, work.LeaseID); err != nil {
+		t.Fatalf("reviewer Done: %v", err)
+	}
+
+	back, err := f.client(t, "coder").Next(ctx, 2*time.Second)
+	if err != nil {
+		t.Fatalf("coder Next: %v", err)
+	}
+	if back.Next != "reviewer" {
+		t.Errorf("next = %q, want reviewer — a skipped role rejoins the route after itself", back.Next)
+	}
+	if back.Terminal {
+		t.Error("terminal = true on a role the card skipped; the reviewer is still ahead of it")
 	}
 }

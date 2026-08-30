@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -583,5 +584,86 @@ func TestProjectIconPathIsChecked(t *testing.T) {
 		if _, err := db.SetProjectIcon(ctx, p.ID, bad); err == nil {
 			t.Errorf("SetProjectIcon accepted %q", bad)
 		}
+	}
+}
+
+// Route is what makes a skip mean anything: three places decide where work
+// goes, and they read this rather than filtering the team themselves.
+func TestRouteDropsSkippedRolesAndMovesTerminal(t *testing.T) {
+	team := []ResolvedRole{
+		{RoleTemplate: RoleTemplate{ID: "a", Name: "planner"}, Position: 0, Enabled: true},
+		{RoleTemplate: RoleTemplate{ID: "b", Name: "coder"}, Position: 1, Enabled: true},
+		{RoleTemplate: RoleTemplate{ID: "c", Name: "reviewer"}, Position: 2, Enabled: true, Terminal: true},
+		{RoleTemplate: RoleTemplate{ID: "d", Name: "docs"}, Position: 3, Enabled: false},
+	}
+
+	route := Route(team, []string{"c"})
+	var names []string
+	for _, r := range route {
+		names = append(names, r.Name)
+	}
+	if !slices.Equal(names, []string{"planner", "coder"}) {
+		t.Fatalf("route = %v, want planner then coder", names)
+	}
+	// The role that merges. Skipping the reviewer has to promote the coder, or
+	// the card reaches the end of its route with nobody able to finish it.
+	if !route[len(route)-1].Terminal {
+		t.Error("the last role on the route is not terminal")
+	}
+	if route[0].Terminal {
+		t.Error("a role in the middle of the route is marked terminal")
+	}
+
+	if got := Route(team, []string{"a", "b", "c"}); len(got) != 0 {
+		t.Errorf("route = %v with every enabled role skipped, want nothing", got)
+	}
+	// A disabled role is not on the route whether or not it was skipped, and
+	// naming it changes nothing.
+	if got := Route(team, []string{"d"}); len(got) != 3 {
+		t.Errorf("route has %d roles, want the 3 enabled ones", len(got))
+	}
+}
+
+// Onward answers for a role that is not on the route at all, which happens when
+// somebody sends to a role this card skipped.
+func TestOnwardRejoinsTheRouteAfterASkippedRole(t *testing.T) {
+	team := []ResolvedRole{
+		{RoleTemplate: RoleTemplate{ID: "a", Name: "planner"}, Position: 0, Enabled: true},
+		{RoleTemplate: RoleTemplate{ID: "b", Name: "coder"}, Position: 1, Enabled: true},
+		{RoleTemplate: RoleTemplate{ID: "c", Name: "reviewer"}, Position: 2, Enabled: true, Terminal: true},
+	}
+	route := Route(team, []string{"b"})
+
+	next, terminal := Onward(team, route, "coder")
+	if next != "reviewer" || terminal {
+		t.Errorf("onward(coder) = %q/%v, want reviewer/false", next, terminal)
+	}
+	next, terminal = Onward(team, route, "planner")
+	if next != "reviewer" || terminal {
+		t.Errorf("onward(planner) = %q/%v, want reviewer/false", next, terminal)
+	}
+	next, terminal = Onward(team, route, "reviewer")
+	if next != "" || !terminal {
+		t.Errorf("onward(reviewer) = %q/%v, want nothing/true", next, terminal)
+	}
+
+	// Skipped, with everything after it skipped too. Terminal rather than
+	// nothing: an agent told neither where to send its work nor that it may
+	// finish has no move left.
+	tail := Route(team, []string{"b", "c"})
+	if next, terminal = Onward(team, tail, "coder"); next != "" || !terminal {
+		t.Errorf("onward(coder) = %q/%v with nothing after it, want nothing/true", next, terminal)
+	}
+}
+
+// The column is compared as a string when work is batched, so what goes into it
+// has to be canonical.
+func TestNormaliseSkipSortsAndDeduplicates(t *testing.T) {
+	got := NormaliseSkip([]string{"c", "a", "c", "", "b"})
+	if !slices.Equal(got, []string{"a", "b", "c"}) {
+		t.Errorf("NormaliseSkip = %v, want a, b, c", got)
+	}
+	if got := NormaliseSkip(nil); got != nil {
+		t.Errorf("NormaliseSkip(nil) = %v, want nil", got)
 	}
 }

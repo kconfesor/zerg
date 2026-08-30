@@ -39,6 +39,10 @@ const props = defineProps<{
   outcomeRef?: string
   /** Which role is holding the card now, if any — the lane it sits in. */
   current?: string
+  /** Roles this card was told to skip, by name. Drawn rather than left out:
+   *  the column is why the work jumped from one role to another, and a gap
+   *  where a role should be reads as something having gone wrong. */
+  skipped?: string[]
 }>()
 
 const MERGED = '(merged)'
@@ -141,6 +145,13 @@ const participants = computed<string[]>(() => {
   const out: string[] = []
   if (props.steps.some((s) => s.from === 'operator')) out.push('operator')
   for (const r of props.roles) if (!out.includes(r)) out.push(r)
+  // A skipped role has no step to reconstruct it from — being skipped is
+  // precisely the absence of one — so a role the team no longer has would
+  // vanish from a card that recorded skipping it. Appended after the team for
+  // the same reason the roles below it are: the position it held is gone with
+  // it, and a column in roughly the wrong place beats a card that quietly
+  // reads as though it went through the whole pipeline.
+  for (const r of props.skipped ?? []) if (!out.includes(r)) out.push(r)
   for (const s of props.steps) {
     if (s.from && !out.includes(s.from)) out.push(s.from)
     if (s.to && !out.includes(s.to)) out.push(s.to)
@@ -238,9 +249,16 @@ const pullRequest = computed(() =>
                 : p === MERGED
                   ? 'text-muted-foreground border-dashed'
                   : 'text-muted-foreground',
+              skipped?.includes(p) ? 'border-dashed opacity-45' : '',
             ]"
           >
             {{ label(p) }}
+          </span>
+          <span
+            v-if="skipped?.includes(p)"
+            class="text-muted-foreground mt-0.5 block text-[9px] tracking-wide uppercase"
+          >
+            skipped
           </span>
         </span>
       </div>

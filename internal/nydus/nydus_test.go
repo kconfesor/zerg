@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -185,7 +186,7 @@ func newFixture(t *testing.T, opts ...Option) *fixture {
 
 func (f *fixture) task(t *testing.T, name string) *store.Task {
 	t.Helper()
-	task, err := f.n.NewTask(context.Background(), f.project.ID, name, "do the thing", "")
+	task, err := f.n.NewTask(context.Background(), f.project.ID, name, "do the thing", "", nil)
 	if err != nil {
 		t.Fatalf("NewTask: %v", err)
 	}
@@ -732,7 +733,7 @@ func TestClaimMergesHandoffIntoWorktree(t *testing.T) {
 	}
 
 	n := New(db, WithIntegrator(Git{}))
-	task, err := n.NewTask(ctx, project.ID, "Calculator", "do the thing", "")
+	task, err := n.NewTask(ctx, project.ID, "Calculator", "do the thing", "", nil)
 	if err != nil {
 		t.Fatalf("NewTask: %v", err)
 	}
@@ -817,7 +818,7 @@ func setupRealRepo(t *testing.T, roles ...string) (*Nydus, *store.Project, *hatc
 func TestSendResolvesHeadInTheSendersWorktree(t *testing.T) {
 	ctx := context.Background()
 	n, project, hat := setupRealRepo(t, "coder", "reviewer")
-	task, err := n.NewTask(ctx, project.ID, "Calculator", "do the thing", "")
+	task, err := n.NewTask(ctx, project.ID, "Calculator", "do the thing", "", nil)
 	if err != nil {
 		t.Fatalf("NewTask: %v", err)
 	}
@@ -859,7 +860,7 @@ func TestSendResolvesHeadInTheSendersWorktree(t *testing.T) {
 func TestCompleteIntegratesIntoTheBaseBranch(t *testing.T) {
 	ctx := context.Background()
 	n, project, hat := setupRealRepo(t, "coder")
-	task, err := n.NewTask(ctx, project.ID, "Calculator", "do the thing", "")
+	task, err := n.NewTask(ctx, project.ID, "Calculator", "do the thing", "", nil)
 	if err != nil {
 		t.Fatalf("NewTask: %v", err)
 	}
@@ -892,7 +893,7 @@ func TestCompleteIntegratesIntoTheBaseBranch(t *testing.T) {
 func TestCompleteRefusesWithoutACommit(t *testing.T) {
 	ctx := context.Background()
 	n, project, _ := setupRealRepo(t, "coder")
-	task, err := n.NewTask(ctx, project.ID, "Calculator", "do the thing", "")
+	task, err := n.NewTask(ctx, project.ID, "Calculator", "do the thing", "", nil)
 	if err != nil {
 		t.Fatalf("NewTask: %v", err)
 	}
@@ -1672,7 +1673,7 @@ func TestATaskRemembersWhereItDeploys(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
 
-	task, err := f.n.NewTask(ctx, f.project.ID, "Add the settings page", "do it", store.DeployLocal)
+	task, err := f.n.NewTask(ctx, f.project.ID, "Add the settings page", "do it", store.DeployLocal, nil)
 	if err != nil {
 		t.Fatalf("NewTask: %v", err)
 	}
@@ -1694,7 +1695,7 @@ func TestATaskRemembersWhereItDeploys(t *testing.T) {
 func TestATaskCannotAskToDeploySomewhereThatDoesNotExist(t *testing.T) {
 	f := newFixture(t)
 
-	_, err := f.n.NewTask(context.Background(), f.project.ID, "Ship it", "do it", "production")
+	_, err := f.n.NewTask(context.Background(), f.project.ID, "Ship it", "do it", "production", nil)
 	if err == nil {
 		t.Fatal("a card asked to deploy to production and was accepted")
 	}
@@ -1908,5 +1909,282 @@ func TestReworkFromAGatedRoleIsNotHeld(t *testing.T) {
 	}
 	if len(pending) != 1 {
 		t.Errorf("%d approvals when the gated role finished the card, want 1", len(pending))
+	}
+}
+
+// ── skipping a role for one card ──────────────────────────────────────────
+
+// roleID is the library id of a role by name, which is what a skip list holds.
+func (f *fixture) roleID(t *testing.T, name string) string {
+	t.Helper()
+	tpl, err := f.db.GetTemplateByName(context.Background(), name)
+	if err != nil {
+		t.Fatalf("GetTemplateByName(%q): %v", name, err)
+	}
+	return tpl.ID
+}
+
+// The card opens on the first role it will actually visit, not on the first
+// role the team has. Skipping the planner used to mean editing the team, which
+// changes every card after it as well.
+func TestASkippedFirstRoleIsNotTheOpeningLane(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+
+	task, err := f.n.NewTask(ctx, f.project.ID, "Fix a typo", "one line", "",
+		[]string{f.roleID(t, "planner")})
+	if err != nil {
+		t.Fatalf("NewTask: %v", err)
+	}
+	if task.Lane != "coder" {
+		t.Fatalf("lane = %q, want coder — the planner was skipped", task.Lane)
+	}
+
+	// And the work is genuinely there: a lane is a label, a route row is the
+	// thing that makes an agent find work.
+	if l, err := f.n.Claim(ctx, f.project.ID, "planner"); err != nil {
+		t.Fatalf("planner Claim: %v", err)
+	} else if l != nil {
+		t.Error("the planner was handed work on a card that skipped it")
+	}
+	if l, err := f.n.Claim(ctx, f.project.ID, "coder"); err != nil {
+		t.Fatalf("coder Claim: %v", err)
+	} else if l == nil {
+		t.Error("the coder found no work, but the card opened in its lane")
+	}
+}
+
+// The skip is the card's own and survives being written down.
+func TestATaskRemembersWhichRolesItSkips(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+
+	reviewer, planner := f.roleID(t, "reviewer"), f.roleID(t, "planner")
+	// Out of order and with a repeat, because that is what an API caller can
+	// send and the column is compared as a string when work is batched.
+	task, err := f.n.NewTask(ctx, f.project.ID, "Docs", "just words", "",
+		[]string{reviewer, planner, reviewer})
+	if err != nil {
+		t.Fatalf("NewTask: %v", err)
+	}
+	want := []string{planner, reviewer}
+	slices.Sort(want)
+	if got := f.reload(t, task.ID).Skip; !slices.Equal(got, want) {
+		t.Errorf("skip = %v, want %v sorted and deduplicated", got, want)
+	}
+}
+
+// A card that skips its whole pipeline has nowhere to go. Refused rather than
+// stored, where it would sit on the board looking like queued work.
+func TestACardCannotSkipEveryRole(t *testing.T) {
+	f := newFixture(t)
+
+	_, err := f.n.NewTask(context.Background(), f.project.ID, "Nothing", "do it", "",
+		[]string{f.roleID(t, "planner"), f.roleID(t, "coder"), f.roleID(t, "reviewer")})
+	if err == nil {
+		t.Fatal("a card skipped its entire team and was accepted")
+	}
+	var invalid *validationError
+	if !errors.As(err, &invalid) {
+		t.Errorf("err = %v, want one the API renders as a 400", err)
+	}
+}
+
+// A skip naming something this team does not run is a mistake worth reporting.
+// Dropped silently, it produces a card that visits a role the request said to
+// skip.
+func TestSkippingARoleTheTeamDoesNotRunIsRefused(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+
+	// A real role in the library, but not on this project's team.
+	outsider := f.roleID(t, "architect")
+	_, err := f.n.NewTask(ctx, f.project.ID, "Fix a typo", "one line", "", []string{outsider})
+	if err == nil {
+		t.Fatal("a card skipped a role the team does not run and was accepted")
+	}
+	var invalid *validationError
+	if !errors.As(err, &invalid) {
+		t.Fatalf("err = %v, want one the API renders as a 400", err)
+	}
+	if !strings.Contains(err.Error(), "architect") {
+		t.Errorf("err = %v, want it to name the role, which is what a person can fix", err)
+	}
+}
+
+// Skipping the role that merges makes the one before it terminal. Send is what
+// enforces that, and it has to agree with what the agent was told when it
+// claimed the work.
+func TestTheRoleBeforeASkippedTerminalOneMayFinishTheCard(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+
+	task, err := f.n.NewTask(ctx, f.project.ID, "Fix a typo", "one line", "",
+		[]string{f.roleID(t, "reviewer")})
+	if err != nil {
+		t.Fatalf("NewTask: %v", err)
+	}
+
+	// planner hands on as usual, and its gate is approved so the card reaches
+	// the coder.
+	if _, err := f.n.Claim(ctx, f.project.ID, "planner"); err != nil {
+		t.Fatalf("planner Claim: %v", err)
+	}
+	if _, err := f.n.Send(ctx, f.project.ID, "planner", SendRequest{
+		TaskID: task.ID, To: "coder", Commit: "aaaaaaaaaa", Body: "planned"}); err != nil {
+		t.Fatalf("planner Send: %v", err)
+	}
+	pending, err := f.db.ListPendingApprovals(ctx, f.project.ID)
+	if err != nil {
+		t.Fatalf("ListPendingApprovals: %v", err)
+	}
+	for _, a := range pending {
+		if err := f.n.Approve(ctx, a.ID); err != nil {
+			t.Fatalf("Approve: %v", err)
+		}
+	}
+	if _, err := f.n.Claim(ctx, f.project.ID, "coder"); err != nil {
+		t.Fatalf("coder Claim: %v", err)
+	}
+
+	// The coder finishes the card, which it may only do because the reviewer
+	// is not on this card's route.
+	if _, err := f.n.Send(ctx, f.project.ID, "coder", SendRequest{
+		TaskID: task.ID, Commit: "bbbbbbbbbb", Body: "done"}); err != nil {
+		t.Fatalf("coder Send with no recipient: %v", err)
+	}
+	if got := f.reload(t, task.ID); got.State != store.TaskDone {
+		t.Errorf("state = %s, want done — the coder was terminal for this card", got.State)
+	}
+	if len(f.git.merges) != 1 {
+		t.Errorf("merges = %v, want the coder's commit merged", f.git.merges)
+	}
+}
+
+// And the rule still holds for a card that skips nothing: a role in the middle
+// of the pipeline may not decide the work is finished.
+func TestARoleThatIsNotLastStillMayNotFinishACard(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+
+	task := f.task(t, "Calculator")
+	if _, err := f.n.Claim(ctx, f.project.ID, "planner"); err != nil {
+		t.Fatalf("planner Claim: %v", err)
+	}
+	_, err := f.n.Send(ctx, f.project.ID, "planner", SendRequest{
+		TaskID: task.ID, Commit: "aaaaaaaaaa", Body: "I say it is done"})
+	if err == nil {
+		t.Fatal("the planner finished a card the reviewer had not seen")
+	}
+	var invalid *validationError
+	if !errors.As(err, &invalid) {
+		t.Errorf("err = %v, want one the API renders as a 400", err)
+	}
+}
+
+// One lease answers one "where does this go next". Two cards that skip
+// different roles do not have the same answer, so a batching role must not be
+// handed both at once: whichever card lost would be routed by the other's
+// skips.
+func TestABatchDoesNotMixCardsThatRouteDifferently(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+
+	// The coder receives in batches for this test, which is what makes more
+	// than one card reachable in a single claim.
+	batch, items, age := store.ReceiveBatch, 10, 3600
+	planner, coder := f.roleID(t, "planner"), f.roleID(t, "coder")
+	if err := f.db.SetTeam(ctx, f.project.ID, []store.TeamPresetRole{
+		{TemplateID: planner, Enabled: true},
+		{TemplateID: coder, Enabled: true, RoleOverrides: store.RoleOverrides{
+			ReceiveOverride:        &batch,
+			BatchMaxItemsOverride:  &items,
+			BatchMaxAgeSecOverride: &age,
+		}},
+		{TemplateID: f.roleID(t, "reviewer"), Enabled: true},
+	}); err != nil {
+		t.Fatalf("SetTeam: %v", err)
+	}
+
+	plain, err := f.n.NewTask(ctx, f.project.ID, "Plain", "do it", "", []string{planner})
+	if err != nil {
+		t.Fatalf("NewTask: %v", err)
+	}
+	skipped, err := f.n.NewTask(ctx, f.project.ID, "Skips the reviewer", "do it", "",
+		[]string{planner, f.roleID(t, "reviewer")})
+	if err != nil {
+		t.Fatalf("NewTask: %v", err)
+	}
+
+	lease, err := f.n.Claim(ctx, f.project.ID, "coder")
+	if err != nil {
+		t.Fatalf("coder Claim: %v", err)
+	}
+	if lease == nil {
+		t.Fatal("the coder found no work, but two cards opened in its lane")
+	}
+	seen := map[string]bool{}
+	for _, item := range lease.Items {
+		if item.TaskID != nil {
+			seen[*item.TaskID] = true
+		}
+	}
+	if seen[plain.ID] && seen[skipped.ID] {
+		t.Errorf("one lease carried both cards; they route differently and share one `next`")
+	}
+}
+
+// Skipping is about where work goes on its own. An explicit recipient is a
+// person's or a role's own decision and still reaches a skipped role -- but
+// only backward, which is what rework is. Forward into a skipped role is the
+// accident the feature exists to prevent, and the envelope never names one.
+func TestForwardIntoASkippedRoleIsRefusedAndReworkIsNot(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+
+	task, err := f.n.NewTask(ctx, f.project.ID, "Docs", "just words", "",
+		[]string{f.roleID(t, "coder")})
+	if err != nil {
+		t.Fatalf("NewTask: %v", err)
+	}
+	if _, err := f.n.Claim(ctx, f.project.ID, "planner"); err != nil {
+		t.Fatalf("planner Claim: %v", err)
+	}
+
+	// Forward, past the role this card is meant to visit next.
+	_, err = f.n.Send(ctx, f.project.ID, "planner", SendRequest{
+		TaskID: task.ID, To: "coder", Commit: "aaaaaaaaaa", Body: "over to you"})
+	if err == nil {
+		t.Fatal("the planner handed work forward to a role this card skips")
+	}
+	var invalid *validationError
+	if !errors.As(err, &invalid) {
+		t.Fatalf("err = %v, want one the API renders as a 400", err)
+	}
+	if !strings.Contains(err.Error(), "coder") {
+		t.Errorf("err = %v, want it to name the role, which is what a person can fix", err)
+	}
+
+	// The same recipient, sent backward, is rework and still allowed: a
+	// reviewer that finds a problem has to be able to return the work.
+	if _, err := f.n.Send(ctx, f.project.ID, "planner", SendRequest{
+		TaskID: task.ID, To: "reviewer", Commit: "aaaaaaaaaa", Body: "planned"}); err != nil {
+		t.Fatalf("planner Send to the reviewer: %v", err)
+	}
+	pending, err := f.db.ListPendingApprovals(ctx, f.project.ID)
+	if err != nil {
+		t.Fatalf("ListPendingApprovals: %v", err)
+	}
+	for _, a := range pending {
+		if err := f.n.Approve(ctx, a.ID); err != nil {
+			t.Fatalf("Approve: %v", err)
+		}
+	}
+	if _, err := f.n.Claim(ctx, f.project.ID, "reviewer"); err != nil {
+		t.Fatalf("reviewer Claim: %v", err)
+	}
+	if _, err := f.n.Send(ctx, f.project.ID, "reviewer", SendRequest{
+		TaskID: task.ID, To: "coder", Commit: "bbbbbbbbbb", Body: "needs a change"}); err != nil {
+		t.Errorf("reviewer Send back to a skipped coder: %v — rework must still reach it", err)
 	}
 }

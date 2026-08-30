@@ -15,6 +15,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -99,16 +101,29 @@ func New(db *store.DB, opts ...Option) *Nydus {
 
 // ── starting work ─────────────────────────────────────────────────────────
 
-// NewTask opens a card and queues it for the first enabled role.
-func (n *Nydus) NewTask(ctx context.Context, projectID, name, body, deploy string) (*store.Task, error) {
+// NewTask opens a card and queues it for the first role it will visit.
+//
+// skip is the roles this card does not visit, as template ids. Almost always
+// empty; see store.Route for what it does and does not affect.
+func (n *Nydus) NewTask(ctx context.Context, projectID, name, body, deploy string, skip []string) (*store.Task, error) {
 	team, err := n.db.ResolveTeam(ctx, projectID)
 	if err != nil {
 		return nil, err
 	}
-	first, ok := firstEnabled(team)
-	if !ok {
+	if _, ok := firstEnabled(team); !ok {
 		return nil, errNoEnabledRoles(projectID)
 	}
+	skip = store.NormaliseSkip(skip)
+	if err := n.checkSkippable(ctx, team, skip); err != nil {
+		return nil, err
+	}
+	route := store.Route(team, skip)
+	if len(route) == 0 {
+		// Refused rather than stored. A card that skips its whole pipeline has
+		// nowhere to go and would sit on the board looking like queued work.
+		return nil, invalid("this card skips every role on the team; leave at least one to do the work")
+	}
+	first := route[0]
 
 	if name == "" {
 		return nil, invalid("a task needs a name; the name follows the card through the whole pipeline")
@@ -140,12 +155,17 @@ func (n *Nydus) NewTask(ctx context.Context, projectID, name, body, deploy strin
 		State:     store.TaskQueued,
 		CreatedAt: now.UTC(),
 		Deploy:    deploy,
+		Skip:      skip,
+	}
+	skipJSON, err := marshalSkip(skip)
+	if err != nil {
+		return nil, err
 	}
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO tasks (id, project_id, name, body, lane, state, created_at, deploy)
-		 VALUES (?,?,?,?,?,?,?,?)`,
+		`INSERT INTO tasks (id, project_id, name, body, lane, state, created_at, deploy, skip)
+		 VALUES (?,?,?,?,?,?,?,?,?)`,
 		task.ID, task.ProjectID, task.Name, task.Body, task.Lane, task.State,
-		task.CreatedAt.Format(time.RFC3339Nano), task.Deploy); err != nil {
+		task.CreatedAt.Format(time.RFC3339Nano), task.Deploy, skipJSON); err != nil {
 		return nil, fmt.Errorf("creating task %q: %w", name, err)
 	}
 
@@ -284,8 +304,27 @@ func (n *Nydus) Send(ctx context.Context, projectID, fromRole string, req SendRe
 	// An empty recipient means completion, and completion is the terminal
 	// role's word alone. Anyone else omitting --to has made a mistake worth
 	// reporting rather than guessing about.
+	// The card, when there is one: it carries the roles this send may route to
+	// and which role finishes it. Read once, because both questions below are
+	// about the same card.
+	var task *store.Task
+	if req.TaskID != "" {
+		task, err = n.db.GetTaskIn(ctx, projectID, req.TaskID)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	if req.To == "" {
-		if !sender.Terminal {
+		// Terminal for this card, which is not the same as terminal for the
+		// project: a card that skips the reviewer is finished by the coder,
+		// and the coder was told exactly that when it claimed the work. Asked
+		// the same way the envelope answered it, so the two cannot disagree.
+		terminal := sender.Terminal
+		if task != nil {
+			_, terminal = store.Onward(team, store.Route(team, task.Skip), sender.Name)
+		}
+		if !terminal {
 			return nil, invalid("role %q must name a recipient; only the terminal role finishes a task", fromRole)
 		}
 		// A gated terminal role waits for a human before its work reaches the
@@ -311,6 +350,21 @@ func (n *Nydus) Send(ctx context.Context, projectID, fromRole string, req SendRe
 	// is counted because backward edges make cycles possible, and a pipeline
 	// that bills per lap should not be able to loop quietly.
 	backward := kind == store.KindHandoff && recipient.Position < sender.Position
+
+	// A role this card skips may still be sent to, but only backward.
+	//
+	// Backward is rework, and rework is the reason skipping does not simply
+	// close a role off: a reviewer that finds a problem on a card whose coder
+	// was skipped has to be able to return the work, and the envelope tells
+	// that coder to rejoin the route afterwards. Forward is the opposite —
+	// nothing was told to send there, so it is either a guess or a stale
+	// recipient, and it hands the card to the role somebody chose to leave
+	// out. Refused by name, since that is what a person can act on.
+	if task != nil && recipient.Position > sender.Position && slices.Contains(task.Skip, recipient.ID) {
+		return nil, invalid(
+			"this task skips %q; send it to %s, or to a role behind you if it needs rework",
+			recipient.Name, nextOrEnd(team, task, sender))
+	}
 
 	priority := req.Priority
 	if priority == 0 {
@@ -646,9 +700,14 @@ func (n *Nydus) Claim(ctx context.Context, projectID, role string) (*store.Lease
 		return open, nil
 	}
 
+	// The card's skip list comes back with the message. A lease answers one
+	// `next`, and after per-card skipping that is only true if everything in
+	// the batch routes the same way -- so the batching rule below needs the
+	// column, and a join is one query rather than a lookup per candidate.
 	rows, err := tx.QueryContext(ctx,
-		`SELECT `+prefixedMessageCols+`, r.enqueued_at
+		`SELECT `+prefixedMessageCols+`, r.enqueued_at, COALESCE(t.skip, '')
 		 FROM routes r JOIN messages m ON m.id = r.message_id
+		 LEFT JOIN tasks t ON t.id = m.task_id
 		 WHERE r.to_role = ? AND r.state = ? AND m.project_id = ?
 		 ORDER BY m.priority ASC, m.created_at ASC`,
 		role, store.RouteQueued, projectID)
@@ -659,11 +718,15 @@ func (n *Nydus) Claim(ctx context.Context, projectID, role string) (*store.Lease
 	type candidate struct {
 		msg        store.Message
 		enqueuedAt time.Time
+		// skip is the card's list as stored, compared as a string. It is
+		// written sorted and deduplicated, so equal bytes mean an equal route.
+		skip string
 	}
 	var candidates []candidate
 	for rows.Next() {
 		var enq sql.NullString
-		m, err := scanMessageRow(rows, &enq)
+		var skip string
+		m, err := scanMessageRow(rows, &enq, &skip)
 		if err != nil {
 			rows.Close()
 			return nil, err
@@ -673,7 +736,7 @@ func (n *Nydus) Claim(ctx context.Context, projectID, role string) (*store.Lease
 			rows.Close()
 			return nil, err
 		}
-		candidates = append(candidates, candidate{msg: *m, enqueuedAt: at})
+		candidates = append(candidates, candidate{msg: *m, enqueuedAt: at, skip: skip})
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
@@ -698,6 +761,13 @@ func (n *Nydus) Claim(ctx context.Context, projectID, role string) (*store.Lease
 				break
 			}
 			if c.enqueuedAt.Sub(head.enqueuedAt) > maxAge {
+				break
+			}
+			// One lease carries one answer to "where does this go next", and
+			// two cards that skip different roles do not have the same one.
+			// Batched together, whichever card lost would be handed the
+			// other's route and hand its work to a role it was told to skip.
+			if c.skip != head.skip {
 				break
 			}
 			take = append(take, c.msg)
@@ -1537,7 +1607,10 @@ func (n *Nydus) finishIntegrated(ctx context.Context, approvalID, taskID, outcom
 const prefixedMessageCols = `m.id, m.project_id, m.task_id, m.from_role, m.kind,
 	m.priority, m.commit_sha, m.body, m.terminal, m.created_at`
 
-func scanMessageRow(rows *sql.Rows, extra *sql.NullString) (*store.Message, error) {
+// scanMessageRow reads a message plus whatever the query selected after it.
+// The trailing columns differ per caller -- the enqueued time here, the stored
+// hash there -- and are passed straight through to Scan.
+func scanMessageRow(rows *sql.Rows, extra ...any) (*store.Message, error) {
 	var (
 		m         store.Message
 		taskID    sql.NullString
@@ -1545,8 +1618,9 @@ func scanMessageRow(rows *sql.Rows, extra *sql.NullString) (*store.Message, erro
 		created   string
 		terminal  int
 	)
-	if err := rows.Scan(&m.ID, &m.ProjectID, &taskID, &m.FromRole, &m.Kind, &m.Priority,
-		&commitSHA, &m.Body, &terminal, &created, extra); err != nil {
+	dest := append([]any{&m.ID, &m.ProjectID, &taskID, &m.FromRole, &m.Kind, &m.Priority,
+		&commitSHA, &m.Body, &terminal, &created}, extra...)
+	if err := rows.Scan(dest...); err != nil {
 		return nil, err
 	}
 	if taskID.Valid {
@@ -1616,6 +1690,56 @@ func leaseItems(ctx context.Context, tx *sql.Tx, leaseID string) ([]store.Messag
 		out = append(out, *m)
 	}
 	return out, rows.Err()
+}
+
+// nextOrEnd names where this role's work was meant to go, for an error that
+// has to leave somebody able to act on it.
+func nextOrEnd(team []store.ResolvedRole, task *store.Task, sender store.ResolvedRole) string {
+	next, terminal := store.Onward(team, store.Route(team, task.Skip), sender.Name)
+	if terminal {
+		return "nobody — you are the last role on this card"
+	}
+	if next == "" {
+		return "the role the envelope named"
+	}
+	return strconv.Quote(next)
+}
+
+// checkSkippable refuses a skip list naming something this team does not run.
+//
+// The cockpit only offers roles that are on the team, so this is about what
+// arrives over the API. Named rather than ignored: silently dropping an id
+// would produce a card that visits a role the request said to skip.
+func (n *Nydus) checkSkippable(ctx context.Context, team []store.ResolvedRole, skip []string) error {
+	for _, id := range skip {
+		found := false
+		for _, r := range team {
+			if r.ID == id && r.Enabled {
+				found = true
+				break
+			}
+		}
+		if found {
+			continue
+		}
+		// The name if the library still has one, since that is what the person
+		// reading the error called it; the id otherwise.
+		what := id
+		if t, err := n.db.GetTemplate(ctx, id); err == nil {
+			what = fmt.Sprintf("%q", t.Name)
+		}
+		return invalid("cannot skip %s: this project's team does not run it", what)
+	}
+	return nil
+}
+
+// marshalSkip is store.EncodeSkip with the error wrapped where it happened.
+func marshalSkip(skip []string) (string, error) {
+	out, err := store.EncodeSkip(skip)
+	if err != nil {
+		return "", fmt.Errorf("encoding the skipped roles: %w", err)
+	}
+	return out, nil
 }
 
 func firstEnabled(team []store.ResolvedRole) (store.ResolvedRole, bool) {

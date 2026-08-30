@@ -15,7 +15,7 @@ import (
 // have something for an artifact to belong to.
 func (f *fixture) task(t *testing.T, name string) *store.Task {
 	t.Helper()
-	task, err := f.nyd.NewTask(context.Background(), f.project.ID, name, "build it", "")
+	task, err := f.nyd.NewTask(context.Background(), f.project.ID, name, "build it", "", nil)
 	if err != nil {
 		t.Fatalf("NewTask: %v", err)
 	}

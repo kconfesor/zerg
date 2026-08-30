@@ -232,6 +232,10 @@ export interface Task {
    *  written: a preview costs an agent turn, and most cards are not worth
    *  looking at. Empty means nowhere. */
   deploy?: 'local'
+  /** Roles this card does not visit, as role template ids. Set when the card
+   *  is written and fixed afterwards. It changes where the work is routed, not
+   *  the team: the pipeline is what it was for every other card. */
+  skip?: string[]
 }
 
 /** One worked task as the history screen reads it. */
@@ -519,10 +523,10 @@ export const api = {
     const suffix = query.toString()
     return call<HistoryPage>(`/projects/${id}/history${suffix ? '?' + suffix : ''}`)
   },
-  newTask: (id: string, name: string, body: string, deploy: string) =>
+  newTask: (id: string, name: string, body: string, deploy: string, skip: string[]) =>
     call<Task>(`/projects/${id}/tasks`, {
       method: 'POST',
-      body: JSON.stringify({ name, body, deploy }),
+      body: JSON.stringify({ name, body, deploy, skip }),
     }),
 
   attention: (id: string) => call<Attention>(`/projects/${id}/attention`),

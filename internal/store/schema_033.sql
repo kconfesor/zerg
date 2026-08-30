@@ -1,0 +1,16 @@
+-- Roles this one card does not visit.
+--
+-- The pipeline is configured per project and every card walked all of it. Some
+-- cards do not need all of it -- a one-line fix does not need a plan, a docs
+-- change does not need a reviewer -- and the only way to get that was to edit
+-- the team, which changes every card that follows. The decision belongs to the
+-- card, taken by whoever writes it, the same argument as `deploy` in 030.
+--
+-- A JSON array of role template ids, empty for the cards written before this
+-- could be asked for. Ids rather than names because renaming a role in the
+-- library would otherwise un-skip every card that named it, and the failure is
+-- invisible: the card simply visits a role it was told to miss. Sorted and
+-- deduplicated on write, so two cards with the same skip set have the same
+-- bytes here -- the batching rule in nydus.Claim compares them as strings to
+-- keep one lease to one route.
+ALTER TABLE tasks ADD COLUMN skip TEXT NOT NULL DEFAULT '';
