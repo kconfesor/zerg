@@ -790,7 +790,14 @@ onBeforeUnmount(() => stream?.close())
       ref="viewport"
       class="bg-card min-h-32 shrink overflow-y-auto border p-3"
     >
-      <p v-if="!lines.length" class="text-muted-foreground text-xs leading-relaxed">
+      <!-- What this is for, on a screen with room to say it. Hidden on a
+           phone: it is three sentences of instruction in the box the
+           conversation is about to fill, and the first message replaces it
+           anyway. Desktop keeps it, where it costs nothing. -->
+      <p
+        v-if="!lines.length"
+        class="text-muted-foreground hidden text-xs leading-relaxed sm:block"
+      >
         Ask about the repository: how something works, where a thing lives, whether an idea is
         already implemented. This agent reads the project and answers; it does not take work. When
         the answer is "that needs a change", queue it as a task on the Board.
