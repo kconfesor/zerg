@@ -388,11 +388,20 @@ function live(r: RoleStatus): boolean {
       <!-- The raster, not the SVG. The mark's glow is two feGaussianBlur
            filters, and a filter is rasterised into an offscreen buffer whose
            resolution mobile browsers cap — a 512-unit viewBox drawn at 36px
-           came out visibly pixelated on a phone. This PNG has the same glow
+           came out visibly pixelated on a phone. These PNGs have the same glow
            baked in at 192px, which is five times what 36 CSS pixels need on a
-           3x display, and no filter to resolve at render time. -->
+           3x display, and no filter to resolve at render time.
+
+           No tile behind it. The app icon has one -- a launcher needs a
+           rectangle to fill -- and in the rail that tile was the whole
+           problem: it is part of the artwork, so on a light rail it was a
+           black square and no CSS could reach it. Dropped, the beams draw on
+           whatever is behind them and one file serves both grounds. What that
+           cost is the node interiors, which used to be holes punched in the
+           beams using the tile's colour; unfilled, the beam runs through the
+           ring and the ring still reads as a node. -->
       <img
-        src="/android-chrome-192x192.png"
+        src="/logo-mark-192.png"
         alt=""
         width="36"
         height="36"

@@ -6,24 +6,56 @@
    variables rather than two that can drift apart.
 
    These slots are what shadcn has no opinion about, and they are not
-   decorative. They were validated with dataviz/scripts/validate_palette.js
-   against the dark surface oklch(20.8% 0.026 301.8):
+   decorative. They were validated with the data-viz palette validator against
+   the surface each one is drawn on.
+
+   Against the dark card oklch(20.8% 0.026 301.8) = #1a1522:
 
      - chart-1..4 (role identity, categorical) ALL PASS, worst adjacent
        CVD deltaE 9.4. All four sit at L~62%, which is why they pass.
      - tier-1..4 (cost ramp, ordinal, one hue, ordered by unit price)
        ALL PASS, monotone lightness.
 
+   The role hues pass on white too, unchanged, so they are shared. The rest are
+   not, and are stated per surface below.
+
    Do not re-pick these by eye; re-run the validator.
    ─────────────────────────────────────────────────────────────────────────── */
 
 :root, .dark {
+  /* Role identity. Validated against both surfaces: the same four hues pass
+     on #1a1522 and on #ffffff, worst adjacent CVD deltaE 9.4 either way. */
   --chart-1: oklch(62.1% 0.128 163.1);   /* aqua    */
   --chart-2: oklch(62.2% 0.173 40.1);    /* orange  */
   --chart-3: oklch(62.2% 0.161 255.1);   /* blue    */
   --chart-4: oklch(62.2% 0.171 0.8);     /* magenta */
   --chart-5: oklch(66.6% 0.203 304.0);   /* carapace, for "other" */
+}
 
+/* Light: the cost ramp runs the other way, and the status hues are darkened
+   until they are readable as text.
+
+   The ramp is ordinal, so what has to hold is that more cost reads as more
+   distance from the surface. On a dark ground that means lighter; on white it
+   means darker, and keeping the dark ramp would have put the dearest tier --
+   output tokens, the bar that matters -- at 1.74:1 against white, which is
+   below the 2:1 floor and very nearly invisible.
+
+   The status colours are text as often as they are marks. On white the dark
+   theme's amber measures 1.83:1, which is not a legibility opinion; it is
+   unreadable. These clear 4.5:1. */
+:root {
+  --tier-1: oklch(78.0% 0.070 300);      /* cache read   ~0.1x */
+  --tier-2: oklch(66.0% 0.115 300);      /* input          1x  */
+  --tier-3: oklch(54.0% 0.150 300);      /* cache write  1.25x */
+  --tier-4: oklch(42.0% 0.135 300);      /* output         5x  */
+
+  --status-good: oklch(55.0% 0.170 142.6);     /* 4.51:1 on white */
+  --status-warning: oklch(57.0% 0.130 78.5);   /* 4.53:1 on white */
+  --status-critical: oklch(59.0% 0.186 25.2);  /* 4.51:1 on white */
+}
+
+.dark {
   --tier-1: oklch(44.3% 0.078 295.5);    /* cache read   ~0.1x */
   --tier-2: oklch(55.3% 0.136 295.6);    /* input          1x  */
   --tier-3: oklch(68.7% 0.131 299.0);    /* cache write  1.25x */

@@ -1,7 +1,28 @@
 <!doctype html>
-<html lang="en" class="dark">
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
+
+    <!-- The theme is applied before anything is painted.
+         Set from the class on <html> by Vue later, but a bundle arriving over
+         a tailnet is most of a second away, and a light page that turns dark
+         when the app boots is worse than either. Reads the same key the app
+         writes; "system" means whatever the machine is set to. -->
+    <script>
+      (function () {
+        try {
+          var choice = localStorage.getItem('zerg.theme') || 'system'
+          var dark =
+            choice === 'dark' ||
+            (choice === 'system' &&
+              window.matchMedia('(prefers-color-scheme: dark)').matches)
+          document.documentElement.classList.toggle('dark', dark)
+        } catch (e) {
+          // A browser with storage blocked still gets a readable page.
+          document.documentElement.classList.add('dark')
+        }
+      })()
+    </script>
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>zerg, Multi-Agent Orchestrator</title>
 
@@ -37,8 +58,14 @@
     <style>
       /* Only the frame, and only the values the running cockpit reports for
          it. Duplicating the whole theme here would be a second copy to keep in
-         step with the first; four declarations is a thing that can be checked
-         by looking. */
+         step with the first; a handful of declarations is a thing that can be
+         checked by looking.
+
+         Stated in both themes, and this file is where it has to happen: these
+         rules are unlayered, and unlayered CSS beats everything the bundle puts
+         in @layer base no matter which loads first. Written for dark only, they
+         held the page dark after the theme was switched to light -- a light
+         board with dark body behind it, which is how this was found. */
       html,
       body,
       #app {
@@ -46,7 +73,7 @@
       }
       body {
         margin: 0;
-        background: oklch(18.2% 0.019 304.8);
+        background: oklch(99.2% 0.003 305);
       }
       .boot {
         display: flex;
@@ -55,15 +82,26 @@
       .boot-rail {
         width: 240px;
         flex: none;
-        background: oklch(15.5% 0.017 305);
-        border-right: 1px solid oklch(24.5% 0.038 300);
+        background: oklch(96.5% 0.004 305);
+        border-right: 1px solid oklch(91.5% 0.006 300);
       }
       .boot-main {
         flex: 1;
       }
       .boot-bar {
         height: 56px;
-        border-bottom: 1px solid oklch(24.5% 0.038 300);
+        border-bottom: 1px solid oklch(91.5% 0.006 300);
+      }
+
+      .dark body {
+        background: oklch(18.2% 0.019 304.8);
+      }
+      .dark .boot-rail {
+        background: oklch(15.5% 0.017 305);
+        border-right-color: oklch(24.5% 0.038 300);
+      }
+      .dark .boot-bar {
+        border-bottom-color: oklch(24.5% 0.038 300);
       }
       /* The rail is a drawer below md and is not on screen until it is opened,
          so the frame should not claim it is. */
