@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { isDark } from '@/lib/theme'
 import { computed, ref, watch } from 'vue'
 import {
   Activity as ActivityIcon,
@@ -99,6 +100,12 @@ const props = defineProps<{
  * `status.roles` is empty then — so the one place that shows what a team is
  * made of was blank exactly when you were deciding whether to start it.
  */
+/** Which mark to draw. The logo is a tile, so the ground is part of the
+ *  artwork and there is a file per theme. */
+const mark = computed(() =>
+  isDark() ? '/android-chrome-192x192.png' : '/logo-icon-light-192.png',
+)
+
 const rolesShown = computed<{ role: string; live: RoleStatus | null }[]>(() => {
   if (props.status.roles.length) {
     return props.status.roles.map((r) => ({ role: r.role, live: r }))
@@ -388,11 +395,17 @@ function live(r: RoleStatus): boolean {
       <!-- The raster, not the SVG. The mark's glow is two feGaussianBlur
            filters, and a filter is rasterised into an offscreen buffer whose
            resolution mobile browsers cap — a 512-unit viewBox drawn at 36px
-           came out visibly pixelated on a phone. This PNG has the same glow
+           came out visibly pixelated on a phone. These PNGs have the same glow
            baked in at 192px, which is five times what 36 CSS pixels need on a
-           3x display, and no filter to resolve at render time. -->
+           3x display, and no filter to resolve at render time.
+
+           One per ground. The mark is a tile: its background, the hairline
+           round it, the holes in the node circles and the centre pulse are all
+           part of the artwork, so no CSS makes the dark one work on a light
+           rail — it is simply a black square there. The beams are the same
+           hues in both, which is what makes this one logo rather than two. -->
       <img
-        src="/android-chrome-192x192.png"
+        :src="mark"
         alt=""
         width="36"
         height="36"
