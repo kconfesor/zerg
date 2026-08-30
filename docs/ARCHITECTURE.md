@@ -442,9 +442,11 @@ a card routed one way and told it went another.
 A lease therefore carries one route, which is why `nydus.Claim` will not batch two cards that skip
 differently: batched together, whichever card lost would be handed the other's `next`.
 
-Skipping governs automatic forward routing only. An explicit `--to` still reaches a skipped role,
-because rework has to work: a reviewer that finds a problem on a card whose coder was skipped still
-has to be able to send the work back, and that role is then told to rejoin the route after itself.
+Skipping governs automatic forward routing only, and only backward. An explicit `--to` still reaches
+a skipped role behind the sender, because rework has to work: a reviewer that finds a problem on a
+card whose coder was skipped still has to be able to send the work back, and that role is then told
+to rejoin the route after itself. Forward into a skipped role is refused — nothing named it, so it
+is a guess or a stale recipient, and it hands the card to the role somebody chose to leave out.
 
 **Leases.** A claim has a deadline. Ack closes it; expiry returns the work to the queue and marks the
 role degraded. This is the answer to "lost wake-up ⇒ permanent stall, no timer, no retry".

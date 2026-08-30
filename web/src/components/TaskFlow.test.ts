@@ -128,4 +128,23 @@ describe('a card that skipped a role', () => {
     // And only that one. The other lifelines are ordinary columns.
     expect(w.findAll('span').filter((s) => s.text() === 'skipped')).toHaveLength(1)
   })
+
+  it('keeps the column for a role the team no longer has', async () => {
+    // A skipped role leaves no step behind — that is what being skipped is —
+    // so nothing else can reconstruct it. Removed from the team, it used to
+    // disappear, and the card then read as though it went through the whole
+    // pipeline.
+    const w = mount(TaskFlow, {
+      props: {
+        taskId: 'task-1',
+        steps: [step({ from: 'planner', to: 'reviewer' })],
+        roles: ['planner', 'reviewer'],
+        skipped: ['coder'],
+      },
+    })
+    await flushPromises()
+
+    expect(w.text()).toContain('coder')
+    expect(w.text()).toContain('skipped')
+  })
 })

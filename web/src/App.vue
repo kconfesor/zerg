@@ -333,13 +333,19 @@ const taskRoute = computed(() =>
 /**
  * The roles the open card skipped, by name.
  *
- * Resolved here because the team lives here: a card stores template ids, so a
- * role renamed in the library still reads correctly on a card written before
- * the rename, and one deleted from the team is simply not named.
+ * Resolved against the library rather than the project's team, because a
+ * history has to survive the pipeline being edited under it: a role taken off
+ * the team is still the role this card skipped, and looking it up in the team
+ * made the badge and its column disappear the moment somebody removed it. The
+ * library is the wider set and is already loaded.
+ *
+ * A card stores template ids, so a role renamed since still reads correctly.
+ * One deleted from the library outright is not named — there is nothing left
+ * to name it with.
  */
 const openTaskSkipped = computed(() => {
   const ids = openTask.value?.skip ?? []
-  return team.value.filter((r) => ids.includes(r.id)).map((r) => r.name)
+  return library.value.filter((r) => ids.includes(r.id)).map((r) => r.name)
 })
 
 function toggleSkip(id: string, on: boolean) {

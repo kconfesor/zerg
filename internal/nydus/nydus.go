@@ -15,6 +15,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -302,14 +304,25 @@ func (n *Nydus) Send(ctx context.Context, projectID, fromRole string, req SendRe
 	// An empty recipient means completion, and completion is the terminal
 	// role's word alone. Anyone else omitting --to has made a mistake worth
 	// reporting rather than guessing about.
+	// The card, when there is one: it carries the roles this send may route to
+	// and which role finishes it. Read once, because both questions below are
+	// about the same card.
+	var task *store.Task
+	if req.TaskID != "" {
+		task, err = n.db.GetTaskIn(ctx, projectID, req.TaskID)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	if req.To == "" {
 		// Terminal for this card, which is not the same as terminal for the
 		// project: a card that skips the reviewer is finished by the coder,
 		// and the coder was told exactly that when it claimed the work. Asked
 		// the same way the envelope answered it, so the two cannot disagree.
-		terminal, err := n.terminalFor(ctx, projectID, team, sender, req.TaskID)
-		if err != nil {
-			return nil, err
+		terminal := sender.Terminal
+		if task != nil {
+			_, terminal = store.Onward(team, store.Route(team, task.Skip), sender.Name)
 		}
 		if !terminal {
 			return nil, invalid("role %q must name a recipient; only the terminal role finishes a task", fromRole)
@@ -337,6 +350,21 @@ func (n *Nydus) Send(ctx context.Context, projectID, fromRole string, req SendRe
 	// is counted because backward edges make cycles possible, and a pipeline
 	// that bills per lap should not be able to loop quietly.
 	backward := kind == store.KindHandoff && recipient.Position < sender.Position
+
+	// A role this card skips may still be sent to, but only backward.
+	//
+	// Backward is rework, and rework is the reason skipping does not simply
+	// close a role off: a reviewer that finds a problem on a card whose coder
+	// was skipped has to be able to return the work, and the envelope tells
+	// that coder to rejoin the route afterwards. Forward is the opposite —
+	// nothing was told to send there, so it is either a guess or a stale
+	// recipient, and it hands the card to the role somebody chose to leave
+	// out. Refused by name, since that is what a person can act on.
+	if task != nil && recipient.Position > sender.Position && slices.Contains(task.Skip, recipient.ID) {
+		return nil, invalid(
+			"this task skips %q; send it to %s, or to a role behind you if it needs rework",
+			recipient.Name, nextOrEnd(team, task, sender))
+	}
 
 	priority := req.Priority
 	if priority == 0 {
@@ -1664,21 +1692,17 @@ func leaseItems(ctx context.Context, tx *sql.Tx, leaseID string) ([]store.Messag
 	return out, rows.Err()
 }
 
-// terminalFor reports whether this role finishes this card.
-//
-// Without a task there is no route to read and the project's own answer is the
-// only one there is -- an opening note or an ad-hoc message, neither of which
-// completes anything.
-func (n *Nydus) terminalFor(ctx context.Context, projectID string, team []store.ResolvedRole, sender store.ResolvedRole, taskID string) (bool, error) {
-	if taskID == "" {
-		return sender.Terminal, nil
+// nextOrEnd names where this role's work was meant to go, for an error that
+// has to leave somebody able to act on it.
+func nextOrEnd(team []store.ResolvedRole, task *store.Task, sender store.ResolvedRole) string {
+	next, terminal := store.Onward(team, store.Route(team, task.Skip), sender.Name)
+	if terminal {
+		return "nobody — you are the last role on this card"
 	}
-	task, err := n.db.GetTaskIn(ctx, projectID, taskID)
-	if err != nil {
-		return false, err
+	if next == "" {
+		return "the role the envelope named"
 	}
-	_, terminal := store.Onward(team, store.Route(team, task.Skip), sender.Name)
-	return terminal, nil
+	return strconv.Quote(next)
 }
 
 // checkSkippable refuses a skip list naming something this team does not run.

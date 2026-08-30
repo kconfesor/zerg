@@ -2133,3 +2133,58 @@ func TestABatchDoesNotMixCardsThatRouteDifferently(t *testing.T) {
 		t.Errorf("one lease carried both cards; they route differently and share one `next`")
 	}
 }
+
+// Skipping is about where work goes on its own. An explicit recipient is a
+// person's or a role's own decision and still reaches a skipped role -- but
+// only backward, which is what rework is. Forward into a skipped role is the
+// accident the feature exists to prevent, and the envelope never names one.
+func TestForwardIntoASkippedRoleIsRefusedAndReworkIsNot(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+
+	task, err := f.n.NewTask(ctx, f.project.ID, "Docs", "just words", "",
+		[]string{f.roleID(t, "coder")})
+	if err != nil {
+		t.Fatalf("NewTask: %v", err)
+	}
+	if _, err := f.n.Claim(ctx, f.project.ID, "planner"); err != nil {
+		t.Fatalf("planner Claim: %v", err)
+	}
+
+	// Forward, past the role this card is meant to visit next.
+	_, err = f.n.Send(ctx, f.project.ID, "planner", SendRequest{
+		TaskID: task.ID, To: "coder", Commit: "aaaaaaaaaa", Body: "over to you"})
+	if err == nil {
+		t.Fatal("the planner handed work forward to a role this card skips")
+	}
+	var invalid *validationError
+	if !errors.As(err, &invalid) {
+		t.Fatalf("err = %v, want one the API renders as a 400", err)
+	}
+	if !strings.Contains(err.Error(), "coder") {
+		t.Errorf("err = %v, want it to name the role, which is what a person can fix", err)
+	}
+
+	// The same recipient, sent backward, is rework and still allowed: a
+	// reviewer that finds a problem has to be able to return the work.
+	if _, err := f.n.Send(ctx, f.project.ID, "planner", SendRequest{
+		TaskID: task.ID, To: "reviewer", Commit: "aaaaaaaaaa", Body: "planned"}); err != nil {
+		t.Fatalf("planner Send to the reviewer: %v", err)
+	}
+	pending, err := f.db.ListPendingApprovals(ctx, f.project.ID)
+	if err != nil {
+		t.Fatalf("ListPendingApprovals: %v", err)
+	}
+	for _, a := range pending {
+		if err := f.n.Approve(ctx, a.ID); err != nil {
+			t.Fatalf("Approve: %v", err)
+		}
+	}
+	if _, err := f.n.Claim(ctx, f.project.ID, "reviewer"); err != nil {
+		t.Fatalf("reviewer Claim: %v", err)
+	}
+	if _, err := f.n.Send(ctx, f.project.ID, "reviewer", SendRequest{
+		TaskID: task.ID, To: "coder", Commit: "bbbbbbbbbb", Body: "needs a change"}); err != nil {
+		t.Errorf("reviewer Send back to a skipped coder: %v — rework must still reach it", err)
+	}
+}
