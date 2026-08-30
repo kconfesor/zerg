@@ -2,6 +2,7 @@ package event
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"path/filepath"
@@ -73,5 +74,61 @@ func TestABurstDoesNotLoseUsageRows(t *testing.T) {
 	if turns != burst {
 		t.Errorf("stored %d usage turns of %d published (queued %d, failed %d)",
 			turns, burst, st.Queued, st.Failed)
+	}
+}
+
+// What a person attached survives the reload.
+//
+// A message carries only its text, so an attachment recorded nowhere came back
+// after a reload as a question about a picture with no picture: "what is wrong
+// with this?" above a gap, and the answer under it discussing something not on
+// screen.
+func TestAMessagesAttachmentsAreRecorded(t *testing.T) {
+	withFiles := Payload(Event{
+		Event: adapter.Event{
+			Kind: adapter.EventMessage,
+			Text: "what is wrong with this layout?",
+			Args: map[string]any{"attachments": []any{
+				map[string]any{"name": "screenshot.png", "artifactId": "A1"},
+			}},
+		},
+	})
+	if withFiles == nil {
+		t.Fatal("a message with an attachment recorded no payload")
+	}
+	var got map[string]any
+	if err := json.Unmarshal(withFiles, &got); err != nil {
+		t.Fatal(err)
+	}
+	files, ok := got["attachments"].([]any)
+	if !ok || len(files) != 1 {
+		t.Fatalf("payload = %s, want the one attachment", withFiles)
+	}
+
+	// An ordinary message stores nothing at all, which is almost all of them.
+	if plain := Payload(Event{
+		Event: adapter.Event{Kind: adapter.EventMessage, Text: "why is it recursive?"},
+	}); plain != nil {
+		t.Errorf("a plain message stored %s", plain)
+	}
+}
+
+// Fragments of an answer are never written down.
+//
+// The whole message follows as its own event, so recording both would double
+// every answer in the transcript and multiply the table by the number of words
+// in it.
+func TestFragmentsOfAnAnswerAreNotRecorded(t *testing.T) {
+	r := &Recorder{queue: nil}
+	r.push(Event{Event: adapter.Event{Kind: adapter.EventMessageDelta, Text: "the"}})
+	r.push(Event{Event: adapter.Event{Kind: adapter.EventMessageDelta, Text: " quick"}})
+	if len(r.queue) != 0 {
+		t.Errorf("%d fragments queued for writing, want none", len(r.queue))
+	}
+
+	// The message they add up to is.
+	r.push(Event{Event: adapter.Event{Kind: adapter.EventMessage, Text: "the quick brown fox"}})
+	if len(r.queue) != 1 {
+		t.Errorf("%d events queued, want the whole message", len(r.queue))
 	}
 }

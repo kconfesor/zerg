@@ -51,6 +51,10 @@ type Artifact struct {
 	// Owner is agent or daemon; see the constants above.
 	Owner string `json:"owner,omitempty"`
 
+	// ChatID is the conversation a file was attached to. Empty for everything
+	// an agent produced, which is what the rest of this table is.
+	ChatID string `json:"chatId,omitempty"`
+
 	CreatedAt time.Time `json:"createdAt"`
 	Pinned    bool      `json:"pinned"`
 }
@@ -86,11 +90,12 @@ func (db *DB) AddArtifact(ctx context.Context, a *Artifact) (*Artifact, error) {
 	}
 	if _, err := db.sql.ExecContext(ctx,
 		`INSERT INTO artifacts (id, project_id, task_id, role, kind, label,
-		   sha256, mime, bytes, name, port, created_at, pinned, owner)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		   sha256, mime, bytes, name, port, created_at, pinned, owner, chat_id)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		a.ID, a.ProjectID, a.TaskID, a.Role, a.Kind, a.Label,
 		a.SHA256, a.MIME, a.Bytes, a.Name, a.Port,
-		a.CreatedAt.Format(time.RFC3339Nano), boolInt(a.Pinned), a.Owner); err != nil {
+		a.CreatedAt.Format(time.RFC3339Nano), boolInt(a.Pinned), a.Owner,
+		nullable(a.ChatID)); err != nil {
 		return nil, fmt.Errorf("recording the artifact: %w", err)
 	}
 	return a, nil
@@ -117,6 +122,27 @@ func (db *DB) ArtifactsForTask(ctx context.Context, taskID string) ([]Artifact, 
 	defer rows.Close()
 
 	var out []Artifact
+	for rows.Next() {
+		a, err := scanArtifact(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *a)
+	}
+	return out, rows.Err()
+}
+
+// ArtifactsForChat lists what was attached to one conversation, oldest first so
+// it reads in the order it was said.
+func (db *DB) ArtifactsForChat(ctx context.Context, chatID string) ([]Artifact, error) {
+	rows, err := db.read.QueryContext(ctx,
+		`SELECT `+artifactCols+` FROM artifacts WHERE chat_id = ? ORDER BY created_at, id`, chatID)
+	if err != nil {
+		return nil, fmt.Errorf("reading a conversation's files: %w", err)
+	}
+	defer rows.Close()
+
+	out := []Artifact{}
 	for rows.Next() {
 		a, err := scanArtifact(rows)
 		if err != nil {
@@ -191,21 +217,23 @@ func (db *DB) SetArtifactPinned(ctx context.Context, id string, pinned bool) err
 }
 
 const artifactCols = `id, project_id, task_id, role, kind, label, sha256, mime, bytes, name,
-	port, stopped_at, created_at, pinned, owner`
+	port, stopped_at, created_at, pinned, owner, chat_id`
 
 func scanArtifact(s scanner) (*Artifact, error) {
 	var (
 		a         Artifact
 		taskID    sql.NullString
 		stoppedAt sql.NullString
+		chatID    sql.NullString
 		createdAt string
 		pinned    int
 	)
 	if err := s.Scan(&a.ID, &a.ProjectID, &taskID, &a.Role, &a.Kind, &a.Label,
 		&a.SHA256, &a.MIME, &a.Bytes, &a.Name, &a.Port, &stoppedAt, &createdAt, &pinned,
-		&a.Owner); err != nil {
+		&a.Owner, &chatID); err != nil {
 		return nil, err
 	}
+	a.ChatID = chatID.String
 	if taskID.Valid {
 		a.TaskID = &taskID.String
 	}
@@ -224,6 +252,96 @@ func boolInt(b bool) int {
 		return 1
 	}
 	return 0
+}
+
+// DeleteChatAttachments removes what was attached to a project's conversation,
+// and reports the digests nothing names any more.
+//
+// Called when a chat is ended, which is the one moment a conversation's files
+// stop being wanted: they are exempt from the sweep precisely because ending it
+// is a decision rather than an age.
+func (db *DB) DeleteChatAttachments(ctx context.Context, projectID string) ([]string, error) {
+	tx, err := db.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("clearing attachments: %w", err)
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.QueryContext(ctx,
+		`SELECT id, sha256 FROM artifacts
+		  WHERE project_id = ? AND role = ? AND task_id IS NULL`, projectID, OperatorRole)
+	if err != nil {
+		return nil, fmt.Errorf("clearing attachments: %w", err)
+	}
+	var ids, digests []string
+	for rows.Next() {
+		var id, digest string
+		if err := rows.Scan(&id, &digest); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		ids = append(ids, id)
+		if digest != "" {
+			digests = append(digests, digest)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(ids) == 0 {
+		return nil, tx.Commit()
+	}
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM artifacts WHERE id IN (`+holes(len(ids))+`)`,
+		anySlice(ids)...); err != nil {
+		return nil, fmt.Errorf("clearing attachments: %w", err)
+	}
+
+	// The same bytes can be named by another row -- the same screenshot
+	// attached to two projects, or produced by an agent -- so only the digests
+	// nothing points at are handed back for deletion.
+	orphans, err := orphanedDigests(ctx, tx, digests)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return orphans, nil
+}
+
+// orphanedDigests is which of these the artifacts table no longer names.
+func orphanedDigests(ctx context.Context, tx *sql.Tx, digests []string) ([]string, error) {
+	if len(digests) == 0 {
+		return nil, nil
+	}
+	rows, err := tx.QueryContext(ctx,
+		`SELECT DISTINCT sha256 FROM artifacts WHERE sha256 IN (`+holes(len(digests))+`)`,
+		anySlice(digests)...)
+	if err != nil {
+		return nil, err
+	}
+	kept := map[string]bool{}
+	for rows.Next() {
+		var d string
+		if err := rows.Scan(&d); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		kept[d] = true
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, d := range digests {
+		if !kept[d] {
+			out = append(out, d)
+		}
+	}
+	return out, nil
 }
 
 // PruneArtifacts drops artifacts of tasks that have aged out, and reports the
@@ -253,12 +371,17 @@ func (db *DB) PruneArtifacts(ctx context.Context, before time.Time) (int, []stri
 	}
 	defer tx.Rollback()
 
+	// A file somebody attached to a conversation is exempt, the way the
+	// conversation itself is. Swept, a chat kept its words and lost its
+	// pictures: "what is wrong with this?" above a gap, with the answer
+	// underneath discussing something no longer on screen.
 	const doomed = `SELECT id, sha256 FROM artifacts
 	                 WHERE created_at < ? AND pinned = 0
+	                   AND role <> ?
 	                   AND (task_id IS NULL
 	                        OR NOT EXISTS (SELECT 1 FROM tasks t
 	                                        WHERE t.id = artifacts.task_id AND t.pinned = 1))`
-	rows, err := tx.QueryContext(ctx, doomed, cut)
+	rows, err := tx.QueryContext(ctx, doomed, cut, OperatorRole)
 	if err != nil {
 		return 0, nil, fmt.Errorf("pruning artifacts: %w", err)
 	}

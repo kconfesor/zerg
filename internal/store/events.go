@@ -25,6 +25,16 @@ type Event struct {
 	// shape that only the view cares about.
 	Data  json.RawMessage `json:"data,omitempty"`
 	Fatal bool            `json:"fatal,omitempty"`
+
+	// ChatID is the conversation this belongs to, for the two roles that are
+	// one. Empty for everything else, which is almost every event: the
+	// pipeline's work belongs to a card, not to a thread.
+	ChatID string `json:"chatId,omitempty"`
+
+	// Model is what produced this, when a harness says. The agent behind a
+	// conversation can be changed while it is open, so "which model said this"
+	// is a fact about the message and not about the project's current setting.
+	Model string `json:"model,omitempty"`
 }
 
 // RecordEvent appends one event.
@@ -63,10 +73,10 @@ func (db *DB) RecordTurn(ctx context.Context, e *Event, u *UsageTurn) error {
 	defer tx.Rollback()
 
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO events (id, project_id, task_id, role, kind, ts, text, tool, data, fatal)
-		 VALUES (?,?,?,?,?,?,?,?,?,?)`,
+		`INSERT INTO events (id, project_id, task_id, role, kind, ts, text, tool, data, fatal, chat_id, model)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
 		e.ID, e.ProjectID, e.TaskID, e.Role, e.Kind, e.At.Format(time.RFC3339Nano),
-		e.Text, e.Tool, data, e.Fatal); err != nil {
+		e.Text, e.Tool, data, e.Fatal, nullable(e.ChatID), nullable(e.Model)); err != nil {
 		return fmt.Errorf("recording event: %w", err)
 	}
 
@@ -81,9 +91,16 @@ func (db *DB) RecordTurn(ctx context.Context, e *Event, u *UsageTurn) error {
 	return nil
 }
 
+// eventCols is the row as the cockpit reads it.
+const eventCols = `id, project_id, task_id, role, kind, ts, text, tool, data, fatal, chat_id, model`
+
 // EventQuery selects a slice of the record.
 type EventQuery struct {
 	ProjectID string
+
+	// Chat narrows to one conversation. Empty means every event the other
+	// filters allow, conversations included.
+	Chat string
 
 	// After is an event id. Because ids are monotonic ULIDs, "after this id"
 	// and "after this moment" are the same question, which is what lets an SSE
@@ -132,6 +149,14 @@ func (db *DB) ListEvents(ctx context.Context, q EventQuery) ([]Event, error) {
 		where += " AND task_id = ?"
 		args = append(args, q.Task)
 	}
+	// One conversation, not the project's chatter. Asked for explicitly rather
+	// than inferred from the role, because "every chat event in this project"
+	// is no longer a thing anybody wants: it is several conversations laid on
+	// top of each other.
+	if q.Chat != "" {
+		where += " AND chat_id = ?"
+		args = append(args, q.Chat)
+	}
 	if !q.From.IsZero() {
 		where += " AND ts >= ?"
 		args = append(args, q.From.Format(time.RFC3339Nano))
@@ -143,11 +168,11 @@ func (db *DB) ListEvents(ctx context.Context, q EventQuery) ([]Event, error) {
 
 	// Without a cursor, take the newest rows and put them back in order. The
 	// inner query is what bounds the scan; ordering the outer one is free.
-	query := `SELECT id, project_id, task_id, role, kind, ts, text, tool, data, fatal
+	query := `SELECT ` + eventCols + `
 	          FROM events WHERE ` + where + ` ORDER BY id ASC LIMIT ?`
 	if q.After == "" && q.From.IsZero() {
 		query = `SELECT * FROM (
-		             SELECT id, project_id, task_id, role, kind, ts, text, tool, data, fatal
+		             SELECT ` + eventCols + `
 		             FROM events WHERE ` + where + ` ORDER BY id DESC LIMIT ?
 		         ) ORDER BY id ASC`
 	}
@@ -162,16 +187,19 @@ func (db *DB) ListEvents(ctx context.Context, q EventQuery) ([]Event, error) {
 	out := []Event{}
 	for rows.Next() {
 		var (
-			e     Event
-			task  sql.NullString
-			data  sql.NullString
-			at    string
-			fatal int
+			e      Event
+			task   sql.NullString
+			data   sql.NullString
+			chatID sql.NullString
+			model  sql.NullString
+			at     string
+			fatal  int
 		)
 		if err := rows.Scan(&e.ID, &e.ProjectID, &task, &e.Role, &e.Kind, &at,
-			&e.Text, &e.Tool, &data, &fatal); err != nil {
+			&e.Text, &e.Tool, &data, &fatal, &chatID, &model); err != nil {
 			return nil, err
 		}
+		e.ChatID, e.Model = chatID.String, model.String
 		if task.Valid {
 			t := task.String
 			e.TaskID = &t
@@ -202,10 +230,24 @@ func (db *DB) ListEvents(ctx context.Context, q EventQuery) ([]Event, error) {
 // A pinned task is exempt, however old. That is what pinning is for: the card
 // worth reading in six months is usually the one that went wrong, and the
 // window that is right for a project's ordinary work is wrong for that one.
+//
+// A conversation is exempt too, and for a different reason. These events are a
+// role's working notes, kept for as long as they are worth replaying; a chat is
+// the thing itself, and there is no other copy. A conversation that emptied
+// itself after a fortnight, halfway through, with nothing said and nothing to
+// undo, is not a retention policy anybody chose. It ends when the person ends
+// it, which deletes it outright.
+//
+// Exempt by having a conversation, not by carrying its role. A question asked
+// from inside a diff runs in a synthetic chat with no row in the table -- no
+// tab, nothing to end -- so exempting the role instead kept those transcripts
+// for the life of the database, growing with every review and reachable from
+// nowhere.
 func (db *DB) PruneEvents(ctx context.Context, before time.Time) (int64, error) {
 	res, err := db.sql.ExecContext(ctx,
 		`DELETE FROM events
 		  WHERE ts < ?
+		    AND NOT EXISTS (SELECT 1 FROM chats c WHERE c.id = events.chat_id)
 		    AND (task_id IS NULL
 		         OR NOT EXISTS (SELECT 1 FROM tasks t WHERE t.id = events.task_id AND t.pinned = 1))`,
 		before.UTC().Format(time.RFC3339Nano))
@@ -213,15 +255,4 @@ func (db *DB) PruneEvents(ctx context.Context, before time.Time) (int64, error) 
 		return 0, fmt.Errorf("pruning events: %w", err)
 	}
 	return res.RowsAffected()
-}
-
-// DeleteRoleEvents removes one role's events in a project. Used to end a chat:
-// its transcript is a conversation, not a record of work, and nothing
-// downstream refers to it.
-func (db *DB) DeleteRoleEvents(ctx context.Context, projectID, role string) error {
-	if _, err := db.sql.ExecContext(ctx,
-		`DELETE FROM events WHERE project_id = ? AND role = ?`, projectID, role); err != nil {
-		return fmt.Errorf("deleting %s events: %w", role, err)
-	}
-	return nil
 }

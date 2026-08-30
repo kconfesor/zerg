@@ -785,7 +785,7 @@ function cloneTeam() {
   <!-- Asked only while agents are up, and only for the changes that stop
        one. Reordering does not kill anything, so it is not asked about. -->
   <Dialog :open="!!pending" @update:open="(v) => !v && (pending = null)">
-    <DialogContent v-if="pending" class="sm:max-w-md">
+    <DialogContent v-if="pending" variant="confirm" class="sm:max-w-md">
       <DialogHeader>
         <DialogTitle>{{ pending.question }}</DialogTitle>
         <DialogDescription>
@@ -883,7 +883,7 @@ function cloneTeam() {
   </Dialog>
 
   <Dialog :open="!!confirmDelete" @update:open="(open) => !open && (confirmDelete = null)">
-    <DialogContent class="sm:max-w-md">
+    <DialogContent variant="confirm" class="sm:max-w-md">
       <DialogHeader>
         <DialogTitle>Delete {{ confirmDelete?.name }}?</DialogTitle>
         <DialogDescription>

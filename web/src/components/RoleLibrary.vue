@@ -461,7 +461,7 @@ async function remove(tpl: RoleTemplate) {
     </Dialog>
 
     <Dialog :open="!!confirmDelete" @update:open="(v) => !v && (confirmDelete = null)">
-      <DialogContent v-if="confirmDelete" class="sm:max-w-md">
+      <DialogContent v-if="confirmDelete" variant="confirm" class="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>Remove {{ confirmDelete.name }}?</DialogTitle>
           <DialogDescription>

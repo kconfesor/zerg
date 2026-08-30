@@ -18,8 +18,22 @@ defineOptions({
   inheritAttrs: false,
 })
 
-const props = withDefaults(defineProps<DialogContentProps & { class?: HTMLAttributes['class'], showCloseButton?: boolean }>(), {
+/**
+ * `variant`:
+ *   sheet   — the default. Full width on a phone, a centred panel from sm up.
+ *             Right for anything with content in it: a diff, a task, a form.
+ *   confirm — a centred card at every width. A question with two buttons under
+ *             it does not need a screen, and taking one makes an "are you
+ *             sure?" look like a place you have navigated to rather than a
+ *             thing you can dismiss.
+ */
+const props = withDefaults(defineProps<DialogContentProps & {
+  class?: HTMLAttributes['class']
+  showCloseButton?: boolean
+  variant?: 'sheet' | 'confirm'
+}>(), {
   showCloseButton: true,
+  variant: 'sheet',
 })
 const emits = defineEmits<DialogContentEmits>()
 
@@ -46,9 +60,17 @@ const forwarded = useForwardPropsEmits(delegatedProps, emits)
         // part of the dialog — which is also why the insets are positions and
         // not padding: padding here would fight whatever the call site sets,
         // and the split dialogs deliberately set p-0.
-        'bg-popover text-popover-foreground data-open:animate-in data-closed:animate-out data-closed:fade-out-0 data-open:fade-in-0 data-closed:zoom-out-95 data-open:zoom-in-95 ring-foreground/10 fixed inset-x-0 top-[env(safe-area-inset-top)] bottom-[env(safe-area-inset-bottom)] z-50 flex max-w-none flex-col gap-4 rounded-none p-5 text-xs/relaxed ring-1 duration-100 outline-none',
-        // From sm up it is a centred panel again, bounded so a long dialog
-        // scrolls inside itself rather than running off the screen.
+        'bg-popover text-popover-foreground data-open:animate-in data-closed:animate-out data-closed:fade-out-0 data-open:fade-in-0 data-closed:zoom-out-95 data-open:zoom-in-95 ring-foreground/10 fixed z-50 flex flex-col gap-4 p-5 text-xs/relaxed ring-1 duration-100 outline-none',
+        // A sheet on a phone: full width, spanning the safe-area insets.
+        variant === 'sheet' &&
+          'inset-x-0 top-[env(safe-area-inset-top)] bottom-[env(safe-area-inset-bottom)] max-w-none rounded-none',
+        // A confirmation is a card at every width, inset from the edges so it
+        // reads as something over the page rather than a page of its own.
+        // No corner radius: this app is square by design (--radius: 0), and
+        // asking for one here only looks like an intention that never renders.
+        variant === 'confirm' && 'inset-x-4 top-1/2 max-h-[85vh] -translate-y-1/2',
+        // From sm up both are a centred panel, bounded so a long one scrolls
+        // inside itself rather than running off the screen.
         'sm:inset-x-auto sm:top-1/2 sm:bottom-auto sm:left-1/2 sm:h-auto sm:max-h-[85vh] sm:w-full sm:max-w-sm sm:-translate-x-1/2 sm:-translate-y-1/2',
         props.class,
       )"

@@ -88,6 +88,15 @@ func (r *Recorder) Stats() Stats {
 }
 
 func (r *Recorder) push(ev Event) {
+	// Fragments of a message being written are not history, and are refused at
+	// the door rather than dropped at the desk: the whole message follows as
+	// its own event, so recording both would double every answer in the
+	// transcript and multiply the table by the number of words in it. Queuing
+	// them first would also spend the queue -- and the shedding that protects
+	// it -- on rows that were always going to be thrown away.
+	if ev.Kind == adapter.EventMessageDelta {
+		return
+	}
 	r.mu.Lock()
 	if r.closed {
 		r.mu.Unlock()
@@ -255,6 +264,8 @@ func (r *Recorder) write(ctx context.Context, db *store.DB, log *slog.Logger, ba
 			ID:        ev.ID,
 			ProjectID: ev.ProjectID,
 			TaskID:    taskID,
+			ChatID:    ev.ChatID,
+			Model:     ev.Model,
 			Role:      ev.Role,
 			Kind:      string(ev.Kind),
 			At:        ev.At,
@@ -299,6 +310,15 @@ func Payload(ev Event) json.RawMessage {
 	var v any
 	switch ev.Kind {
 	case adapter.EventToolCall:
+		if len(ev.Args) == 0 {
+			return nil
+		}
+		v = ev.Args
+	case adapter.EventMessage:
+		// A message carries nothing but its text, except when a person
+		// attached something to it. Those have to survive a reload: the
+		// conversation shows the picture the question was about, and without
+		// this the transcript comes back as a question about nothing.
 		if len(ev.Args) == 0 {
 			return nil
 		}

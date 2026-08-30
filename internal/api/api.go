@@ -226,8 +226,18 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("PUT /api/projects/{id}/icon", s.setProjectIcon)
 	mux.HandleFunc("GET /api/projects/{id}/icons", s.projectIcons)
 	mux.HandleFunc("GET /api/projects/{id}/icon", s.projectIcon)
-	mux.HandleFunc("POST /api/projects/{id}/chat", s.askChat)
-	mux.HandleFunc("DELETE /api/projects/{id}/chat", s.resetChat)
+	// Conversations. A project holds several, and each is addressed by id:
+	// they have separate transcripts, separate attachments and separate agents.
+	mux.HandleFunc("GET /api/projects/{id}/chats", s.listChats)
+	mux.HandleFunc("POST /api/projects/{id}/chats", s.newChat)
+	mux.HandleFunc("PUT /api/projects/{id}/chats/{chat}", s.renameChat)
+	// Closing one takes its transcript, its files and its worktree. A stop for
+	// the answer is a different verb on a different path, because they are very
+	// different buttons to press by accident.
+	mux.HandleFunc("DELETE /api/projects/{id}/chats/{chat}", s.endChat)
+	mux.HandleFunc("POST /api/projects/{id}/chats/{chat}/messages", s.askChat)
+	mux.HandleFunc("POST /api/projects/{id}/chats/{chat}/attachments", s.attachToChat)
+	mux.HandleFunc("POST /api/projects/{id}/chats/{chat}/interrupt", s.interruptChat)
 	mux.HandleFunc("PUT /api/projects/{id}/chat-agent", s.setChatAgent)
 	mux.HandleFunc("GET /api/settings/shared-instructions", s.getSharedInstructions)
 	mux.HandleFunc("PUT /api/settings/shared-instructions", s.setSharedInstructions)
@@ -496,6 +506,13 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict,
 			"this project's swarm is running; stop it before deleting the project")
 		return
+	}
+	// The pipeline is not the only thing running in a project. A conversation
+	// holds an agent process and a worktree of its own, and neither is reached
+	// by the swarm check: deleting the project left them running against a row
+	// that no longer exists, spending on a project nobody can open.
+	if s.chatMgr != nil {
+		s.chatMgr.StopProject(r.Context(), id)
 	}
 	if err := s.db.DeleteProject(r.Context(), id); err != nil {
 		s.fail(w, r, err)

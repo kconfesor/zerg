@@ -84,6 +84,10 @@ func (s *scriptedAdapter) EncodeTurn(text string) ([]byte, error) {
 	return append(b, '\n'), nil
 }
 
+func (s *scriptedAdapter) EncodeInterrupt() ([]byte, error) {
+	return []byte("{\"interrupt\":true}\n"), nil
+}
+
 type blockingPreflight struct {
 	mu    sync.Mutex
 	err   error
@@ -573,3 +577,51 @@ func TestSilenceIsMeasuredOnlyWhileMidTurn(t *testing.T) {
 		t.Errorf("an idle agent reported %s of silence", got)
 	}
 }
+
+// A turn stopped on request is not a failure.
+//
+// The harness reports an abandoned turn the way it reports a broken one: a
+// result marked as an error with nothing to say about it. The adapter cannot
+// tell those apart, since it did not ask for the stop, so pressing stop put
+// "the harness reported an error without describing it" on screen underneath
+// the answer somebody had just chosen to cut short.
+func TestStoppingAnAnswerDoesNotReadAsAFailure(t *testing.T) {
+	c, _ := newCerebrate(t, &scriptedAdapter{})
+
+	// The state a stop leaves behind: asked for, not yet answered.
+	c.mu.Lock()
+	c.interrupting = true
+	c.mu.Unlock()
+
+	if !c.tookInterrupt() {
+		t.Fatal("the interrupt was not remembered")
+	}
+	// One interrupt ends one turn: a genuine error after it is still an error.
+	if c.tookInterrupt() {
+		t.Error("the interrupt was still set for a second event")
+	}
+}
+
+// Nothing to stop is not a failure either: the answer arrived while the button
+// was being pressed, which is the common case for a short turn.
+func TestInterruptingAnIdleAgentIsQuiet(t *testing.T) {
+	c, _ := newCerebrate(t, &scriptedAdapter{})
+	c.mu.Lock()
+	c.stdin = nopWriteCloser{}
+	c.busy = false
+	c.mu.Unlock()
+
+	if err := c.Interrupt(); err != nil {
+		t.Errorf("interrupting an idle agent: %v", err)
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.interrupting {
+		t.Error("an idle agent was left waiting for a stop it never sent")
+	}
+}
+
+type nopWriteCloser struct{}
+
+func (nopWriteCloser) Write(p []byte) (int, error) { return len(p), nil }
+func (nopWriteCloser) Close() error                { return nil }

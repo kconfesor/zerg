@@ -107,10 +107,16 @@ var schema029 string
 //go:embed schema_030.sql
 var schema030 string
 
+//go:embed schema_031.sql
+var schema031 string
+
+//go:embed schema_032.sql
+var schema032 string
+
 // migrations are applied in order; a database at user_version N has had the
 // first N of them run. To change the schema, append a file and a line here —
 // never edit one that has shipped.
-var migrations = []string{schema001, schema002, schema003, schema004, schema005, schema006, schema007, schema008, schema009, schema010, schema011, schema012, schema013, schema014, schema015, schema016, schema017, schema018, schema019, schema020, schema021, schema022, schema023, schema024, schema025, schema026, schema027, schema028, schema029, schema030}
+var migrations = []string{schema001, schema002, schema003, schema004, schema005, schema006, schema007, schema008, schema009, schema010, schema011, schema012, schema013, schema014, schema015, schema016, schema017, schema018, schema019, schema020, schema021, schema022, schema023, schema024, schema025, schema026, schema027, schema028, schema029, schema030, schema031, schema032}
 
 func schemaVersion() int { return len(migrations) }
 

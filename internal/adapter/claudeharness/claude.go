@@ -94,7 +94,13 @@ func (*Adapter) Capabilities() adapter.Caps {
 		// --input-format stream-json accepts messages on stdin while the process
 		// keeps running, so chat and clarification answers reach a live agent.
 		StructuredInput: true,
-		InteractiveTUI:  true,
+		// Both verified against a live process: a control_request/interrupt is
+		// answered success and ends the turn without taking the session down,
+		// and --include-partial-messages emits content_block_delta frames as
+		// the answer is written.
+		Interruptible:  true,
+		Streaming:      true,
+		InteractiveTUI: true,
 		// Verified on macOS: credentials live in the keychain under
 		// "Claude Code-credentials", and setting CLAUDE_CONFIG_DIR makes the
 		// CLI report "Not logged in", even with .claude.json copied across.
@@ -125,6 +131,12 @@ func (*Adapter) Command(ctx context.Context, spec adapter.Spec) (*exec.Cmd, erro
 		"--input-format", "stream-json",
 		"--output-format", "stream-json",
 		"--verbose", // required for stream-json to emit anything but the result
+	}
+	// Asked for only where somebody is watching the words appear. A pipeline
+	// role writes to a transcript nobody reads live, and the deltas would be
+	// pure volume on the bus for it.
+	if spec.Streaming {
+		args = append(args, "--include-partial-messages")
 	}
 
 	// --strict-mcp-config and --permission-mode are no longer forced here.
@@ -245,6 +257,18 @@ type wire struct {
 	Subtype string `json:"subtype"`
 	Model   string `json:"model"`
 
+	// Event carries the fragments emitted under --include-partial-messages.
+	// Only the text deltas are read: the block start, stop and message frames
+	// say nothing the whole message will not say authoritatively when it
+	// arrives.
+	Event struct {
+		Type  string `json:"type"`
+		Delta struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"delta"`
+	} `json:"event"`
+
 	Message struct {
 		Model   string `json:"model"`
 		Content []struct {
@@ -333,6 +357,19 @@ func (a *Adapter) Parse(line []byte) ([]adapter.Event, error) {
 			}}, nil
 		}
 		return nil, nil // hook_started, hook_response, and friends
+
+	case "stream_event":
+		// A fragment of an answer being written, for a screen somebody is
+		// watching. Never recorded -- the whole message follows as an ordinary
+		// assistant frame, and that is the one the transcript keeps.
+		if w.Event.Type == "content_block_delta" && w.Event.Delta.Type == "text_delta" &&
+			w.Event.Delta.Text != "" {
+			return []adapter.Event{{
+				Kind: adapter.EventMessageDelta, Text: w.Event.Delta.Text,
+				Provider: providerName,
+			}}, nil
+		}
+		return nil, nil
 
 	case "assistant":
 		// The resolved model, which is not always the alias that was requested.
@@ -464,6 +501,29 @@ func (*Adapter) EncodeTurn(text string) ([]byte, error) {
 	b, err := json.Marshal(msg)
 	if err != nil {
 		return nil, fmt.Errorf("claude: encoding turn: %w", err)
+	}
+	return append(b, '\n'), nil
+}
+
+// EncodeInterrupt is the control message that ends the current turn.
+//
+// Verified against a live process rather than inferred from documentation: the
+// harness answers control_response/success with the queue it dropped, emits a
+// result frame for the turn, and stays up for the next question. That last part
+// is the point -- the conversation is in this process, so stopping a reply must
+// not mean forgetting the conversation.
+//
+// The request id is fixed. Only one interrupt can be outstanding, because there
+// is only one turn to stop, and the response is not awaited: the turn ending is
+// what says it worked, and that arrives as an ordinary result frame.
+func (*Adapter) EncodeInterrupt() ([]byte, error) {
+	b, err := json.Marshal(map[string]any{
+		"type":       "control_request",
+		"request_id": "interrupt",
+		"request":    map[string]any{"subtype": "interrupt"},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("claude: encoding interrupt: %w", err)
 	}
 	return append(b, '\n'), nil
 }
