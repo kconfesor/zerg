@@ -392,16 +392,16 @@ function live(r: RoleStatus): boolean {
            baked in at 192px, which is five times what 36 CSS pixels need on a
            3x display, and no filter to resolve at render time.
 
-           No tile behind it. The app icon has one -- a launcher needs a
-           rectangle to fill -- and in the rail that tile was the whole
-           problem: it is part of the artwork, so on a light rail it was a
-           black square and no CSS could reach it. Dropped, the beams draw on
-           whatever is behind them and one file serves both grounds. What that
-           cost is the node interiors, which used to be holes punched in the
-           beams using the tile's colour; unfilled, the beam runs through the
-           ring and the ring still reads as a node. -->
+           With its tile. The tile was dropped when light mode arrived,
+           because it is part of the artwork and could not be recoloured --
+           on a light rail it is a dark square. That turns out to be what the
+           mark is: people read the dark tile as the logo, and a bare mark on
+           a white rail as a logo that failed to load. A dark tile on a light
+           ground is deliberate here, the way an app icon is, and it brings
+           back the node interiors -- holes punched in the beams in the
+           tile's own colour, which need a ground to be holes in. -->
       <img
-        src="/logo-mark-192.png"
+        src="/logo-tile-192.png"
         alt=""
         width="36"
         height="36"
