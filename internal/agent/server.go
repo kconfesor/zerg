@@ -609,6 +609,12 @@ func (s *Server) ask(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if current.State == store.ClarificationAnswered && current.Answer != nil {
+			// Read, so a later repeat of the question is a new question rather
+			// than this answer handed over twice.
+			if err := s.db.MarkClarificationDelivered(r.Context(), c.ID); err != nil {
+				s.fail(w, err)
+				return
+			}
 			writeJSON(w, http.StatusOK, askResponse{ID: c.ID, Answer: *current.Answer, Answered: true})
 			return
 		}

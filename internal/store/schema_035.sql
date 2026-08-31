@@ -1,0 +1,16 @@
+-- When an answer actually reached the agent that asked.
+--
+-- `zerg ask` waits for a bounded time and then reports the question as still
+-- open, so the agent can decide what to do rather than hang. What it does is
+-- ask again. Both halves of that were wrong from the operator's side, and both
+-- were watched happening on one card: the question was filed twice, so the
+-- panel showed two identical cards with no way to tell them apart, and the
+-- answer typed into the first one was written to a row nobody was waiting on.
+-- Two different options were chosen six seconds apart and the agent acted on
+-- the second, having never seen the first.
+--
+-- With this, an answer is not lost by being a few seconds late: a repeat of a
+-- question whose answer was never handed over returns that answer instead of
+-- filing a new card. NULL means an answer that has not been read by anyone,
+-- which every row written before this is, since nothing recorded it either way.
+ALTER TABLE clarifications ADD COLUMN delivered_at TEXT;

@@ -599,11 +599,16 @@ type Clarification struct {
 	// Options the agent worked out itself, for a question that is a choice.
 	// Empty is the free-text question this started as, and is what every row
 	// written before 034 reads back as.
-	Options    []string   `json:"options,omitempty"`
-	Answer     *string    `json:"answer,omitempty"`
-	State      string     `json:"state"`
-	CreatedAt  time.Time  `json:"createdAt"`
-	AnsweredAt *time.Time `json:"answeredAt,omitempty"`
+	Options []string `json:"options,omitempty"`
+	Answer  *string  `json:"answer,omitempty"`
+	State   string   `json:"state"`
+	// DeliveredAt is when the answer was handed to an agent waiting on it.
+	// Answered but never delivered is the answer that arrived a moment after
+	// its asker gave up waiting, and it is what a repeat of the question is
+	// given instead of a second card.
+	DeliveredAt *time.Time `json:"deliveredAt,omitempty"`
+	CreatedAt   time.Time  `json:"createdAt"`
+	AnsweredAt  *time.Time `json:"answeredAt,omitempty"`
 }
 
 // maxClarificationOptions is where a choice stops being one. Ten radio
@@ -623,20 +628,28 @@ func (db *DB) AskClarification(ctx context.Context, projectID, role, question st
 	if err != nil {
 		return nil, err
 	}
+	// A repeat of a question already waiting is that same question, not a
+	// second one. `zerg ask` gives up after its wait and the agent asks again,
+	// which filed two identical cards the operator could not tell apart, and
+	// let two different answers be given to what was one decision. A repeat of
+	// a question whose answer was never handed over gets that answer, so an
+	// answer typed a moment after the asker stopped listening is late rather
+	// than lost.
+	prior, err := db.priorAsk(ctx, projectID, role, question, options, taskID)
+	if err != nil {
+		return nil, err
+	}
+	if prior != nil {
+		return prior, nil
+	}
 	c := &Clarification{
 		ID: NewID(), ProjectID: projectID, TaskID: taskID, Role: role,
 		Question: question, Options: options, State: ClarificationOpen,
 		CreatedAt: time.Now().UTC(),
 	}
-	// NULL, not '[]', for a question with nothing to choose from: the column
-	// is what tells the cockpit which of the two shapes to draw.
-	var stored any
-	if len(options) > 0 {
-		encoded, err := json.Marshal(options)
-		if err != nil {
-			return nil, fmt.Errorf("encoding a question's options: %w", err)
-		}
-		stored = string(encoded)
+	stored, err := encodeOptions(options)
+	if err != nil {
+		return nil, err
 	}
 	_, err = db.sql.ExecContext(ctx,
 		`INSERT INTO clarifications (id, project_id, task_id, role, question, options, state, created_at)
@@ -647,6 +660,61 @@ func (db *DB) AskClarification(ctx context.Context, projectID, role, question st
 		return nil, fmt.Errorf("recording clarification: %w", err)
 	}
 	return c, nil
+}
+
+// priorAsk returns the question this one repeats, if there is one: the same
+// role asking the same thing about the same card, offering the same answers.
+//
+// Open, or answered without the answer ever reaching an agent. A question that
+// was answered and read is finished, so asking it again is a new question --
+// an agent that comes back to a decision later deserves a fresh answer rather
+// than the one it already acted on.
+func (db *DB) priorAsk(ctx context.Context, projectID, role, question string, options []string, taskID *string) (*Clarification, error) {
+	stored, err := encodeOptions(options)
+	if err != nil {
+		return nil, err
+	}
+	row := db.read.QueryRowContext(ctx,
+		`SELECT id, project_id, task_id, role, question, options, answer, state, delivered_at, created_at, answered_at
+		   FROM clarifications
+		  WHERE project_id = ? AND role = ? AND question = ?
+		    AND task_id IS ? AND options IS ?
+		    AND (state = ? OR (state = ? AND delivered_at IS NULL))
+		  ORDER BY created_at DESC LIMIT 1`,
+		projectID, role, question, taskID, stored,
+		ClarificationOpen, ClarificationAnswered)
+	c, err := scanClarification(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	return c, err
+}
+
+// MarkClarificationDelivered records that an agent read the answer. Only the
+// first reader sets it: the question is finished at that point, and a later
+// reader is not who the answer was waiting for.
+func (db *DB) MarkClarificationDelivered(ctx context.Context, id string) error {
+	_, err := db.sql.ExecContext(ctx,
+		`UPDATE clarifications SET delivered_at = ? WHERE id = ? AND delivered_at IS NULL`,
+		time.Now().UTC().Format(time.RFC3339Nano), id)
+	if err != nil {
+		return fmt.Errorf("recording that clarification %s was read: %w", id, err)
+	}
+	return nil
+}
+
+// encodeOptions is how the column holds an offer. NULL, not '[]', for a
+// question with nothing to choose from: the column is what tells the cockpit
+// which of the two shapes to draw, and what makes two asks comparable.
+func encodeOptions(options []string) (any, error) {
+	if len(options) == 0 {
+		return nil, nil
+	}
+	encoded, err := json.Marshal(options)
+	if err != nil {
+		return nil, fmt.Errorf("encoding a question's options: %w", err)
+	}
+	return string(encoded), nil
 }
 
 // checkOptions is the agent's own mistakes, caught where they can still be
@@ -693,7 +761,7 @@ func (db *DB) AnswerClarification(ctx context.Context, id, answer string) error 
 // GetClarification reads one question and whatever answer it has.
 func (db *DB) GetClarification(ctx context.Context, id string) (*Clarification, error) {
 	row := db.read.QueryRowContext(ctx,
-		`SELECT id, project_id, task_id, role, question, options, answer, state, created_at, answered_at
+		`SELECT id, project_id, task_id, role, question, options, answer, state, delivered_at, created_at, answered_at
 		 FROM clarifications WHERE id = ?`, id)
 	c, err := scanClarification(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -706,7 +774,7 @@ func (db *DB) GetClarification(ctx context.Context, id string) (*Clarification, 
 // not, oldest first. The trail reads these; Attention reads the open ones.
 func (db *DB) ClarificationsForTask(ctx context.Context, taskID string) ([]Clarification, error) {
 	rows, err := db.read.QueryContext(ctx,
-		`SELECT id, project_id, task_id, role, question, options, answer, state, created_at, answered_at
+		`SELECT id, project_id, task_id, role, question, options, answer, state, delivered_at, created_at, answered_at
 		 FROM clarifications WHERE task_id = ? ORDER BY created_at`, taskID)
 	if err != nil {
 		return nil, fmt.Errorf("listing a task's clarifications: %w", err)
@@ -727,7 +795,7 @@ func (db *DB) ClarificationsForTask(ctx context.Context, taskID string) ([]Clari
 // ListOpenClarifications returns what Attention must show.
 func (db *DB) ListOpenClarifications(ctx context.Context, projectID string) ([]Clarification, error) {
 	rows, err := db.read.QueryContext(ctx,
-		`SELECT id, project_id, task_id, role, question, options, answer, state, created_at, answered_at
+		`SELECT id, project_id, task_id, role, question, options, answer, state, delivered_at, created_at, answered_at
 		 FROM clarifications WHERE project_id = ? AND state = ? ORDER BY created_at`,
 		projectID, ClarificationOpen)
 	if err != nil {
@@ -748,15 +816,16 @@ func (db *DB) ListOpenClarifications(ctx context.Context, projectID string) ([]C
 
 func scanClarification(s scanner) (*Clarification, error) {
 	var (
-		c        Clarification
-		taskID   sql.NullString
-		options  sql.NullString
-		answer   sql.NullString
-		created  string
-		answered sql.NullString
+		c         Clarification
+		taskID    sql.NullString
+		options   sql.NullString
+		answer    sql.NullString
+		delivered sql.NullString
+		created   string
+		answered  sql.NullString
 	)
 	if err := s.Scan(&c.ID, &c.ProjectID, &taskID, &c.Role, &c.Question,
-		&options, &answer, &c.State, &created, &answered); err != nil {
+		&options, &answer, &c.State, &delivered, &created, &answered); err != nil {
 		return nil, err
 	}
 	if taskID.Valid {
@@ -776,6 +845,9 @@ func scanClarification(s scanner) (*Clarification, error) {
 		return nil, err
 	}
 	if c.AnsweredAt, err = nullTime(answered); err != nil {
+		return nil, err
+	}
+	if c.DeliveredAt, err = nullTime(delivered); err != nil {
 		return nil, err
 	}
 	return &c, nil

@@ -431,6 +431,18 @@ agent that does not pass the flag still is. Blank or duplicate options are the a
 come back as a 400 naming it, since two radio buttons a person cannot tell apart are worse than
 prose.
 
+**Asking again is asking the same question.** `ask` waits for a bounded time and then reports the
+question as still open, so the agent decides what to do rather than hangs; what it does is ask
+again. Filed twice, that put two identical cards in the panel with nothing to tell them apart, and
+wrote the operator's answer to whichever one they reached first, which need not be the one an agent
+was waiting on. Watched on one real card: two different options chosen six seconds apart, and the
+agent acted on the second having never seen the first. A question is therefore identified by its
+sender, its card, its wording and its offer, and a repeat joins the open row rather than filing a
+new one. `clarifications.delivered_at` (`schema_035.sql`) records when an answer was actually handed
+to an agent, so an answer given a moment after its asker gave up is collected by the next ask
+instead of lost, while one that has been read is finished: asking the same thing later is a new
+question and gets a new answer.
+
 Work envelope:
 
 ```json

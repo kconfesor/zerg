@@ -303,6 +303,57 @@ func TestAskRecordsAQuestionAndReceivesAnAnswer(t *testing.T) {
 	}
 }
 
+// The incident this fixes, end to end.
+//
+// The ask waits, gives up, and reports the question as pending. The agent asks
+// again, and both halves used to go wrong at once: a second identical card in
+// the operator's panel, and the answer typed into the first one written to a
+// row nobody was waiting on. Two options were chosen six seconds apart on one
+// real card and the agent acted on the second, having never seen the first.
+func TestAnAnswerGivenAfterTheWaitRanOutReachesTheNextAsk(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	coder := f.client(t, "coder")
+
+	offered := []string{"Redis, shared across instances", "A signed cookie"}
+	const question = "Where does the session live?"
+
+	// Waits for nothing, so it comes back pending, exactly as it did at ten
+	// minutes on the card this is about.
+	pending, err := coder.Ask(ctx, question, "", offered, 0)
+	if err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	if pending.Answered {
+		t.Fatal("a question nobody had answered came back answered")
+	}
+
+	// The operator answers now, with the agent no longer listening.
+	if err := f.db.AnswerClarification(ctx, pending.ID, offered[1]); err != nil {
+		t.Fatalf("AnswerClarification: %v", err)
+	}
+
+	again, err := coder.Ask(ctx, question, "", offered, 0)
+	if err != nil {
+		t.Fatalf("asking again: %v", err)
+	}
+	if again.ID != pending.ID {
+		t.Errorf("the repeat filed a second question (%s, then %s)", pending.ID, again.ID)
+	}
+	if !again.Answered || again.Answer != offered[1] {
+		t.Errorf("got %+v, want the answer the operator had already given", again)
+	}
+
+	// And the operator was never asked twice for one decision.
+	open, err := f.db.ListOpenClarifications(ctx, f.project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(open) != 0 {
+		t.Errorf("%d question(s) still open after the answer was collected", len(open))
+	}
+}
+
 // An agent that already knows the answers offers them, and gets back the text
 // of the one that was chosen. Matching the answer against what was offered is
 // the whole point: before this the operator retyped it, and "the API" came

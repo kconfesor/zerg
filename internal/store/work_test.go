@@ -1005,3 +1005,139 @@ func TestAnUnreadableTimestampIsStillAnError(t *testing.T) {
 		t.Error("a question dated \"yesterday\" was read without complaint")
 	}
 }
+
+// Asking again is asking the same question.
+//
+// `zerg ask` gives up after its wait and reports the question as still open,
+// and what the agent does with that is ask again. Watched on one card: two
+// identical questions in the panel with nothing to tell them apart, two
+// different options chosen six seconds apart, and the agent acting on the
+// second having never seen the first.
+func TestARepeatedQuestionIsTheSameQuestion(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+
+	p, err := db.CreateProject(ctx, t.TempDir(), "calc", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := db.CreateTask(ctx, p.ID, "Login", "build it", "coder")
+	if err != nil {
+		t.Fatal(err)
+	}
+	offered := []string{"Redis", "A signed cookie"}
+
+	first, err := db.AskClarification(ctx, p.ID, "coder", "Where does the session live?", offered, &task.ID)
+	if err != nil {
+		t.Fatalf("AskClarification: %v", err)
+	}
+	again, err := db.AskClarification(ctx, p.ID, "coder", "Where does the session live?", offered, &task.ID)
+	if err != nil {
+		t.Fatalf("asking again: %v", err)
+	}
+	if again.ID != first.ID {
+		t.Errorf("the repeat filed a second card (%s, then %s)", first.ID, again.ID)
+	}
+
+	open, err := db.ListOpenClarifications(ctx, p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(open) != 1 {
+		t.Errorf("the operator sees %d cards for one decision", len(open))
+	}
+}
+
+// An answer typed a moment after the asker stopped listening is late, not
+// lost: the next ask is handed it rather than filing a card asking again.
+func TestAnAnswerThatArrivedLateReachesTheNextAsk(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+
+	p, err := db.CreateProject(ctx, t.TempDir(), "calc", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	asked, err := db.AskClarification(ctx, p.ID, "coder", "Which app should I serve?", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The operator answers after the agent's wait ran out, so nothing is
+	// listening at the moment it lands.
+	if err := db.AnswerClarification(ctx, asked.ID, "the admin one"); err != nil {
+		t.Fatal(err)
+	}
+
+	again, err := db.AskClarification(ctx, p.ID, "coder", "Which app should I serve?", nil, nil)
+	if err != nil {
+		t.Fatalf("asking again: %v", err)
+	}
+	if again.ID != asked.ID {
+		t.Fatalf("the repeat filed a new card instead of collecting the answer")
+	}
+	if again.Answer == nil || *again.Answer != "the admin one" {
+		t.Errorf("the repeat came back with %v, want the answer already given", again.Answer)
+	}
+
+	// Once it has been read, the question is finished: an agent coming back to
+	// the same decision later is asking something new and deserves a new
+	// answer rather than the one it already acted on.
+	if err := db.MarkClarificationDelivered(ctx, asked.ID); err != nil {
+		t.Fatal(err)
+	}
+	third, err := db.AskClarification(ctx, p.ID, "coder", "Which app should I serve?", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if third.ID == asked.ID {
+		t.Error("an answer that was already read was handed over a second time")
+	}
+	if third.State != ClarificationOpen {
+		t.Errorf("the new question is %q, want open", third.State)
+	}
+}
+
+// Only the same question counts as a repeat. A different card, a different
+// wording or a different offer is a different decision, and collapsing them
+// would answer one question with another's answer.
+func TestADifferentQuestionIsNotARepeat(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+
+	p, err := db.CreateProject(ctx, t.TempDir(), "calc", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := db.CreateTask(ctx, p.ID, "Login", "build it", "coder")
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, err := db.AskClarification(ctx, p.ID, "coder", "Where does the session live?", []string{"Redis"}, &task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, c := range []struct {
+		name     string
+		role     string
+		question string
+		options  []string
+		taskID   *string
+	}{
+		{"another role asking it", "reviewer", "Where does the session live?", []string{"Redis"}, &task.ID},
+		{"the same words about another card", "coder", "Where does the session live?", []string{"Redis"}, nil},
+		{"a different question", "coder", "Where do the uploads live?", []string{"Redis"}, &task.ID},
+		{"a different offer", "coder", "Where does the session live?", []string{"Redis", "A cookie"}, &task.ID},
+		{"no offer at all", "coder", "Where does the session live?", nil, &task.ID},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := db.AskClarification(ctx, p.ID, c.role, c.question, c.options, c.taskID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.ID == base.ID {
+				t.Error("was collapsed into the first question, and would be answered by its answer")
+			}
+		})
+	}
+}
