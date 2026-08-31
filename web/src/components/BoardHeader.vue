@@ -7,8 +7,8 @@
  * there was room. The answer to that was a strip of figures with the value
  * above an uppercase label, which fixed the disorder and introduced a worse
  * problem: it is a metrics widget, and nothing else in the cockpit is one. Every
- * other screen opens with a title, a sentence, and a row of small facts, so the
- * board was the one page that looked like it came from another product.
+ * other screen opens with a title and a row of small facts, so the board was
+ * the one page that looked like it came from another product.
  *
  * What is left is written the way this app writes figures everywhere else —
  * number, then a lowercase word, separated by middots, the way a task's turns
@@ -49,7 +49,12 @@ function size(bytes: number): string {
 </script>
 
 <template>
-  <PageHeader title="Board" subtitle="One column per role. A card moves right as each role finishes with it.">
+  <!-- No subtitle, alone among the views. Theirs say what you are looking at
+       because a list of history rows or a page of settings does not announce
+       itself; a board of labelled columns with cards in them does. On the
+       screen people keep open all day it was two lines of instruction read
+       once, and on a phone it pushed the first card further down. -->
+  <PageHeader title="Board">
     <template #meta>
       <!-- Which repository, and which branch the work lands on. The path is
            desktop-only: it is the longest thing in the row and answers a
