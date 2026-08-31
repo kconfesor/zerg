@@ -7,7 +7,7 @@
  * its own: messages persist, survive a reload, and resume after a dropped
  * connection because they are events, and events already do all three.
  */
-import { computed, nextTick, onBeforeUnmount, ref, useId, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, useId, watch } from 'vue'
 import {
   api,
   artifactBytes,
@@ -632,8 +632,39 @@ function onKeydown(ev: KeyboardEvent) {
   }
 }
 
+/**
+ * The composer, so opening Chat means typing rather than clicking first.
+ *
+ * Not on a touch screen. Focusing a textarea there raises the keyboard, which
+ * covers half the conversation you came to read, and a phone user who wants to
+ * type taps the box -- which is the same gesture they were going to make
+ * anyway. The check is on the pointer rather than the width, because a small
+ * window on a laptop still has a keyboard already out.
+ */
+const composer = ref<HTMLElement | { $el?: HTMLElement } | null>(null)
+
+function focusComposer() {
+  if (window.matchMedia?.('(pointer: coarse)').matches) return
+  nextTick(() => {
+    // The ref is the component, not the element, so reach through $el. A
+    // textarea inside it wins over the element itself, since InputGroup wraps
+    // the field in a container of its own.
+    const value = composer.value
+    const root = (value && '$el' in value ? value.$el : value) as HTMLElement | undefined
+    if (!root) return
+    const field = root instanceof HTMLTextAreaElement ? root : root.querySelector('textarea')
+    field?.focus()
+  })
+}
+
 watch(projectId, () => loadChats(false), { immediate: true })
-watch(openChat, connect)
+watch(openChat, (id) => {
+  connect()
+  // Switching tabs is opening a conversation too, and each tab keeps its own
+  // draft: landing in the box is what makes a half-written one continuable.
+  if (id) focusComposer()
+})
+onMounted(focusComposer)
 onBeforeUnmount(() => stream?.close())
 </script>
 
@@ -926,6 +957,7 @@ onBeforeUnmount(() => stream?.close())
 
       <InputGroup>
         <InputGroupTextarea
+          ref="composer"
           v-model="draft"
           rows="2"
           class="text-xs"
