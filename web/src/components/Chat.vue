@@ -7,7 +7,7 @@
  * its own: messages persist, survive a reload, and resume after a dropped
  * connection because they are events, and events already do all three.
  */
-import { computed, nextTick, onBeforeUnmount, ref, useId, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, useId, watch } from 'vue'
 import {
   api,
   artifactBytes,
@@ -632,8 +632,39 @@ function onKeydown(ev: KeyboardEvent) {
   }
 }
 
+/**
+ * The composer, so opening Chat means typing rather than clicking first.
+ *
+ * Not on a touch screen. Focusing a textarea there raises the keyboard, which
+ * covers half the conversation you came to read, and a phone user who wants to
+ * type taps the box -- which is the same gesture they were going to make
+ * anyway. The check is on the pointer rather than the width, because a small
+ * window on a laptop still has a keyboard already out.
+ */
+const composer = ref<HTMLElement | { $el?: HTMLElement } | null>(null)
+
+function focusComposer() {
+  if (window.matchMedia?.('(pointer: coarse)').matches) return
+  nextTick(() => {
+    // The ref is the component, not the element, so reach through $el. A
+    // textarea inside it wins over the element itself, since InputGroup wraps
+    // the field in a container of its own.
+    const value = composer.value
+    const root = (value && '$el' in value ? value.$el : value) as HTMLElement | undefined
+    if (!root) return
+    const field = root instanceof HTMLTextAreaElement ? root : root.querySelector('textarea')
+    field?.focus()
+  })
+}
+
 watch(projectId, () => loadChats(false), { immediate: true })
-watch(openChat, connect)
+watch(openChat, (id) => {
+  connect()
+  // Switching tabs is opening a conversation too, and each tab keeps its own
+  // draft: landing in the box is what makes a half-written one continuable.
+  if (id) focusComposer()
+})
+onMounted(focusComposer)
 onBeforeUnmount(() => stream?.close())
 </script>
 
@@ -790,19 +821,11 @@ onBeforeUnmount(() => stream?.close())
       ref="viewport"
       class="bg-card min-h-32 shrink overflow-y-auto border p-3"
     >
-      <!-- What this is for, on a screen with room to say it. Hidden on a
-           phone: it is three sentences of instruction in the box the
-           conversation is about to fill, and the first message replaces it
-           anyway. Desktop keeps it, where it costs nothing. -->
-      <p
-        v-if="!lines.length"
-        class="text-muted-foreground hidden text-xs leading-relaxed sm:block"
-      >
-        Ask about the repository: how something works, where a thing lives, whether an idea is
-        already implemented. This agent reads the project and answers; it does not take work. When
-        the answer is "that needs a change", queue it as a task on the Board.
-      </p>
-
+      <!-- Nothing in an empty transcript. There were three sentences of
+           instruction here, in the box the conversation is about to fill and
+           in front of the person opening it; they were taken off the phone
+           first and then off the desktop, having been read once and then sat
+           through every time after that. -->
       <div class="flex flex-col gap-3">
         <!-- A finished line never changes again, so it is memoised on the
              two things that can: the text while it is still being written,
@@ -934,6 +957,7 @@ onBeforeUnmount(() => stream?.close())
 
       <InputGroup>
         <InputGroupTextarea
+          ref="composer"
           v-model="draft"
           rows="2"
           class="text-xs"
