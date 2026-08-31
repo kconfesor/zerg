@@ -162,7 +162,8 @@ func envKeyFor(provider string) bool {
 // typo become twenty minutes of an agent looking alive while every turn fails.
 func (a *Adapter) modelAvailableCheck() adapter.Check {
 	return adapter.Check{
-		Name: "model_available",
+		Name:     "model_available",
+		Advisory: true,
 		Run: func(ctx adapter.Ctx, spec adapter.Spec) adapter.Result {
 			if spec.Model == "" {
 				return adapter.Result{OK: true, Detail: "harness default"}

@@ -208,6 +208,99 @@ func TestHungCheckIsReportedNotWaitedOn(t *testing.T) {
 	}
 }
 
+// A check that can only advise must not block on a slow answer.
+//
+// `pi --list-models` answers in under two seconds on an idle machine and took
+// longer than the budget on one running four agents. That refused to start the
+// team, over a probe whose worst honest verdict is "check the spelling": an
+// unlisted model is a warning there, and no catalog at all is not a finding.
+// The reason still has to reach the panel, since a probe that keeps timing out
+// is worth seeing.
+func TestASlowAdvisoryCheckWarnsRatherThanBlocks(t *testing.T) {
+	slow := adapter.Check{
+		Name:     "model_available",
+		Advisory: true,
+		Run: func(ctx adapter.Ctx, _ adapter.Spec) adapter.Result {
+			<-ctx.Done()
+			return adapter.Result{OK: true}
+		},
+	}
+
+	r, p, _ := setup(t, passing("binary_present"), slow)
+	r.timeout = 50 * time.Millisecond
+
+	report, err := r.Check(context.Background(), p.ID)
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if !report.Ready {
+		t.Error("a slow catalog lookup refused to start the team")
+	}
+	got := report.Roles[0].Checks[1]
+	if got.Status != StatusWarn {
+		t.Errorf("status is %q, want a warning", got.Status)
+	}
+	if got.Reason == "" {
+		t.Error("the timeout was downgraded into silence; the panel has nothing to show")
+	}
+	if report.Roles[0].Status != StatusWarn {
+		t.Errorf("role is %q, want a warning", report.Roles[0].Status)
+	}
+}
+
+// The declaration is on the check, not on the result, because the findings
+// nobody wrote -- a timeout, a panic -- never go through the check's own code.
+func TestAnAdvisoryCheckCannotBlockHoweverItFails(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		check adapter.Check
+	}{
+		{"one that panics", adapter.Check{
+			Name: "boom", Advisory: true,
+			Run: func(adapter.Ctx, adapter.Spec) adapter.Result { panic("kaboom") },
+		}},
+		{"one that returns a blocking result", adapter.Check{
+			Name: "wrong", Advisory: true,
+			Run: func(adapter.Ctx, adapter.Spec) adapter.Result {
+				return adapter.Result{Reason: "no catalog", Remedy: "shrug"}
+			},
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r, p, _ := setup(t, c.check)
+			report, err := r.Check(context.Background(), p.ID)
+			if err != nil {
+				t.Fatalf("Check: %v", err)
+			}
+			if !report.Ready {
+				t.Error("an advisory check refused to start the team")
+			}
+			if got := report.Roles[0].Checks[0]; got.Status != StatusWarn || got.Reason == "" {
+				t.Errorf("got %+v, want a warning that still says why", got)
+			}
+		})
+	}
+}
+
+// And nothing else changed: a check that is allowed to block still does.
+func TestAHungOrdinaryCheckStillBlocks(t *testing.T) {
+	hang := adapter.Check{Name: "auth_valid", Run: func(ctx adapter.Ctx, _ adapter.Spec) adapter.Result {
+		<-ctx.Done()
+		return adapter.Result{OK: true}
+	}}
+
+	r, p, _ := setup(t, hang)
+	r.timeout = 50 * time.Millisecond
+
+	report, err := r.Check(context.Background(), p.ID)
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if report.Ready {
+		t.Error("a hung credential check produced a ready team")
+	}
+}
+
 // A panicking check is a zerg bug, and a bug in one probe must not take the
 // whole readiness panel down with it.
 func TestPanickingCheckBecomesAFinding(t *testing.T) {

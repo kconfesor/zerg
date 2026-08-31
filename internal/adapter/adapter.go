@@ -293,6 +293,17 @@ type Ctx = context.Context
 type Check struct {
 	Name string
 	Run  func(ctx Ctx, spec Spec) Result
+
+	// Advisory says this check can only ever advise: its worst honest verdict
+	// is a warning, so nothing it reports may refuse a spawn. A catalog lookup
+	// is the case in hand. It cannot tell a mistyped model from one the
+	// catalog has not caught up with, so it warns either way -- and then a
+	// slow answer blocked the team anyway, because a probe that runs out of
+	// time is reported as blocked without anyone asking what it was probing.
+	// Declared here rather than left to each check to remember, since the
+	// paths that produce a finding nobody wrote -- a timeout, a panic -- are
+	// exactly the ones that do not go through the check's own code.
+	Advisory bool
 }
 
 type Result struct {
