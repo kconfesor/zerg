@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 )
@@ -743,5 +744,61 @@ func TestACardReportsTheModelsThatWorkedIt(t *testing.T) {
 			t.Errorf("models = %v, want %v (first use first)", got, want)
 			break
 		}
+	}
+}
+
+// Three queries read a card, and each has its own column list and its own
+// scanner. A field added to one and forgotten in another is not a compile
+// error: it is a card that has a skip list on the board and none in the
+// history, which reads as two different cards.
+func TestSkipComesBackFromEveryQueryThatReadsACard(t *testing.T) {
+	ctx := context.Background()
+	db, p := seeded(t)
+	task, err := db.CreateTask(ctx, p.ID, "Fix a typo", "one line", "coder")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Written straight to the column: nydus owns validating and canonicalising
+	// a skip list, and this is about the read paths.
+	if _, err := db.SQL().ExecContext(ctx,
+		`UPDATE tasks SET skip = ? WHERE id = ?`, `["role-a","role-b"]`, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"role-a", "role-b"}
+
+	got, err := db.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if !slices.Equal(got.Skip, want) {
+		t.Errorf("GetTask skip = %v, want %v", got.Skip, want)
+	}
+
+	board, err := db.ListTasks(ctx, p.ID)
+	if err != nil {
+		t.Fatalf("ListTasks: %v", err)
+	}
+	if len(board) != 1 || !slices.Equal(board[0].Skip, want) {
+		t.Errorf("ListTasks skip = %v, want %v", board[0].Skip, want)
+	}
+
+	page, _, err := db.ListHistory(ctx, p.ID, HistoryFilter{Limit: 10})
+	if err != nil {
+		t.Fatalf("ListHistory: %v", err)
+	}
+	if len(page) != 1 || !slices.Equal(page[0].Skip, want) {
+		t.Errorf("ListHistory skip = %v, want %v", page[0].Skip, want)
+	}
+
+	// And a card that skips nothing comes back with nothing, not with an empty
+	// list that renders as a badge saying so.
+	plain, err := db.CreateTask(ctx, p.ID, "Plain", "body", "coder")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again, err := db.GetTask(ctx, plain.ID); err != nil {
+		t.Fatal(err)
+	} else if again.Skip != nil {
+		t.Errorf("skip = %v on a card that skips nothing, want nil", again.Skip)
 	}
 }

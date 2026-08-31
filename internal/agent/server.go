@@ -396,11 +396,19 @@ func (s *Server) describe(ctx context.Context, id Identity, lease *store.Lease) 
 			Merged: lease.Merged[m.ID],
 		}
 		if m.TaskID != nil {
-			if task, err := s.db.GetTask(ctx, *m.TaskID); err == nil {
-				item.TaskName = task.Name
-				if out.Task == nil {
-					out.Task = task
-				}
+			// Not skipped on error. The card is the routing record -- it says
+			// which roles this work does not visit -- so failing to read it and
+			// carrying on means answering `next` and `terminal` from the full
+			// team: telling an agent to hand work to a role the card skips, or
+			// that it may finish a card it may not. A claim that cannot be
+			// described is an error, and the agent retries.
+			task, err := s.db.GetTask(ctx, *m.TaskID)
+			if err != nil {
+				return out, fmt.Errorf("reading task %s for lease %s: %w", *m.TaskID, lease.ID, err)
+			}
+			item.TaskName = task.Name
+			if out.Task == nil {
+				out.Task = task
 			}
 		}
 		out.Items = append(out.Items, item)

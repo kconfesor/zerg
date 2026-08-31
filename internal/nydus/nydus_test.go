@@ -26,7 +26,10 @@ type fakeIntegrator struct {
 	// publishedURL is what each title's pull request answers to, so Landed can
 	// report where the work went the way `gh` does.
 	publishedURL map[string]string
-	err          error
+	// resolve maps a ref to the sha it names, for the tests that care. Set
+	// before the fixture is used and not written afterwards.
+	resolve map[string]string
+	err     error
 	// landedErr makes the "did this integration finish" question unanswerable,
 	// which must leave an interrupted approval claimed rather than releasing
 	// one whose merge may have happened.
@@ -46,8 +49,10 @@ type fakeIntegrator struct {
 	once sync.Once
 }
 
-// Resolve is identity here: these tests pass shas already, and the point of
-// the real one is the tree it resolves against, which a fake has none of.
+// Resolve is identity unless a test sets `resolve`: most of these pass shas
+// already. A test about `--commit HEAD` needs the real behaviour, because the
+// whole point of that path is that the string an agent sends is not the string
+// that gets stored.
 // Publish records the request and returns a plausible URL, so a test can check
 // that PR mode published without needing a remote or a GitHub account.
 func (f *fakeIntegrator) Publish(_ context.Context, _, base, commit, title, body string, draft bool) (string, error) {
@@ -62,7 +67,14 @@ func (f *fakeIntegrator) Publish(_ context.Context, _, base, commit, title, body
 	return url, nil
 }
 
+// Resolve is identity unless a test says otherwise: most of these pass shas
+// already. A test about `--commit HEAD` sets `resolve`, because the whole
+// point of that path is that the string the agent sent is not the string that
+// gets stored.
 func (f *fakeIntegrator) Resolve(_ context.Context, _, ref string) (string, error) {
+	if sha, ok := f.resolve[ref]; ok {
+		return sha, nil
+	}
 	return ref, nil
 }
 
@@ -2132,6 +2144,126 @@ func TestABatchDoesNotMixCardsThatRouteDifferently(t *testing.T) {
 	if seen[plain.ID] && seen[skipped.ID] {
 		t.Errorf("one lease carried both cards; they route differently and share one `next`")
 	}
+
+	// Split, not dropped. Refusing to batch the second card is only correct if
+	// it is still there afterwards: the next claim has to find it.
+	if err := f.n.Ack(ctx, lease.ID); err != nil {
+		t.Fatalf("Ack: %v", err)
+	}
+	next, err := f.n.Claim(ctx, f.project.ID, "coder")
+	if err != nil {
+		t.Fatalf("second coder Claim: %v", err)
+	}
+	if next == nil {
+		t.Fatal("the second card was not claimable; refusing to batch it lost it")
+	}
+	for _, item := range next.Items {
+		if item.TaskID != nil {
+			seen[*item.TaskID] = true
+		}
+	}
+	if !seen[plain.ID] || !seen[skipped.ID] {
+		t.Errorf("across both claims the coder saw %v, want both cards", seen)
+	}
+}
+
+// And the rule cuts only where it has to: cards that route the same way still
+// arrive together, which is what a batching role is for.
+func TestABatchStillCarriesCardsThatRouteAlike(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+
+	batch, items, age := store.ReceiveBatch, 10, 3600
+	planner, coder := f.roleID(t, "planner"), f.roleID(t, "coder")
+	if err := f.db.SetTeam(ctx, f.project.ID, []store.TeamPresetRole{
+		{TemplateID: planner, Enabled: true},
+		{TemplateID: coder, Enabled: true, RoleOverrides: store.RoleOverrides{
+			ReceiveOverride:        &batch,
+			BatchMaxItemsOverride:  &items,
+			BatchMaxAgeSecOverride: &age,
+		}},
+		{TemplateID: f.roleID(t, "reviewer"), Enabled: true},
+	}); err != nil {
+		t.Fatalf("SetTeam: %v", err)
+	}
+
+	// The same skip on both, written in a different order on the second: the
+	// column is canonical, so the two are one route.
+	reviewer := f.roleID(t, "reviewer")
+	if _, err := f.n.NewTask(ctx, f.project.ID, "First", "do it", "", []string{planner, reviewer}); err != nil {
+		t.Fatalf("NewTask: %v", err)
+	}
+	if _, err := f.n.NewTask(ctx, f.project.ID, "Second", "do it", "", []string{reviewer, planner}); err != nil {
+		t.Fatalf("NewTask: %v", err)
+	}
+
+	lease, err := f.n.Claim(ctx, f.project.ID, "coder")
+	if err != nil {
+		t.Fatalf("coder Claim: %v", err)
+	}
+	if len(lease.Items) != 2 {
+		t.Errorf("lease carries %d items, want both cards: they route identically", len(lease.Items))
+	}
+}
+
+// A promoted terminal role brings its own gate with it. The gate belongs to
+// whichever role finishes the card, and skipping the one that used to means
+// the promoted role's setting is the one that applies -- to the single action
+// that changes the project's branch.
+func TestAPromotedTerminalRoleStillGatesBeforeLanding(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+
+	// The coder gates on approval and the reviewer is skipped, so the coder is
+	// terminal for this card and must not land it unasked.
+	gate := store.GateApproval
+	planner, coder := f.roleID(t, "planner"), f.roleID(t, "coder")
+	if err := f.db.SetTeam(ctx, f.project.ID, []store.TeamPresetRole{
+		{TemplateID: planner, Enabled: true},
+		{TemplateID: coder, Enabled: true, RoleOverrides: store.RoleOverrides{GateOverride: &gate}},
+		{TemplateID: f.roleID(t, "reviewer"), Enabled: true},
+	}); err != nil {
+		t.Fatalf("SetTeam: %v", err)
+	}
+
+	task, err := f.n.NewTask(ctx, f.project.ID, "Fix a typo", "one line", "",
+		[]string{planner, f.roleID(t, "reviewer")})
+	if err != nil {
+		t.Fatalf("NewTask: %v", err)
+	}
+	if _, err := f.n.Claim(ctx, f.project.ID, "coder"); err != nil {
+		t.Fatalf("coder Claim: %v", err)
+	}
+	if _, err := f.n.Send(ctx, f.project.ID, "coder", SendRequest{
+		TaskID: task.ID, Commit: "aaaaaaaaaa", Body: "done"}); err != nil {
+		t.Fatalf("coder Send: %v", err)
+	}
+
+	// Held, not landed.
+	if len(f.git.merges) != 0 {
+		t.Errorf("merged %v before anyone approved it", f.git.merges)
+	}
+	if got := f.reload(t, task.ID); got.State == store.TaskDone {
+		t.Error("the card is done while its completion is still waiting for a person")
+	}
+	pending, err := f.db.ListPendingApprovals(ctx, f.project.ID)
+	if err != nil {
+		t.Fatalf("ListPendingApprovals: %v", err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("%d approvals pending, want the promoted role's completion", len(pending))
+	}
+
+	// And approving it lands the work.
+	if err := f.n.Approve(ctx, pending[0].ID); err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+	if len(f.git.merges) != 1 {
+		t.Errorf("merges = %v, want the coder's commit merged once approved", f.git.merges)
+	}
+	if got := f.reload(t, task.ID); got.State != store.TaskDone {
+		t.Errorf("state = %s after approval, want done", got.State)
+	}
 }
 
 // Skipping is about where work goes on its own. An explicit recipient is a
@@ -2186,5 +2318,125 @@ func TestForwardIntoASkippedRoleIsRefusedAndReworkIsNot(t *testing.T) {
 	if _, err := f.n.Send(ctx, f.project.ID, "reviewer", SendRequest{
 		TaskID: task.ID, To: "coder", Commit: "bbbbbbbbbb", Body: "needs a change"}); err != nil {
 		t.Errorf("reviewer Send back to a skipped coder: %v — rework must still reach it", err)
+	}
+}
+
+// ── one send, once ────────────────────────────────────────────────────────
+
+// A lease can carry several cards, and a batching role hands each of them on
+// from it. Two of those sends can be identical in every field but the card --
+// one commit covering the batch, and a note as short as "done" -- and the
+// second was then read as a repeat of the first: it was given back the first
+// card's message and its own card never moved.
+func TestTwoCardsInOneLeaseBothMove(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+
+	batch, items, age := store.ReceiveBatch, 10, 3600
+	planner, coder := f.roleID(t, "planner"), f.roleID(t, "coder")
+	if err := f.db.SetTeam(ctx, f.project.ID, []store.TeamPresetRole{
+		{TemplateID: planner, Enabled: true},
+		{TemplateID: coder, Enabled: true, RoleOverrides: store.RoleOverrides{
+			ReceiveOverride:        &batch,
+			BatchMaxItemsOverride:  &items,
+			BatchMaxAgeSecOverride: &age,
+		}},
+		{TemplateID: f.roleID(t, "reviewer"), Enabled: true},
+	}); err != nil {
+		t.Fatalf("SetTeam: %v", err)
+	}
+
+	// Both cards skip the planner, so both open in the coder's lane and one
+	// claim carries the pair.
+	var cards []*store.Task
+	for _, name := range []string{"First", "Second"} {
+		task, err := f.n.NewTask(ctx, f.project.ID, name, "do it", "", []string{planner})
+		if err != nil {
+			t.Fatalf("NewTask(%s): %v", name, err)
+		}
+		cards = append(cards, task)
+	}
+	lease, err := f.n.Claim(ctx, f.project.ID, "coder")
+	if err != nil {
+		t.Fatalf("coder Claim: %v", err)
+	}
+	if len(lease.Items) != 2 {
+		t.Fatalf("lease carries %d items, want both cards in one batch", len(lease.Items))
+	}
+
+	// The same commit and the same note for each: the coder did one piece of
+	// work and said so twice.
+	for _, card := range cards {
+		if _, err := f.n.Send(ctx, f.project.ID, "coder", SendRequest{
+			TaskID: card.ID, To: "reviewer", Commit: "aaaaaaaaaa", Body: "done",
+			SourceLease: lease.ID}); err != nil {
+			t.Fatalf("Send for %s: %v", card.Name, err)
+		}
+	}
+
+	for _, card := range cards {
+		if got := f.reload(t, card.ID).Lane; got != "reviewer" {
+			t.Errorf("%s is in %s, want reviewer — its send was absorbed as a repeat of the other card's",
+				card.Name, got)
+		}
+	}
+}
+
+// The retry this guard exists for, with a commit that has to be resolved.
+//
+// Agents write `--commit HEAD`, which is what the instructions ask for. The
+// key was computed once to look for a prior send and again to store one, with
+// the commit pinned to a sha in between, so a retry looked for a key that was
+// never stored -- and integration happens before the completion is recorded.
+func TestRetryingASendWithARefDoesNotIntegrateTwice(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+
+	// A worktree for the sender, so resolveCommit does its job rather than
+	// handing the ref straight back, and a resolver that behaves like git.
+	if err := os.MkdirAll(hatchery.New(f.project.Path).Path("reviewer"), 0o755); err != nil {
+		t.Fatalf("making the reviewer's worktree: %v", err)
+	}
+	f.git.resolve = map[string]string{"HEAD": "cccccccccc"}
+
+	task := f.task(t, "Calculator")
+	if _, err := f.n.Claim(ctx, f.project.ID, "planner"); err != nil {
+		t.Fatalf("planner Claim: %v", err)
+	}
+	if _, err := f.n.Send(ctx, f.project.ID, "planner", SendRequest{
+		TaskID: task.ID, To: "reviewer", Commit: "aaaaaaaaaa", Body: "planned"}); err != nil {
+		t.Fatalf("planner Send: %v", err)
+	}
+	pending, err := f.db.ListPendingApprovals(ctx, f.project.ID)
+	if err != nil {
+		t.Fatalf("ListPendingApprovals: %v", err)
+	}
+	for _, a := range pending {
+		if err := f.n.Approve(ctx, a.ID); err != nil {
+			t.Fatalf("Approve: %v", err)
+		}
+	}
+	lease, err := f.n.Claim(ctx, f.project.ID, "reviewer")
+	if err != nil {
+		t.Fatalf("reviewer Claim: %v", err)
+	}
+
+	// The terminal role finishes the card, and the response is lost, so the
+	// agent sends the identical call again.
+	finish := SendRequest{TaskID: task.ID, Commit: "HEAD", Body: "done", SourceLease: lease.ID}
+	first, err := f.n.Send(ctx, f.project.ID, "reviewer", finish)
+	if err != nil {
+		t.Fatalf("reviewer Send: %v", err)
+	}
+	second, err := f.n.Send(ctx, f.project.ID, "reviewer", finish)
+	if err != nil {
+		t.Fatalf("the retry failed instead of being absorbed: %v", err)
+	}
+	if second.ID != first.ID {
+		t.Errorf("the retry produced message %s, want the first one (%s) back", second.ID, first.ID)
+	}
+	if len(f.git.merges) != 1 {
+		t.Errorf("merged %d times, want once — a retried completion must not integrate again: %v",
+			len(f.git.merges), f.git.merges)
 	}
 }

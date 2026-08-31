@@ -226,12 +226,27 @@ type SendRequest struct {
 
 // opKey identifies one send inside one lease.
 //
-// The operation, not the moment: recipient, kind, commit and note. A genuine
-// second note to the same role still differs in its body and still sends; only
-// a repeat of the identical call is absorbed.
+// The operation, not the moment: the card, the recipient, the kind, the commit
+// and the note. A genuine second note to the same role still differs in its
+// body and still sends; only a repeat of the identical call is absorbed.
+//
+// The card is in it because a lease can carry several. A batching role hands
+// each of them on from the same lease, and two of those sends can be identical
+// in every other field -- one commit covering the batch, and a note as short as
+// "done" -- at which point the second was read as a repeat of the first, given
+// back the first card's message, and its own card never moved.
+//
+// Computed once, after the request has been normalised and its commit resolved,
+// and then carried to whichever path records the send. It used to be computed
+// twice: once to look for a prior send, and again to store one. Between those
+// two the commit was pinned to a sha, so an agent writing `--commit HEAD` --
+// which is what the instructions ask for -- stored a key nothing would ever
+// look up again. A retried send therefore missed its own prior operation and
+// merged, or opened a pull request, a second time before the unique index
+// stopped it.
 func opKey(req SendRequest) string {
 	sum := sha256.Sum256([]byte(strings.Join(
-		[]string{req.To, req.Kind, req.Commit, req.Body}, "\x00")))
+		[]string{req.TaskID, req.To, req.Kind, req.Commit, req.Body}, "\x00")))
 	return hex.EncodeToString(sum[:])
 }
 
@@ -250,22 +265,13 @@ func (n *Nydus) Send(ctx context.Context, projectID, fromRole string, req SendRe
 		return nil, invalid("role %q is not on this project's team", fromRole)
 	}
 
-	// A repeat of a send that already happened returns what it produced the
-	// first time. Checked before anything else because completion integrates
-	// before it records: without this a lost response followed by a retry runs
-	// the merge or opens the pull request a second time.
-	if req.SourceLease != "" {
-		if prior, err := n.priorSend(ctx, req.SourceLease, opKey(req)); err != nil {
-			return nil, err
-		} else if prior != nil {
-			return prior, nil
-		}
-	}
-
 	kind := req.Kind
 	if kind == "" {
 		kind = store.KindHandoff
 	}
+	// Normalised onto the request itself, so the key below describes the call
+	// as it will be recorded rather than as it happened to be written.
+	req.Kind = kind
 	if kind == store.KindHandoff && req.Commit == "" {
 		return nil, invalid("a handoff must carry a commit; it points at committed state rather than a diff")
 	}
@@ -301,6 +307,24 @@ func (n *Nydus) Send(ctx context.Context, projectID, fromRole string, req SendRe
 		req.Commit = sha
 	}
 
+	// A repeat of a send that already happened returns what it produced the
+	// first time, rather than doing it again: completion integrates before it
+	// records, so a lost response followed by a retry would otherwise run the
+	// merge or open the pull request a second time.
+	//
+	// After the commit is pinned, not before. The key has to describe the send
+	// as it was stored, and it is stored with the sha. Resolving first costs a
+	// `rev-parse` in the sender's own tree on a retry, which reads and changes
+	// nothing -- unlike everything this guard stands in front of.
+	key := opKey(req)
+	if req.SourceLease != "" {
+		if prior, err := n.priorSend(ctx, req.SourceLease, key); err != nil {
+			return nil, err
+		} else if prior != nil {
+			return prior, nil
+		}
+	}
+
 	// An empty recipient means completion, and completion is the terminal
 	// role's word alone. Anyone else omitting --to has made a mistake worth
 	// reporting rather than guessing about.
@@ -334,9 +358,9 @@ func (n *Nydus) Send(ctx context.Context, projectID, fromRole string, req SendRe
 		// did the opposite of what it said, to the one action that modifies
 		// the repository.
 		if sender.Gate == store.GateApproval {
-			return n.holdCompletion(ctx, projectID, sender, req)
+			return n.holdCompletion(ctx, projectID, sender, req, key)
 		}
-		return n.complete(ctx, projectID, sender, req)
+		return n.complete(ctx, projectID, sender, req, key)
 	}
 
 	recipient, ok := roleNamed(team, req.To)
@@ -387,7 +411,7 @@ func (n *Nydus) Send(ctx context.Context, projectID, fromRole string, req SendRe
 		gate:        sender.Gate,
 		rework:      backward,
 		sourceLease: req.SourceLease,
-		opKey:       opKey(req),
+		opKey:       key,
 	})
 }
 
@@ -532,7 +556,7 @@ func (n *Nydus) sendIn(ctx context.Context, tx *sql.Tx, msg *store.Message, req 
 
 // complete finishes a task: the overmind merges the terminal commit into the
 // base branch and the card lands in Done.
-func (n *Nydus) complete(ctx context.Context, projectID string, sender store.ResolvedRole, req SendRequest) (*store.Message, error) {
+func (n *Nydus) complete(ctx context.Context, projectID string, sender store.ResolvedRole, req SendRequest, key string) (*store.Message, error) {
 	if req.TaskID == "" {
 		return nil, invalid("completing a task requires its id")
 	}
@@ -543,11 +567,6 @@ func (n *Nydus) complete(ctx context.Context, projectID string, sender store.Res
 	if req.Commit == "" {
 		return nil, invalid("finishing a task requires the commit to integrate")
 	}
-	// Before the body is rewritten below. The key has to describe the call that
-	// was made, or a retry of the same call would hash differently and be
-	// treated as a new one.
-	key := opKey(req)
-
 	task, err := n.db.GetTask(ctx, req.TaskID)
 	if err != nil {
 		return nil, err
@@ -1722,8 +1741,14 @@ func (n *Nydus) checkSkippable(ctx context.Context, team []store.ResolvedRole, s
 		if found {
 			continue
 		}
-		// The name if the library still has one, since that is what the person
-		// reading the error called it; the id otherwise.
+		// Refused already: the team above is the whole answer, and it is in
+		// hand. This lookup only decides what to call the role in the message
+		// -- its name if the library still has one, since that is what the
+		// person reading the error called it, and the raw id otherwise. An
+		// error here is therefore deliberately dropped rather than returned:
+		// the request is invalid whether or not the database can tell us what
+		// the id used to be, and turning a caller's mistake into a fault would
+		// hide the thing they can actually fix.
 		what := id
 		if t, err := n.db.GetTemplate(ctx, id); err == nil {
 			what = fmt.Sprintf("%q", t.Name)
@@ -1786,7 +1811,7 @@ func boolToInt(b bool) int {
 // as the roles are concerned and not yet landed, which is a real state and
 // needs to be visible as one. The card stays with the role that finished it,
 // so the board does not claim Done over work nobody has approved.
-func (n *Nydus) holdCompletion(ctx context.Context, projectID string, sender store.ResolvedRole, req SendRequest) (*store.Message, error) {
+func (n *Nydus) holdCompletion(ctx context.Context, projectID string, sender store.ResolvedRole, req SendRequest, key string) (*store.Message, error) {
 	if req.TaskID == "" {
 		return nil, invalid("completing a task requires its id")
 	}
@@ -1819,7 +1844,7 @@ func (n *Nydus) holdCompletion(ctx context.Context, projectID string, sender sto
 		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
 		msg.ID, msg.ProjectID, msg.TaskID, msg.FromRole, msg.Kind, msg.Priority,
 		msg.CommitSHA, msg.Body, true, now.Format(time.RFC3339Nano),
-		nullable(req.SourceLease), nullable(opKey(req))); err != nil {
+		nullable(req.SourceLease), nullable(key)); err != nil {
 		return nil, fmt.Errorf("recording held completion: %w", err)
 	}
 	// The approval is written in the same transaction as the message, so there
