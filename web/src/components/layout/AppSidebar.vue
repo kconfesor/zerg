@@ -392,20 +392,30 @@ function live(r: RoleStatus): boolean {
            baked in at 192px, which is five times what 36 CSS pixels need on a
            3x display, and no filter to resolve at render time.
 
-           No tile behind it. The app icon has one -- a launcher needs a
-           rectangle to fill -- and in the rail that tile was the whole
-           problem: it is part of the artwork, so on a light rail it was a
-           black square and no CSS could reach it. Dropped, the beams draw on
-           whatever is behind them and one file serves both grounds. What that
-           cost is the node interiors, which used to be holes punched in the
-           beams using the tile's colour; unfilled, the beam runs through the
-           ring and the ring still reads as a node. -->
+           With its tile, and one per ground. The tile was dropped when light
+           mode arrived, because it is part of the artwork and no CSS can
+           reach it; a bare mark turned out to read as a logo that failed to
+           load. So the ground comes back, and the light theme gets its own
+           rather than a dark square on a near-white rail.
+
+           Two files rather than one recoloured at render time: the mark is a
+           gradient over a patterned field, and there is no filter that turns
+           one ground into the other without also turning the beams into
+           something else. Both are switched here rather than by a media
+           query, because the theme is a setting as well as a preference. -->
       <img
-        src="/logo-mark-192.png"
+        src="/logo-tile-light-192.png"
         alt=""
         width="36"
         height="36"
-        class="size-9 shrink-0"
+        class="size-9 shrink-0 dark:hidden"
+      />
+      <img
+        src="/logo-tile-192.png"
+        alt=""
+        width="36"
+        height="36"
+        class="hidden size-9 shrink-0 dark:block"
       />
       <!-- The mark and the name, and nothing else. This used to carry a
            pulsing "live" badge, which said the same thing as the run state in
