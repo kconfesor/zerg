@@ -392,20 +392,30 @@ function live(r: RoleStatus): boolean {
            baked in at 192px, which is five times what 36 CSS pixels need on a
            3x display, and no filter to resolve at render time.
 
-           With its tile. The tile was dropped when light mode arrived,
-           because it is part of the artwork and could not be recoloured --
-           on a light rail it is a dark square. That turns out to be what the
-           mark is: people read the dark tile as the logo, and a bare mark on
-           a white rail as a logo that failed to load. A dark tile on a light
-           ground is deliberate here, the way an app icon is, and it brings
-           back the node interiors -- holes punched in the beams in the
-           tile's own colour, which need a ground to be holes in. -->
+           With its tile, and one per ground. The tile was dropped when light
+           mode arrived, because it is part of the artwork and no CSS can
+           reach it; a bare mark turned out to read as a logo that failed to
+           load. So the ground comes back, and the light theme gets its own
+           rather than a dark square on a near-white rail.
+
+           Two files rather than one recoloured at render time: the mark is a
+           gradient over a patterned field, and there is no filter that turns
+           one ground into the other without also turning the beams into
+           something else. Both are switched here rather than by a media
+           query, because the theme is a setting as well as a preference. -->
+      <img
+        src="/logo-tile-light-192.png"
+        alt=""
+        width="36"
+        height="36"
+        class="size-9 shrink-0 dark:hidden"
+      />
       <img
         src="/logo-tile-192.png"
         alt=""
         width="36"
         height="36"
-        class="size-9 shrink-0"
+        class="hidden size-9 shrink-0 dark:block"
       />
       <!-- The mark and the name, and nothing else. This used to carry a
            pulsing "live" badge, which said the same thing as the run state in

@@ -1,0 +1,116 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <!-- Square corners throughout, deliberately: every surface in the cockpit is
+       rounded-none, and a mark with softer corners than the product it stands
+       for reads as somebody else's logo. -->
+  <defs>
+    <!-- Background Gradient -->
+    <!-- The light ground. Not white: the rail is near-white already, and a
+         white tile on it is a mark with no edges. -->
+    <linearGradient id="bg-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#f1f5f9" />
+      <stop offset="50%" stop-color="#e6ebf2" />
+      <stop offset="100%" stop-color="#dbe2ec" />
+    </linearGradient>
+
+    <!-- Node & Path Gradients -->
+    <linearGradient id="primary-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#a855f7" />
+      <stop offset="50%" stop-color="#8b5cf6" />
+      <stop offset="100%" stop-color="#6366f1" />
+    </linearGradient>
+
+    <!-- In user space, not the default object bounding box. A horizontal line
+         has a bounding box of zero height, and the spec says an element
+         painted with a gradient over an empty box is not rendered at all: the
+         beam was simply invisible, in the tab and in every generated icon. -->
+    <linearGradient id="accent-cyan" gradientUnits="userSpaceOnUse" x1="136" y1="140" x2="376" y2="140">
+      <stop offset="0%" stop-color="#06b6d4" />
+      <stop offset="100%" stop-color="#3b82f6" />
+    </linearGradient>
+
+    <linearGradient id="accent-emerald" gradientUnits="userSpaceOnUse" x1="136" y1="372" x2="376" y2="372">
+      <stop offset="0%" stop-color="#10b981" />
+      <stop offset="100%" stop-color="#34d399" />
+    </linearGradient>
+
+    <linearGradient id="z-stroke" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#c084fc" />
+      <stop offset="50%" stop-color="#8b5cf6" />
+      <stop offset="100%" stop-color="#06b6d4" />
+    </linearGradient>
+
+    <!-- Glow Filter -->
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="12" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+    <filter id="subtle-glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="6" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+
+    <!-- The field behind the mark: one dot per cell, on the same 64-unit pitch
+         the nodes sit on, so the grid the agents are drawn on is visible rather
+         than implied. -->
+    <pattern id="node-field" width="64" height="64" patternUnits="userSpaceOnUse">
+      <circle cx="32" cy="32" r="5" fill="#4c1d95" fill-opacity="0.22" />
+    </pattern>
+  </defs>
+  <!-- The tile, and the field on it.
+       A flat gradient at 36 pixels is a dark square; the hex outlines that were
+       here read at 512 and vanish at rail size. The dot grid is pitched at 64
+       units, an eighth of the tile, so nine or ten device pixels on a phone,
+       which is coarse enough to survive the raster and fine enough to stay a
+       texture rather than a second mark. -->
+  <rect width="512" height="512" fill="url(#bg-grad)" />
+  <rect width="512" height="512" fill="url(#node-field)" />
+  <g opacity="0.22" stroke="#6d28d9" stroke-width="1.5" fill="none">
+    <polygon points="256,40 336,86 336,178 256,224 176,178 176,86" />
+    <polygon points="256,288 336,334 336,426 256,472 176,426 176,334" />
+    <polygon points="128,164 208,210 208,302 128,348 48,302 48,210" />
+    <polygon points="384,164 464,210 464,302 384,348 304,302 304,210" />
+  </g>
+  <rect width="508" height="508" x="2" y="2" fill="none" stroke="#0f172a" stroke-opacity="0.14" stroke-width="2" />
+  <!-- Swarm Connectivity Matrix (Z-Shape Interconnect lines) -->
+  <g filter="url(#glow)">
+    <!-- Top Horizontal Beam -->
+    <path d="M 136 140 L 376 140" stroke="url(#accent-cyan)" stroke-width="20" stroke-linecap="round" />
+    <!-- Diagonal Z Beam -->
+    <path d="M 376 140 L 136 372" stroke="url(#z-stroke)" stroke-width="26" stroke-linecap="round" />
+    <!-- Bottom Horizontal Beam -->
+    <path d="M 136 372 L 376 372" stroke="url(#accent-emerald)" stroke-width="20" stroke-linecap="round" />
+  </g>
+
+  <!-- Secondary Parallel Energy Threads -->
+  <g opacity="0.6">
+    <path d="M 160 116 L 352 116" stroke="#c084fc" stroke-width="4" stroke-dasharray="8 8" />
+    <path d="M 352 164 L 160 352" stroke="#38bdf8" stroke-width="4" stroke-dasharray="8 8" />
+    <path d="M 160 396 L 352 396" stroke="#34d399" stroke-width="4" stroke-dasharray="8 8" />
+  </g>
+
+  <!-- Swarm Node Points (Agents in Orchestration Grid) -->
+  <g filter="url(#subtle-glow)">
+    <!-- Top Left Node (Planner) -->
+    <circle cx="136" cy="140" r="24" fill="#f1f5f9" stroke="#38bdf8" stroke-width="6" />
+    <circle cx="136" cy="140" r="10" fill="#38bdf8" />
+
+    <!-- Top Right Node (Coder) -->
+    <circle cx="376" cy="140" r="28" fill="#f1f5f9" stroke="#c084fc" stroke-width="7" />
+    <circle cx="376" cy="140" r="12" fill="#c084fc" />
+
+    <!-- Center Bridge Node (Overmind Orchestrator) -->
+    <circle cx="256" cy="256" r="32" fill="#e6ebf2" stroke="url(#primary-grad)" stroke-width="8" />
+    <circle cx="256" cy="256" r="14" fill="#a855f7" />
+
+    <!-- Bottom Left Node (Reviewer) -->
+    <circle cx="136" cy="372" r="28" fill="#f1f5f9" stroke="#8b5cf6" stroke-width="7" />
+    <circle cx="136" cy="372" r="12" fill="#8b5cf6" />
+
+    <!-- Bottom Right Node (Merge / Hardener) -->
+    <circle cx="376" cy="372" r="24" fill="#f1f5f9" stroke="#34d399" stroke-width="6" />
+    <circle cx="376" cy="372" r="10" fill="#34d399" />
+  </g>
+
+  <!-- Central Energy Core Pulse -->
+  <circle cx="256" cy="256" r="6" fill="#1e1b4b" />
+</svg>
