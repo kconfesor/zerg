@@ -99,10 +99,13 @@ type SendArgs struct {
 }
 
 // Ask raises a question for the operator and waits up to wait for an answer.
-func (c *Client) Ask(ctx context.Context, question, taskID string, wait time.Duration) (*askResponse, error) {
+// options may be nil, which is a question answered in prose; given, they are
+// what the operator is offered, and the answer is one of them verbatim unless
+// the operator typed something else.
+func (c *Client) Ask(ctx context.Context, question, taskID string, options []string, wait time.Duration) (*askResponse, error) {
 	var out askResponse
 	_, err := c.call(ctx, "/agent/ask", askRequest{
-		Question: question, TaskID: taskID, WaitSeconds: int(wait.Seconds()),
+		Question: question, Options: options, TaskID: taskID, WaitSeconds: int(wait.Seconds()),
 	}, &out)
 	if err != nil {
 		return nil, err

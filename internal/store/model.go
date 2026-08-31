@@ -237,3 +237,32 @@ func (t *RoleTemplate) Validate() error {
 	}
 	return nil
 }
+
+// storedTimeLayouts is what a timestamp column can actually hold.
+//
+// Everything zerg writes is RFC3339Nano, which is why that is tried first. The
+// rest are SQLite's own formats, and they get into the column when a person
+// patches a stuck row by hand -- `datetime('now')` is what anyone reaches for
+// at a sqlite3 prompt. One such value was found in a real database, on a
+// question that had been cancelled by hand, and a strict read made it worse
+// than it had to be: a listing fails whole, so one unparseable row emptied
+// every open question in that project rather than only itself. A value that is
+// already written is not the place to hold a line.
+var storedTimeLayouts = []string{
+	time.RFC3339Nano,
+	"2006-01-02 15:04:05.999999999Z07:00",
+	"2006-01-02 15:04:05.999999999",
+	"2006-01-02T15:04:05",
+}
+
+// parseStored reads a timestamp out of a column. A value carrying no zone is
+// read as UTC, which is what SQLite's datetime() writes and what every writer
+// in this package uses.
+func parseStored(s string) (time.Time, error) {
+	for _, layout := range storedTimeLayouts {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("unreadable timestamp %q", s)
+}

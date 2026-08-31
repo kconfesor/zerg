@@ -412,11 +412,36 @@ PATH-synced script directory, no `.sh`/`.bb` wrapper pairs, no cwd inference.
 zerg next [--wait 30s]   claim work (long-poll); JSON on stdout
 zerg done [--result f]   ack the lease
 zerg send --to <role> --commit HEAD --task <name>
-zerg ask  "<question>"   raise a clarification to the operator
+zerg ask  "<question>" [--option "<one answer>" ...]
+                         raise a clarification to the operator
 ```
 
 Identity arrives as `ZERG_SOCKET` and `ZERG_TOKEN`, injected at spawn. The token is role-scoped and
 per-spawn; there is no `--from` flag to forge.
+
+**A question that is a choice says so.** Repeated `--option` turns the question into one, and
+Attention draws it as radio buttons with **Something else** under them rather than a box to type in.
+Options are stored as a JSON array on the clarification (`schema_034.sql`) and the answer stays one
+string: the operator picks an option and that option's text is what the agent reads back, so it can
+compare the answer to what it offered. Without this the enumeration the agent had already done
+reached the operator as prose to read, decide and retype, and retyping is where the answer stops
+matching the offer: an agent looking for one of three names gets a paraphrase, or a typo. No options
+is the free-text question this started as, which is what every row written before 034 and every
+agent that does not pass the flag still is. Blank or duplicate options are the agent's mistake and
+come back as a 400 naming it, since two radio buttons a person cannot tell apart are worse than
+prose.
+
+**Asking again is asking the same question.** `ask` waits for a bounded time and then reports the
+question as still open, so the agent decides what to do rather than hangs; what it does is ask
+again. Filed twice, that put two identical cards in the panel with nothing to tell them apart, and
+wrote the operator's answer to whichever one they reached first, which need not be the one an agent
+was waiting on. Watched on one real card: two different options chosen six seconds apart, and the
+agent acted on the second having never seen the first. A question is therefore identified by its
+sender, its card, its wording and its offer, and a repeat joins the open row rather than filing a
+new one. `clarifications.delivered_at` (`schema_035.sql`) records when an answer was actually handed
+to an agent, so an answer given a moment after its asker gave up is collected by the next ask
+instead of lost, while one that has been read is finished: asking the same thing later is a new
+question and gets a new answer.
 
 Work envelope:
 

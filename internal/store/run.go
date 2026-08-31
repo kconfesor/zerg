@@ -40,7 +40,7 @@ func (db *DB) RunNoteFor(ctx context.Context, projectID string) (*RunNote, error
 	if err != nil {
 		return nil, fmt.Errorf("reading the run note: %w", err)
 	}
-	n.UpdatedAt, _ = time.Parse(time.RFC3339Nano, at)
+	n.UpdatedAt, _ = parseStored(at)
 	return n, nil
 }
 

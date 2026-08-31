@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -419,7 +420,7 @@ func fillTaskTimes(t *Task, sessionID sql.NullString, created string, firstClaim
 		t.SessionID = &sessionID.String
 	}
 	var err error
-	if t.CreatedAt, err = time.Parse(time.RFC3339Nano, created); err != nil {
+	if t.CreatedAt, err = parseStored(created); err != nil {
 		return fmt.Errorf("task %s has an unreadable created_at: %w", t.ID, err)
 	}
 	if t.FirstClaimedAt, err = nullTime(firstClaim); err != nil {
@@ -438,9 +439,9 @@ func nullTime(ns sql.NullString) (*time.Time, error) {
 	if !ns.Valid {
 		return nil, nil
 	}
-	t, err := time.Parse(time.RFC3339Nano, ns.String)
+	t, err := parseStored(ns.String)
 	if err != nil {
-		return nil, fmt.Errorf("unreadable timestamp %q: %w", ns.String, err)
+		return nil, err
 	}
 	return &t, nil
 }
@@ -489,7 +490,7 @@ func (db *DB) ListSessions(ctx context.Context, projectID string) ([]Session, er
 			return nil, err
 		}
 		var err error
-		if s.StartedAt, err = time.Parse(time.RFC3339Nano, started); err != nil {
+		if s.StartedAt, err = parseStored(started); err != nil {
 			return nil, err
 		}
 		if s.EndedAt, err = nullTime(ended); err != nil {
@@ -525,7 +526,7 @@ func scanMessage(s scanner) (*Message, error) {
 	}
 	m.Terminal = terminal != 0
 	var err error
-	if m.CreatedAt, err = time.Parse(time.RFC3339Nano, created); err != nil {
+	if m.CreatedAt, err = parseStored(created); err != nil {
 		return nil, fmt.Errorf("message %s has an unreadable created_at: %w", m.ID, err)
 	}
 	return &m, nil
@@ -571,7 +572,7 @@ func (db *DB) ListPendingApprovals(ctx context.Context, projectID string) ([]App
 			a.Note = &note.String
 		}
 		var err error
-		if a.CreatedAt, err = time.Parse(time.RFC3339Nano, created); err != nil {
+		if a.CreatedAt, err = parseStored(created); err != nil {
 			return nil, err
 		}
 		out = append(out, a)
@@ -590,35 +591,158 @@ const (
 
 // Clarification is an agent's question waiting on a human.
 type Clarification struct {
-	ID         string     `json:"id"`
-	ProjectID  string     `json:"projectId"`
-	TaskID     *string    `json:"taskId,omitempty"`
-	Role       string     `json:"role"`
-	Question   string     `json:"question"`
-	Answer     *string    `json:"answer,omitempty"`
-	State      string     `json:"state"`
-	CreatedAt  time.Time  `json:"createdAt"`
-	AnsweredAt *time.Time `json:"answeredAt,omitempty"`
+	ID        string  `json:"id"`
+	ProjectID string  `json:"projectId"`
+	TaskID    *string `json:"taskId,omitempty"`
+	Role      string  `json:"role"`
+	Question  string  `json:"question"`
+	// Options the agent worked out itself, for a question that is a choice.
+	// Empty is the free-text question this started as, and is what every row
+	// written before 034 reads back as.
+	Options []string `json:"options,omitempty"`
+	Answer  *string  `json:"answer,omitempty"`
+	State   string   `json:"state"`
+	// DeliveredAt is when the answer was handed to an agent waiting on it.
+	// Answered but never delivered is the answer that arrived a moment after
+	// its asker gave up waiting, and it is what a repeat of the question is
+	// given instead of a second card.
+	DeliveredAt *time.Time `json:"deliveredAt,omitempty"`
+	CreatedAt   time.Time  `json:"createdAt"`
+	AnsweredAt  *time.Time `json:"answeredAt,omitempty"`
 }
 
-// AskClarification records a question and returns it.
-func (db *DB) AskClarification(ctx context.Context, projectID, role, question string, taskID *string) (*Clarification, error) {
+// maxClarificationOptions is where a choice stops being one. Ten radio
+// buttons is already a lot to read on a phone, which is where approvals and
+// questions actually get answered, and an agent offering more than that has
+// not narrowed the decision down for anybody.
+const maxClarificationOptions = 10
+
+// AskClarification records a question, with the options it offers, and
+// returns it. No options is a question answered in prose, which is every
+// question asked before this was possible.
+func (db *DB) AskClarification(ctx context.Context, projectID, role, question string, options []string, taskID *string) (*Clarification, error) {
 	if question == "" {
 		return nil, invalid("a clarification needs a question")
 	}
+	options, err := checkOptions(options)
+	if err != nil {
+		return nil, err
+	}
+	// A repeat of a question already waiting is that same question, not a
+	// second one. `zerg ask` gives up after its wait and the agent asks again,
+	// which filed two identical cards the operator could not tell apart, and
+	// let two different answers be given to what was one decision. A repeat of
+	// a question whose answer was never handed over gets that answer, so an
+	// answer typed a moment after the asker stopped listening is late rather
+	// than lost.
+	prior, err := db.priorAsk(ctx, projectID, role, question, options, taskID)
+	if err != nil {
+		return nil, err
+	}
+	if prior != nil {
+		return prior, nil
+	}
 	c := &Clarification{
 		ID: NewID(), ProjectID: projectID, TaskID: taskID, Role: role,
-		Question: question, State: ClarificationOpen, CreatedAt: time.Now().UTC(),
+		Question: question, Options: options, State: ClarificationOpen,
+		CreatedAt: time.Now().UTC(),
 	}
-	_, err := db.sql.ExecContext(ctx,
-		`INSERT INTO clarifications (id, project_id, task_id, role, question, state, created_at)
-		 VALUES (?,?,?,?,?,?,?)`,
-		c.ID, c.ProjectID, c.TaskID, c.Role, c.Question, c.State,
+	stored, err := encodeOptions(options)
+	if err != nil {
+		return nil, err
+	}
+	_, err = db.sql.ExecContext(ctx,
+		`INSERT INTO clarifications (id, project_id, task_id, role, question, options, state, created_at)
+		 VALUES (?,?,?,?,?,?,?,?)`,
+		c.ID, c.ProjectID, c.TaskID, c.Role, c.Question, stored, c.State,
 		c.CreatedAt.Format(time.RFC3339Nano))
 	if err != nil {
 		return nil, fmt.Errorf("recording clarification: %w", err)
 	}
 	return c, nil
+}
+
+// priorAsk returns the question this one repeats, if there is one: the same
+// role asking the same thing about the same card, offering the same answers.
+//
+// Open, or answered without the answer ever reaching an agent. A question that
+// was answered and read is finished, so asking it again is a new question --
+// an agent that comes back to a decision later deserves a fresh answer rather
+// than the one it already acted on.
+func (db *DB) priorAsk(ctx context.Context, projectID, role, question string, options []string, taskID *string) (*Clarification, error) {
+	stored, err := encodeOptions(options)
+	if err != nil {
+		return nil, err
+	}
+	row := db.read.QueryRowContext(ctx,
+		`SELECT id, project_id, task_id, role, question, options, answer, state, delivered_at, created_at, answered_at
+		   FROM clarifications
+		  WHERE project_id = ? AND role = ? AND question = ?
+		    AND task_id IS ? AND options IS ?
+		    AND (state = ? OR (state = ? AND delivered_at IS NULL))
+		  ORDER BY created_at DESC LIMIT 1`,
+		projectID, role, question, taskID, stored,
+		ClarificationOpen, ClarificationAnswered)
+	c, err := scanClarification(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	return c, err
+}
+
+// MarkClarificationDelivered records that an agent read the answer. Only the
+// first reader sets it: the question is finished at that point, and a later
+// reader is not who the answer was waiting for.
+func (db *DB) MarkClarificationDelivered(ctx context.Context, id string) error {
+	_, err := db.sql.ExecContext(ctx,
+		`UPDATE clarifications SET delivered_at = ? WHERE id = ? AND delivered_at IS NULL`,
+		time.Now().UTC().Format(time.RFC3339Nano), id)
+	if err != nil {
+		return fmt.Errorf("recording that clarification %s was read: %w", id, err)
+	}
+	return nil
+}
+
+// encodeOptions is how the column holds an offer. NULL, not '[]', for a
+// question with nothing to choose from: the column is what tells the cockpit
+// which of the two shapes to draw, and what makes two asks comparable.
+func encodeOptions(options []string) (any, error) {
+	if len(options) == 0 {
+		return nil, nil
+	}
+	encoded, err := json.Marshal(options)
+	if err != nil {
+		return nil, fmt.Errorf("encoding a question's options: %w", err)
+	}
+	return string(encoded), nil
+}
+
+// checkOptions is the agent's own mistakes, caught where they can still be
+// reported to it: these are 400s naming what to fix, not faults. An option
+// that is blank, or the same as another, is a radio button the operator
+// cannot tell apart from its neighbour once it reaches the panel.
+func checkOptions(options []string) ([]string, error) {
+	if len(options) == 0 {
+		return nil, nil
+	}
+	if len(options) > maxClarificationOptions {
+		return nil, invalid("a question can offer at most %d options; this one offers %d",
+			maxClarificationOptions, len(options))
+	}
+	out := make([]string, 0, len(options))
+	seen := make(map[string]bool, len(options))
+	for _, o := range options {
+		o = strings.TrimSpace(o)
+		if o == "" {
+			return nil, invalid("an option cannot be empty")
+		}
+		if seen[o] {
+			return nil, invalid("option %q is offered twice", o)
+		}
+		seen[o] = true
+		out = append(out, o)
+	}
+	return out, nil
 }
 
 // AnswerClarification records a human's answer.
@@ -637,7 +761,7 @@ func (db *DB) AnswerClarification(ctx context.Context, id, answer string) error 
 // GetClarification reads one question and whatever answer it has.
 func (db *DB) GetClarification(ctx context.Context, id string) (*Clarification, error) {
 	row := db.read.QueryRowContext(ctx,
-		`SELECT id, project_id, task_id, role, question, answer, state, created_at, answered_at
+		`SELECT id, project_id, task_id, role, question, options, answer, state, delivered_at, created_at, answered_at
 		 FROM clarifications WHERE id = ?`, id)
 	c, err := scanClarification(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -650,7 +774,7 @@ func (db *DB) GetClarification(ctx context.Context, id string) (*Clarification, 
 // not, oldest first. The trail reads these; Attention reads the open ones.
 func (db *DB) ClarificationsForTask(ctx context.Context, taskID string) ([]Clarification, error) {
 	rows, err := db.read.QueryContext(ctx,
-		`SELECT id, project_id, task_id, role, question, answer, state, created_at, answered_at
+		`SELECT id, project_id, task_id, role, question, options, answer, state, delivered_at, created_at, answered_at
 		 FROM clarifications WHERE task_id = ? ORDER BY created_at`, taskID)
 	if err != nil {
 		return nil, fmt.Errorf("listing a task's clarifications: %w", err)
@@ -671,7 +795,7 @@ func (db *DB) ClarificationsForTask(ctx context.Context, taskID string) ([]Clari
 // ListOpenClarifications returns what Attention must show.
 func (db *DB) ListOpenClarifications(ctx context.Context, projectID string) ([]Clarification, error) {
 	rows, err := db.read.QueryContext(ctx,
-		`SELECT id, project_id, task_id, role, question, answer, state, created_at, answered_at
+		`SELECT id, project_id, task_id, role, question, options, answer, state, delivered_at, created_at, answered_at
 		 FROM clarifications WHERE project_id = ? AND state = ? ORDER BY created_at`,
 		projectID, ClarificationOpen)
 	if err != nil {
@@ -692,27 +816,38 @@ func (db *DB) ListOpenClarifications(ctx context.Context, projectID string) ([]C
 
 func scanClarification(s scanner) (*Clarification, error) {
 	var (
-		c        Clarification
-		taskID   sql.NullString
-		answer   sql.NullString
-		created  string
-		answered sql.NullString
+		c         Clarification
+		taskID    sql.NullString
+		options   sql.NullString
+		answer    sql.NullString
+		delivered sql.NullString
+		created   string
+		answered  sql.NullString
 	)
 	if err := s.Scan(&c.ID, &c.ProjectID, &taskID, &c.Role, &c.Question,
-		&answer, &c.State, &created, &answered); err != nil {
+		&options, &answer, &c.State, &delivered, &created, &answered); err != nil {
 		return nil, err
 	}
 	if taskID.Valid {
 		c.TaskID = &taskID.String
 	}
+	if options.Valid && options.String != "" {
+		if err := json.Unmarshal([]byte(options.String), &c.Options); err != nil {
+			return nil, fmt.Errorf("clarification %s has unreadable options %q: %w",
+				c.ID, options.String, err)
+		}
+	}
 	if answer.Valid {
 		c.Answer = &answer.String
 	}
 	var err error
-	if c.CreatedAt, err = time.Parse(time.RFC3339Nano, created); err != nil {
+	if c.CreatedAt, err = parseStored(created); err != nil {
 		return nil, err
 	}
 	if c.AnsweredAt, err = nullTime(answered); err != nil {
+		return nil, err
+	}
+	if c.DeliveredAt, err = nullTime(delivered); err != nil {
 		return nil, err
 	}
 	return &c, nil
@@ -837,7 +972,7 @@ func (db *DB) TaskHistory(ctx context.Context, taskID string) ([]Handoff, error)
 		if err := rows.Scan(&h.From, &h.To, &h.Kind, &h.Commit, &h.Body, &at, &final); err != nil {
 			return nil, err
 		}
-		h.At, err = time.Parse(time.RFC3339Nano, at)
+		h.At, err = parseStored(at)
 		if err != nil {
 			return nil, fmt.Errorf("handoff has an unparseable timestamp %q: %w", at, err)
 		}
@@ -877,7 +1012,7 @@ func (db *DB) GetApproval(ctx context.Context, id string) (*Approval, error) {
 	if note.Valid {
 		a.Note = &note.String
 	}
-	if a.CreatedAt, err = time.Parse(time.RFC3339Nano, created); err != nil {
+	if a.CreatedAt, err = parseStored(created); err != nil {
 		return nil, err
 	}
 	return &a, nil
@@ -1283,7 +1418,7 @@ func (db *DB) TaskTrail(ctx context.Context, taskID string) ([]TrailStep, error)
 			&granted, &gateID, &gateState, &gateNote, &gateCreated, &gateDecided); err != nil {
 			return nil, err
 		}
-		if s.At, err = time.Parse(time.RFC3339Nano, createdAt); err != nil {
+		if s.At, err = parseStored(createdAt); err != nil {
 			return nil, fmt.Errorf("handoff has an unreadable timestamp %q: %w", createdAt, err)
 		}
 		s.Final = final != 0
@@ -1298,7 +1433,7 @@ func (db *DB) TaskTrail(ctx context.Context, taskID string) ([]TrailStep, error)
 		}
 		if gateID.Valid {
 			gate := TrailGate{ID: gateID.String, State: gateState.String, Note: gateNote.String}
-			if gate.CreatedAt, err = time.Parse(time.RFC3339Nano, gateCreated.String); err != nil {
+			if gate.CreatedAt, err = parseStored(gateCreated.String); err != nil {
 				return nil, fmt.Errorf("approval has an unreadable timestamp: %w", err)
 			}
 			if gate.DecidedAt, err = nullTime(gateDecided); err != nil {
@@ -1370,7 +1505,7 @@ func (db *DB) attachTurns(ctx context.Context, taskID string, steps []TrailStep)
 		if err := rows.Scan(&role, &ts, &tokens, &cost); err != nil {
 			return err
 		}
-		at, err := time.Parse(time.RFC3339Nano, ts)
+		at, err := parseStored(ts)
 		if err != nil {
 			return fmt.Errorf("a turn has an unreadable timestamp %q: %w", ts, err)
 		}

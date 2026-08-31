@@ -375,6 +375,67 @@ func TestEmptyCollectionsEncodeAsArrays(t *testing.T) {
 	}
 }
 
+// The options an agent offered have to reach the panel that draws them, and
+// the answer that comes back is one of them verbatim. The cockpit decides
+// between a radio group and a text box on this field alone, so a question that
+// arrives without its options is one the operator has to answer in prose after
+// the agent already worked out the choices.
+func TestAttentionCarriesAQuestionsOptions(t *testing.T) {
+	h, db := newTestServer(t)
+	ctx := context.Background()
+
+	rec := do(t, h, "POST", "/api/projects", map[string]any{"path": t.TempDir()})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create status = %d, want 201: %s", rec.Code, rec.Body)
+	}
+	var p store.Project
+	decodeInto(t, rec, &p)
+
+	offered := []string{"Redis, shared across instances", "A signed cookie, no server state"}
+	asked, err := db.AskClarification(ctx, p.ID, "coder", "Where does the session live?", offered, nil)
+	if err != nil {
+		t.Fatalf("AskClarification: %v", err)
+	}
+	// One without options, which is still how most questions arrive.
+	if _, err := db.AskClarification(ctx, p.ID, "coder", "what is the range?", nil, nil); err != nil {
+		t.Fatalf("AskClarification: %v", err)
+	}
+
+	rec = do(t, h, "GET", "/api/projects/"+p.ID+"/attention", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("attention status = %d, want 200: %s", rec.Code, rec.Body)
+	}
+	var attention struct {
+		Clarifications []store.Clarification `json:"clarifications"`
+	}
+	decodeInto(t, rec, &attention)
+	if len(attention.Clarifications) != 2 {
+		t.Fatalf("%d question(s) in Attention, want 2", len(attention.Clarifications))
+	}
+	if !slices.Equal(attention.Clarifications[0].Options, offered) {
+		t.Errorf("options reached the cockpit as %q, want %q",
+			attention.Clarifications[0].Options, offered)
+	}
+	// Absent rather than an empty array: the field is what the panel branches
+	// on, and "[]" reads as a choice with nothing to choose.
+	if strings.Contains(rec.Body.String(), `"options":[]`) {
+		t.Errorf("a question with no options encoded them anyway: %s", rec.Body)
+	}
+
+	rec = do(t, h, "POST", "/api/clarifications/"+asked.ID+"/answer",
+		map[string]any{"answer": offered[1]})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("answer status = %d, want 200: %s", rec.Code, rec.Body)
+	}
+	answered, err := db.GetClarification(ctx, asked.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if answered.Answer == nil || *answered.Answer != offered[1] {
+		t.Errorf("stored answer is %v, want the option that was chosen", answered.Answer)
+	}
+}
+
 // ── cockpit ───────────────────────────────────────────────────────────────
 
 // needCockpit skips a test that requires the built UI.

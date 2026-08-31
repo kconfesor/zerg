@@ -1,0 +1,19 @@
+-- The options an agent offers with its question.
+--
+-- A question was one string and an answer was another, so a choice the agent
+-- had already worked out -- "admin, customer, or the API?" is the example in
+-- the seeded prompt itself -- reached the operator as prose they had to read,
+-- decide, and then retype into a one-line box. Retyping is where the answer
+-- stops matching what was offered: an agent looking for one of three names
+-- gets "the api", or a paraphrase, or a typo, and has to guess what was meant.
+--
+-- A JSON array of strings, NULL for a question with nothing to choose from.
+-- NULL rather than '[]' so every row already in the table, and every agent
+-- that has not been told the flag exists, is the free-text question it always
+-- was rather than a choice with no options.
+--
+-- Options here and not a second table: they are written once with the
+-- question, read with it, and never queried on their own. The answer stays a
+-- single TEXT column holding the chosen option verbatim, so an agent reads the
+-- same shape it read before this column existed.
+ALTER TABLE clarifications ADD COLUMN options TEXT;

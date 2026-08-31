@@ -207,7 +207,7 @@ func (db *DB) ListEvents(ctx context.Context, q EventQuery) ([]Event, error) {
 		if data.Valid && data.String != "" {
 			e.Data = json.RawMessage(data.String)
 		}
-		e.At, err = time.Parse(time.RFC3339Nano, at)
+		e.At, err = parseStored(at)
 		if err != nil {
 			return nil, fmt.Errorf("event %s has an unparseable timestamp %q: %w", e.ID, at, err)
 		}

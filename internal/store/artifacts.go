@@ -238,11 +238,11 @@ func scanArtifact(s scanner) (*Artifact, error) {
 		a.TaskID = &taskID.String
 	}
 	if stoppedAt.Valid {
-		if t, err := time.Parse(time.RFC3339Nano, stoppedAt.String); err == nil {
+		if t, err := parseStored(stoppedAt.String); err == nil {
 			a.StoppedAt = &t
 		}
 	}
-	a.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdAt)
+	a.CreatedAt, _ = parseStored(createdAt)
 	a.Pinned = pinned != 0
 	return &a, nil
 }

@@ -19,6 +19,7 @@ import {
 } from '@/lib/api'
 import { followPreset } from '@/lib/team'
 import Attention from '@/components/Attention.vue'
+import { summarizeAttention } from '@/lib/attention'
 import Board from '@/components/Board.vue'
 import ProjectPathField from '@/components/ProjectPathField.vue'
 
@@ -360,6 +361,9 @@ const attentionCount = computed(() => {
   if (!a) return 0
   return a.approvals.length + a.clarifications.length + a.rework.tasks.length
 })
+
+/** What that count is made of, for the panel's own header. */
+const attentionKinds = computed(() => summarizeAttention(attention.value))
 
 /**
  * Close the queue when the last thing in it is decided.
@@ -1253,7 +1257,12 @@ watch(current, () => (banner.value = null))
       >
         <DialogHeader class="hairline-b shrink-0 px-5 py-4 pr-12">
           <DialogTitle>Waiting on you</DialogTitle>
+          <!-- What is in here, by kind. A terminal approval arrives with a file
+               browser and a whole diff, so a question behind two of them is off
+               the bottom of the screen, and the bell's number does not say what
+               kind of thing it counted. -->
           <DialogDescription>
+            <span v-if="attentionKinds" class="text-foreground">{{ attentionKinds }}.</span>
             Nothing downstream moves until these are decided.
           </DialogDescription>
         </DialogHeader>

@@ -528,9 +528,13 @@ func (s *Server) send(w http.ResponseWriter, r *http.Request) {
 // ── ask ───────────────────────────────────────────────────────────────────
 
 type askRequest struct {
-	Question    string `json:"question"`
-	TaskID      string `json:"taskId"`
-	WaitSeconds int    `json:"waitSeconds"`
+	Question string `json:"question"`
+	// Options turn the question into a choice. The operator picks one and the
+	// answer comes back as that option's text, so an agent that offered
+	// options can compare the answer to them rather than parse prose.
+	Options     []string `json:"options,omitempty"`
+	TaskID      string   `json:"taskId"`
+	WaitSeconds int      `json:"waitSeconds"`
 }
 
 type askResponse struct {
@@ -583,7 +587,7 @@ func (s *Server) ask(w http.ResponseWriter, r *http.Request) {
 		task := id.TaskID
 		taskID = &task
 	}
-	c, err := s.db.AskClarification(r.Context(), id.ProjectID, id.Role, req.Question, taskID)
+	c, err := s.db.AskClarification(r.Context(), id.ProjectID, id.Role, req.Question, req.Options, taskID)
 	if err != nil {
 		s.fail(w, err)
 		return
@@ -605,6 +609,12 @@ func (s *Server) ask(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if current.State == store.ClarificationAnswered && current.Answer != nil {
+			// Read, so a later repeat of the question is a new question rather
+			// than this answer handed over twice.
+			if err := s.db.MarkClarificationDelivered(r.Context(), c.ID); err != nil {
+				s.fail(w, err)
+				return
+			}
 			writeJSON(w, http.StatusOK, askResponse{ID: c.ID, Answer: *current.Answer, Answered: true})
 			return
 		}

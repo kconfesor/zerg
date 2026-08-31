@@ -155,7 +155,9 @@ Run by agents, not by you:
   zerg next [--wait 30s]              claim work
   zerg done --lease <id>              acknowledge it
   zerg send --to <role> --commit HEAD --task <id>
-  zerg ask "<question>"               ask the operator
+  zerg ask "<question>" [--option "<one answer>" ...]
+                                      ask the operator; --option, repeated,
+                                      offers answers to choose from
   zerg artifact add <path>            keep a file for a person to look at
   zerg artifact serve --port <n>      register a service you started
   zerg remember "<what you learned>"  how this project runs, for next time

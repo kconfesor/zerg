@@ -187,10 +187,10 @@ func scanTemplate(s scanner) (*RoleTemplate, error) {
 	if t.Args, err = unmarshalArgs(args); err != nil {
 		return nil, err
 	}
-	if t.CreatedAt, err = time.Parse(time.RFC3339Nano, created); err != nil {
+	if t.CreatedAt, err = parseStored(created); err != nil {
 		return nil, fmt.Errorf("role %s has an unreadable created_at: %w", t.ID, err)
 	}
-	if t.UpdatedAt, err = time.Parse(time.RFC3339Nano, updated); err != nil {
+	if t.UpdatedAt, err = parseStored(updated); err != nil {
 		return nil, fmt.Errorf("role %s has an unreadable updated_at: %w", t.ID, err)
 	}
 	return &t, nil

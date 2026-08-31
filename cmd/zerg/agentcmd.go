@@ -97,10 +97,17 @@ func runAsk(args []string) error {
 	fs := flag.NewFlagSet("ask", flag.ContinueOnError)
 	task := fs.String("task", "", "the task the question is about")
 	wait := fs.Duration("wait", 10*time.Minute, "how long to wait for an answer")
-	if err := fs.Parse(args); err != nil {
+	var options optionList
+	fs.Var(&options, "option", "an answer to offer; repeat it, once per option")
+	words, err := parseAnywhere(fs, args)
+	if err != nil {
 		return err
 	}
-	if fs.NArg() == 0 {
+	// Joined rather than taking the first word, because an unquoted question is
+	// the shell slip an agent actually makes, and half a question filed against
+	// nothing is one nobody can answer.
+	question := strings.TrimSpace(strings.Join(words, " "))
+	if question == "" {
 		return errors.New(`ask needs a question, e.g. zerg ask "should this be idempotent?"`)
 	}
 
@@ -111,11 +118,48 @@ func runAsk(args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), *wait+30*time.Second)
 	defer cancel()
 
-	answer, err := client.Ask(ctx, fs.Arg(0), *task, *wait)
+	answer, err := client.Ask(ctx, question, *task, options, *wait)
 	if err != nil {
 		return err
 	}
 	return printJSON(answer)
+}
+
+// parseAnywhere parses flags wherever they appear, and returns the words that
+// are not flags.
+//
+// Go's flag package stops at the first word that is not a flag, and every form
+// this binary documents puts the subject first: `zerg ask "<question>" --task
+// "<name>" --option ...`, `zerg artifact add ./report.html --label "<what>"`.
+// Parsed straight through, everything after that first word is positional and
+// silently ignored -- a question filed against no card, offering none of the
+// options it just enumerated, and an artifact with no label. Re-parsing what is
+// left after each positional is the ordinary permute, and a flag keeps its
+// value (`--task Login`) because Parse consumes both itself.
+func parseAnywhere(fs *flag.FlagSet, args []string) ([]string, error) {
+	var words []string
+	for {
+		if err := fs.Parse(args); err != nil {
+			return nil, err
+		}
+		if fs.NArg() == 0 {
+			return words, nil
+		}
+		words = append(words, fs.Arg(0))
+		args = fs.Args()[1:]
+	}
+}
+
+// optionList collects a repeated --option. A repeated flag rather than one
+// comma-separated string: an option is a sentence a person reads off a screen,
+// and it can legitimately contain a comma.
+type optionList []string
+
+func (o *optionList) String() string { return strings.Join(*o, ", ") }
+
+func (o *optionList) Set(v string) error {
+	*o = append(*o, v)
+	return nil
 }
 
 func printJSON(v any) error {
@@ -151,16 +195,21 @@ func runArtifact(args []string) error {
 	req := agent.ArtifactArgs{}
 	switch sub {
 	case "add":
-		if err := fs.Parse(rest); err != nil {
+		paths, err := parseAnywhere(fs, rest)
+		if err != nil {
 			return err
 		}
-		if fs.NArg() == 0 {
+		if len(paths) == 0 {
 			return errors.New("artifact add needs a path: zerg artifact add ./report.html")
 		}
+		if len(paths) > 1 {
+			return fmt.Errorf("artifact add takes one path, and was given %d (%s); quote a path with spaces in it",
+				len(paths), strings.Join(paths, ", "))
+		}
 		req.Kind = "file"
-		req.Path = fs.Arg(0)
+		req.Path = paths[0]
 	case "serve":
-		if err := fs.Parse(rest); err != nil {
+		if _, err := parseAnywhere(fs, rest); err != nil {
 			return err
 		}
 		if *port == 0 {

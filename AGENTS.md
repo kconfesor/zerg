@@ -108,4 +108,12 @@ Commit messages are prose: a sentence saying what changed, then a body explainin
 why this is the fix. The history is where this project keeps its reasoning.
 
 ## Web components
-Never handrole components, always look for shadcn-vue existing components, install it using cli if not already installe
+
+Never handroll a component. Look for the shadcn-vue one and install it with the CLI if it is not
+already here: `pnpm --dir web dlx shadcn-vue@latest add <name>`.
+
+Read what the CLI touched before staging it. It edits `src/style.css` as well as adding files, and
+with a `font` key in `components.json` it writes a Google Fonts `@import` at the top of the
+stylesheet on every `add`. That is a third-party request from a daemon meant to run on a machine
+with no route to the internet, for a family the stylesheet does not even name; `web/index.html`
+records the measurement. The key is gone for that reason, so do not put it back.
