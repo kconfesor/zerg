@@ -15,6 +15,16 @@ defineProps<{ title: string; subtitle?: string }>()
            qualifies instead of in the global bar, where it read as chrome. -->
       <div class="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1"><slot name="meta" /></div>
     </div>
-    <div class="ml-auto flex items-center gap-2"><slot name="actions" /></div>
+    <!-- Its own row once the header wraps, rather than a right-aligned island.
+         On a phone the toggle and the button dropped under the meta line and
+         stayed pinned to the right edge, leaving 143px of empty gutter beside
+         them: it read as something that had fallen off the title rather than
+         the row of controls it is. Full width and spread apart, a wrap looks
+         deliberate. Above sm it is the right-aligned group it always was. -->
+    <div
+      class="flex w-full items-center justify-between gap-2 sm:ml-auto sm:w-auto sm:justify-end"
+    >
+      <slot name="actions" />
+    </div>
   </header>
 </template>
