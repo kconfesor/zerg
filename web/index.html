@@ -54,7 +54,11 @@
          870ms, and it is a request to a third party from a daemon that is
          meant to work on a machine with no route to the internet. Removing it
          changes nothing on screen. To actually get the typeface, self-host the
-         woff2 and match the family name; do not put the CDN back. -->
+         woff2 and match the family name; do not put the CDN back.
+
+         components.json carries no "font" key for the same reason: with one,
+         `shadcn-vue add <anything>` writes that same Google Fonts @import into
+         src/style.css, and it came back once already that way. -->
     <style>
       /* Only the frame, and only the values the running cockpit reports for
          it. Duplicating the whole theme here would be a second copy to keep in
