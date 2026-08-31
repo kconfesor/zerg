@@ -214,6 +214,16 @@ func (r *Runner) run(ctx context.Context, check adapter.Check, spec adapter.Spec
 		res.Reason = fmt.Sprintf("the %s check did not finish within %s", check.Name, r.timeout)
 		res.Remedy = "the harness may be hung; try running it once by hand"
 	}
+
+	// An advisory check warns at worst, whatever happened inside it. Watched
+	// on a machine busy running four agents: `pi --list-models` answers in
+	// under two seconds idle, took longer than the budget under that load, and
+	// refused to start the team -- over a check that reports an unlisted model
+	// as a warning and a missing catalog as nothing at all. The finding still
+	// shows, with its reason; it just no longer decides.
+	if check.Advisory && res.Status == StatusBlocked {
+		res.Status = StatusWarn
+	}
 	return res
 }
 

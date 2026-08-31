@@ -549,7 +549,7 @@ in **Attention** with both, never as an idle pane that happens to be doing nothi
 | `config_parses` | *triplicated `[features]` key in `~/.codex/config.toml`* | adapter |
 | `auth_valid` | *pi: "No API key found for openai"* → "log in with pi" (detect only, §2) | adapter |
 | `workspace_trusted` | *claude's first-run trust dialog blocking four roles* | adapter |
-| `model_available` | model id absent from the harness catalog → warn, don't block | adapter |
+| `model_available` | model id absent from the harness catalog → warn, don't block (`Advisory`) | adapter |
 | `plugins_loadable` | *pi's broken extension tree*, smoke run with the real flags | adapter |
 
 ### 8.1 Two moments, one check suite
@@ -568,7 +568,15 @@ agents. A team that cannot work should never reach a running board.
 
 Red is blocking. Amber (an unlisted model, a harness whose version could not be determined) shows a
 warning and allows Start with an explicit acknowledgement, since a catalog can lag a model that
-works. The panel is re-runnable on demand: you fix a login in another terminal, hit **Re-check**,
+works.
+
+Some checks can only ever be amber, and say so: `adapter.Check.Advisory` marks a probe whose worst
+honest verdict is a warning, and preflight will not let one turn red however it fails. Without that,
+the paths that produce a finding nobody wrote went the other way. `model_available` reports an
+unlisted model as a warning and a missing catalog as nothing at all, and then blocked a team on a
+machine busy running four agents, because `pi --list-models` answered in under two seconds idle and
+took longer than the ten-second budget under that load. A slow answer to a question that cannot
+block should not block. The panel is re-runnable on demand: you fix a login in another terminal, hit **Re-check**,
 and watch the row go green without restarting anything.
 
 **Spawn, the guard.** The same suite runs again before each individual spawn, because state drifts

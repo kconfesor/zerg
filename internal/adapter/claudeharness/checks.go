@@ -90,7 +90,8 @@ func (*Adapter) configParsesCheck() adapter.Check {
 // a human meets the dialog with no idea why the agent stopped.
 func (*Adapter) workspaceTrustedCheck() adapter.Check {
 	return adapter.Check{
-		Name: "workspace_trusted",
+		Name:     "workspace_trusted",
+		Advisory: true,
 		Run: func(_ adapter.Ctx, spec adapter.Spec) adapter.Result {
 			path, err := userConfigJSON()
 			if err != nil {
@@ -133,7 +134,8 @@ func (*Adapter) workspaceTrustedCheck() adapter.Check {
 // HTTP 400 on every turn for twenty minutes while looking perfectly healthy.
 func (a *Adapter) modelAvailableCheck() adapter.Check {
 	return adapter.Check{
-		Name: "model_available",
+		Name:     "model_available",
+		Advisory: true,
 		Run: func(ctx adapter.Ctx, spec adapter.Spec) adapter.Result {
 			if spec.Model == "" {
 				return adapter.Result{OK: true, Detail: "harness default"}
