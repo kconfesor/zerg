@@ -1420,7 +1420,14 @@ function empty(a: Attention | null): boolean {
            collapsed the paragraph breaks too, which is what turned a structured
            question into a wall. The renderer escapes before it builds any tag,
            so nothing an agent read out of the repository becomes markup. -->
-      <div class="md mb-2.5 min-w-0 overflow-x-auto text-xs leading-relaxed break-words" v-html="renderMarkdown(c.question)" />
+      <!-- The id is what names the radio group and the box below it. A group
+           of radios with no accessible name is read out as three unrelated
+           options, and the question is on screen right above it. -->
+      <div
+        :id="`${c.id}-question`"
+        class="md mb-2.5 min-w-0 overflow-x-auto text-xs leading-relaxed break-words"
+        v-html="renderMarkdown(c.question)"
+      />
 
       <!-- A question the agent already worked the answers out for. The
            question itself stays visible: the panel exists to say what is
@@ -1442,7 +1449,11 @@ function empty(a: Attention | null): boolean {
           </Button>
         </CollapsibleTrigger>
         <CollapsibleContent>
-          <RadioGroup v-model="picked[c.id]" class="mt-2.5 gap-2">
+          <RadioGroup
+            v-model="picked[c.id]"
+            :aria-labelledby="`${c.id}-question`"
+            class="mt-2.5 gap-2"
+          >
             <div v-for="(o, i) in c.options" :key="o" class="flex items-start gap-2">
               <RadioGroupItem
                 :id="`${c.id}-o${i}`"
@@ -1478,6 +1489,7 @@ function empty(a: Attention | null): boolean {
             rows="3"
             class="mt-2 text-xs leading-relaxed"
             placeholder="your answer"
+            :aria-labelledby="`${c.id}-question`"
             :disabled="answering(c.id)"
             @keydown.enter.meta.prevent="submit(c)"
             @keydown.enter.ctrl.prevent="submit(c)"
@@ -1503,6 +1515,7 @@ function empty(a: Attention | null): boolean {
           rows="3"
           class="text-xs leading-relaxed"
           placeholder="your answer"
+          :aria-labelledby="`${c.id}-question`"
           :disabled="answering(c.id)"
           @keydown.enter.meta.prevent="submit(c)"
           @keydown.enter.ctrl.prevent="submit(c)"

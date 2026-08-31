@@ -416,6 +416,24 @@ describe('a question that is a choice', () => {
     expect(w.emitted('answer')).toEqual([['c1', 'Postgres, we already run one']])
   })
 
+  // Three radios with no accessible name are read out as three unrelated
+  // options, and the question they belong to is on screen right above them.
+  it('names the choices after the question being asked', async () => {
+    const w = mount(Attention, { props: { attention: asking(both) } })
+    await expand(w)
+
+    const group = w.find('[role="radiogroup"]')
+    expect(group.exists()).toBe(true)
+    const labelledBy = group.attributes('aria-labelledby')
+    expect(labelledBy).toBeTruthy()
+    expect(w.find(`#${labelledBy}`).text()).toContain('Where does the session live?')
+
+    // The box under Something else answers the same question.
+    const radios = w.findAll('[data-slot="radio-group-item"]')
+    await radios[2].trigger('click')
+    expect(w.find('textarea').attributes('aria-labelledby')).toBe(labelledBy)
+  })
+
   it('is still a box to write in when the agent offered nothing', async () => {
     const w = mount(Attention, { props: { attention: asking(undefined) } })
     // No disclosure to open: there is nothing behind it.
