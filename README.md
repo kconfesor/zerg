@@ -55,7 +55,8 @@ what it has spent, and what needs a decision.
 These screenshots use a demo project named `swarm-sim`. Its pipeline has a gated planner, coder,
 docs role, and gated reviewer.
 
-**Board.** Each role has a lane, and each card shows its state, age, and cost.
+**Board.** Each role has a lane, headed by the model that works it, and each card shows its state,
+age, and cost.
 
 ![The board, with cards in four lanes](docs/screenshots/01-board.png)
 
@@ -88,6 +89,10 @@ reusable defaults for harnesses, models, prompts, and gates.
 ![The team editor](docs/screenshots/04-team.png)
 
 ![The role library in Settings](docs/screenshots/07-settings.png)
+
+**Light and dark.** The cockpit follows the system setting, and the toggle in the bar overrides it.
+
+![The board in the light theme](docs/screenshots/10-light-board.png)
 
 **Phone.** Navigation becomes a drawer, lanes stack, and dialogs fill the screen.
 
