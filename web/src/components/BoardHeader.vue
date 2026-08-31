@@ -1,22 +1,27 @@
 <script setup lang="ts">
 /**
- * What is true about this board, in one line.
+ * What is true about this board, in the same shape as every other view.
  *
  * These facts arrived one at a time — the repository path, then the branch,
- * then spend, then a hidden count — and each was put wherever there was room.
- * The result read as leftovers rather than a summary: a subtitle, a meta row
- * and a button in the corner, none of them related to the others.
+ * then a hidden count, then what the checkouts cost — and each was put wherever
+ * there was room. The answer to that was a strip of figures with the value
+ * above an uppercase label, which fixed the disorder and introduced a worse
+ * problem: it is a metrics widget, and nothing else in the cockpit is one. Every
+ * other screen opens with a title, a sentence, and a row of small facts, so the
+ * board was the one page that looked like it came from another product.
  *
- * One strip of labelled figures instead. Every one answers a question you would
- * otherwise open something to ask: how much is queued, how much is put away,
- * what the checkouts cost.
+ * The facts have not changed. They are written the way this app writes figures
+ * everywhere else — number, then a lowercase word, separated by middots, the
+ * way a task's turns and tokens and cost are written — and they sit in the meta
+ * row that every other header already has.
  *
- * Spend is deliberately not among them any more. It is the one figure that
- * matters whatever you are looking at, so it moved to the bar that is on every
- * screen; here it was visible only while already reading the board.
+ * Spend is deliberately not among them. It is the one figure that matters
+ * whatever you are looking at, so it lives in the bar that is on every screen;
+ * here it was visible only while already reading the board.
  */
 import { computed } from 'vue'
 import { FolderGit2, GitBranch, HardDrive } from '@lucide/vue'
+import PageHeader from '@/components/layout/PageHeader.vue'
 import type { Project, Task, Workspace } from '@/lib/api'
 
 const props = defineProps<{
@@ -42,65 +47,59 @@ function size(bytes: number): string {
 </script>
 
 <template>
-  <div class="flex flex-col gap-3">
-    <!-- Identity: which repository, on which branch. -->
-    <div class="flex flex-wrap items-center gap-x-3 gap-y-1">
-      <h1 class="text-[17px] leading-none font-semibold tracking-tight">Board</h1>
-      <span class="text-muted-foreground">/</span>
+  <PageHeader title="Board" subtitle="One column per role. A card moves right as each role finishes with it.">
+    <template #meta>
+      <!-- Which repository, and which branch the work lands on. The path is
+           desktop-only: it is the longest thing in the row and answers a
+           question you ask once, which is the same call Chat's header makes. -->
       <span
-        class="text-muted-foreground inline-flex min-w-0 items-center gap-1.5 text-[11px]"
+        class="text-muted-foreground hidden min-w-0 items-center gap-1.5 font-mono text-[11px] sm:flex"
         :title="project.path"
       >
-        <FolderGit2 :size="12" class="shrink-0" aria-hidden="true" />
-        <span class="truncate font-mono">{{ project.path }}</span>
+        <FolderGit2 :size="11" class="shrink-0" aria-hidden="true" />
+        <span class="truncate">{{ project.path }}</span>
       </span>
-      <span class="text-muted-foreground inline-flex items-center gap-1.5 text-[11px]">
-        <GitBranch :size="12" aria-hidden="true" />
+      <span class="text-muted-foreground flex items-center gap-1.5 font-mono text-[11px]">
+        <GitBranch :size="11" class="shrink-0" aria-hidden="true" />
         {{ project.baseBranch }}
       </span>
-      <div class="ml-auto flex items-center gap-2"><slot name="actions" /></div>
-    </div>
 
-    <!-- The figures. Value above label, so the numbers line up and the row
-         scans as a row rather than as sentences of different lengths. -->
-    <dl class="hairline-b flex flex-wrap items-end gap-x-6 gap-y-2 pb-3">
-      <div>
-        <dd class="tabular text-sm leading-none font-semibold">{{ stats.open }}</dd>
-        <dt class="text-muted-foreground mt-1 text-[10px] tracking-wide uppercase">open</dt>
-      </div>
-      <div>
-        <dd
-          class="tabular text-sm leading-none font-semibold"
-          :class="stats.working ? 'text-[var(--primary)]' : 'text-muted-foreground'"
-        >
-          {{ stats.working }}
-        </dd>
-        <dt class="text-muted-foreground mt-1 text-[10px] tracking-wide uppercase">working</dt>
-      </div>
-      <div>
-        <dd class="tabular text-sm leading-none font-semibold">{{ stats.done }}</dd>
-        <dt class="text-muted-foreground mt-1 text-[10px] tracking-wide uppercase">done</dt>
-      </div>
-      <!-- Only when there are any: a zero here is a control that does nothing
-           dressed as information. -->
-      <div v-if="stats.hidden">
-        <dd class="tabular text-muted-foreground text-sm leading-none font-semibold">
-          {{ stats.hidden }}
-        </dd>
-        <dt class="text-muted-foreground mt-1 text-[10px] tracking-wide uppercase">hidden</dt>
-      </div>
+      <!-- The counts, as one fact rather than four tiles. Middot-separated
+           figures with the word after the number is how a task writes its
+           turns, its tokens and its cost, and this is the same kind of
+           sentence about a different subject.
 
-      <div v-if="workspace?.worktrees?.length" class="border-l pl-6">
-        <dd
-          class="tabular flex items-baseline gap-1.5 text-sm leading-none font-semibold"
-          :title="workspace.worktrees.map((w) => `${w.role}: ${size(w.bytes)}`).join('\n')"
-        >
-          {{ workspace.worktrees.length }}
-          <HardDrive :size="12" class="text-muted-foreground self-center" aria-hidden="true" />
-          <span class="text-muted-foreground text-xs font-normal">{{ size(workspace.bytes) }}</span>
-        </dd>
-        <dt class="text-muted-foreground mt-1 text-[10px] tracking-wide uppercase">worktrees</dt>
-      </div>
-    </dl>
-  </div>
+           Working takes the accent when it is not zero: it is the only one of
+           these that means something is happening right now, and the only one
+           worth catching an eye that is looking at the columns instead. -->
+      <span class="text-muted-foreground tabular flex items-center gap-1.5 text-[11px]">
+        {{ stats.open }} open
+        <span aria-hidden="true">·</span>
+        <span :class="stats.working ? 'text-[var(--primary)] font-medium' : ''">
+          {{ stats.working }} working
+        </span>
+        <span aria-hidden="true">·</span>
+        {{ stats.done }} done
+        <!-- Only when there are any: a zero here describes a control that is
+             not on screen, since the toggle that reveals them is hidden too. -->
+        <template v-if="stats.hidden">
+          <span aria-hidden="true">·</span>
+          {{ stats.hidden }} hidden
+        </template>
+      </span>
+
+      <span
+        v-if="workspace?.worktrees?.length"
+        class="text-muted-foreground tabular flex items-center gap-1.5 text-[11px]"
+        :title="workspace.worktrees.map((w) => `${w.role}: ${size(w.bytes)}`).join('\n')"
+      >
+        <HardDrive :size="11" class="shrink-0" aria-hidden="true" />
+        {{ workspace.worktrees.length }} worktrees
+        <span aria-hidden="true">·</span>
+        {{ size(workspace.bytes) }}
+      </span>
+    </template>
+
+    <template #actions><slot name="actions" /></template>
+  </PageHeader>
 </template>
