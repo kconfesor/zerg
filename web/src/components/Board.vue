@@ -98,6 +98,24 @@ function shortModel(model: string): string {
 }
 
 /**
+ * The model a role is configured with, for its column heading.
+ *
+ * A different question from the models on a card, which say what actually did
+ * that work and are recorded with it. This one is live: change the team and
+ * every heading changes, because it describes what the next card through this
+ * lane will be worked by.
+ *
+ * The last path segment, since a harness that namespaces its models
+ * ("openai-codex/gpt-5.6-sol") puts the interesting half at the end and a
+ * column is 192 pixels wide. The full value is in the title.
+ */
+function laneModel(lane: string): string {
+  const role = props.team.find((r) => r.enabled && r.name === lane)
+  if (!role?.model) return ''
+  return shortModel(role.model.split('/').pop() ?? role.model)
+}
+
+/**
  * How long the role working this card has been silent, in words.
  *
  * A card that says "working" says the same thing whether the agent is running
@@ -187,8 +205,20 @@ const byLane = computed(() => {
             lane === 'done' ? 'border-[var(--status-good)]/50' : 'border-primary/45',
           ]"
         >
-          <span class="text-xs font-semibold tracking-wide">{{ lane }}</span>
-          <span class="tabular text-muted-foreground ml-auto text-[11px]">
+          <span class="shrink-0 text-xs font-semibold tracking-wide">{{ lane }}</span>
+          <!-- What will work the next card through here. It was a trip to the
+               team editor to answer, which is a screen away from the board it
+               is about. Allowed to truncate rather than to push the count off
+               the end: the count is the fact you scan for, and the full model
+               is in the title. -->
+          <span
+            v-if="laneModel(lane)"
+            class="text-muted-foreground min-w-0 truncate text-[10px]"
+            :title="`${lane} runs ${team.find((r) => r.name === lane)?.model}`"
+          >
+            · {{ laneModel(lane) }}
+          </span>
+          <span class="tabular text-muted-foreground ml-auto shrink-0 pl-1 text-[11px]">
             {{ byLane.get(lane)?.length ?? 0 }}
           </span>
         </div>
