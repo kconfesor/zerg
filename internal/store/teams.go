@@ -349,11 +349,11 @@ func scanPreset(s scanner) (*TeamPreset, error) {
 		p.ProjectID = &v
 	}
 	var err error
-	p.CreatedAt, err = time.Parse(time.RFC3339Nano, created)
+	p.CreatedAt, err = parseStored(created)
 	if err != nil {
 		return nil, err
 	}
-	p.UpdatedAt, err = time.Parse(time.RFC3339Nano, updated)
+	p.UpdatedAt, err = parseStored(updated)
 	return &p, err
 }
 

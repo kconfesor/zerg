@@ -239,7 +239,7 @@ func (db *DB) LatestSessionStart(ctx context.Context, projectID string) (time.Ti
 	if err != nil {
 		return time.Time{}, fmt.Errorf("reading the last session: %w", err)
 	}
-	at, err := time.Parse(time.RFC3339Nano, started)
+	at, err := parseStored(started)
 	if err != nil {
 		return time.Time{}, fmt.Errorf("session %s has an unreadable started_at: %w", projectID, err)
 	}
@@ -357,7 +357,7 @@ func (db *DB) UsageByRole(ctx context.Context, projectID string, since time.Time
 			cur.Providers = append(cur.Providers, provider)
 		}
 		if last.Valid {
-			if at, err := time.Parse(time.RFC3339Nano, last.String); err == nil && at.After(cur.LastAt) {
+			if at, err := parseStored(last.String); err == nil && at.After(cur.LastAt) {
 				cur.LastAt = at
 			}
 		}
@@ -584,7 +584,7 @@ func (db *DB) roleEdits(ctx context.Context) (map[string]time.Time, error) {
 		if err := rows.Scan(&name, &updated); err != nil {
 			return nil, err
 		}
-		if at, err := time.Parse(time.RFC3339Nano, updated); err == nil {
+		if at, err := parseStored(updated); err == nil {
 			out[name] = at
 		}
 	}
@@ -738,7 +738,7 @@ func leaseOwns(at time.Time, acked, expired sql.NullString, expiresAt string) bo
 }
 
 func parseLeaseTime(s string) time.Time {
-	t, err := time.Parse(time.RFC3339Nano, s)
+	t, err := parseStored(s)
 	if err != nil {
 		return time.Time{}
 	}

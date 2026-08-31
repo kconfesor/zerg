@@ -532,11 +532,11 @@ func scanProject(s scanner) (*Project, error) {
 		p.TeamPresetID = &v
 	}
 	var err error
-	if p.CreatedAt, err = time.Parse(time.RFC3339Nano, created); err != nil {
+	if p.CreatedAt, err = parseStored(created); err != nil {
 		return nil, fmt.Errorf("project %s has an unreadable created_at: %w", p.ID, err)
 	}
 	if lastOpened.Valid {
-		t, err := time.Parse(time.RFC3339Nano, lastOpened.String)
+		t, err := parseStored(lastOpened.String)
 		if err != nil {
 			return nil, fmt.Errorf("project %s has an unreadable last_opened_at: %w", p.ID, err)
 		}

@@ -265,7 +265,7 @@ func (db *DB) reviewComments(ctx context.Context, threadID string) ([]ReviewComm
 		if err := rows.Scan(&c.ID, &c.ThreadID, &c.Author, &c.Body, &at); err != nil {
 			return nil, err
 		}
-		if c.CreatedAt, err = time.Parse(time.RFC3339Nano, at); err != nil {
+		if c.CreatedAt, err = parseStored(at); err != nil {
 			return nil, fmt.Errorf("review comment %s has an unreadable timestamp: %w", c.ID, err)
 		}
 		out = append(out, c)
@@ -289,7 +289,7 @@ func scanThread(s scanner) (*ReviewThread, error) {
 		t.ApprovalID = &v
 	}
 	var err error
-	if t.CreatedAt, err = time.Parse(time.RFC3339Nano, created); err != nil {
+	if t.CreatedAt, err = parseStored(created); err != nil {
 		return nil, fmt.Errorf("review thread %s has an unreadable timestamp: %w", t.ID, err)
 	}
 	if t.ResolvedAt, err = nullTime(resolvedAt); err != nil {
@@ -384,6 +384,6 @@ func (db *DB) ReviewGuideFor(ctx context.Context, approvalID string) (*ReviewGui
 	if err != nil {
 		return nil, fmt.Errorf("reading the guide: %w", err)
 	}
-	g.CreatedAt, _ = time.Parse(time.RFC3339Nano, at)
+	g.CreatedAt, _ = parseStored(at)
 	return g, nil
 }

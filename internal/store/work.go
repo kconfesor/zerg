@@ -420,7 +420,7 @@ func fillTaskTimes(t *Task, sessionID sql.NullString, created string, firstClaim
 		t.SessionID = &sessionID.String
 	}
 	var err error
-	if t.CreatedAt, err = time.Parse(time.RFC3339Nano, created); err != nil {
+	if t.CreatedAt, err = parseStored(created); err != nil {
 		return fmt.Errorf("task %s has an unreadable created_at: %w", t.ID, err)
 	}
 	if t.FirstClaimedAt, err = nullTime(firstClaim); err != nil {
@@ -439,9 +439,9 @@ func nullTime(ns sql.NullString) (*time.Time, error) {
 	if !ns.Valid {
 		return nil, nil
 	}
-	t, err := time.Parse(time.RFC3339Nano, ns.String)
+	t, err := parseStored(ns.String)
 	if err != nil {
-		return nil, fmt.Errorf("unreadable timestamp %q: %w", ns.String, err)
+		return nil, err
 	}
 	return &t, nil
 }
@@ -490,7 +490,7 @@ func (db *DB) ListSessions(ctx context.Context, projectID string) ([]Session, er
 			return nil, err
 		}
 		var err error
-		if s.StartedAt, err = time.Parse(time.RFC3339Nano, started); err != nil {
+		if s.StartedAt, err = parseStored(started); err != nil {
 			return nil, err
 		}
 		if s.EndedAt, err = nullTime(ended); err != nil {
@@ -526,7 +526,7 @@ func scanMessage(s scanner) (*Message, error) {
 	}
 	m.Terminal = terminal != 0
 	var err error
-	if m.CreatedAt, err = time.Parse(time.RFC3339Nano, created); err != nil {
+	if m.CreatedAt, err = parseStored(created); err != nil {
 		return nil, fmt.Errorf("message %s has an unreadable created_at: %w", m.ID, err)
 	}
 	return &m, nil
@@ -572,7 +572,7 @@ func (db *DB) ListPendingApprovals(ctx context.Context, projectID string) ([]App
 			a.Note = &note.String
 		}
 		var err error
-		if a.CreatedAt, err = time.Parse(time.RFC3339Nano, created); err != nil {
+		if a.CreatedAt, err = parseStored(created); err != nil {
 			return nil, err
 		}
 		out = append(out, a)
@@ -772,7 +772,7 @@ func scanClarification(s scanner) (*Clarification, error) {
 		c.Answer = &answer.String
 	}
 	var err error
-	if c.CreatedAt, err = time.Parse(time.RFC3339Nano, created); err != nil {
+	if c.CreatedAt, err = parseStored(created); err != nil {
 		return nil, err
 	}
 	if c.AnsweredAt, err = nullTime(answered); err != nil {
@@ -900,7 +900,7 @@ func (db *DB) TaskHistory(ctx context.Context, taskID string) ([]Handoff, error)
 		if err := rows.Scan(&h.From, &h.To, &h.Kind, &h.Commit, &h.Body, &at, &final); err != nil {
 			return nil, err
 		}
-		h.At, err = time.Parse(time.RFC3339Nano, at)
+		h.At, err = parseStored(at)
 		if err != nil {
 			return nil, fmt.Errorf("handoff has an unparseable timestamp %q: %w", at, err)
 		}
@@ -940,7 +940,7 @@ func (db *DB) GetApproval(ctx context.Context, id string) (*Approval, error) {
 	if note.Valid {
 		a.Note = &note.String
 	}
-	if a.CreatedAt, err = time.Parse(time.RFC3339Nano, created); err != nil {
+	if a.CreatedAt, err = parseStored(created); err != nil {
 		return nil, err
 	}
 	return &a, nil
@@ -1346,7 +1346,7 @@ func (db *DB) TaskTrail(ctx context.Context, taskID string) ([]TrailStep, error)
 			&granted, &gateID, &gateState, &gateNote, &gateCreated, &gateDecided); err != nil {
 			return nil, err
 		}
-		if s.At, err = time.Parse(time.RFC3339Nano, createdAt); err != nil {
+		if s.At, err = parseStored(createdAt); err != nil {
 			return nil, fmt.Errorf("handoff has an unreadable timestamp %q: %w", createdAt, err)
 		}
 		s.Final = final != 0
@@ -1361,7 +1361,7 @@ func (db *DB) TaskTrail(ctx context.Context, taskID string) ([]TrailStep, error)
 		}
 		if gateID.Valid {
 			gate := TrailGate{ID: gateID.String, State: gateState.String, Note: gateNote.String}
-			if gate.CreatedAt, err = time.Parse(time.RFC3339Nano, gateCreated.String); err != nil {
+			if gate.CreatedAt, err = parseStored(gateCreated.String); err != nil {
 				return nil, fmt.Errorf("approval has an unreadable timestamp: %w", err)
 			}
 			if gate.DecidedAt, err = nullTime(gateDecided); err != nil {
@@ -1433,7 +1433,7 @@ func (db *DB) attachTurns(ctx context.Context, taskID string, steps []TrailStep)
 		if err := rows.Scan(&role, &ts, &tokens, &cost); err != nil {
 			return err
 		}
-		at, err := time.Parse(time.RFC3339Nano, ts)
+		at, err := parseStored(ts)
 		if err != nil {
 			return fmt.Errorf("a turn has an unreadable timestamp %q: %w", ts, err)
 		}

@@ -214,10 +214,10 @@ func scanChat(s scanner) (*Chat, error) {
 		return nil, err
 	}
 	var err error
-	if c.CreatedAt, err = time.Parse(time.RFC3339Nano, created); err != nil {
+	if c.CreatedAt, err = parseStored(created); err != nil {
 		return nil, fmt.Errorf("conversation %s has an unreadable created_at: %w", c.ID, err)
 	}
-	if c.LastUsedAt, err = time.Parse(time.RFC3339Nano, lastUsed); err != nil {
+	if c.LastUsedAt, err = parseStored(lastUsed); err != nil {
 		return nil, fmt.Errorf("conversation %s has an unreadable last_used_at: %w", c.ID, err)
 	}
 	return &c, nil

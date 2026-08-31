@@ -940,3 +940,68 @@ func TestOptionsThatCannotBeChosenBetweenAreRefused(t *testing.T) {
 		t.Errorf("%d refused question(s) reached the operator anyway", len(open))
 	}
 }
+
+// A timestamp somebody wrote by hand must not take the panel down with it.
+//
+// A real database had one: a question cancelled at a sqlite3 prompt, its
+// answered_at left in SQLite's own format by `datetime('now')`. Reading is
+// strict about the format it writes, and a listing fails whole, so that one
+// row emptied every open question in the project rather than only itself.
+func TestAHandPatchedTimestampDoesNotEmptyTheQueue(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+
+	p, err := db.CreateProject(ctx, t.TempDir(), "calc", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.AskClarification(ctx, p.ID, "coder", "which range?", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.sql.ExecContext(ctx,
+		`INSERT INTO clarifications (id, project_id, role, question, state, created_at, answered_at)
+		 VALUES ('patched', ?, 'coder', 'which app?', 'open', datetime('now'), datetime('now'))`,
+		p.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	open, err := db.ListOpenClarifications(ctx, p.ID)
+	if err != nil {
+		t.Fatalf("ListOpenClarifications: %v", err)
+	}
+	if len(open) != 2 {
+		t.Errorf("%d question(s) reached the operator, want both", len(open))
+	}
+
+	patched, err := db.GetClarification(ctx, "patched")
+	if err != nil {
+		t.Fatalf("GetClarification: %v", err)
+	}
+	// datetime('now') is UTC and carries no zone, so that is how it reads back.
+	if patched.CreatedAt.Location() != time.UTC || patched.CreatedAt.IsZero() {
+		t.Errorf("created at %v, want a UTC time", patched.CreatedAt)
+	}
+	if patched.AnsweredAt == nil {
+		t.Error("the hand-written answered_at read back as nothing")
+	}
+}
+
+// A value that is not a timestamp at all still says so, rather than reading
+// back as the zero time and dating a question to year one.
+func TestAnUnreadableTimestampIsStillAnError(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+
+	p, err := db.CreateProject(ctx, t.TempDir(), "calc", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.sql.ExecContext(ctx,
+		`INSERT INTO clarifications (id, project_id, role, question, state, created_at)
+		 VALUES ('junk', ?, 'coder', 'which?', 'open', 'yesterday')`, p.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.GetClarification(ctx, "junk"); err == nil {
+		t.Error("a question dated \"yesterday\" was read without complaint")
+	}
+}
