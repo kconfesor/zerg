@@ -10,17 +10,23 @@
  * other screen opens with a title, a sentence, and a row of small facts, so the
  * board was the one page that looked like it came from another product.
  *
- * The facts have not changed. They are written the way this app writes figures
- * everywhere else — number, then a lowercase word, separated by middots, the
- * way a task's turns and tokens and cost are written — and they sit in the meta
- * row that every other header already has.
+ * What is left is written the way this app writes figures everywhere else —
+ * number, then a lowercase word, separated by middots, the way a task's turns
+ * and tokens and cost are written — and it sits in the meta row that every
+ * other header already has.
  *
- * Spend is deliberately not among them. It is the one figure that matters
- * whatever you are looking at, so it lives in the bar that is on every screen;
- * here it was visible only while already reading the board.
+ * What is left is also only what the board cannot say itself. Open, working and
+ * done were three ways of counting cards that are on screen underneath: the
+ * lane headers carry a count each, and done is a lane. A summary that restates
+ * the thing it sits above is furniture. Hidden cards are the opposite — they
+ * are the ones not on the board — and the checkouts are not on it at all.
+ *
+ * Spend is deliberately not among them either. It is the one figure that
+ * matters whatever you are looking at, so it lives in the bar that is on every
+ * screen; here it was visible only while already reading the board.
  */
 import { computed } from 'vue'
-import { FolderGit2, GitBranch, HardDrive } from '@lucide/vue'
+import { EyeOff, FolderGit2, GitBranch, HardDrive } from '@lucide/vue'
 import PageHeader from '@/components/layout/PageHeader.vue'
 import type { Project, Task, Workspace } from '@/lib/api'
 
@@ -30,13 +36,9 @@ const props = defineProps<{
   workspace: Workspace | null
 }>()
 
-const stats = computed(() => {
-  const total = props.tasks.length
-  const working = props.tasks.filter((t) => t.state === 'working').length
-  const hidden = props.tasks.filter((t) => t.hidden).length
-  const done = props.tasks.filter((t) => t.state === 'done').length
-  return { total, working, hidden, done, open: total - done }
-})
+/** Cards that are put away, which is the one count the board cannot show:
+ *  they are the cards it is not showing. */
+const hidden = computed(() => props.tasks.filter((t) => t.hidden).length)
 
 /** Bytes as something a person reads, not a number they convert. */
 function size(bytes: number): string {
@@ -64,28 +66,14 @@ function size(bytes: number): string {
         {{ project.baseBranch }}
       </span>
 
-      <!-- The counts, as one fact rather than four tiles. Middot-separated
-           figures with the word after the number is how a task writes its
-           turns, its tokens and its cost, and this is the same kind of
-           sentence about a different subject.
-
-           Working takes the accent when it is not zero: it is the only one of
-           these that means something is happening right now, and the only one
-           worth catching an eye that is looking at the columns instead. -->
-      <span class="text-muted-foreground tabular flex items-center gap-1.5 text-[11px]">
-        {{ stats.open }} open
-        <span aria-hidden="true">·</span>
-        <span :class="stats.working ? 'text-[var(--primary)] font-medium' : ''">
-          {{ stats.working }} working
-        </span>
-        <span aria-hidden="true">·</span>
-        {{ stats.done }} done
-        <!-- Only when there are any: a zero here describes a control that is
-             not on screen, since the toggle that reveals them is hidden too. -->
-        <template v-if="stats.hidden">
-          <span aria-hidden="true">·</span>
-          {{ stats.hidden }} hidden
-        </template>
+      <!-- Only when there are any: a zero here describes a control that is not
+           on screen either, since the toggle that reveals them is hidden too. -->
+      <span
+        v-if="hidden"
+        class="text-muted-foreground tabular flex items-center gap-1.5 text-[11px]"
+      >
+        <EyeOff :size="11" class="shrink-0" aria-hidden="true" />
+        {{ hidden }} hidden
       </span>
 
       <span
