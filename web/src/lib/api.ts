@@ -348,6 +348,12 @@ export interface Clarification {
   taskId?: string
   role: string
   question: string
+  /**
+   * The answers the agent worked out for itself. Absent is the question
+   * answered in prose, which is what every question was before agents could
+   * offer a choice, and the panel draws the two differently.
+   */
+  options?: string[]
   state: string
   createdAt: string
 }

@@ -19,6 +19,10 @@ import ReviewThreadView from '@/components/ReviewThread.vue'
 import Artifacts from '@/components/Artifacts.vue'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
+import { Label } from '@/components/ui/label'
+import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
+import { Textarea } from '@/components/ui/textarea'
 import {
   InputGroup,
   InputGroupAddon,
@@ -796,6 +800,47 @@ async function toggleDiff(id: string) {
 const notes = ref<Record<string, string>>({})
 const answers = ref<Record<string, string>>({})
 
+/**
+ * The value of the "Something else" radio.
+ *
+ * A sentinel rather than an index or a null, because the radio group's value
+ * is the answer that gets posted: picking an option means the operator sends
+ * that option's text verbatim, which is the whole point of offering them. The
+ * sentinel is a control character no agent writes into an answer it expects a
+ * person to read.
+ */
+const somethingElse = '\u0000something-else'
+
+/** Which radio is selected, per question. */
+const picked = ref<Record<string, string>>({})
+
+/** Which questions have their answer form open. */
+const questionOpen = ref<Record<string, boolean>>({})
+
+/**
+ * What answering this question would send: the chosen option verbatim, or what
+ * was typed under "Something else". A question with no options is the free-text
+ * one, and that is the box.
+ */
+function chosen(c: { id: string; options?: string[] }): string {
+  const pick = picked.value[c.id]
+  if (c.options?.length && pick && pick !== somethingElse) return pick
+  return (answers.value[c.id] ?? '').trim()
+}
+
+/**
+ * Answering runs one request, and a question that is still on screen with an
+ * empty box is one press away from posting nothing.
+ */
+function canAnswer(c: { id: string; options?: string[] }): boolean {
+  return !answering(c.id) && chosen(c) !== ''
+}
+
+function submit(c: { id: string; options?: string[] }): void {
+  if (!canAnswer(c)) return
+  emit('answer', c.id, chosen(c))
+}
+
 function empty(a: Attention | null): boolean {
   if (!a) return true
   return !a.approvals.length && !a.clarifications.length && !a.rework.tasks.length
@@ -1376,24 +1421,96 @@ function empty(a: Attention | null): boolean {
            question into a wall. The renderer escapes before it builds any tag,
            so nothing an agent read out of the repository becomes markup. -->
       <div class="md mb-2.5 min-w-0 overflow-x-auto text-xs leading-relaxed break-words" v-html="renderMarkdown(c.question)" />
-      <InputGroup>
-        <InputGroupInput
-          v-model="answers[c.id]"
-          placeholder="your answer"
-          :disabled="answering(c.id)"
-          @keyup.enter="emit('answer', c.id, answers[c.id] ?? '')"
-        />
-        <InputGroupAddon align="inline-end">
-          <InputGroupButton
-            variant="default"
-            size="sm"
+
+      <!-- A question the agent already worked the answers out for. The
+           question itself stays visible: the panel exists to say what is
+           blocked, and a card that has to be opened before it says what is
+           being asked answers a different question than the bell asked. Only
+           the form is behind the click. -->
+      <Collapsible v-if="c.options?.length" v-model:open="questionOpen[c.id]">
+        <CollapsibleTrigger as-child>
+          <Button variant="outline" size="sm" class="h-7 gap-1 text-[11px]">
+            <ChevronRight
+              class="size-3 transition-transform"
+              :class="questionOpen[c.id] && 'rotate-90'"
+              aria-hidden="true"
+            />
+            Answer
+            <span class="text-muted-foreground">
+              · {{ c.options.length }} option{{ c.options.length === 1 ? '' : 's' }}
+            </span>
+          </Button>
+        </CollapsibleTrigger>
+        <CollapsibleContent>
+          <RadioGroup v-model="picked[c.id]" class="mt-2.5 gap-2">
+            <div v-for="(o, i) in c.options" :key="o" class="flex items-start gap-2">
+              <RadioGroupItem
+                :id="`${c.id}-o${i}`"
+                :value="o"
+                :disabled="answering(c.id)"
+                class="mt-0.5"
+              />
+              <Label :for="`${c.id}-o${i}`" class="text-xs leading-relaxed font-normal break-words">
+                {{ o }}
+              </Label>
+            </div>
+            <!-- The options are the agent's guess at the decision, and it is
+                 sometimes wrong. Without this the operator's only way to say
+                 so is to pick the nearest one. -->
+            <div class="flex items-start gap-2">
+              <RadioGroupItem
+                :id="`${c.id}-other`"
+                :value="somethingElse"
+                :disabled="answering(c.id)"
+                class="mt-0.5"
+              />
+              <Label
+                :for="`${c.id}-other`"
+                class="text-muted-foreground text-xs leading-relaxed font-normal"
+              >
+                Something else
+              </Label>
+            </div>
+          </RadioGroup>
+          <Textarea
+            v-if="picked[c.id] === somethingElse"
+            v-model="answers[c.id]"
+            rows="3"
+            class="mt-2 text-xs leading-relaxed"
+            placeholder="your answer"
             :disabled="answering(c.id)"
-            @click="emit('answer', c.id, answers[c.id] ?? '')"
+            @keydown.enter.meta.prevent="submit(c)"
+            @keydown.enter.ctrl.prevent="submit(c)"
+          />
+          <Button
+            size="sm"
+            class="mt-2 h-7 text-[11px]"
+            :disabled="!canAnswer(c)"
+            @click="submit(c)"
           >
             Answer
-          </InputGroupButton>
-        </InputGroupAddon>
-      </InputGroup>
+          </Button>
+        </CollapsibleContent>
+      </Collapsible>
+
+      <!-- A question with nothing to choose from. A textarea rather than the
+           one-line input it used to be: an answer worth typing is a sentence,
+           and reading it back in a box that shows six words of it is how you
+           send half of one. -->
+      <template v-else>
+        <Textarea
+          v-model="answers[c.id]"
+          rows="3"
+          class="text-xs leading-relaxed"
+          placeholder="your answer"
+          :disabled="answering(c.id)"
+          @keydown.enter.meta.prevent="submit(c)"
+          @keydown.enter.ctrl.prevent="submit(c)"
+        />
+        <Button size="sm" class="mt-2 h-7 text-[11px]" :disabled="!canAnswer(c)" @click="submit(c)">
+          Answer
+        </Button>
+      </template>
     </article>
 
     <!-- Cards going in circles. Informational: rework is legitimate, and

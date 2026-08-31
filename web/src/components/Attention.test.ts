@@ -345,3 +345,86 @@ describe('merge readiness', () => {
     expect(w.text()).toContain('has moved 6')
   })
 })
+
+// A question with options the agent worked out itself.
+//
+// The operator used to read the choices as prose and retype one into a
+// one-line box, which is where an answer stops matching what was offered: an
+// agent looking for one of three names gets a paraphrase, or a typo.
+describe('a question that is a choice', () => {
+  const asking = (options?: string[]): AttentionData => ({
+    approvals: [],
+    clarifications: [
+      {
+        id: 'c1',
+        taskId: 't1',
+        role: 'coder',
+        question: 'Where does the session live?',
+        options,
+        state: 'open',
+        createdAt: '2026-01-01T00:00:00Z',
+      },
+    ],
+    rework: { threshold: 3, tasks: [] },
+  })
+
+  const both = ['Redis, shared across instances', 'A signed cookie, no server state']
+
+  const expand = async (w: ReturnType<typeof mount>) => {
+    const trigger = w.findAll('button').find((b) => b.text().startsWith('Answer'))!
+    await trigger.trigger('click')
+    await flushPromises()
+    return trigger
+  }
+
+  it('says what is being asked before anything is clicked, and how many answers there are', () => {
+    const w = mount(Attention, { props: { attention: asking(both) } })
+    expect(w.text()).toContain('Where does the session live?')
+    expect(w.text()).toContain('2 options')
+    // The form is behind the click; the question is not.
+    expect(w.text()).not.toContain('Redis, shared across instances')
+  })
+
+  it('sends the option that was picked, verbatim', async () => {
+    const w = mount(Attention, { props: { attention: asking(both) } })
+    await expand(w)
+
+    expect(w.text()).toContain('A signed cookie, no server state')
+    const radios = w.findAll('[data-slot="radio-group-item"]')
+    // Two options and Something else.
+    expect(radios).toHaveLength(3)
+    await radios[1].trigger('click')
+
+    const answer = w.findAll('button').find((b) => b.text() === 'Answer')!
+    await answer.trigger('click')
+    expect(w.emitted('answer')).toEqual([['c1', 'A signed cookie, no server state']])
+  })
+
+  it('takes an answer the agent did not think of', async () => {
+    const w = mount(Attention, { props: { attention: asking(both) } })
+    await expand(w)
+
+    // Nothing picked yet is nothing to send.
+    expect(w.findAll('button').find((b) => b.text() === 'Answer')!.attributes('disabled')).toBeDefined()
+
+    const radios = w.findAll('[data-slot="radio-group-item"]')
+    await radios[2].trigger('click')
+    const box = w.find('textarea')
+    await box.setValue('Postgres, we already run one')
+
+    await w.findAll('button').find((b) => b.text() === 'Answer')!.trigger('click')
+    expect(w.emitted('answer')).toEqual([['c1', 'Postgres, we already run one']])
+  })
+
+  it('is still a box to write in when the agent offered nothing', async () => {
+    const w = mount(Attention, { props: { attention: asking(undefined) } })
+    // No disclosure to open: there is nothing behind it.
+    expect(w.text()).not.toContain('option')
+    const box = w.find('textarea')
+    expect(box.exists()).toBe(true)
+
+    await box.setValue('between 0 and 100')
+    await w.findAll('button').find((b) => b.text() === 'Answer')!.trigger('click')
+    expect(w.emitted('answer')).toEqual([['c1', 'between 0 and 100']])
+  })
+})

@@ -97,6 +97,8 @@ func runAsk(args []string) error {
 	fs := flag.NewFlagSet("ask", flag.ContinueOnError)
 	task := fs.String("task", "", "the task the question is about")
 	wait := fs.Duration("wait", 10*time.Minute, "how long to wait for an answer")
+	var options optionList
+	fs.Var(&options, "option", "an answer to offer; repeat it, once per option")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -111,11 +113,23 @@ func runAsk(args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), *wait+30*time.Second)
 	defer cancel()
 
-	answer, err := client.Ask(ctx, fs.Arg(0), *task, *wait)
+	answer, err := client.Ask(ctx, fs.Arg(0), *task, options, *wait)
 	if err != nil {
 		return err
 	}
 	return printJSON(answer)
+}
+
+// optionList collects a repeated --option. A repeated flag rather than one
+// comma-separated string: an option is a sentence a person reads off a screen,
+// and it can legitimately contain a comma.
+type optionList []string
+
+func (o *optionList) String() string { return strings.Join(*o, ", ") }
+
+func (o *optionList) Set(v string) error {
+	*o = append(*o, v)
+	return nil
 }
 
 func printJSON(v any) error {

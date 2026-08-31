@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"slices"
@@ -136,12 +137,12 @@ func TestDeletingACardRemovesItsQuestions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.AskClarification(ctx, p.ID, "coder", "which range?", &task.ID); err != nil {
+	if _, err := db.AskClarification(ctx, p.ID, "coder", "which range?", nil, &task.ID); err != nil {
 		t.Fatal(err)
 	}
 	// One asked about no card at all, which `zerg ask` allows and which must
 	// survive: it is not this card's, so it is not this card's to take.
-	if _, err := db.AskClarification(ctx, p.ID, "coder", "unrelated", nil); err != nil {
+	if _, err := db.AskClarification(ctx, p.ID, "coder", "unrelated", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -175,7 +176,7 @@ func TestStoppingACardCancelsItsQuestions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.AskClarification(ctx, p.ID, "coder", "which range?", &task.ID); err != nil {
+	if _, err := db.AskClarification(ctx, p.ID, "coder", "which range?", nil, &task.ID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -800,5 +801,142 @@ func TestSkipComesBackFromEveryQueryThatReadsACard(t *testing.T) {
 		t.Fatal(err)
 	} else if again.Skip != nil {
 		t.Errorf("skip = %v on a card that skips nothing, want nil", again.Skip)
+	}
+}
+
+// Options are the agent's own enumeration of the answers, and they have to
+// survive the round trip intact: the operator picks one and the answer comes
+// back as that text, so an option that is reordered, trimmed away or merged
+// with its neighbour is an answer the agent cannot match to what it offered.
+func TestAQuestionCarriesTheOptionsItOffered(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+
+	p, err := db.CreateProject(ctx, t.TempDir(), "calc", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	offered := []string{"Redis, shared across instances", "A signed cookie, no server state"}
+	asked, err := db.AskClarification(ctx, p.ID, "coder", "Where does the session live?", offered, nil)
+	if err != nil {
+		t.Fatalf("AskClarification: %v", err)
+	}
+
+	if !slices.Equal(asked.Options, offered) {
+		t.Errorf("the row it returned has options %q, want %q", asked.Options, offered)
+	}
+
+	read, err := db.GetClarification(ctx, asked.ID)
+	if err != nil {
+		t.Fatalf("GetClarification: %v", err)
+	}
+	if !slices.Equal(read.Options, offered) {
+		t.Errorf("read back options %q, want %q", read.Options, offered)
+	}
+
+	open, err := db.ListOpenClarifications(ctx, p.ID)
+	if err != nil {
+		t.Fatalf("ListOpenClarifications: %v", err)
+	}
+	if len(open) != 1 || !slices.Equal(open[0].Options, offered) {
+		t.Errorf("Attention sees %+v, want the options the agent offered", open)
+	}
+
+	// The answer is one of them verbatim, and stays a plain string: an agent
+	// written before options existed reads the same shape it always read.
+	if err := db.AnswerClarification(ctx, asked.ID, offered[1]); err != nil {
+		t.Fatalf("AnswerClarification: %v", err)
+	}
+	answered, err := db.GetClarification(ctx, asked.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if answered.Answer == nil || *answered.Answer != offered[1] {
+		t.Errorf("answer is %v, want the option that was chosen", answered.Answer)
+	}
+	if !slices.Equal(answered.Options, offered) {
+		t.Errorf("answering lost the options: %q", answered.Options)
+	}
+}
+
+// A question with nothing to choose from is the free-text one this started as,
+// and is what every row written before schema 34 reads back as. The column is
+// NULL there, not '[]', because it is what tells the cockpit which of the two
+// shapes to draw.
+func TestAQuestionWithoutOptionsStaysFreeText(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+
+	p, err := db.CreateProject(ctx, t.TempDir(), "calc", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	asked, err := db.AskClarification(ctx, p.ID, "coder", "what is the range?", nil, nil)
+	if err != nil {
+		t.Fatalf("AskClarification: %v", err)
+	}
+	if asked.Options != nil {
+		t.Errorf("options are %q, want none", asked.Options)
+	}
+
+	var stored sql.NullString
+	if err := db.sql.QueryRowContext(ctx,
+		`SELECT options FROM clarifications WHERE id = ?`, asked.ID).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored.Valid {
+		t.Errorf("stored options are %q, want NULL", stored.String)
+	}
+
+	read, err := db.GetClarification(ctx, asked.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if read.Options != nil {
+		t.Errorf("read back options %q from a question that offered none", read.Options)
+	}
+}
+
+// The agent's own mistakes, caught where they can still be reported to it: an
+// option that is blank, or the same as another, is a radio button the operator
+// cannot tell from its neighbour, and each of these is a 400 naming the fix.
+func TestOptionsThatCannotBeChosenBetweenAreRefused(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+
+	p, err := db.CreateProject(ctx, t.TempDir(), "calc", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	many := make([]string, maxClarificationOptions+1)
+	for i := range many {
+		many[i] = fmt.Sprintf("option %d", i)
+	}
+
+	for _, c := range []struct {
+		name    string
+		options []string
+	}{
+		{"an empty option", []string{"Redis", ""}},
+		{"whitespace only", []string{"Redis", "   "}},
+		{"the same option twice", []string{"Redis", "Redis"}},
+		{"the same option after trimming", []string{"Redis", " Redis "}},
+		{"more options than anyone reads", many},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := db.AskClarification(ctx, p.ID, "coder", "which?", c.options, nil)
+			var v *ValidationError
+			if !errors.As(err, &v) {
+				t.Fatalf("got %v, want a validation error the API renders as 400", err)
+			}
+		})
+	}
+
+	open, err := db.ListOpenClarifications(ctx, p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(open) != 0 {
+		t.Errorf("%d refused question(s) reached the operator anyway", len(open))
 	}
 }

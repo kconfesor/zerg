@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -293,12 +294,63 @@ func TestAskRecordsAQuestionAndReceivesAnAnswer(t *testing.T) {
 		}
 	}()
 
-	answer, err := f.client(t, "coder").Ask(ctx, "should this be idempotent?", "", 5*time.Second)
+	answer, err := f.client(t, "coder").Ask(ctx, "should this be idempotent?", "", nil, 5*time.Second)
 	if err != nil {
 		t.Fatalf("Ask: %v", err)
 	}
 	if !answer.Answered || answer.Answer != "yes, make it idempotent" {
 		t.Errorf("got %+v, want the operator's answer", answer)
+	}
+}
+
+// An agent that already knows the answers offers them, and gets back the text
+// of the one that was chosen. Matching the answer against what was offered is
+// the whole point: before this the operator retyped it, and "the API" came
+// back as "the api", or a paraphrase, or a typo.
+func TestAskOffersOptionsAndReturnsTheChosenOne(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+
+	offered := []string{"admin", "customer", "the API"}
+	go func() {
+		for i := 0; i < 40; i++ {
+			open, err := f.db.ListOpenClarifications(ctx, f.project.ID)
+			if err == nil && len(open) > 0 {
+				if !slices.Equal(open[0].Options, offered) {
+					t.Errorf("the operator was offered %q, want %q", open[0].Options, offered)
+				}
+				// What the cockpit posts when the third radio is picked.
+				_ = f.db.AnswerClarification(ctx, open[0].ID, open[0].Options[2])
+				return
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	}()
+
+	answer, err := f.client(t, "coder").Ask(ctx, "which of these should I serve?", "", offered, 5*time.Second)
+	if err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	if !answer.Answered || answer.Answer != "the API" {
+		t.Errorf("got %+v, want the option that was chosen, verbatim", answer)
+	}
+}
+
+// Options an operator cannot choose between are the agent's mistake, and it is
+// told so rather than having the question filed anyway.
+func TestAskRefusesOptionsThatCannotBeChosenBetween(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+
+	if _, err := f.client(t, "coder").Ask(ctx, "which?", "", []string{"Redis", "Redis"}, 0); err == nil {
+		t.Error("a question offering the same option twice was accepted")
+	}
+	open, err := f.db.ListOpenClarifications(ctx, f.project.ID)
+	if err != nil {
+		t.Fatalf("ListOpenClarifications: %v", err)
+	}
+	if len(open) != 0 {
+		t.Errorf("%d refused question(s) reached the operator anyway", len(open))
 	}
 }
 
@@ -308,7 +360,7 @@ func TestAskReturnsPendingRatherThanHanging(t *testing.T) {
 	ctx := context.Background()
 	f := newFixture(t)
 
-	answer, err := f.client(t, "coder").Ask(ctx, "is anyone there?", "", 0)
+	answer, err := f.client(t, "coder").Ask(ctx, "is anyone there?", "", nil, 0)
 	if err != nil {
 		t.Fatalf("Ask: %v", err)
 	}
@@ -424,7 +476,7 @@ func TestAnAgentCannotNameAnotherProjectsTask(t *testing.T) {
 	if _, err := c.Send(ctx, SendArgs{To: "reviewer", Kind: "note", TaskID: foreign.ID, Body: "x"}); err == nil {
 		t.Error("send accepted a task id from another project")
 	}
-	if _, err := c.Ask(ctx, "which one?", foreign.ID, 0); err == nil {
+	if _, err := c.Ask(ctx, "which one?", foreign.ID, nil, 0); err == nil {
 		t.Error("ask accepted a task id from another project")
 	}
 

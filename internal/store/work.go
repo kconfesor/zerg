@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -590,35 +591,90 @@ const (
 
 // Clarification is an agent's question waiting on a human.
 type Clarification struct {
-	ID         string     `json:"id"`
-	ProjectID  string     `json:"projectId"`
-	TaskID     *string    `json:"taskId,omitempty"`
-	Role       string     `json:"role"`
-	Question   string     `json:"question"`
+	ID        string  `json:"id"`
+	ProjectID string  `json:"projectId"`
+	TaskID    *string `json:"taskId,omitempty"`
+	Role      string  `json:"role"`
+	Question  string  `json:"question"`
+	// Options the agent worked out itself, for a question that is a choice.
+	// Empty is the free-text question this started as, and is what every row
+	// written before 034 reads back as.
+	Options    []string   `json:"options,omitempty"`
 	Answer     *string    `json:"answer,omitempty"`
 	State      string     `json:"state"`
 	CreatedAt  time.Time  `json:"createdAt"`
 	AnsweredAt *time.Time `json:"answeredAt,omitempty"`
 }
 
-// AskClarification records a question and returns it.
-func (db *DB) AskClarification(ctx context.Context, projectID, role, question string, taskID *string) (*Clarification, error) {
+// maxClarificationOptions is where a choice stops being one. Ten radio
+// buttons is already a lot to read on a phone, which is where approvals and
+// questions actually get answered, and an agent offering more than that has
+// not narrowed the decision down for anybody.
+const maxClarificationOptions = 10
+
+// AskClarification records a question, with the options it offers, and
+// returns it. No options is a question answered in prose, which is every
+// question asked before this was possible.
+func (db *DB) AskClarification(ctx context.Context, projectID, role, question string, options []string, taskID *string) (*Clarification, error) {
 	if question == "" {
 		return nil, invalid("a clarification needs a question")
 	}
+	options, err := checkOptions(options)
+	if err != nil {
+		return nil, err
+	}
 	c := &Clarification{
 		ID: NewID(), ProjectID: projectID, TaskID: taskID, Role: role,
-		Question: question, State: ClarificationOpen, CreatedAt: time.Now().UTC(),
+		Question: question, Options: options, State: ClarificationOpen,
+		CreatedAt: time.Now().UTC(),
 	}
-	_, err := db.sql.ExecContext(ctx,
-		`INSERT INTO clarifications (id, project_id, task_id, role, question, state, created_at)
-		 VALUES (?,?,?,?,?,?,?)`,
-		c.ID, c.ProjectID, c.TaskID, c.Role, c.Question, c.State,
+	// NULL, not '[]', for a question with nothing to choose from: the column
+	// is what tells the cockpit which of the two shapes to draw.
+	var stored any
+	if len(options) > 0 {
+		encoded, err := json.Marshal(options)
+		if err != nil {
+			return nil, fmt.Errorf("encoding a question's options: %w", err)
+		}
+		stored = string(encoded)
+	}
+	_, err = db.sql.ExecContext(ctx,
+		`INSERT INTO clarifications (id, project_id, task_id, role, question, options, state, created_at)
+		 VALUES (?,?,?,?,?,?,?,?)`,
+		c.ID, c.ProjectID, c.TaskID, c.Role, c.Question, stored, c.State,
 		c.CreatedAt.Format(time.RFC3339Nano))
 	if err != nil {
 		return nil, fmt.Errorf("recording clarification: %w", err)
 	}
 	return c, nil
+}
+
+// checkOptions is the agent's own mistakes, caught where they can still be
+// reported to it: these are 400s naming what to fix, not faults. An option
+// that is blank, or the same as another, is a radio button the operator
+// cannot tell apart from its neighbour once it reaches the panel.
+func checkOptions(options []string) ([]string, error) {
+	if len(options) == 0 {
+		return nil, nil
+	}
+	if len(options) > maxClarificationOptions {
+		return nil, invalid("a question can offer at most %d options; this one offers %d",
+			maxClarificationOptions, len(options))
+	}
+	out := make([]string, 0, len(options))
+	seen := make(map[string]bool, len(options))
+	for _, o := range options {
+		o = strings.TrimSpace(o)
+		if o == "" {
+			return nil, invalid("an option cannot be empty")
+		}
+		if seen[o] {
+			return nil, invalid("option %q is offered twice", o)
+		}
+		seen[o] = true
+		out = append(out, o)
+	}
+	return out, nil
 }
 
 // AnswerClarification records a human's answer.
@@ -637,7 +693,7 @@ func (db *DB) AnswerClarification(ctx context.Context, id, answer string) error 
 // GetClarification reads one question and whatever answer it has.
 func (db *DB) GetClarification(ctx context.Context, id string) (*Clarification, error) {
 	row := db.read.QueryRowContext(ctx,
-		`SELECT id, project_id, task_id, role, question, answer, state, created_at, answered_at
+		`SELECT id, project_id, task_id, role, question, options, answer, state, created_at, answered_at
 		 FROM clarifications WHERE id = ?`, id)
 	c, err := scanClarification(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -650,7 +706,7 @@ func (db *DB) GetClarification(ctx context.Context, id string) (*Clarification, 
 // not, oldest first. The trail reads these; Attention reads the open ones.
 func (db *DB) ClarificationsForTask(ctx context.Context, taskID string) ([]Clarification, error) {
 	rows, err := db.read.QueryContext(ctx,
-		`SELECT id, project_id, task_id, role, question, answer, state, created_at, answered_at
+		`SELECT id, project_id, task_id, role, question, options, answer, state, created_at, answered_at
 		 FROM clarifications WHERE task_id = ? ORDER BY created_at`, taskID)
 	if err != nil {
 		return nil, fmt.Errorf("listing a task's clarifications: %w", err)
@@ -671,7 +727,7 @@ func (db *DB) ClarificationsForTask(ctx context.Context, taskID string) ([]Clari
 // ListOpenClarifications returns what Attention must show.
 func (db *DB) ListOpenClarifications(ctx context.Context, projectID string) ([]Clarification, error) {
 	rows, err := db.read.QueryContext(ctx,
-		`SELECT id, project_id, task_id, role, question, answer, state, created_at, answered_at
+		`SELECT id, project_id, task_id, role, question, options, answer, state, created_at, answered_at
 		 FROM clarifications WHERE project_id = ? AND state = ? ORDER BY created_at`,
 		projectID, ClarificationOpen)
 	if err != nil {
@@ -694,16 +750,23 @@ func scanClarification(s scanner) (*Clarification, error) {
 	var (
 		c        Clarification
 		taskID   sql.NullString
+		options  sql.NullString
 		answer   sql.NullString
 		created  string
 		answered sql.NullString
 	)
 	if err := s.Scan(&c.ID, &c.ProjectID, &taskID, &c.Role, &c.Question,
-		&answer, &c.State, &created, &answered); err != nil {
+		&options, &answer, &c.State, &created, &answered); err != nil {
 		return nil, err
 	}
 	if taskID.Valid {
 		c.TaskID = &taskID.String
+	}
+	if options.Valid && options.String != "" {
+		if err := json.Unmarshal([]byte(options.String), &c.Options); err != nil {
+			return nil, fmt.Errorf("clarification %s has unreadable options %q: %w",
+				c.ID, options.String, err)
+		}
 	}
 	if answer.Valid {
 		c.Answer = &answer.String

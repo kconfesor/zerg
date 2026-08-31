@@ -71,6 +71,21 @@ card, and a question attached to nothing is one the operator has to go looking
 for. Do not guess at a requirement you could ask about, and do not write
 questions into your output hoping someone reads them.
 
+If you already know what the answers could be, offer them. Repeat
+` + "`--option`" + `, once per answer, and the operator picks one instead of retyping
+it:
+
+    zerg ask "Which store should the session live in?" --task "Login" \
+      --option "Redis, shared across instances" \
+      --option "A signed cookie, no server state"
+
+The answer comes back as the text of the option that was chosen, so you can
+compare it to what you offered. The operator can always write something else
+instead, so still read the answer rather than assuming it is one of yours.
+Offer options when the decision is a choice between things you have already
+worked out; ask in prose when you genuinely do not know the shape of the
+answer.
+
 # Ground rules
 
 - Work only inside your own worktree. Other roles have their own.
@@ -222,7 +237,8 @@ Rules:
   repository, a secret, a database, or if there are several apps and no way to
   tell which one is wanted:
 
-      zerg ask "which of these should I serve: admin, customer, or the API?"
+      zerg ask "which of these should I serve?" \
+        --option "admin" --option "customer" --option "the API"
 
   It blocks until somebody answers, and the answer is worth remembering too.
 
