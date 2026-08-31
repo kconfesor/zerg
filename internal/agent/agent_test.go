@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -586,5 +587,57 @@ func TestASkippedRoleThatIsSentToIsStillToldWhereWorkGoes(t *testing.T) {
 	}
 	if back.Terminal {
 		t.Error("terminal = true on a role the card skipped; the reviewer is still ahead of it")
+	}
+}
+
+// A card that cannot be read must not be routed as though it skipped nothing.
+//
+// describe used to drop every error from reading the task and carry on with an
+// empty skip list, which answers `next` and `terminal` from the full team: an
+// agent told to hand work to a role the card skips, or that it may finish a
+// card it may not. Neither is visible from the agent's side -- the envelope
+// looks ordinary -- so the failure is silent, and this is what keeps it gone.
+func TestAnUnreadableCardIsAnErrorRatherThanAFullTeamRoute(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+
+	task, err := f.nyd.NewTask(ctx, f.project.ID, "Fix a typo", "one line", "",
+		[]string{f.roleID(t, "reviewer")})
+	if err != nil {
+		t.Fatalf("NewTask: %v", err)
+	}
+
+	// The column, as a database error or a bad hand edit would leave it. The
+	// claim itself still works: nydus compares the skip list as an opaque
+	// string when it batches, so the fault surfaces where it is parsed.
+	if _, err := f.db.SQL().ExecContext(ctx,
+		`UPDATE tasks SET skip = ? WHERE id = ?`, "{not json", task.ID); err != nil {
+		t.Fatalf("corrupting the skip list: %v", err)
+	}
+
+	work, err := f.client(t, "coder").Next(ctx, 2*time.Second)
+	if err == nil {
+		t.Fatalf("claimed work with next=%q terminal=%v on a card that could not be read;"+
+			" an unreadable route must not fall back to the whole team", work.Next, work.Terminal)
+	}
+	if errors.Is(err, ErrNoWork) {
+		t.Fatal("reported no work; the work exists and the card behind it is unreadable")
+	}
+	if !strings.Contains(err.Error(), task.ID) {
+		t.Errorf("err = %v, want it to name the card that could not be read", err)
+	}
+
+	// Repaired, the same claim describes itself normally — so the failure above
+	// was the corrupt column and nothing else about this fixture.
+	if _, err := f.db.SQL().ExecContext(ctx,
+		`UPDATE tasks SET skip = ? WHERE id = ?`, "", task.ID); err != nil {
+		t.Fatalf("repairing the skip list: %v", err)
+	}
+	work, err = f.client(t, "coder").Next(ctx, 2*time.Second)
+	if err != nil {
+		t.Fatalf("Next after repair: %v", err)
+	}
+	if work.Next != "reviewer" {
+		t.Errorf("next = %q after repair, want reviewer", work.Next)
 	}
 }
