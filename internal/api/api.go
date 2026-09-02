@@ -185,6 +185,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/tasks/{id}/events", s.taskEvents)
 	mux.HandleFunc("PUT /api/tasks/{id}/hidden", s.setTaskHidden)
 	mux.HandleFunc("PUT /api/tasks/{id}/pinned", s.setTaskPinned)
+	mux.HandleFunc("PUT /api/tasks/{id}/supervised", s.setTaskSupervised)
 	mux.HandleFunc("POST /api/tasks/{id}/stop", s.stopTask)
 	mux.HandleFunc("DELETE /api/tasks/{id}", s.deleteTask)
 	mux.HandleFunc("GET /api/tasks/{id}/review", s.reviewThreads)
@@ -780,6 +781,9 @@ type newTaskRequest struct {
 	// always empty; it is the exception a particular card asks for, not a
 	// setting.
 	Skip []string `json:"skip"`
+	// Supervised means an architect sidecar will run this card; the land
+	// still waits for a person. See tasks.supervised.
+	Supervised bool `json:"supervised"`
 }
 
 // newTask opens a card and queues it for the first role it will visit.
@@ -792,10 +796,19 @@ func (s *Server) newTask(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	task, err := s.nyd.NewTask(r.Context(), r.PathValue("id"), req.Name, req.Body, req.Deploy, req.Skip)
+	projectID := r.PathValue("id")
+	task, err := s.nyd.NewTaskWith(r.Context(), nydus.NewTaskOpts{
+		ProjectID: projectID, Name: req.Name, Body: req.Body,
+		Deploy: req.Deploy, Skip: req.Skip, Supervised: req.Supervised,
+	})
 	if err != nil {
 		s.fail(w, r, err)
 		return
+	}
+	if req.Supervised && s.over != nil {
+		if err := s.over.SyncSupervisor(r.Context(), projectID); err != nil {
+			s.log.Warn("could not summon the architect", "project", projectID, "err", err)
+		}
 	}
 	writeJSON(w, http.StatusCreated, task)
 }
@@ -824,9 +837,18 @@ func (s *Server) attention(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
+	// Whether the architect is actually running, not just whether a card asked
+	// for one. The badge was drawn from the request alone, so a missing
+	// supervisor role or a sidecar that would not spawn read as "an architect
+	// is deciding" while nothing was.
+	supervisor := overmind.SupervisorState{}
+	if s.over != nil {
+		supervisor = s.over.SupervisorState(r.Context(), id)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"approvals":      orEmpty(approvals),
 		"clarifications": orEmpty(questions),
+		"supervisor":     supervisor,
 		"rework": map[string]any{
 			"threshold": threshold,
 			"tasks":     orEmpty(looping),
@@ -877,7 +899,7 @@ func (s *Server) answer(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, "an answer cannot be empty")
 		return
 	}
-	if err := s.db.AnswerClarification(r.Context(), r.PathValue("id"), req.Answer); err != nil {
+	if err := s.db.AnswerClarification(r.Context(), store.DecisionScope{}, r.PathValue("id"), req.Answer, ""); err != nil {
 		s.fail(w, r, err)
 		return
 	}

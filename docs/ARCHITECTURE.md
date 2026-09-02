@@ -230,8 +230,9 @@ sentences makes agents spend output tokens on telemetry.
 
 ### 4.5 The built-in library
 
-Nine templates ship, covering every team shape worth presetting, as rows in a picker rather than
-as branches of the orchestrator you have to check out to change your team.
+Nine pipeline templates ship, covering every team shape worth presetting, plus two sidecars the
+daemon starts itself (runner, supervisor), as rows in a picker rather than as branches of the
+orchestrator you have to check out to change your team.
 
 | Template | Model | Receive | Gate | Does |
 |---|---|---|---|---|
@@ -241,6 +242,7 @@ as branches of the orchestrator you have to check out to change your team.
 | `debugger` | opus | task | none | reproduces a failure, finds the cause, fixes it behind a failing test |
 | `cleaner` | sonnet | batch | none | behavior-preserving cleanup, duplication, dead code |
 | `architect` | opus | batch | none | module boundaries, dependency direction, structural drift |
+| `supervisor` | opus | task | none | **purpose=supervisor**: architect sidecar for a supervised card; not a lane |
 | `hardener` | sonnet | batch | none | edge cases, error paths, mutation-style probing |
 | `security` | opus | batch | none | input handling, secrets, dependency and injection review |
 | `docs` | sonnet | batch | none | README, API docs, changelog |
@@ -405,7 +407,7 @@ decide routing; nydus does.
 
 ### 7.2 Agent-facing protocol
 
-The agent's whole world is four verbs against a unix socket. Same binary, different subcommand, so no
+The agent's whole world is a handful of verbs against a unix socket. Same binary, different subcommand, so no
 PATH-synced script directory, no `.sh`/`.bb` wrapper pairs, no cwd inference.
 
 ```
@@ -414,6 +416,7 @@ zerg done [--result f]   ack the lease
 zerg send --to <role> --commit HEAD --task <name>
 zerg ask  "<question>" [--option "<one answer>" ...]
                          raise a clarification to the operator
+zerg approve|reject|answer   supervisor sidecar only; never the land
 ```
 
 Identity arrives as `ZERG_SOCKET` and `ZERG_TOKEN`, injected at spawn. The token is role-scoped and
@@ -718,6 +721,7 @@ tasks       (id, project_id, session_id, name, body, lane, state,
              rework_count,        -- laps backward through the pipeline
              deploy,              -- where this card's work is put when it lands; empty for most
              skip,                -- role template ids this card does not visit (§7.2); empty for most
+             supervised,          -- architect sidecar will run this card; the land still waits (§9.1)
              hidden)              -- put away by a person; §9.3
 
 messages    (id, project_id, task_id, from_role, kind, priority,
@@ -726,9 +730,10 @@ routes      (message_id, to_role, state, enqueued_at, delivered_at)  -- idempote
 leases      (id, project_id, role, granted_at, expires_at, acked_at, expired_at)
 lease_items (lease_id, message_id, to_role)   -- a batch lease covers many messages
 events      (id, project_id, task_id, role, kind, ts, text, tool, data, fatal)  -- append-only
-approvals   (id, project_id, message_id, state, note, created_at, decided_at)
+approvals   (id, project_id, message_id, state, note, created_at, decided_at, decided_by,
+             evidence_sha)       -- the commit the decider wrote the rationale into
 clarifications (id, project_id, task_id, role, question, answer, state,
-                created_at, answered_at)
+                created_at, answered_at, answered_by, evidence_sha)
 
 -- one row per model turn, not per run: this is what the cost dashboard reads
 usage_turns (id, project_id, task_id, role, ts,
@@ -772,6 +777,47 @@ different views. A handoff shows what the sender just committed. A terminal comp
 `git diff base...sha`, everything that would land across every role and every lap, since
 approving the last commit on the strength of its own diff is approving a merge by its closing
 paragraph.
+
+**A supervised card holds the terminal send even if the finisher's gate is `none`.** Default is
+coder then reviewer, both ungated, so a finished card merges unattended. The flag is on the card
+(`tasks.supervised`), not on the finishing role, because skipping that role would otherwise move
+the policy with it. Mid-pipeline gates and questions are decided by the supervisor sidecar
+(`purpose=supervisor`, not the pipeline architect); the land stays a person.
+`approvals.decided_by` records who actually clicked. A pipeline token never gains `decide`:
+empty `Can` means every *pipeline* verb, and approve is explicit.
+
+**An approval id is a name, not an authority.** It is a string handed to an agent in an envelope,
+and holding one says nothing about being allowed to act on it. The first cut looked the row up by
+id alone, which meant a leaked id decided another project's card, and a sidecar that was handed a
+decision went on making it after the operator switched supervision off, because the check ran
+where the work was *offered* rather than where it was *written*. Every agent decision now carries
+a `store.DecisionScope`, naming the project it authenticated as and the role writing it, and the
+write re-checks: the row is in that project, the card is still supervised, and the question is not one
+the decider asked itself. The operator's own path is unchanged; the cockpit is already scoped by
+its route, and this is a limit on the sidecar rather than a lock on the gate.
+
+**A decision's evidence is a sha, resolved in the decider's own worktree.** The sidecar's prompt
+says `--commit HEAD`, and `HEAD` is not a commit: it names the tip of whichever tree resolves it.
+Stored literally it is the exact failure in §6.1's table, one layer over: a link to the reasoning
+that points at a different commit in every repository that reads it. `Nydus.resolveEvidence` runs
+the same resolution `Send` does, before the transaction opens, and a ref that names nothing is a
+400 rather than a stored string. The commit itself stays on the sidecar's worktree branch and is
+*not* merged into the routed work: it is a design note, not part of what the card ships, and
+folding it in would put unreviewed content into the land. It stays reachable because
+`PruneMergedBranches` uses `-d`, which refuses a branch carrying anything not already in the base;
+the trail carries `evidence_sha`, which is how a reader gets to it.
+
+**Whether a sidecar exists is not whether one was asked for.** `tasks.supervised` is a request.
+`Overmind.SupervisorState` is the outcome, being wanted, live, and the reason when those disagree,
+and the badge reads that. A missing supervisor role and a harness that will not start are both things
+an operator fixes, and both used to be a daemon log line and nothing else, under a board saying an
+architect was deciding. The pointer to the sidecar process is cleared by the goroutine that runs
+it, so it means "a process is running" rather than "a process was started once"; a fatal exit is
+reported and *not* respawned, because `cerebrate` stops on `StateFailed` deliberately and a tick
+starting a replacement every two seconds would undo that from outside. A change to the role or its
+harness is a new thing to try, and clears the failure. The harness case matters because `Refresh`
+re-reads the prompt and the flags but cannot swap the adapter the process was built with, which is
+what `Reconcile` has done for pipeline roles since the team editor shipped.
 
 ### 9.2 Where finished work goes
 

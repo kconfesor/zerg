@@ -29,6 +29,7 @@ function money(n: number): string {
 }
 import {
   Bell,
+  Bot,
   Eye,
   EyeOff,
   ExternalLink,
@@ -300,6 +301,15 @@ const byLane = computed(() => {
                   aria-hidden="true"
                 />
                 {{ blockedOn?.get(task.id) === 'question' ? 'answer' : 'approve' }}
+              </Badge>
+              <Badge
+                v-if="task.supervised"
+                variant="secondary"
+                class="gap-1"
+                title="Architect will decide plans and questions; you still land it"
+              >
+                <Bot :size="10" aria-hidden="true" />
+                architect
               </Badge>
               <Badge v-if="task.reworkCount > 0" variant="secondary" :title="`sent backward ${task.reworkCount} times`">
                 ↩ {{ task.reworkCount }}

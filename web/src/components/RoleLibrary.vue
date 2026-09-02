@@ -59,12 +59,20 @@ const models = ref<Record<string, Model[]>>({})
  *  the adapter knows what its CLI will take. */
 const thinking = ref<Record<string, string[]>>({})
 
+const editing = ref<RoleTemplate | null>(null)
+const creating = ref(false)
+const open = ref(false)
+const confirmDelete = ref<RoleTemplate | null>(null)
+
 /**
  * A level the new harness does not take is not a level.
  *
  * The field hides itself for a harness with no such control, and kept its old
  * value while hidden, so a role moved from pi to claude went on asking for
  * "off", which claude exits on rather than runs.
+ *
+ * Declared after `editing`: the getter runs during setup to collect deps, and
+ * a const still in the temporal dead zone is this page's crash on open.
  */
 watch(
   () => editing.value?.harness,
@@ -135,11 +143,6 @@ const teamsUsing = computed(() => {
   }
   return out
 })
-
-const editing = ref<RoleTemplate | null>(null)
-const creating = ref(false)
-const open = ref(false)
-const confirmDelete = ref<RoleTemplate | null>(null)
 
 function edit(tpl: RoleTemplate) {
   creating.value = false
@@ -266,6 +269,9 @@ async function remove(tpl: RoleTemplate) {
               <Play :size="9" aria-hidden="true" />
               runs your app
             </Badge>
+            <Badge v-if="tpl.purpose === 'supervisor'" variant="secondary" class="gap-1 text-[9px]">
+              architect sidecar
+            </Badge>
           </span>
           <span class="text-muted-foreground mt-0.5 block truncate font-mono text-[10px]">
             {{ tpl.harness }}<span v-if="tpl.model"> · {{ tpl.model }}</span>
@@ -334,13 +340,20 @@ async function remove(tpl: RoleTemplate) {
                one setting, which is what it looked like sitting in a column of
                its own. -->
           <p
-            v-if="editing.purpose === 'runner'"
+            v-if="editing.purpose === 'runner' || editing.purpose === 'supervisor'"
             class="bg-muted/30 border-l-primary border border-l-2 p-2.5 text-[11px] leading-relaxed sm:col-span-2"
           >
-            Not part of any pipeline. This one is started when somebody asks to see the app
-            running: it reads the project, works out how it serves itself, and starts it. It never
-            claims work, never appears on the board, and cannot be added to a team. Its harness,
-            model, thinking and prompt are yours to change, like any other role's.
+            <template v-if="editing.purpose === 'runner'">
+              Not part of any pipeline. This one is started when somebody asks to see the app
+              running: it reads the project, works out how it serves itself, and starts it. It never
+              claims work, never appears on the board, and cannot be added to a team. Its harness,
+              model, thinking and prompt are yours to change, like any other role's.
+            </template>
+            <template v-else>
+              Not part of any pipeline. The daemon starts this one when a card asks for an
+              architect to supervise it. It decides plans and questions; you still land the work.
+              It never appears on the board and cannot be added to a team.
+            </template>
           </p>
 
           <div class="flex flex-col gap-1.5">
@@ -392,7 +405,7 @@ async function remove(tpl: RoleTemplate) {
             </span>
           </div>
 
-          <div v-if="editing.purpose !== 'runner'" class="flex flex-col gap-1.5">
+          <div v-if="editing.purpose !== 'runner' && editing.purpose !== 'supervisor'" class="flex flex-col gap-1.5">
             <Label :for="receiveId">Receive</Label>
             <Select v-model="editing.receive">
               <SelectTrigger :id="receiveId"><SelectValue /></SelectTrigger>
@@ -403,7 +416,7 @@ async function remove(tpl: RoleTemplate) {
             </Select>
           </div>
 
-          <div v-if="editing.purpose !== 'runner'" class="flex flex-col gap-1.5">
+          <div v-if="editing.purpose !== 'runner' && editing.purpose !== 'supervisor'" class="flex flex-col gap-1.5">
             <Label :for="gateId">Gate</Label>
             <Select v-model="editing.gate">
               <SelectTrigger :id="gateId"><SelectValue /></SelectTrigger>
@@ -420,7 +433,7 @@ async function remove(tpl: RoleTemplate) {
           <!-- Where this role belongs in a pipeline, which is a fact about the
                role rather than about any one team: a reviewer or a cleaner ends
                the work wherever it appears, and a planner never does. -->
-          <div v-if="editing.purpose !== 'runner'" class="flex flex-col gap-1.5">
+          <div v-if="editing.purpose !== 'runner' && editing.purpose !== 'supervisor'" class="flex flex-col gap-1.5">
             <Label :for="finisherId">Ends a pipeline</Label>
             <label class="flex items-start gap-2.5 text-xs">
               <Switch

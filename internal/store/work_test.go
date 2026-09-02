@@ -844,7 +844,7 @@ func TestAQuestionCarriesTheOptionsItOffered(t *testing.T) {
 
 	// The answer is one of them verbatim, and stays a plain string: an agent
 	// written before options existed reads the same shape it always read.
-	if err := db.AnswerClarification(ctx, asked.ID, offered[1]); err != nil {
+	if err := db.AnswerClarification(ctx, DecisionScope{}, asked.ID, offered[1], ""); err != nil {
 		t.Fatalf("AnswerClarification: %v", err)
 	}
 	answered, err := db.GetClarification(ctx, asked.ID)
@@ -853,6 +853,9 @@ func TestAQuestionCarriesTheOptionsItOffered(t *testing.T) {
 	}
 	if answered.Answer == nil || *answered.Answer != offered[1] {
 		t.Errorf("answer is %v, want the option that was chosen", answered.Answer)
+	}
+	if answered.AnsweredBy != OperatorRole {
+		t.Errorf("answered_by = %q, want %q", answered.AnsweredBy, OperatorRole)
 	}
 	if !slices.Equal(answered.Options, offered) {
 		t.Errorf("answering lost the options: %q", answered.Options)
@@ -1064,7 +1067,7 @@ func TestAnAnswerThatArrivedLateReachesTheNextAsk(t *testing.T) {
 	}
 	// The operator answers after the agent's wait ran out, so nothing is
 	// listening at the moment it lands.
-	if err := db.AnswerClarification(ctx, asked.ID, "the admin one"); err != nil {
+	if err := db.AnswerClarification(ctx, DecisionScope{}, asked.ID, "the admin one", ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1139,5 +1142,97 @@ func TestADifferentQuestionIsNotARepeat(t *testing.T) {
 				t.Error("was collapsed into the first question, and would be answered by its answer")
 			}
 		})
+	}
+}
+
+// An agent answering a question is checked against the question, not against
+// the id it was handed.
+//
+// The id comes out of an envelope, and holding one is not permission to act on
+// it. The handler used to check only the project, which left a sidecar able to
+// answer a question on a card nobody asked it to supervise, and able to answer
+// the question it had asked itself -- a loop that reads as progress on the
+// board and is one agent talking to itself.
+func TestAnAgentsAnswerIsCheckedAgainstTheQuestion(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+
+	p, err := db.CreateProject(ctx, t.TempDir(), "calc", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := db.CreateProject(ctx, t.TempDir(), "other", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	card, err := db.CreateTask(ctx, p.ID, "Supervised", "body", "coder")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetTaskSupervised(ctx, card.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	plain, err := db.CreateTask(ctx, p.ID, "Unsupervised", "body", "coder")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sidecar := DecisionScope{ProjectID: p.ID, Role: "supervisor"}
+
+	// A question on a card that is not supervised is the operator's.
+	unsupervised, err := db.AskClarification(ctx, p.ID, "coder", "Which cache?", nil, &plain.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AnswerClarification(ctx, sidecar, unsupervised.ID, "redis", ""); err == nil {
+		t.Error("the sidecar answered a question on an unsupervised card")
+	}
+
+	// Its own question is not a decision, it is a loop.
+	own, err := db.AskClarification(ctx, p.ID, "supervisor", "Which cache?", nil, &card.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AnswerClarification(ctx, sidecar, own.ID, "redis", ""); err == nil {
+		t.Error("the sidecar answered its own question")
+	}
+
+	// Another project's question, with the id in hand.
+	theirs, err := db.AskClarification(ctx, other.ID, "coder", "Which cache?", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = db.AnswerClarification(ctx, sidecar, theirs.ID, "redis", "")
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("cross-project answer = %v, want not found", err)
+	}
+
+	// What it may answer: someone else's question, on a supervised card, in
+	// its own project.
+	asked, err := db.AskClarification(ctx, p.ID, "coder", "Which cache?", nil, &card.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AnswerClarification(ctx, sidecar, asked.ID, "redis", "cafebabe"); err != nil {
+		t.Fatalf("AnswerClarification: %v", err)
+	}
+	got, err := db.GetClarification(ctx, asked.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.AnsweredBy != "supervisor" || got.EvidenceSHA != "cafebabe" {
+		t.Errorf("answered_by = %q, evidence = %q, want supervisor and the commit",
+			got.AnsweredBy, got.EvidenceSHA)
+	}
+
+	// The three that were refused are still open for a person.
+	for _, id := range []string{unsupervised.ID, own.ID} {
+		q, err := db.GetClarification(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if q.State != ClarificationOpen {
+			t.Errorf("question %s is %s, want it still open for the operator", id, q.State)
+		}
 	}
 }

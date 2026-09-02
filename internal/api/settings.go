@@ -550,6 +550,34 @@ func (s *Server) setTaskHidden(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, task)
 }
 
+// setTaskSupervised marks a card as one an architect sidecar will run, or
+// hands the remaining decisions back to the person. PUT: the same body twice
+// is the same state, and the switch can be flipped from two devices.
+func (s *Server) setTaskSupervised(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Supervised bool `json:"supervised"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.fail(w, r, fmt.Errorf("reading request: %w", err))
+		return
+	}
+	if err := s.db.SetTaskSupervised(r.Context(), r.PathValue("id"), req.Supervised); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	task, err := s.db.GetTask(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if s.over != nil {
+		if err := s.over.SyncSupervisor(r.Context(), task.ProjectID); err != nil {
+			s.log.Warn("could not sync the architect", "project", task.ProjectID, "err", err)
+		}
+	}
+	writeJSON(w, http.StatusOK, task)
+}
+
 // setTaskPinned keeps a card's transcript past the retention window, or hands
 // it back to the sweep.
 func (s *Server) setTaskPinned(w http.ResponseWriter, r *http.Request) {

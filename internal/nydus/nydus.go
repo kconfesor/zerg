@@ -101,11 +101,30 @@ func New(db *store.DB, opts ...Option) *Nydus {
 
 // ── starting work ─────────────────────────────────────────────────────────
 
+// NewTaskOpts is what opens a card. NewTask fills the common case; Supervised
+// is the exception a particular card asks for.
+type NewTaskOpts struct {
+	ProjectID  string
+	Name       string
+	Body       string
+	Deploy     string
+	Skip       []string
+	Supervised bool
+}
+
 // NewTask opens a card and queues it for the first role it will visit.
 //
 // skip is the roles this card does not visit, as template ids. Almost always
 // empty; see store.Route for what it does and does not affect.
 func (n *Nydus) NewTask(ctx context.Context, projectID, name, body, deploy string, skip []string) (*store.Task, error) {
+	return n.NewTaskWith(ctx, NewTaskOpts{
+		ProjectID: projectID, Name: name, Body: body, Deploy: deploy, Skip: skip,
+	})
+}
+
+// NewTaskWith is NewTask with the fields a card can carry beyond its brief.
+func (n *Nydus) NewTaskWith(ctx context.Context, opts NewTaskOpts) (*store.Task, error) {
+	projectID, name, body, deploy, skip := opts.ProjectID, opts.Name, opts.Body, opts.Deploy, opts.Skip
 	team, err := n.db.ResolveTeam(ctx, projectID)
 	if err != nil {
 		return nil, err
@@ -147,25 +166,30 @@ func (n *Nydus) NewTask(ctx context.Context, projectID, name, body, deploy strin
 
 	now := n.now()
 	task := &store.Task{
-		ID:        store.NewID(),
-		ProjectID: projectID,
-		Name:      name,
-		Body:      body,
-		Lane:      first.Name,
-		State:     store.TaskQueued,
-		CreatedAt: now.UTC(),
-		Deploy:    deploy,
-		Skip:      skip,
+		ID:         store.NewID(),
+		ProjectID:  projectID,
+		Name:       name,
+		Body:       body,
+		Lane:       first.Name,
+		State:      store.TaskQueued,
+		CreatedAt:  now.UTC(),
+		Deploy:     deploy,
+		Skip:       skip,
+		Supervised: opts.Supervised,
 	}
 	skipJSON, err := marshalSkip(skip)
 	if err != nil {
 		return nil, err
 	}
+	supervised := 0
+	if opts.Supervised {
+		supervised = 1
+	}
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO tasks (id, project_id, name, body, lane, state, created_at, deploy, skip)
-		 VALUES (?,?,?,?,?,?,?,?,?)`,
+		`INSERT INTO tasks (id, project_id, name, body, lane, state, created_at, deploy, skip, supervised)
+		 VALUES (?,?,?,?,?,?,?,?,?,?)`,
 		task.ID, task.ProjectID, task.Name, task.Body, task.Lane, task.State,
-		task.CreatedAt.Format(time.RFC3339Nano), task.Deploy, skipJSON); err != nil {
+		task.CreatedAt.Format(time.RFC3339Nano), task.Deploy, skipJSON, supervised); err != nil {
 		return nil, fmt.Errorf("creating task %q: %w", name, err)
 	}
 
@@ -357,7 +381,13 @@ func (n *Nydus) Send(ctx context.Context, projectID, fromRole string, req SendRe
 		// reviewer set to require approval merged without asking. The setting
 		// did the opposite of what it said, to the one action that modifies
 		// the repository.
-		if sender.Gate == store.GateApproval {
+		//
+		// A supervised card waits even when the finisher is ungated. Default
+		// is coder then reviewer, both gate none, so without this the land
+		// would still be unattended — the opposite of "the last click stays
+		// human". The card carries the rule, not the finishing role, because
+		// skipping that role would otherwise move the policy with it.
+		if sender.Gate == store.GateApproval || (task != nil && task.Supervised) {
 			return n.holdCompletion(ctx, projectID, sender, req, key)
 		}
 		return n.complete(ctx, projectID, sender, req, key)
@@ -1131,16 +1161,65 @@ func (n *Nydus) expire(ctx context.Context, deadline time.Time, projectID string
 
 // Approve releases a held handoff to its recipient.
 func (n *Nydus) Approve(ctx context.Context, approvalID string) error {
-	return n.decide(ctx, approvalID, store.ApprovalApproved, "")
+	return n.decide(ctx, store.DecisionScope{}, approvalID, store.ApprovalApproved, "", "")
 }
 
 // Reject returns a held handoff to its sender with a note, and nothing
 // downstream ever saw it.
 func (n *Nydus) Reject(ctx context.Context, approvalID, note string) error {
-	return n.decide(ctx, approvalID, store.ApprovalRejected, note)
+	return n.decide(ctx, store.DecisionScope{}, approvalID, store.ApprovalRejected, note, "")
 }
 
-func (n *Nydus) decide(ctx context.Context, approvalID, decision, note string) error {
+// ApproveBy is Approve with a named decider, used by the supervisor sidecar.
+// note and evidence are the rationale and the commit that recorded it.
+func (n *Nydus) ApproveBy(ctx context.Context, scope store.DecisionScope, approvalID, note, evidence string) error {
+	return n.decide(ctx, scope, approvalID, store.ApprovalApproved, note, evidence)
+}
+
+// RejectBy is Reject with a named decider.
+func (n *Nydus) RejectBy(ctx context.Context, scope store.DecisionScope, approvalID, note, evidence string) error {
+	return n.decide(ctx, scope, approvalID, store.ApprovalRejected, note, evidence)
+}
+
+// AnswerBy records a sidecar's answer to a question, with the commit that
+// wrote the reasoning down resolved the same way an approval's is.
+//
+// It lives here rather than on the store because resolving a ref means running
+// git, and the store must never do that.
+func (n *Nydus) AnswerBy(ctx context.Context, scope store.DecisionScope, id, answer, evidence string) error {
+	evidence, err := n.resolveEvidence(ctx, scope, evidence)
+	if err != nil {
+		return err
+	}
+	return n.db.AnswerClarification(ctx, scope, id, answer, evidence)
+}
+
+// resolveEvidence turns whatever the decider passed as --commit into the sha
+// it names in that decider's own worktree.
+//
+// The sidecar's prompt says `--commit HEAD`, and HEAD is not a commit: it is
+// whatever the tree that reads it is pointing at. Storing the literal string
+// is the mistake ARCHITECTURE records under "--commit HEAD stored as the
+// literal string", where a hand-off's HEAD resolved at the project root and a
+// card reached Done over an untouched branch. An unresolvable ref is the
+// decider's problem to fix, so it is refused rather than stored as prose --
+// except with no integrator or no worktree, which is a test.
+func (n *Nydus) resolveEvidence(ctx context.Context, scope store.DecisionScope, ref string) (string, error) {
+	if ref == "" || scope.Operator() {
+		return ref, nil
+	}
+	return n.resolveCommit(ctx, scope.ProjectID, scope.By(), ref)
+}
+
+func (n *Nydus) decide(ctx context.Context, scope store.DecisionScope, approvalID, decision, note, evidence string) error {
+	by := scope.By()
+
+	// Before the transaction: a git subprocess must never run while holding
+	// the single write lock.
+	evidence, err := n.resolveEvidence(ctx, scope, evidence)
+	if err != nil {
+		return err
+	}
 	tx, err := n.db.SQL().BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("beginning decision: %w", err)
@@ -1148,29 +1227,52 @@ func (n *Nydus) decide(ctx context.Context, approvalID, decision, note string) e
 	defer tx.Rollback()
 
 	var (
-		messageID string
-		state     string
-		taskID    sql.NullString
-		fromRole  string
-		terminal  int
-		commit    sql.NullString
-		body      string
-		projectID string
+		messageID  string
+		state      string
+		taskID     sql.NullString
+		fromRole   string
+		terminal   int
+		commit     sql.NullString
+		body       string
+		projectID  string
+		supervised int
 	)
 	err = tx.QueryRowContext(ctx,
 		`SELECT a.message_id, a.state, m.task_id, m.from_role,
-		        m.terminal, m.commit_sha, m.body, a.project_id
+		        m.terminal, m.commit_sha, m.body, a.project_id,
+		        COALESCE(t.supervised, 0)
 		 FROM approvals a JOIN messages m ON m.id = a.message_id
+		 LEFT JOIN tasks t ON t.id = m.task_id
 		 WHERE a.id = ?`, approvalID).Scan(&messageID, &state, &taskID, &fromRole,
-		&terminal, &commit, &body, &projectID)
+		&terminal, &commit, &body, &projectID, &supervised)
 	if errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("approval %s: %w", approvalID, store.ErrNotFound)
 	}
 	if err != nil {
 		return fmt.Errorf("reading approval: %w", err)
 	}
+	// What an agent may decide, re-checked here rather than trusted from the
+	// envelope that offered it. The id is a name, not an authority: see
+	// store.DecisionScope.
+	if !scope.Operator() {
+		// Not found rather than forbidden, so an id from another project does
+		// not confirm that it exists.
+		if scope.ProjectID == "" || projectID != scope.ProjectID {
+			return fmt.Errorf("approval %s: %w", approvalID, store.ErrNotFound)
+		}
+		// Supervision can be switched off between the offer and the decision,
+		// and the sidecar keeps whatever it was handed for the rest of its
+		// turn. Without this, turning it off stopped new offers and nothing
+		// else.
+		if supervised == 0 {
+			return invalid("this card is not supervised; its gates are the operator's to decide")
+		}
+	}
 	if state != store.ApprovalPending {
 		return invalid("approval %s was already %s", approvalID, state)
+	}
+	if by != store.OperatorRole && terminal != 0 {
+		return invalid("the land stays with a person; %s cannot approve a final completion", by)
 	}
 
 	// A card does not merge with a question still open on it, which is the
@@ -1250,8 +1352,8 @@ func (n *Nydus) decide(ctx context.Context, approvalID, decision, note string) e
 		expect = store.ApprovalIntegrating
 	}
 	res, err := tx.ExecContext(ctx,
-		`UPDATE approvals SET state = ?, note = ?, decided_at = ? WHERE id = ? AND state = ?`,
-		decision, notePtr, now, approvalID, expect)
+		`UPDATE approvals SET state = ?, note = ?, decided_at = ?, decided_by = ?, evidence_sha = ? WHERE id = ? AND state = ?`,
+		decision, notePtr, now, by, evidence, approvalID, expect)
 	if err != nil {
 		return fmt.Errorf("recording decision: %w", err)
 	}

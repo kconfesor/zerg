@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -73,10 +74,17 @@ const (
 	CanAsk      = "ask"      // put a question to the operator
 	CanArtifact = "artifact" // register what it produced
 	CanRemember = "remember" // write down what it learned about this project
+	CanDecide   = "decide"   // approve, reject, answer as the supervisor sidecar
 )
 
 // allows reports whether this identity may call a verb.
 func (i Identity) allows(verb string) bool {
+	// Decide is never implied. A pipeline token holds every other verb by
+	// leaving Can empty; granting approve that way would let any coder land
+	// a card, which is the same class of failure as a forgeable --from.
+	if verb == CanDecide {
+		return i.Can[verb]
+	}
 	if len(i.Can) == 0 {
 		return true
 	}
@@ -288,6 +296,9 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /agent/ask", s.ask)
 	mux.HandleFunc("POST /agent/artifact", s.artifact)
 	mux.HandleFunc("POST /agent/remember", s.remember)
+	mux.HandleFunc("POST /agent/approve", s.approve)
+	mux.HandleFunc("POST /agent/reject", s.reject)
+	mux.HandleFunc("POST /agent/answer", s.answer)
 	return mux
 }
 
@@ -311,6 +322,17 @@ type NextResponse struct {
 	// happened the first time a real agent ran this.
 	Next     string `json:"next,omitempty"`
 	Terminal bool   `json:"terminal"`
+
+	// Kind is "decide" when this is a judgement for the supervisor sidecar,
+	// empty for ordinary pipeline work. A pipeline agent never sees decide.
+	Kind            string   `json:"kind,omitempty"`
+	ApprovalID      string   `json:"approvalId,omitempty"`
+	ClarificationID string   `json:"clarificationId,omitempty"`
+	Question        string   `json:"question,omitempty"`
+	Options         []string `json:"options,omitempty"`
+	From            string   `json:"from,omitempty"`
+	Body            string   `json:"body,omitempty"`
+	Commit          string   `json:"commit,omitempty"`
 }
 
 // Item is one unit of work inside a lease.
@@ -350,19 +372,31 @@ func (s *Server) next(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for {
-		lease, err := s.nyd.Claim(r.Context(), id.ProjectID, id.Role)
-		if err != nil {
-			s.fail(w, err)
-			return
-		}
-		if lease != nil {
-			out, err := s.describe(r.Context(), id, lease)
+		if id.allows(CanDecide) {
+			out, err := s.describeDecision(r.Context(), id)
 			if err != nil {
 				s.fail(w, err)
 				return
 			}
-			writeJSON(w, http.StatusOK, out)
-			return
+			if out != nil {
+				writeJSON(w, http.StatusOK, out)
+				return
+			}
+		} else {
+			lease, err := s.nyd.Claim(r.Context(), id.ProjectID, id.Role)
+			if err != nil {
+				s.fail(w, err)
+				return
+			}
+			if lease != nil {
+				out, err := s.describe(r.Context(), id, lease)
+				if err != nil {
+					s.fail(w, err)
+					return
+				}
+				writeJSON(w, http.StatusOK, out)
+				return
+			}
 		}
 		if !time.Now().Before(deadline) {
 			// No work is not an error. An agent that is told "nothing yet"
@@ -663,6 +697,123 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(body)
+}
+
+func (s *Server) describeDecision(ctx context.Context, id Identity) (*NextResponse, error) {
+	d, err := s.db.NextDecision(ctx, id.ProjectID, id.Role)
+	if err != nil {
+		return nil, err
+	}
+	if d == nil {
+		return nil, nil
+	}
+	out := NextResponse{Kind: "decide", Role: id.Role, Terminal: false}
+	if d.Approval != nil {
+		out.ApprovalID = d.Approval.ID
+		out.From = d.Approval.FromRole
+		out.Body = d.Approval.Body
+		out.Commit = d.Approval.Commit
+		if d.Approval.TaskID != "" {
+			task, err := s.db.GetTask(ctx, d.Approval.TaskID)
+			if err != nil {
+				return nil, err
+			}
+			out.Task = task
+		}
+	}
+	if d.Clarification != nil {
+		out.ClarificationID = d.Clarification.ID
+		out.Question = d.Clarification.Question
+		out.Options = d.Clarification.Options
+		out.From = d.Clarification.Role
+		if d.Clarification.TaskID != nil {
+			task, err := s.db.GetTask(ctx, *d.Clarification.TaskID)
+			if err != nil {
+				return nil, err
+			}
+			out.Task = task
+		}
+	}
+	return &out, nil
+}
+
+type decideRequest struct {
+	ID     string `json:"id"`
+	Note   string `json:"note"`
+	Answer string `json:"answer"`
+	Commit string `json:"commit"`
+}
+
+func (s *Server) approve(w http.ResponseWriter, r *http.Request) {
+	s.decideApproval(w, r, true)
+}
+
+func (s *Server) reject(w http.ResponseWriter, r *http.Request) {
+	s.decideApproval(w, r, false)
+}
+
+func (s *Server) decideApproval(w http.ResponseWriter, r *http.Request, ok bool) {
+	id, permitted := s.permit(w, r, CanDecide)
+	if !permitted {
+		return
+	}
+	var req decideRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	if req.ID == "" {
+		writeError(w, http.StatusBadRequest, "an approval needs --id, from the decide envelope")
+		return
+	}
+	if !ok && strings.TrimSpace(req.Note) == "" {
+		writeError(w, http.StatusBadRequest, "a rejection needs --note: what to change")
+		return
+	}
+	if ok && strings.TrimSpace(req.Note) == "" {
+		writeError(w, http.StatusBadRequest, "an approval needs --note: the rationale")
+		return
+	}
+	scope := store.DecisionScope{ProjectID: id.ProjectID, Role: id.Role}
+	var err error
+	if ok {
+		err = s.nyd.ApproveBy(r.Context(), scope, req.ID, req.Note, req.Commit)
+	} else {
+		err = s.nyd.RejectBy(r.Context(), scope, req.ID, req.Note, req.Commit)
+	}
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": map[bool]string{true: "approved", false: "rejected"}[ok]})
+}
+
+func (s *Server) answer(w http.ResponseWriter, r *http.Request) {
+	id, permitted := s.permit(w, r, CanDecide)
+	if !permitted {
+		return
+	}
+	var req decideRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	if req.ID == "" {
+		writeError(w, http.StatusBadRequest, "an answer needs --id, from the decide envelope")
+		return
+	}
+	if strings.TrimSpace(req.Answer) == "" {
+		writeError(w, http.StatusBadRequest, "an answer cannot be empty")
+		return
+	}
+	// Scope, supervision and authorship are checked at the write, in one
+	// place, rather than partly here: this handler used to check the project
+	// and nothing else, so a sidecar could answer a question on an
+	// unsupervised card, or the one it had asked itself.
+	scope := store.DecisionScope{ProjectID: id.ProjectID, Role: id.Role}
+	if err := s.nyd.AnswerBy(r.Context(), scope, req.ID, req.Answer, req.Commit); err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "answered"})
 }
 
 func writeError(w http.ResponseWriter, status int, msg string) {

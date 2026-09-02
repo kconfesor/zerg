@@ -43,11 +43,12 @@ type RoleTemplate struct {
 	//
 	// PurposePipeline is a role that claims work, appears on the board and can
 	// be put in a team. PurposeRunner is the agent that works out how a
-	// project serves itself and starts it: never routed to, never on the
-	// board, never in a team, and started by the daemon when somebody asks to
-	// see the app. Everything else about it -- harness, model, thinking level,
-	// prompt -- is configured exactly where every other role's is, which is
-	// the whole reason it is a role rather than a special case in the binary.
+	// project serves itself and starts it. PurposeSupervisor is the architect
+	// sidecar that decides a supervised card's mid-pipeline gates and
+	// questions, and never the land. Neither sidecar is routed to, on the
+	// board, or in a team: the daemon starts them when they are needed.
+	// Everything else -- harness, model, thinking level, prompt -- is
+	// configured exactly where every other role's is.
 	Purpose string `json:"purpose"`
 	// Thinking is how hard the harness reasons before answering, in that
 	// harness's own vocabulary: claude spends it as --effort, pi as --thinking,
@@ -105,8 +106,9 @@ type Project struct {
 
 // What a role is for; see RoleTemplate.Purpose.
 const (
-	PurposePipeline = "pipeline"
-	PurposeRunner   = "runner"
+	PurposePipeline   = "pipeline"
+	PurposeRunner     = "runner"
+	PurposeSupervisor = "supervisor"
 )
 
 // RoleOverrides is the nullable layer shared by reusable-team roles and a
@@ -229,9 +231,9 @@ func (t *RoleTemplate) Validate() error {
 	if t.Purpose == "" {
 		t.Purpose = PurposePipeline
 	}
-	if t.Purpose != PurposePipeline && t.Purpose != PurposeRunner {
-		return invalid("role %q has purpose %q, want %q or %q",
-			t.Name, t.Purpose, PurposePipeline, PurposeRunner)
+	if t.Purpose != PurposePipeline && t.Purpose != PurposeRunner && t.Purpose != PurposeSupervisor {
+		return invalid("role %q has purpose %q, want %q, %q or %q",
+			t.Name, t.Purpose, PurposePipeline, PurposeRunner, PurposeSupervisor)
 	}
 	if t.Receive == ReceiveBatch {
 		if t.BatchMaxItems < 1 {

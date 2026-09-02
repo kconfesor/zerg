@@ -27,9 +27,11 @@ type fakeIntegrator struct {
 	// report where the work went the way `gh` does.
 	publishedURL map[string]string
 	// resolve maps a ref to the sha it names, for the tests that care. Set
-	// before the fixture is used and not written afterwards.
-	resolve map[string]string
-	err     error
+	// before the fixture is used and not written afterwards. resolveErr is git
+	// refusing a ref that names nothing.
+	resolve    map[string]string
+	resolveErr error
+	err        error
 	// landedErr makes the "did this integration finish" question unanswerable,
 	// which must leave an interrupted approval claimed rather than releasing
 	// one whose merge may have happened.
@@ -72,6 +74,9 @@ func (f *fakeIntegrator) Publish(_ context.Context, _, base, commit, title, body
 // point of that path is that the string the agent sent is not the string that
 // gets stored.
 func (f *fakeIntegrator) Resolve(_ context.Context, _, ref string) (string, error) {
+	if f.resolveErr != nil {
+		return "", f.resolveErr
+	}
 	if sha, ok := f.resolve[ref]; ok {
 		return sha, nil
 	}
@@ -2438,5 +2443,343 @@ func TestRetryingASendWithARefDoesNotIntegrateTwice(t *testing.T) {
 	if len(f.git.merges) != 1 {
 		t.Errorf("merged %d times, want once — a retried completion must not integrate again: %v",
 			len(f.git.merges), f.git.merges)
+	}
+}
+
+// A supervised card holds the land even when the finisher is ungated.
+//
+// Default is coder then reviewer, both gate none, so a finished card merges
+// unattended. Delegating without this would auto-answer questions and still
+// land, which is the opposite of "the last click stays human". The card
+// carries the rule, not the finishing role.
+func TestASupervisedCardHoldsAnUngatedFinisher(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+
+	task, err := f.n.NewTaskWith(ctx, NewTaskOpts{
+		ProjectID: f.project.ID, Name: "Calculator", Body: "do it", Supervised: true,
+	})
+	if err != nil {
+		t.Fatalf("NewTaskWith: %v", err)
+	}
+	if !task.Supervised {
+		t.Fatal("the card was stored without the supervised flag")
+	}
+
+	if _, err := f.n.Send(ctx, f.project.ID, "reviewer", SendRequest{
+		TaskID: task.ID, Commit: "aaaaaaaaaa", Body: "looks good",
+	}); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	if len(f.git.merges) != 0 {
+		t.Fatalf("merged %v before anyone approved — a supervised card must not land unattended", f.git.merges)
+	}
+	if got := f.reload(t, task.ID); got.State == store.TaskDone {
+		t.Fatal("the board says Done over work nobody has approved")
+	}
+
+	pending, err := f.db.ListPendingApprovals(ctx, f.project.ID)
+	if err != nil {
+		t.Fatalf("ListPendingApprovals: %v", err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("%d approvals pending, want the supervised land", len(pending))
+	}
+	if !pending[0].Terminal {
+		t.Fatal("the held approval is not the terminal one")
+	}
+
+	if err := f.n.Approve(ctx, pending[0].ID); err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+	if len(f.git.merges) != 1 {
+		t.Errorf("merges = %v, want the land once a person approved", f.git.merges)
+	}
+	if got := f.reload(t, task.ID); got.State != store.TaskDone {
+		t.Errorf("state = %s after approval, want done", got.State)
+	}
+
+	steps, err := f.db.TaskTrail(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("TaskTrail: %v", err)
+	}
+	var decided string
+	for _, s := range steps {
+		if s.Gate != nil {
+			decided = s.Gate.DecidedBy
+		}
+	}
+	if decided != store.OperatorRole {
+		t.Errorf("decided_by = %q, want %q — the cockpit is who clicked", decided, store.OperatorRole)
+	}
+}
+
+// The unsupervised path is unchanged: an ungated finisher still lands.
+func TestAnUnsupervisedCardStillLandsWithoutAGate(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	task := f.task(t, "Calculator")
+	if task.Supervised {
+		t.Fatal("a card nobody asked to supervise was stored as supervised")
+	}
+
+	if _, err := f.n.Send(ctx, f.project.ID, "reviewer", SendRequest{
+		TaskID: task.ID, Commit: "aaaaaaaaaa", Body: "looks good",
+	}); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	if len(f.git.merges) != 1 {
+		t.Errorf("merges = %v, want the ungated land", f.git.merges)
+	}
+	if got := f.reload(t, task.ID); got.State != store.TaskDone {
+		t.Errorf("state = %s, want done", got.State)
+	}
+	pending, err := f.db.ListPendingApprovals(ctx, f.project.ID)
+	if err != nil {
+		t.Fatalf("ListPendingApprovals: %v", err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("%d approvals pending on an unsupervised ungated card", len(pending))
+	}
+}
+
+// The sidecar can release a mid-pipeline gate, and cannot land the work.
+func TestTheSupervisorCannotLandAndCanReleaseAHandoff(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+
+	task, err := f.n.NewTaskWith(ctx, NewTaskOpts{
+		ProjectID: f.project.ID, Name: "Spec", Body: "write it", Supervised: true,
+	})
+	if err != nil {
+		t.Fatalf("NewTaskWith: %v", err)
+	}
+
+	// Planner is gated; its send is held for a person — or the sidecar.
+	if _, err := f.n.Send(ctx, f.project.ID, "planner", SendRequest{
+		To: "coder", TaskID: task.ID, Commit: "aaaaaaaaaa", Body: "the spec",
+	}); err != nil {
+		t.Fatalf("planner Send: %v", err)
+	}
+	pending, err := f.db.ListPendingApprovals(ctx, f.project.ID)
+	if err != nil {
+		t.Fatalf("ListPendingApprovals: %v", err)
+	}
+	if len(pending) != 1 || pending[0].Terminal {
+		t.Fatalf("want one mid-pipeline approval, got %+v", pending)
+	}
+
+	d, err := f.db.NextDecision(ctx, f.project.ID, "supervisor")
+	if err != nil || d == nil || d.Approval == nil {
+		t.Fatalf("NextDecision: %v %+v", err, d)
+	}
+	if err := f.n.ApproveBy(ctx, supervisorScope(f.project.ID), d.Approval.ID, "the spec is enough", ""); err != nil {
+		t.Fatalf("ApproveBy: %v", err)
+	}
+	if got := f.reload(t, task.ID); got.Lane != "coder" {
+		t.Errorf("lane = %s after sidecar approve, want coder", got.Lane)
+	}
+
+	steps, err := f.db.TaskTrail(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("TaskTrail: %v", err)
+	}
+	var by string
+	for _, s := range steps {
+		if s.Gate != nil {
+			by = s.Gate.DecidedBy
+		}
+	}
+	if by != "supervisor" {
+		t.Errorf("decided_by = %q, want supervisor", by)
+	}
+
+	// The land is still a person, even though the card is supervised and the
+	// reviewer is ungated.
+	if _, err := f.n.Send(ctx, f.project.ID, "reviewer", SendRequest{
+		TaskID: task.ID, Commit: "bbbbbbbbbb", Body: "looks good",
+	}); err != nil {
+		t.Fatalf("reviewer complete: %v", err)
+	}
+	pending, err = f.db.ListPendingApprovals(ctx, f.project.ID)
+	if err != nil {
+		t.Fatalf("ListPendingApprovals: %v", err)
+	}
+	if len(pending) != 1 || !pending[0].Terminal {
+		t.Fatalf("want the land held, got %+v", pending)
+	}
+	err = f.n.ApproveBy(ctx, supervisorScope(f.project.ID), pending[0].ID, "shipping it", "")
+	if err == nil {
+		t.Fatal("the sidecar was allowed to land the work")
+	}
+	if !strings.Contains(err.Error(), "person") {
+		t.Errorf("err = %v, want it to say the land stays with a person", err)
+	}
+	if err := f.n.Approve(ctx, pending[0].ID); err != nil {
+		t.Fatalf("operator Approve: %v", err)
+	}
+	if got := f.reload(t, task.ID); got.State != store.TaskDone {
+		t.Errorf("state = %s after the person landed it, want done", got.State)
+	}
+}
+
+// supervisorScope is the sidecar deciding inside its own project.
+func supervisorScope(projectID string) store.DecisionScope {
+	return store.DecisionScope{ProjectID: projectID, Role: "supervisor"}
+}
+
+// A decision is scoped to the project the token authenticated as, and to a
+// card that is still supervised.
+//
+// The first cut looked the approval up by id and nothing else. An approval id
+// is a string handed out in an envelope: holding one says nothing about being
+// allowed to act on it. A leaked id decided another project's card, and a
+// sidecar mid-turn went on deciding after the operator switched supervision
+// off, because the check ran where the work was offered rather than where it
+// was written.
+func TestASidecarCannotDecideOutsideItsProjectOrOffASupervisedCard(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+
+	task, err := f.n.NewTaskWith(ctx, NewTaskOpts{
+		ProjectID: f.project.ID, Name: "Spec", Body: "write it", Supervised: true,
+	})
+	if err != nil {
+		t.Fatalf("NewTaskWith: %v", err)
+	}
+	if _, err := f.n.Send(ctx, f.project.ID, "planner", SendRequest{
+		To: "coder", TaskID: task.ID, Commit: "aaaaaaaaaa", Body: "the spec",
+	}); err != nil {
+		t.Fatalf("planner Send: %v", err)
+	}
+	pending, err := f.db.ListPendingApprovals(ctx, f.project.ID)
+	if err != nil || len(pending) != 1 {
+		t.Fatalf("ListPendingApprovals: %v %+v", err, pending)
+	}
+	gate := pending[0].ID
+
+	// Another project's sidecar, holding the id.
+	err = f.n.ApproveBy(ctx, store.DecisionScope{ProjectID: "another-project", Role: "supervisor"},
+		gate, "looks fine", "")
+	if !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("cross-project approve = %v, want not found", err)
+	}
+	if got := f.reload(t, task.ID); got.Lane == "coder" {
+		t.Error("the card moved on a decision from another project")
+	}
+
+	// The operator turns supervision off while the sidecar is mid-turn.
+	if err := f.db.SetTaskSupervised(ctx, task.ID, false); err != nil {
+		t.Fatalf("SetTaskSupervised: %v", err)
+	}
+	err = f.n.ApproveBy(ctx, supervisorScope(f.project.ID), gate, "looks fine", "")
+	if err == nil {
+		t.Fatal("the sidecar decided a card the operator had unsupervised")
+	}
+	if !strings.Contains(err.Error(), "not supervised") {
+		t.Errorf("err = %v, want it to name the reason", err)
+	}
+	if got := f.reload(t, task.ID); got.Lane == "coder" {
+		t.Error("the card moved after supervision was switched off")
+	}
+
+	// The operator can still decide it: this is a scope on the sidecar, not a
+	// lock on the gate.
+	if err := f.n.Approve(ctx, gate); err != nil {
+		t.Fatalf("operator Approve: %v", err)
+	}
+	if got := f.reload(t, task.ID); got.Lane != "coder" {
+		t.Errorf("lane = %s after the operator approved, want coder", got.Lane)
+	}
+}
+
+// The commit a decision cites is resolved in the decider's own worktree.
+//
+// The sidecar's prompt says `--commit HEAD`, and HEAD is not a commit: it is
+// whatever tree reads it. Stored literally, the trail's link to the reasoning
+// pointed at "the tip of whichever repository you happen to ask" -- the same
+// mistake ARCHITECTURE records for hand-offs, where it put a card in Done over
+// an untouched branch.
+func TestADecisionsEvidenceIsStoredAsASha(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+
+	if err := os.MkdirAll(hatchery.New(f.project.Path).Path("supervisor"), 0o755); err != nil {
+		t.Fatalf("making the supervisor's worktree: %v", err)
+	}
+	f.git.resolve = map[string]string{"HEAD": "dddddddddddddddddddddddddddddddddddddddd"}
+
+	task, err := f.n.NewTaskWith(ctx, NewTaskOpts{
+		ProjectID: f.project.ID, Name: "Spec", Body: "write it", Supervised: true,
+	})
+	if err != nil {
+		t.Fatalf("NewTaskWith: %v", err)
+	}
+	if _, err := f.n.Send(ctx, f.project.ID, "planner", SendRequest{
+		To: "coder", TaskID: task.ID, Commit: "aaaaaaaaaa", Body: "the spec",
+	}); err != nil {
+		t.Fatalf("planner Send: %v", err)
+	}
+	pending, err := f.db.ListPendingApprovals(ctx, f.project.ID)
+	if err != nil || len(pending) != 1 {
+		t.Fatalf("ListPendingApprovals: %v %+v", err, pending)
+	}
+	if err := f.n.ApproveBy(ctx, supervisorScope(f.project.ID), pending[0].ID,
+		"the trade-off is written down", "HEAD"); err != nil {
+		t.Fatalf("ApproveBy: %v", err)
+	}
+
+	steps, err := f.db.TaskTrail(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("TaskTrail: %v", err)
+	}
+	var evidence string
+	for _, s := range steps {
+		if s.Gate != nil {
+			evidence = s.Gate.EvidenceSHA
+		}
+	}
+	if evidence != "dddddddddddddddddddddddddddddddddddddddd" {
+		t.Errorf("evidence = %q, want the resolved sha — a stored %q names a different commit "+
+			"in every tree that reads it", evidence, "HEAD")
+	}
+}
+
+// A ref that names nothing is the decider's problem, and saying so is the only
+// way it gets fixed. Storing it as prose would leave a trail pointing nowhere.
+func TestEvidenceThatNamesNoCommitIsRefused(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+
+	if err := os.MkdirAll(hatchery.New(f.project.Path).Path("supervisor"), 0o755); err != nil {
+		t.Fatalf("making the supervisor's worktree: %v", err)
+	}
+	f.git.resolveErr = errors.New("unknown revision")
+
+	task, err := f.n.NewTaskWith(ctx, NewTaskOpts{
+		ProjectID: f.project.ID, Name: "Spec", Body: "write it", Supervised: true,
+	})
+	if err != nil {
+		t.Fatalf("NewTaskWith: %v", err)
+	}
+	if _, err := f.n.Send(ctx, f.project.ID, "planner", SendRequest{
+		To: "coder", TaskID: task.ID, Commit: "aaaaaaaaaa", Body: "the spec",
+	}); err != nil {
+		t.Fatalf("planner Send: %v", err)
+	}
+	pending, err := f.db.ListPendingApprovals(ctx, f.project.ID)
+	if err != nil || len(pending) != 1 {
+		t.Fatalf("ListPendingApprovals: %v %+v", err, pending)
+	}
+	err = f.n.ApproveBy(ctx, supervisorScope(f.project.ID), pending[0].ID, "fine", "nope")
+	if err == nil {
+		t.Fatal("a ref that names no commit was accepted as evidence")
+	}
+	var invalid interface{ Validation() }
+	if !errors.As(err, &invalid) {
+		t.Errorf("err = %v, want an operator-fixable error", err)
+	}
+	if got := f.reload(t, task.ID); got.Lane == "coder" {
+		t.Error("the card moved on a decision that was refused")
 	}
 }

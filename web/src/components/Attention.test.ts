@@ -57,6 +57,7 @@ const attention = (files: ChangedFile[], threads: ReviewThread[] = []): Attentio
       },
     ],
     clarifications: [],
+    supervisor: { wanted: true, live: true },
     rework: { threshold: 3, tasks: [] },
   }
 }
@@ -365,6 +366,7 @@ describe('a question that is a choice', () => {
         createdAt: '2026-01-01T00:00:00Z',
       },
     ],
+    supervisor: { wanted: true, live: true },
     rework: { threshold: 3, tasks: [] },
   })
 
@@ -444,5 +446,55 @@ describe('a question that is a choice', () => {
     await box.setValue('between 0 and 100')
     await w.findAll('button').find((b) => b.text() === 'Answer')!.trigger('click')
     expect(w.emitted('answer')).toEqual([['c1', 'between 0 and 100']])
+  })
+})
+
+// The badge says what is happening, not what was asked for.
+//
+// `supervised` on a card is a request for an architect sidecar. Drawn from
+// that alone, the badge read "architect is deciding" while the daemon was
+// logging, to nobody, that there is no supervisor role in the library or that
+// its harness would not start. The operator saw a card that needed no action
+// and it never got one. Both causes are things a person fixes, so both have to
+// reach that person.
+describe('a card that asked for an architect', () => {
+  const supervised = (supervisor: AttentionData['supervisor']): AttentionData => ({
+    approvals: [],
+    clarifications: [
+      {
+        id: 'c1',
+        taskId: 't1',
+        role: 'coder',
+        question: 'Where does the session live?',
+        state: 'open',
+        createdAt: '2026-01-01T00:00:00Z',
+        supervised: true,
+      },
+    ],
+    supervisor,
+    rework: { threshold: 3, tasks: [] },
+  })
+
+  it('says an architect is deciding only while one is running', () => {
+    const w = mount(Attention, {
+      props: { attention: supervised({ wanted: true, live: true, role: 'supervisor' }) },
+    })
+    expect(w.text()).toContain('architect is deciding')
+    expect(w.text()).not.toContain('waiting for an architect')
+  })
+
+  it('names what an operator has to fix when no architect started', () => {
+    const w = mount(Attention, {
+      props: {
+        attention: supervised({
+          wanted: true,
+          live: false,
+          error: 'no role in the library has the supervisor purpose',
+        }),
+      },
+    })
+    expect(w.text()).not.toContain('architect is deciding')
+    expect(w.text()).toContain('waiting for an architect')
+    expect(w.text()).toContain('no role in the library has the supervisor purpose')
   })
 })

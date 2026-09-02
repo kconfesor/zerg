@@ -125,6 +125,64 @@ func runAsk(args []string) error {
 	return printJSON(answer)
 }
 
+func runApprove(args []string) error {
+	return runDecide(args, "approve", true)
+}
+
+func runReject(args []string) error {
+	return runDecide(args, "reject", false)
+}
+
+func runDecide(args []string, verb string, ok bool) error {
+	fs := flag.NewFlagSet(verb, flag.ContinueOnError)
+	id := fs.String("id", "", "the approval id from the decide envelope")
+	note := fs.String("note", "", "the rationale, required")
+	commit := fs.String("commit", "", "the commit that recorded the decision")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *id == "" {
+		return fmt.Errorf("%s needs --id, from the decide envelope", verb)
+	}
+	if strings.TrimSpace(*note) == "" {
+		return fmt.Errorf("%s needs --note: the rationale", verb)
+	}
+	client, err := agent.NewClientFromEnv()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if ok {
+		return client.Approve(ctx, *id, *note, *commit)
+	}
+	return client.Reject(ctx, *id, *note, *commit)
+}
+
+func runAnswer(args []string) error {
+	fs := flag.NewFlagSet("answer", flag.ContinueOnError)
+	id := fs.String("id", "", "the clarification id from the decide envelope")
+	commit := fs.String("commit", "", "the commit that recorded the decision")
+	words, err := parseAnywhere(fs, args)
+	if err != nil {
+		return err
+	}
+	answer := strings.TrimSpace(strings.Join(words, " "))
+	if *id == "" {
+		return errors.New("answer needs --id, from the decide envelope")
+	}
+	if answer == "" {
+		return errors.New("answer needs the text of the answer")
+	}
+	client, err := agent.NewClientFromEnv()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return client.Answer(ctx, *id, answer, *commit)
+}
+
 // parseAnywhere parses flags wherever they appear, and returns the words that
 // are not flags.
 //

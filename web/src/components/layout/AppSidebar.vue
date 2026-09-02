@@ -177,7 +177,7 @@ const enabledCount = computed(() => pipeline.value.filter((r) => r.enabled).leng
  */
 const addable = computed(() => {
   const inTeam = new Set(pipeline.value.map((r) => r.id))
-  return props.library.filter((t) => !inTeam.has(t.id) && t.purpose !== 'runner')
+  return props.library.filter((t) => !inTeam.has(t.id) && t.purpose !== 'runner' && t.purpose !== 'supervisor')
 })
 
 /**

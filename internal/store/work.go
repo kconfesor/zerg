@@ -50,6 +50,40 @@ const OperatorRole = "operator"
 // conversation.
 const ChatRole = "chat"
 
+// DecisionScope is who is deciding and what they are allowed to decide.
+//
+// An approval id and a clarification id are opaque strings an agent is handed
+// in an envelope, and nothing about holding one says the holder may act on it.
+// The first cut looked the row up by id alone: a leaked id decided another
+// project's card, a sidecar whose supervision the operator had just switched
+// off went on deciding, and a supervisor could answer the question it had
+// asked itself. Every one of those is the id being treated as the authority
+// instead of as a name.
+//
+// The zero value is the operator, whose route is already scoped to a project
+// by the cockpit and who is allowed to decide anything, supervised or not.
+type DecisionScope struct {
+	// ProjectID the caller authenticated as. Required for an agent; the row
+	// must belong to it.
+	ProjectID string
+	// Role writing the decision: OperatorRole, or the sidecar's role name.
+	Role string
+}
+
+// Operator reports whether this is a person deciding from the cockpit rather
+// than an agent deciding over the socket.
+func (s DecisionScope) Operator() bool {
+	return s.Role == "" || s.Role == OperatorRole
+}
+
+// By is the role name to record, with the empty scope reading as the operator.
+func (s DecisionScope) By() string {
+	if s.Role == "" {
+		return OperatorRole
+	}
+	return s.Role
+}
+
 // LaneDone is the well a finished card lands in.
 const LaneDone = "done"
 
@@ -147,6 +181,13 @@ type Task struct {
 	// the work back to it.
 	Skip []string `json:"skip,omitempty"`
 
+	// Supervised means an architect sidecar will decide this card's
+	// mid-pipeline gates and questions. The land still waits for a person,
+	// even if the finishing role's gate is none — Default is coder then
+	// reviewer, both ungated, and without this the card would merge
+	// unattended. A property of the card, not of whoever happens to be last.
+	Supervised bool `json:"supervised,omitempty"`
+
 	// Models are the models that have actually spent tokens on this card, in
 	// the order they first did. What a role is configured with is a live value
 	// and answers a different question: this says what produced the work in
@@ -228,6 +269,19 @@ type Approval struct {
 	// that role just wrote; for this one, it is everything about to reach the
 	// base branch, which is usually more than one commit.
 	Terminal bool `json:"terminal"`
+
+	// DecidedBy is who resolved this approval: OperatorRole for the cockpit,
+	// a role name for an agent, empty while it is still pending.
+	DecidedBy string `json:"decidedBy,omitempty"`
+
+	// Supervised is whether the card this approval sits on asked for an
+	// architect sidecar. Attention uses it to mark items the sidecar will
+	// decide, without hiding them from the person who can still override.
+	Supervised bool `json:"supervised,omitempty"`
+
+	// EvidenceSHA is the commit that recorded the rationale, when there was
+	// one. Empty if the decision was made without a repo note.
+	EvidenceSHA string `json:"evidenceSha,omitempty"`
 }
 
 type Session struct {
@@ -266,14 +320,14 @@ func (db *DB) CreateTask(ctx context.Context, projectID, name, body, lane string
 
 const taskCols = `id, project_id, session_id, name, body, lane, state,
 	created_at, first_claimed_at, completed_at, active_ms, rework_count, hidden, stopped_at,
-	outcome, outcome_ref, pinned, deploy, skip`
+	outcome, outcome_ref, pinned, deploy, skip, supervised`
 
 // taskColsT is the same list qualified to the tasks table, for the queries that
 // join. Unqualified names resolve today and would become ambiguous the moment a
 // joined table gained a column of the same name.
 const taskColsT = `t.id, t.project_id, t.session_id, t.name, t.body, t.lane, t.state,
 	t.created_at, t.first_claimed_at, t.completed_at, t.active_ms, t.rework_count, t.hidden,
-	t.stopped_at, t.outcome, t.outcome_ref, t.pinned, t.deploy, t.skip`
+	t.stopped_at, t.outcome, t.outcome_ref, t.pinned, t.deploy, t.skip, t.supervised`
 
 // GetTaskIn resolves a task that must belong to this project.
 //
@@ -369,9 +423,10 @@ func scanTaskWithSummary(s scanner) (*Task, error) {
 		stoppedAt   sql.NullString
 	)
 	var models, skip string
+	var supervised int
 	if err := s.Scan(&t.ID, &t.ProjectID, &sessionID, &t.Name, &t.Body, &t.Lane, &t.State,
 		&created, &firstClaim, &completedAt, &t.ActiveMS, &t.ReworkCount, &t.Hidden, &stoppedAt,
-		&t.Outcome, &t.OutcomeRef, &t.Pinned, &t.Deploy, &skip,
+		&t.Outcome, &t.OutcomeRef, &t.Pinned, &t.Deploy, &skip, &supervised,
 		&t.Tokens, &t.CostUSD, &models, &t.Doing); err != nil {
 		return nil, err
 	}
@@ -379,6 +434,7 @@ func scanTaskWithSummary(s scanner) (*Task, error) {
 	if t.Skip, err = unmarshalArgs(skip); err != nil {
 		return nil, fmt.Errorf("task %s has an unreadable skip list: %w", t.ID, err)
 	}
+	t.Supervised = supervised != 0
 	if models != "" {
 		t.Models = strings.Split(models, "\n")
 	}
@@ -398,15 +454,17 @@ func scanTask(s scanner) (*Task, error) {
 		stoppedAt   sql.NullString
 	)
 	var skip string
+	var supervised int
 	if err := s.Scan(&t.ID, &t.ProjectID, &sessionID, &t.Name, &t.Body, &t.Lane, &t.State,
 		&created, &firstClaim, &completedAt, &t.ActiveMS, &t.ReworkCount, &t.Hidden,
-		&stoppedAt, &t.Outcome, &t.OutcomeRef, &t.Pinned, &t.Deploy, &skip); err != nil {
+		&stoppedAt, &t.Outcome, &t.OutcomeRef, &t.Pinned, &t.Deploy, &skip, &supervised); err != nil {
 		return nil, err
 	}
 	var err error
 	if t.Skip, err = unmarshalArgs(skip); err != nil {
 		return nil, fmt.Errorf("task %s has an unreadable skip list: %w", t.ID, err)
 	}
+	t.Supervised = supervised != 0
 	if err := fillTaskTimes(&t, sessionID, created, firstClaim, completedAt, stoppedAt); err != nil {
 		return nil, err
 	}
@@ -561,7 +619,8 @@ func (db *DB) ListPendingApprovals(ctx context.Context, projectID string) ([]App
 	rows, err := db.read.QueryContext(ctx,
 		`SELECT a.id, a.project_id, a.message_id, a.state, a.note, a.created_at,
 		        COALESCE(t.name, ''), COALESCE(m.task_id, ''), m.from_role,
-		        m.body, COALESCE(m.commit_sha, ''), m.terminal
+		        m.body, COALESCE(m.commit_sha, ''), m.terminal,
+		        COALESCE(t.supervised, 0), a.evidence_sha
 		 FROM approvals a
 		 JOIN messages m ON m.id = a.message_id
 		 LEFT JOIN tasks t ON t.id = m.task_id
@@ -575,17 +634,19 @@ func (db *DB) ListPendingApprovals(ctx context.Context, projectID string) ([]App
 	var out []Approval
 	for rows.Next() {
 		var (
-			a        Approval
-			note     sql.NullString
-			created  string
-			terminal int
+			a          Approval
+			note       sql.NullString
+			created    string
+			terminal   int
+			supervised int
 		)
 		if err := rows.Scan(&a.ID, &a.ProjectID, &a.MessageID, &a.State, &note,
 			&created, &a.TaskName, &a.TaskID, &a.FromRole, &a.Body, &a.Commit,
-			&terminal); err != nil {
+			&terminal, &supervised, &a.EvidenceSHA); err != nil {
 			return nil, err
 		}
 		a.Terminal = terminal != 0
+		a.Supervised = supervised != 0
 		if note.Valid {
 			a.Note = &note.String
 		}
@@ -596,6 +657,70 @@ func (db *DB) ListPendingApprovals(ctx context.Context, projectID string) ([]App
 		out = append(out, a)
 	}
 	return out, rows.Err()
+}
+
+// HasOpenSupervised reports whether this project has a live card that asked
+// for an architect sidecar. The overmind uses it to summon or retire that
+// process, so an idle opus is not kept for a swarm that has nothing for it.
+func (db *DB) HasOpenSupervised(ctx context.Context, projectID string) (bool, error) {
+	var n int
+	err := db.read.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM tasks
+		  WHERE project_id = ? AND supervised = 1 AND state NOT IN (?, ?)`,
+		projectID, TaskDone, TaskRejected).Scan(&n)
+	if err != nil {
+		return false, fmt.Errorf("looking for supervised cards: %w", err)
+	}
+	return n > 0, nil
+}
+
+// Decision is one item the supervisor should judge: a held mid-pipeline
+// handoff, or a question a pipeline role asked.
+type Decision struct {
+	Approval      *Approval
+	Clarification *Clarification
+}
+
+func (d Decision) CreatedAt() time.Time {
+	if d.Approval != nil {
+		return d.Approval.CreatedAt
+	}
+	if d.Clarification != nil {
+		return d.Clarification.CreatedAt
+	}
+	return time.Time{}
+}
+
+// NextDecision is the oldest pending judgement on a supervised card that is
+// not the land, and not a question the supervisor itself asked.
+func (db *DB) NextDecision(ctx context.Context, projectID, supervisorRole string) (*Decision, error) {
+	approvals, err := db.ListPendingApprovals(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	questions, err := db.ListOpenClarifications(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	var best *Decision
+	consider := func(d Decision) {
+		if best == nil || d.CreatedAt().Before(best.CreatedAt()) {
+			best = &d
+		}
+	}
+	for i := range approvals {
+		a := approvals[i]
+		if a.Supervised && !a.Terminal {
+			consider(Decision{Approval: &a})
+		}
+	}
+	for i := range questions {
+		q := questions[i]
+		if q.Supervised && q.Role != supervisorRole {
+			consider(Decision{Clarification: &q})
+		}
+	}
+	return best, nil
 }
 
 // ── clarifications ────────────────────────────────────────────────────────
@@ -627,6 +752,16 @@ type Clarification struct {
 	DeliveredAt *time.Time `json:"deliveredAt,omitempty"`
 	CreatedAt   time.Time  `json:"createdAt"`
 	AnsweredAt  *time.Time `json:"answeredAt,omitempty"`
+	// AnsweredBy is who wrote the answer: OperatorRole for the cockpit, a
+	// role name for an agent, empty while the question is still open.
+	AnsweredBy string `json:"answeredBy,omitempty"`
+
+	// Supervised is whether the card this question sits on asked for an
+	// architect sidecar.
+	Supervised bool `json:"supervised,omitempty"`
+
+	// EvidenceSHA is the commit that recorded the rationale, when there was one.
+	EvidenceSHA string `json:"evidenceSha,omitempty"`
 }
 
 // maxClarificationOptions is where a choice stops being one. Ten radio
@@ -693,12 +828,12 @@ func (db *DB) priorAsk(ctx context.Context, projectID, role, question string, op
 		return nil, err
 	}
 	row := db.read.QueryRowContext(ctx,
-		`SELECT id, project_id, task_id, role, question, options, answer, state, delivered_at, created_at, answered_at
-		   FROM clarifications
-		  WHERE project_id = ? AND role = ? AND question = ?
-		    AND task_id IS ? AND options IS ?
-		    AND (state = ? OR (state = ? AND delivered_at IS NULL))
-		  ORDER BY created_at DESC LIMIT 1`,
+		`SELECT `+clarificationCols+`
+		   FROM clarifications c LEFT JOIN tasks t ON t.id = c.task_id
+		  WHERE c.project_id = ? AND c.role = ? AND c.question = ?
+		    AND c.task_id IS ? AND c.options IS ?
+		    AND (c.state = ? OR (c.state = ? AND c.delivered_at IS NULL))
+		  ORDER BY c.created_at DESC LIMIT 1`,
 		projectID, role, question, taskID, stored,
 		ClarificationOpen, ClarificationAnswered)
 	c, err := scanClarification(row)
@@ -763,12 +898,22 @@ func checkOptions(options []string) ([]string, error) {
 	return out, nil
 }
 
-// AnswerClarification records a human's answer.
-func (db *DB) AnswerClarification(ctx context.Context, id, answer string) error {
+// AnswerClarification records an answer. scope is who wrote it: the zero
+// value for the cockpit, a project and role name for an agent.
+//
+// An agent's answer is checked against the question rather than against the id
+// it was given, because the id proves nothing. See DecisionScope.
+func (db *DB) AnswerClarification(ctx context.Context, scope DecisionScope, id, answer, evidence string) error {
+	by := scope.By()
+	if !scope.Operator() {
+		if err := db.mayDecideQuestion(ctx, scope, id); err != nil {
+			return err
+		}
+	}
 	res, err := db.sql.ExecContext(ctx,
-		`UPDATE clarifications SET answer = ?, state = ?, answered_at = ?
+		`UPDATE clarifications SET answer = ?, state = ?, answered_at = ?, answered_by = ?, evidence_sha = ?
 		 WHERE id = ? AND state = ?`,
-		answer, ClarificationAnswered, time.Now().UTC().Format(time.RFC3339Nano),
+		answer, ClarificationAnswered, time.Now().UTC().Format(time.RFC3339Nano), by, evidence,
 		id, ClarificationOpen)
 	if err != nil {
 		return fmt.Errorf("answering clarification %s: %w", id, err)
@@ -776,11 +921,35 @@ func (db *DB) AnswerClarification(ctx context.Context, id, answer string) error 
 	return mustAffect(res, fmt.Sprintf("open clarification %s", id))
 }
 
+// mayDecideQuestion is the guard on an agent answering a question: the same
+// three conditions NextDecision uses to offer one, re-checked at the write.
+//
+// Offering and deciding are separated by however long the sidecar's turn
+// takes, and the operator can switch supervision off inside that gap. A check
+// only at the offer is a check against the state that used to hold.
+func (db *DB) mayDecideQuestion(ctx context.Context, scope DecisionScope, id string) error {
+	q, err := db.GetClarification(ctx, id)
+	if err != nil {
+		return err
+	}
+	// Not found rather than forbidden: an id from another project is not a
+	// question this caller may learn the existence of.
+	if scope.ProjectID == "" || q.ProjectID != scope.ProjectID {
+		return fmt.Errorf("clarification %s: %w", id, ErrNotFound)
+	}
+	if !q.Supervised {
+		return invalid("this card is not supervised; its questions are the operator's to answer")
+	}
+	if q.Role == scope.By() {
+		return invalid("%s asked this question and cannot answer it", scope.By())
+	}
+	return nil
+}
+
 // GetClarification reads one question and whatever answer it has.
 func (db *DB) GetClarification(ctx context.Context, id string) (*Clarification, error) {
 	row := db.read.QueryRowContext(ctx,
-		`SELECT id, project_id, task_id, role, question, options, answer, state, delivered_at, created_at, answered_at
-		 FROM clarifications WHERE id = ?`, id)
+		`SELECT `+clarificationCols+` FROM clarifications c LEFT JOIN tasks t ON t.id = c.task_id WHERE c.id = ?`, id)
 	c, err := scanClarification(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("clarification %s: %w", id, ErrNotFound)
@@ -792,8 +961,8 @@ func (db *DB) GetClarification(ctx context.Context, id string) (*Clarification, 
 // not, oldest first. The trail reads these; Attention reads the open ones.
 func (db *DB) ClarificationsForTask(ctx context.Context, taskID string) ([]Clarification, error) {
 	rows, err := db.read.QueryContext(ctx,
-		`SELECT id, project_id, task_id, role, question, options, answer, state, delivered_at, created_at, answered_at
-		 FROM clarifications WHERE task_id = ? ORDER BY created_at`, taskID)
+		`SELECT `+clarificationCols+`
+		 FROM clarifications c LEFT JOIN tasks t ON t.id = c.task_id WHERE c.task_id = ? ORDER BY c.created_at`, taskID)
 	if err != nil {
 		return nil, fmt.Errorf("listing a task's clarifications: %w", err)
 	}
@@ -813,8 +982,8 @@ func (db *DB) ClarificationsForTask(ctx context.Context, taskID string) ([]Clari
 // ListOpenClarifications returns what Attention must show.
 func (db *DB) ListOpenClarifications(ctx context.Context, projectID string) ([]Clarification, error) {
 	rows, err := db.read.QueryContext(ctx,
-		`SELECT id, project_id, task_id, role, question, options, answer, state, delivered_at, created_at, answered_at
-		 FROM clarifications WHERE project_id = ? AND state = ? ORDER BY created_at`,
+		`SELECT `+clarificationCols+`
+		 FROM clarifications c LEFT JOIN tasks t ON t.id = c.task_id WHERE c.project_id = ? AND c.state = ? ORDER BY c.created_at`,
 		projectID, ClarificationOpen)
 	if err != nil {
 		return nil, fmt.Errorf("listing clarifications: %w", err)
@@ -832,20 +1001,25 @@ func (db *DB) ListOpenClarifications(ctx context.Context, projectID string) ([]C
 	return out, rows.Err()
 }
 
+const clarificationCols = `c.id, c.project_id, c.task_id, c.role, c.question, c.options, c.answer, c.state, c.delivered_at, c.created_at, c.answered_at, c.answered_by, c.evidence_sha, COALESCE(t.supervised, 0)`
+
 func scanClarification(s scanner) (*Clarification, error) {
 	var (
-		c         Clarification
-		taskID    sql.NullString
-		options   sql.NullString
-		answer    sql.NullString
-		delivered sql.NullString
-		created   string
-		answered  sql.NullString
+		c          Clarification
+		taskID     sql.NullString
+		options    sql.NullString
+		answer     sql.NullString
+		delivered  sql.NullString
+		created    string
+		answered   sql.NullString
+		supervised int
 	)
 	if err := s.Scan(&c.ID, &c.ProjectID, &taskID, &c.Role, &c.Question,
-		&options, &answer, &c.State, &delivered, &created, &answered); err != nil {
+		&options, &answer, &c.State, &delivered, &created, &answered, &c.AnsweredBy,
+		&c.EvidenceSHA, &supervised); err != nil {
 		return nil, err
 	}
+	c.Supervised = supervised != 0
 	if taskID.Valid {
 		c.TaskID = &taskID.String
 	}
@@ -1068,6 +1242,23 @@ func (db *DB) SetTaskHidden(ctx context.Context, id string, hidden bool) error {
 		return fmt.Errorf("task %s is not a finished card", id)
 	}
 	return nil
+}
+
+// SetTaskSupervised marks a card as one an architect sidecar will run, or
+// hands it back to the person. Live cards are allowed: taking supervision
+// off mid-flight returns pending items to Attention rather than leaving them
+// waiting on a process that will never see them.
+func (db *DB) SetTaskSupervised(ctx context.Context, id string, on bool) error {
+	flag := 0
+	if on {
+		flag = 1
+	}
+	res, err := db.sql.ExecContext(ctx,
+		`UPDATE tasks SET supervised = ? WHERE id = ?`, flag, id)
+	if err != nil {
+		return fmt.Errorf("setting supervised on %s: %w", id, err)
+	}
+	return mustAffect(res, fmt.Sprintf("task %s", id))
 }
 
 // StopTask parks a card: no agent will pick it up again, and its history stays.
@@ -1294,10 +1485,11 @@ func (db *DB) ListHistory(ctx context.Context, projectID string, f HistoryFilter
 			stoppedAt   sql.NullString
 			roles       string
 			skip        string
+			supervised  int
 		)
 		if err := rows.Scan(&e.ID, &e.ProjectID, &sessionID, &e.Name, &e.Body, &e.Lane, &e.State,
 			&created, &firstClaim, &completedAt, &e.ActiveMS, &e.ReworkCount, &e.Hidden,
-			&stoppedAt, &e.Outcome, &e.OutcomeRef, &e.Pinned, &e.Deploy, &skip,
+			&stoppedAt, &e.Outcome, &e.OutcomeRef, &e.Pinned, &e.Deploy, &skip, &supervised,
 			&e.Tokens, &e.CostUSD, &e.HasTranscript, &roles); err != nil {
 			return nil, "", err
 		}
@@ -1305,6 +1497,7 @@ func (db *DB) ListHistory(ctx context.Context, projectID string, f HistoryFilter
 		if e.Skip, err = unmarshalArgs(skip); err != nil {
 			return nil, "", fmt.Errorf("task %s has an unreadable skip list: %w", e.ID, err)
 		}
+		e.Supervised = supervised != 0
 		if err := fillTaskTimes(&e.Task, sessionID, created, firstClaim, completedAt, stoppedAt); err != nil {
 			return nil, "", err
 		}
@@ -1398,6 +1591,15 @@ type TrailGate struct {
 	// WaitedMS is how long it was pending. This is where wall time goes when
 	// active time is short, and it is invisible in any per-task total.
 	WaitedMS int64 `json:"waitedMs"`
+	// DecidedBy is who resolved it: OperatorRole, a role name, or empty while
+	// pending. The trail used to show only the wait, so a sidecar decision
+	// would have looked like a person.
+	DecidedBy string `json:"decidedBy,omitempty"`
+	// EvidenceSHA is the commit the decider wrote the rationale into, when
+	// there was one. The sidecar is told to record its reasoning in the
+	// repository, and without this the trail had no way to reach it: the
+	// commit sits on the sidecar's worktree branch and nothing links to it.
+	EvidenceSHA string `json:"evidenceSha,omitempty"`
 }
 
 // TaskTrail is every step a task took, with the numbers that belong to each.
@@ -1410,7 +1612,8 @@ func (db *DB) TaskTrail(ctx context.Context, taskID string) ([]TrailStep, error)
 		`SELECT m.from_role, COALESCE(r.to_role, ''), m.kind,
 		        COALESCE(m.commit_sha, ''), m.body, m.created_at, m.terminal,
 		        l.granted_at,
-		        a.id, a.state, a.note, a.created_at, a.decided_at
+		        a.id, a.state, a.note, a.created_at, a.decided_at, a.decided_by,
+		        a.evidence_sha
 		   FROM messages m
 		   LEFT JOIN routes r ON r.message_id = m.id
 		   LEFT JOIN leases l ON l.id = m.source_lease_id
@@ -1430,10 +1633,12 @@ func (db *DB) TaskTrail(ctx context.Context, taskID string) ([]TrailStep, error)
 			final                       int
 			gateID, gateState, gateNote sql.NullString
 			gateCreated, gateDecided    sql.NullString
+			gateBy, gateEvidence        sql.NullString
 			createdAt                   string
 		)
 		if err := rows.Scan(&s.From, &s.To, &s.Kind, &s.Commit, &s.Body, &createdAt, &final,
-			&granted, &gateID, &gateState, &gateNote, &gateCreated, &gateDecided); err != nil {
+			&granted, &gateID, &gateState, &gateNote, &gateCreated, &gateDecided, &gateBy,
+			&gateEvidence); err != nil {
 			return nil, err
 		}
 		if s.At, err = parseStored(createdAt); err != nil {
@@ -1450,7 +1655,8 @@ func (db *DB) TaskTrail(ctx context.Context, taskID string) ([]TrailStep, error)
 			}
 		}
 		if gateID.Valid {
-			gate := TrailGate{ID: gateID.String, State: gateState.String, Note: gateNote.String}
+			gate := TrailGate{ID: gateID.String, State: gateState.String, Note: gateNote.String,
+				DecidedBy: gateBy.String, EvidenceSHA: gateEvidence.String}
 			if gate.CreatedAt, err = parseStored(gateCreated.String); err != nil {
 				return nil, fmt.Errorf("approval has an unreadable timestamp: %w", err)
 			}

@@ -354,6 +354,21 @@ const pullRequest = computed(() =>
                   :class="a.step.gate.state === 'pending' ? 'text-[var(--status-warning)]' : ''"
                 >
                   {{ a.step.gate.state === 'pending' ? 'waiting for a decision' : a.step.gate.state }}
+                  <template v-if="a.step.gate.decidedBy && a.step.gate.decidedBy !== 'operator'">
+                    by {{ a.step.gate.decidedBy }}
+                  </template>
+                  <!-- Where the reasoning was written down. A sidecar commits
+                       its rationale to the repository and that commit lives on
+                       the sidecar's own worktree branch: without the sha here
+                       the trail said a decision was made and gave no way to
+                       reach the argument for it. -->
+                  <code
+                    v-if="a.step.gate.evidenceSha"
+                    class="text-foreground/80"
+                    :title="`the decision was written down in ${a.step.gate.evidenceSha}`"
+                  >
+                    {{ a.step.gate.evidenceSha.slice(0, 8) }}
+                  </code>
                   <template v-if="a.step.gate.waitedMs >= 60_000">
                     after {{ duration(a.step.gate.waitedMs) }}
                   </template>
