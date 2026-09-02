@@ -64,6 +64,15 @@ const (
 	nudge = "You have work queued. Run `zerg next` to claim it."
 )
 
+// ErrClosing is returned by a lifecycle operation that arrives after the daemon
+// has begun shutting down.
+//
+// It is a refusal and not a failure: nothing was started, so there is nothing
+// half-done to explain. What it prevents is the opposite — a swarm published
+// after shutdown has counted what it has to stop, whose agents then outlive the
+// daemon in process groups of their own.
+var ErrClosing = errors.New("this daemon is shutting down")
+
 // ErrNotReady is returned when a team cannot work. It carries the readiness
 // report so the caller can show which role failed which check, and why.
 type ErrNotReady struct{ Report *preflight.Report }
@@ -92,7 +101,17 @@ type Overmind struct {
 	log       *slog.Logger
 	stateDir  string
 
-	mu      sync.Mutex
+	mu sync.Mutex
+	// closing is the point after which no lifecycle operation may publish a
+	// swarm. Set once, never cleared: a daemon that has begun shutting down is
+	// not going to want one again.
+	//
+	// StopAll takes a snapshot of what is running, and without this a Start
+	// that was still spawning could publish after that snapshot — a swarm
+	// nothing stops, whose agents are in process groups of their own and so
+	// outlive the daemon holding worktrees. The window was as long as
+	// preflight, which is seconds, and a resume at boot spends all of it.
+	closing bool
 	running map[string]*swarm
 	// gate serialises the lifecycle of one project: start, stop, reconcile and
 	// delete cannot interleave for the same project, and never block another.
@@ -381,27 +400,61 @@ func (o *Overmind) Start(ctx context.Context, projectID string) error {
 	defer unlock()
 
 	o.mu.Lock()
+	closing := o.closing
 	_, up := o.running[projectID]
 	o.mu.Unlock()
+	if closing {
+		return ErrClosing
+	}
 	if up {
 		return fmt.Errorf("this project is already running")
 	}
 
+	// Nothing goes into a worktree that may still have an agent in it.
+	//
+	// A row here has survived the boot sweep, which means the previous run's
+	// process group could be neither stopped nor identified. Spawning over it
+	// is the failure the sweep exists to prevent: two harnesses in one
+	// directory, both committing.
+	held, err := o.db.AgentProcessesFor(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	if len(held) > 0 {
+		return &ErrAgentsUnaccountedFor{Processes: held}
+	}
+
 	// Everything acquired before the swarm is published has to be given back on
 	// any failure, or a half-started project leaks agent tokens, an open
-	// session and running processes that nothing can stop.
+	// session, a recorded intent to be running, and processes that nothing can
+	// stop.
 	started := false
 	var (
-		cancel  context.CancelFunc
-		session *store.Session
-		tokens  []string
+		s         *swarm
+		session   *store.Session
+		tokens    []string
+		intentSet bool
 	)
 	defer func() {
 		if started {
 			return
 		}
-		if cancel != nil {
-			cancel()
+		// Cancelled *and* waited for. Cancelling returns immediately while the
+		// harnesses are still shutting down, and a failed start that returned
+		// there left agents in worktrees the operator's next attempt would
+		// spawn into — the same collision as the one Stop already waits out.
+		if s != nil {
+			s.cancel()
+			stopped := make(chan struct{})
+			go func() {
+				s.live.Wait()
+				close(stopped)
+			}()
+			select {
+			case <-stopped:
+			case <-time.After(stopGrace):
+				o.log.Warn("agents from a failed start did not exit in time", "project", projectID)
+			}
 		}
 		for _, t := range tokens {
 			o.agents.Revoke(t)
@@ -409,6 +462,17 @@ func (o *Overmind) Start(ctx context.Context, projectID string) error {
 		if session != nil {
 			if err := o.db.EndSession(context.WithoutCancel(ctx), session.ID, "start failed"); err != nil {
 				o.log.Warn("closing a session after a failed start", "project", projectID, "err", err)
+			}
+		}
+		// Only if this attempt is what set it. A resume of a project that was
+		// already wanted must keep the intent when it fails, which is what has
+		// the next daemon start try again; withdrawing one we merely found
+		// would turn a harness that is logged out at boot into a project the
+		// operator has to remember to start by hand.
+		if intentSet {
+			if err := o.db.WithdrawStart(context.WithoutCancel(ctx), projectID); err != nil {
+				o.log.Warn("could not withdraw the start intent after a failed start",
+					"project", projectID, "err", err)
 			}
 		}
 	}()
@@ -419,6 +483,22 @@ func (o *Overmind) Start(ctx context.Context, projectID string) error {
 	}
 	if !report.Ready {
 		return &ErrNotReady{Report: report}
+	}
+
+	// The operator's decision, written down before anything is spawned and
+	// undone above if the spawn fails.
+	//
+	// After preflight, because a project that cannot work was never running and
+	// an intent recorded for it would have every later daemon start try again
+	// on its own, unattended, for as long as whatever is broken stays broken.
+	// Before the spawn, because this is the one write whose failure the
+	// operator has to hear about: it used to be logged and swallowed after the
+	// swarm was up, so a Start could report success and then not come back
+	// after a restart, with nothing on screen to say the decision had not been
+	// kept.
+	intentSet, err = o.db.RequestStart(ctx, projectID)
+	if err != nil {
+		return err
 	}
 
 	spawn, err := o.spawnContext(ctx, projectID)
@@ -432,8 +512,7 @@ func (o *Overmind) Start(ctx context.Context, projectID string) error {
 	}
 
 	runCtx, runCancel := context.WithCancel(context.Background())
-	cancel = runCancel
-	s := &swarm{
+	s = &swarm{
 		session: session, ctx: runCtx, cancel: runCancel,
 		roles: map[string]*roleProc{},
 	}
@@ -448,21 +527,17 @@ func (o *Overmind) Start(ctx context.Context, projectID string) error {
 		tokens = append(tokens, s.roles[role.Name].token)
 	}
 
+	// Publishing and the closing check are one step under the lock. Split
+	// apart they are a race with shutdown: StopAll snapshots what is running,
+	// and a swarm published a moment later is one nothing ever stops.
 	o.mu.Lock()
+	if o.closing {
+		o.mu.Unlock()
+		return ErrClosing
+	}
 	o.running[projectID] = s
 	o.mu.Unlock()
 	started = true
-
-	// After the swarm is up, not before: a project that failed preflight was
-	// never running, and recording an intent for it would have the next daemon
-	// start try again on its own and fail again, unattended, for as long as
-	// whatever is broken stays broken.
-	if err := o.db.RequestStart(context.WithoutCancel(ctx), projectID); err != nil {
-		// Not fatal. The swarm is running either way; what is lost is its
-		// coming back by itself after a restart.
-		o.log.Warn("could not record that this project should be running",
-			"project", projectID, "err", err)
-	}
 
 	s.live.Add(1)
 	go func() {
@@ -580,6 +655,7 @@ func (o *Overmind) spawnRole(runCtx context.Context, s *swarm, env *spawnEnv, ro
 		Preflight:    o.preflight,
 		StateDir:     o.roleDir(projectID, role.Name, "state"),
 		Continuity:   continuity{db: o.db, projectID: projectID, log: o.log},
+		Processes:    processes{db: o.db, projectID: projectID, log: o.log},
 	})
 
 	s.mu.Lock()
@@ -629,6 +705,38 @@ func (c continuity) Record(ctx context.Context, role, harness, sessionID, finger
 	if err := c.db.SaveRoleSession(ctx, c.projectID, role, harness, sessionID, fingerprint); err != nil {
 		c.log.Warn("could not record the session this role is holding",
 			"project", c.projectID, "role", role, "err", err)
+	}
+}
+
+// processes is where the pipeline writes down the operating-system process
+// behind each role, so a daemon that is killed leaves the next one enough to
+// find that process and stop it.
+//
+// Failures are logged and swallowed, like continuity's, but they do not cost
+// the same thing. What is lost here is the next daemon's ability to clean up
+// after this one, which leaves it exactly where it was before any of this
+// existed: it will find no row, assume the worktree is free, and may put a
+// second agent into it.
+type processes struct {
+	db        *store.DB
+	projectID string
+	log       *slog.Logger
+}
+
+func (p processes) Started(ctx context.Context, role string, pid, pgid int, identity, worktree string) {
+	if err := p.db.RecordAgentProcess(ctx, store.AgentProcess{
+		ProjectID: p.projectID, Role: role,
+		PID: pid, PGID: pgid, Identity: identity, Worktree: worktree,
+	}); err != nil {
+		p.log.Warn("could not record an agent's process; a crash of this daemon will leave it running",
+			"project", p.projectID, "role", role, "pid", pid, "err", err)
+	}
+}
+
+func (p processes) Exited(ctx context.Context, role string, pid int) {
+	if err := p.db.ForgetAgentProcess(ctx, p.projectID, role, pid); err != nil {
+		p.log.Warn("could not forget an agent's process after it exited",
+			"project", p.projectID, "role", role, "pid", pid, "err", err)
 	}
 }
 
@@ -735,32 +843,46 @@ func (o *Overmind) Reconcile(ctx context.Context, projectID string) error {
 // holding, so the next Start is a genuinely fresh one. StopAll, which is the
 // daemon going down, does neither — see the difference described on
 // store.WithdrawStart.
+// A project that is not running is stopped all the same. This used to be an
+// error returned before the intent was touched, which left the one state
+// nobody could get out of: a resume that fails preflight leaves the project
+// down and still wanting to be up, so every restart tried it again, and Stop —
+// the button that exists to say otherwise — refused because there was no swarm
+// to stop. Stop is a statement about what the operator wants, not a claim about
+// what is running.
 func (o *Overmind) Stop(ctx context.Context, projectID, reason string) error {
 	unlock := o.lock(projectID)
 	defer unlock()
-	if err := o.stop(ctx, projectID, reason); err != nil {
-		return err
+
+	o.mu.Lock()
+	_, up := o.running[projectID]
+	o.mu.Unlock()
+
+	if up {
+		if err := o.stop(ctx, projectID, reason); err != nil {
+			return err
+		}
 	}
-	o.forgetContinuity(ctx, projectID)
-	return nil
+	return o.forgetContinuity(ctx, projectID)
 }
 
 // forgetContinuity drops everything that would make the next start a resumed
-// one. Both failures are warnings: the swarm is already down, and the worst
-// case is a project that starts itself once more, or an agent that comes back
-// remembering a task that is finished.
-func (o *Overmind) forgetContinuity(ctx context.Context, projectID string) {
-	ctx = context.WithoutCancel(ctx)
-	if err := o.db.WithdrawStart(ctx, projectID); err != nil {
-		o.log.Warn("could not record that this project should stay stopped",
-			"project", projectID, "err", err)
+// one, in one transaction, and reports whether it worked.
+//
+// The failure used to be logged and swallowed, which reported a stop that had
+// not happened: the project kept its intent and started itself again on the
+// next daemon boot, or kept its sessions and brought back a conversation about
+// a task that was finished. Neither is visible from the button that was
+// pressed, so the only place it can be said is the response to pressing it.
+func (o *Overmind) forgetContinuity(ctx context.Context, projectID string) error {
+	n, err := o.db.ForgetContinuity(context.WithoutCancel(ctx), projectID)
+	if err != nil {
+		return err
 	}
-	if n, err := o.db.ForgetRoleSessions(ctx, projectID); err != nil {
-		o.log.Warn("could not clear this project's harness sessions",
-			"project", projectID, "err", err)
-	} else if n > 0 {
+	if n > 0 {
 		o.log.Info("cleared harness sessions on stop", "project", projectID, "roles", n)
 	}
+	return nil
 }
 
 // stop is the body, for callers that already hold the lifecycle lock.
@@ -846,14 +968,12 @@ func (o *Overmind) StopFor(ctx context.Context, projectID, reason string) (bool,
 		// Still an operator saying stop, even with nothing running: a project
 		// whose swarm died and was never restarted still holds the intent, and
 		// leaving it set would have the daemon start it again.
-		o.forgetContinuity(ctx, projectID)
-		return false, nil
+		return false, o.forgetContinuity(ctx, projectID)
 	}
 	if err := o.stop(ctx, projectID, reason); err != nil {
 		return true, err
 	}
-	o.forgetContinuity(ctx, projectID)
-	return true, nil
+	return true, o.forgetContinuity(ctx, projectID)
 }
 
 // Resume starts the projects the operator left running when the daemon last
@@ -889,11 +1009,24 @@ func (o *Overmind) Resume(ctx context.Context) (int, error) {
 			held = len(sessions)
 		}
 
+		var unaccounted *ErrAgentsUnaccountedFor
 		switch err := o.Start(ctx, id); {
 		case err == nil:
 			started++
 			o.log.Info("resumed a project that was running before the restart",
 				"project", name, "conversations", held)
+		case errors.Is(err, ErrClosing):
+			// The daemon began shutting down while this was running. Nothing
+			// was started and nothing is left to start.
+			return started, err
+		case errors.As(err, &unaccounted):
+			// The one refusal that is not worth retrying on the next boot: the
+			// worktree may still hold an agent nobody could identify, and an
+			// unattended second one in it is exactly what this is preventing.
+			// The intent stays, so the operator's Start still works once they
+			// have looked at the machine.
+			o.log.Error("refusing to resume a project whose previous agents are unaccounted for",
+				"project", name, "err", err)
 		default:
 			// Including ErrNotReady, which is the common one: a preflight check
 			// that fails at boot is usually a harness that has not finished
@@ -905,6 +1038,24 @@ func (o *Overmind) Resume(ctx context.Context) (int, error) {
 	return started, nil
 }
 
+// Closing raises the barrier without stopping anything, for a shutdown that has
+// to wait for a resume before it can tear down.
+//
+// Shutdown waits up to fifteen seconds for a resume in flight and then stops
+// waiting, and the resume keeps going: it is on a goroutine with a context of
+// its own that Start switches away from as soon as it publishes. Raising the
+// barrier first means that whatever the resume reaches after the wait gives up
+// starts nothing at all, rather than starting a swarm into a daemon that has
+// already counted what it has to stop.
+//
+// Idempotent, and StopAll raises it too. It exists separately so a shutdown can
+// close the door before it begins waiting rather than after.
+func (o *Overmind) Closing() {
+	o.mu.Lock()
+	o.closing = true
+	o.mu.Unlock()
+}
+
 // StopAll shuts every running project down, for daemon shutdown.
 //
 // Deliberately not Stop, which is the operator's decision and withdraws the
@@ -913,7 +1064,14 @@ func (o *Overmind) Resume(ctx context.Context) (int, error) {
 // leaves every record of what should be running exactly as it found it, which
 // is what lets the next start put it all back.
 func (o *Overmind) StopAll(ctx context.Context, reason string) {
+	// Barrier before snapshot, and both under one lock. A Start that is midway
+	// through preflight when this runs would otherwise publish its swarm after
+	// the snapshot was taken, and that swarm is one nothing stops: its agents
+	// are in process groups of their own, so they outlive the daemon holding
+	// worktrees. With the barrier that Start fails at its publish and gives
+	// back everything it acquired.
 	o.mu.Lock()
+	o.closing = true
 	ids := make([]string, 0, len(o.running))
 	for id := range o.running {
 		ids = append(ids, id)

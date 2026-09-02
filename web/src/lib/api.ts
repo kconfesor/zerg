@@ -316,6 +316,11 @@ export interface QuotaWindow {
 
 export interface SwarmStatus {
   running: boolean
+  /** Whether the operator has asked for this project to be running, which is a
+   *  different question from whether it is. A resume that fails preflight
+   *  leaves a project down and still wanted, and every later daemon start tries
+   *  it again; this is what lets the bar offer the Stop that withdraws it. */
+  wanted?: boolean
   roles: RoleStatus[]
   /** Subscription headroom, keyed by provider — one account, many roles. */
   quotas?: Record<string, QuotaReport>

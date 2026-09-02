@@ -294,6 +294,56 @@ func TestAPromptEditIsNotResumedAcross(t *testing.T) {
 	}
 }
 
+// A change to the harness flags is not resumed across either.
+//
+// The flags were missing from the fingerprint, and that was a hole rather than
+// an omission: they are the arguments the harness is actually launched with, and
+// every other field in the fingerprint can be overridden by one. --model,
+// --permission-mode, a plugin, a session flag — a settings change to any of them
+// would have resumed a conversation held under the old configuration while the
+// board reported the new one was in force.
+func TestAHarnessFlagChangeIsNotResumedAcross(t *testing.T) {
+	ctx := context.Background()
+	log := &spawnLog{}
+	h := resumableHarnessFor(t, log)
+
+	if err := h.over.Start(ctx, h.project.ID); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	waitFor(t, func() bool { return anyRecorded(t, h.db, h.project.ID) }, 10*time.Second,
+		"no session was recorded")
+	h.over.StopAll(ctx, "the daemon shut down")
+
+	// The operator changes the flags every role on this harness is launched
+	// with. Nothing else about the roles moves: same model, same thinking
+	// level, same prompt.
+	cfg, err := h.db.GetConfig(ctx)
+	if err != nil {
+		t.Fatalf("GetConfig: %v", err)
+	}
+	if cfg.Harness == nil {
+		cfg.Harness = map[string]store.HarnessOptions{}
+	}
+	cfg.Harness["scripted"] = store.HarnessOptions{Flags: []string{"--model", "something-else"}}
+	if _, err := h.db.SetConfig(ctx, cfg); err != nil {
+		t.Fatalf("SetConfig: %v", err)
+	}
+
+	spawnsBefore := len(log.spawns())
+	next := newDaemon(t, h, log)
+	if _, err := next.Resume(ctx); err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	waitFor(t, func() bool { return len(log.spawns()) > spawnsBefore }, 10*time.Second,
+		"nothing was spawned after the flag change")
+
+	for i, got := range log.spawns()[spawnsBefore:] {
+		if got != "" {
+			t.Errorf("spawn %d resumed %q across a harness flag change; it should have started cold", i, got)
+		}
+	}
+}
+
 // anyRecorded reports whether any role of this project has a session on record,
 // under any fingerprint.
 func anyRecorded(t *testing.T, db *store.DB, projectID string) bool {

@@ -25,6 +25,7 @@ import (
 
 	"github.com/kconfesor/zerg/internal/adapter"
 	"github.com/kconfesor/zerg/internal/event"
+	"github.com/kconfesor/zerg/internal/procid"
 	"github.com/kconfesor/zerg/internal/store"
 )
 
@@ -139,6 +140,15 @@ type Config struct {
 	// the tests want.
 	Continuity Continuity
 
+	// Processes is where the operating-system process behind each spawn is
+	// written down, so a daemon that is killed leaves the next one something to
+	// find and stop.
+	//
+	// Nil means nothing is recorded, which is right for chat: its worktree is
+	// its own and nothing else is ever put into it, so an orphan there costs a
+	// stale process and not a corrupted branch.
+	Processes Processes
+
 	Bus         *event.Bus
 	Log         *slog.Logger
 	Preflight   Preflighter
@@ -157,7 +167,8 @@ type Continuity interface {
 	// Resume is the conversation to continue, or empty for a fresh one.
 	//
 	// fingerprint is what the session would be resumed *into*: harness, model,
-	// thinking level and composed system prompt. A stored session recorded
+	// thinking level, composed system prompt and the effective command-line
+	// flags, which can override any of the rest. A stored session recorded
 	// under a different one must not come back, because a role restarts on a
 	// configuration change precisely so the change applies (ARCHITECTURE
 	// §11.3), and resuming across the edit would replay a conversation shaped
@@ -167,6 +178,25 @@ type Continuity interface {
 	// Record stores the conversation the harness says it is running. Called
 	// whenever that answer changes, which is normally once per spawn.
 	Record(ctx context.Context, role, harness, sessionID, fingerprint string)
+}
+
+// Processes is the record of which operating-system processes this daemon
+// spawned, kept where a daemon that dies without running any of its deferred
+// work still leaves it behind.
+//
+// The pid alone would not be usable by the daemon that finds it: pids are
+// reused, and signalling one on the strength of a number in a database is how a
+// cleanup kills a stranger's process. identity is what the operating system
+// says about that process — when it started and what it is running — captured
+// at the moment it was spawned, so the next daemon can ask again and compare.
+type Processes interface {
+	// Started is called once the process is running and in its own group.
+	Started(ctx context.Context, role string, pid, pgid int, identity, worktree string)
+
+	// Exited is called once it has been waited for. Only the recorded pid is
+	// forgotten: a respawn has already written a new row by the time some
+	// callers get here.
+	Exited(ctx context.Context, role string, pid int)
 }
 
 // Cerebrate supervises one role's agent process.
@@ -636,6 +666,13 @@ func (c *Cerebrate) runOnce(ctx context.Context) (fatal bool, ranFor time.Durati
 		return false, 0, fmt.Errorf("starting %s: %w", c.name(), err)
 	}
 
+	// Written down before anything else happens with it. From here until Wait
+	// returns there is a process group holding this worktree, and a daemon that
+	// is SIGKILLed in that window never runs another line of this function: the
+	// row in the database is the only thing that will tell the next daemon the
+	// group is there.
+	c.recordProcess(ctx, cmd.Process.Pid)
+
 	c.mu.Lock()
 	c.stdin = stdin
 	c.ready = make(chan struct{})
@@ -680,6 +717,12 @@ func (c *Cerebrate) runOnce(ctx context.Context) (fatal bool, ranFor time.Durati
 	}
 	stdout.Close()
 	ranFor = c.cfg.clock().Sub(started)
+
+	// Waited for, so the group is gone and the next daemon has nothing to
+	// clean up here. Without cancellation, because the case this matters most
+	// in is a shutdown: the context is already cancelled by the time an agent
+	// stops, and a row left behind by a clean stop would refuse the next start.
+	c.forgetProcess(context.WithoutCancel(ctx), cmd.Process.Pid)
 
 	c.mu.Lock()
 	c.stdin = nil
@@ -1092,13 +1135,61 @@ func (c *Cerebrate) recordSession(ctx context.Context, recorded, fingerprint str
 // The composed system prompt is in it whole rather than by length or by a field
 // list: a prompt edit is exactly the change this has to notice, and any digest
 // of it that is cheaper than the text is a digest that can miss one.
+//
+// The flags are in it for the same reason and were missed at first, which was a
+// hole rather than an omission: they are the arguments the harness is actually
+// launched with, and every field above can be overridden by one. A settings
+// change to the shared harness flags, or a role gaining --model or
+// --permission-mode, would resume a conversation held under the old
+// configuration while the board reported the new one. Effective and in order,
+// so this is the same string the spawn builds ExtraArgs from — flags that were
+// merely reordered do change it, which costs a cold session and is the side to
+// be wrong on.
 func configFingerprint(live liveConfig) string {
-	return strings.Join([]string{
+	parts := []string{
 		live.role.Harness,
 		live.role.Model,
 		live.role.Thinking,
 		live.systemPrompt,
-	}, "\x00")
+	}
+	parts = append(parts, live.harnessFlags...)
+	parts = append(parts, live.role.Args...)
+	return strings.Join(parts, "\x00")
+}
+
+// recordProcess writes down the process group this spawn leads.
+//
+// Every failure here is a warning and nothing more. What is lost is the next
+// daemon's ability to clean up after this one, which is where it was before any
+// of this existed; refusing to spawn over it would trade a supervised agent for
+// no agent at all.
+func (c *Cerebrate) recordProcess(ctx context.Context, pid int) {
+	if c.cfg.Processes == nil {
+		return
+	}
+	pgid, err := processGroup(pid)
+	if err != nil {
+		c.cfg.Log.Warn("could not read the process group of a spawned agent; "+
+			"a crash of this daemon will leave it running",
+			"role", c.name(), "pid", pid, "err", err)
+		return
+	}
+	identity, err := procid.Of(pid)
+	if err != nil {
+		c.cfg.Log.Warn("could not identify a spawned agent; "+
+			"a crash of this daemon will leave it running",
+			"role", c.name(), "pid", pid, "err", err)
+		return
+	}
+	c.cfg.Processes.Started(ctx, c.name(), pid, pgid, identity, c.cfg.Worktree)
+}
+
+// forgetProcess drops the record for a process that has been waited for.
+func (c *Cerebrate) forgetProcess(ctx context.Context, pid int) {
+	if c.cfg.Processes == nil {
+		return
+	}
+	c.cfg.Processes.Exited(ctx, c.name(), pid)
 }
 
 // sessionAdapter is this process's own instance, falling back to the shared

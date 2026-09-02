@@ -521,18 +521,60 @@ zerg answers it in three pieces:
   `cmd.Cancel`, which a `SIGKILL`ed daemon never reaches. Measured: after `kill -9` on the daemon,
   a coder was still running thirty seconds later and still writing files into its worktree, and it
   exited on its own only some minutes afterwards. `zerg down` on the same swarm left nothing behind.
-  Two consequences, and both matter more now that a restart puts a swarm back: an orphan and a
-  resumed agent can hold the same worktree for a few seconds, and `--resume` can be aimed at a
-  session that is still live, which is the case claude answers by forking to a new id. The fork is
-  why the stored id is latched from the stream rather than trusted from what was sent. Killing the
-  previous run's agents at boot is not implemented; a crash is currently survived rather than
-  cleaned up after.
+
+  So the previous run's agents are stopped at boot, before anything else touches their projects.
+  `agent_processes` (schema_037) is one row per spawned process, written by the supervisor as soon
+  as the process is up and removed once it has been waited for, so what is there at boot is exactly
+  what the last daemon did not stop. The row carries the process group, because the group is what
+  has to be signalled, and an *identity*, the process's start time and command as the operating
+  system reports them, because a pid on its own cannot be acted on. Pids are reused, and
+  signalling one on the strength of a number in a database is how a cleanup kills a stranger's
+  process; that failure was reproduced against `zerg.pid` itself, where `zerg down` SIGTERMed an
+  unrelated `sleep` and reported that zerg had stopped.
+
+  The sweep therefore has three outcomes and they are deliberately different. Ours and still there:
+  signal the group, wait for it, forget the row. Gone, group and all: forget the row, nothing to
+  do. Neither of those, meaning the identity does not match or the group outlived a leader that can
+  no longer be identified: leave the process alone and *keep the row*, which refuses that start until
+  an operator says otherwise. `Stop` is that statement, which is why it works on a project that is
+  not running. The refusal costs a resume; the alternative costs a worktree with two harnesses
+  committing into it.
+
+  Ordering matters as much as the mechanism: the sweep runs before leases are reclaimed, because
+  reclaiming a lease hands that card to somebody else while the agent holding it may still be
+  working on it. It also runs before the resume, since the resume is what would put a second agent
+  into the worktree. `--resume` aimed at a session that is still live remains possible in the window
+  before the sweep completes, and is the case claude answers by forking to a new id, which is why
+  the stored id is latched from the stream rather than trusted from what was sent.
+
+  Shutdown closes the same door from the other side. The resume runs on a goroutine so the cockpit
+  opens while preflight is still shelling out, and a shutdown waits fifteen seconds for it and then
+  stops waiting, after which the resume is still going. `StopAll` takes a snapshot of what is
+  running, so a swarm published a moment later is one nothing stops, and its agents are in process
+  groups of their own. The overmind therefore has a closing barrier, raised before the wait rather
+  than after it: publishing a swarm and checking the barrier are one step under one lock, so a Start
+  that has not got there yet fails and gives back its tokens, session, worktrees and processes
+  instead of starting into a daemon that has finished counting. The listener failing takes the same
+  path as a signal, since returning straight out of it ran the teardown with a resume still spawning.
 - **The swarm comes back, because somebody asked for it and nothing has un-asked.**
   `projects.start_requested_at` is the operator's standing intent, set on Start and cleared on Stop.
   A daemon shutting down clears nothing, so the next one starts what was running. `sessions.ended_at`
   cannot answer this and was tried: shutdown fills it in, so a clean stop and a killed daemon are
   the same row afterwards. Settings has a switch (`resumeOnStart`), because an unattended restart
   spends money; the conservatism is in the intent, not in the default.
+
+  Because it is an intent and not a report, both buttons act on it whatever is running. Start
+  records it before it spawns anything and withdraws it again if the spawn fails, in that order and
+  only if that attempt is what set it: a resume of a project that was already wanted must keep the
+  intent when it fails, or a harness that is logged out at boot becomes a project the operator has
+  to remember by hand. Stop clears it *and* the stored conversations in one transaction, and works
+  on a project that is not running: refusing there left the one state nobody could escape, where a
+  resume that fails preflight leaves the project down and still wanted, every restart tries it
+  again, and the button that says otherwise is hidden behind the state it would fix. Both writes are
+  returned rather than logged, because a Stop whose write failed is a project that starts itself
+  again tomorrow while the operator was told it had stopped. The cockpit shows Stop beside Start
+  whenever a project is down and still wanted, which is how a stuck intent is cleared, and with it a
+  start refused because the last run's agents are unaccounted for.
 - **Agents resume the conversation they were holding.** Both harnesses keep it on disk and will
   continue it, and the flags differ in a way that is not a detail: claude needs `--resume <id>`,
   because `--session-id` is the flag that *creates* one and exits with "Session ID <uuid> is already
@@ -542,8 +584,12 @@ zerg answers it in three pieces:
   and the fork is the conversation the work goes into. This is not only about daemon restarts: a
   cerebrate respawns a crashed agent with backoff, and that respawn was cold too.
 
-  A session is stored with a fingerprint of the harness, model, thinking level and composed system
-  prompt, and is not resumed when that changes. §11.3 restarts a role on a configuration change
+  A session is stored with a fingerprint of the harness, model, thinking level, composed system
+  prompt and the effective command-line flags, and is not resumed when that changes. The flags were
+  missing at first, which was a hole rather than an omission: they are what the harness is actually
+  launched with, and every other field in the list can be overridden by one, so a settings change to
+  the shared harness flags resumed a conversation held under the old configuration while the board
+  reported the new one was in force. §11.3 restarts a role on a configuration change
   precisely so the change applies; resuming across the edit would replay a conversation shaped by
   the instructions that were just replaced while the board reported the new ones were in force.
   An operator's Stop forgets the conversations for the same reason it withdraws the intent: a
@@ -551,10 +597,25 @@ zerg answers it in three pieces:
   conversation about a finished task is continuity of the wrong thing.
 
 `zerg up --detach` re-execs into a session of its own with `setsid`, so closing the terminal leaves
-the daemon and its agents alone, and writes its output to `zerg.log` beside the database. The daemon
-records itself in `zerg.pid` there, which is what `zerg down` and `zerg status` read and what stops
-a second daemon opening the same database. It is deliberately not a service manager: it does not
-restart the daemon and has no opinion about boot, which is what launchd and systemd are for.
+the daemon and its agents alone, and writes its output to `zerg.log` beside the database. It is
+deliberately not a service manager: it does not restart the daemon and has no opinion about boot,
+which is what launchd and systemd are for.
+
+Two things that look like one and are not. `zerg.pid` is the **lifetime lock**: the daemon holds an
+exclusive `flock` on it from before the database is opened until it exits, which is what stops a
+second daemon on the same database and what `zerg down` and `zerg status` read. It is a lock rather
+than a note for two reasons that were both reproduced. Asking whether the pid in the file still
+exists cannot tell a reused pid from the original, so `zerg down` signalled and killed an unrelated
+process and reported success. And a file that is checked and then written is a race, so two
+simultaneous `zerg up`s both saw nothing running and both took it. The kernel answers both questions
+in one step and can be wrong about neither.
+
+**Readiness** is a different question and gets its own channel: a pipe on fd 3, which a detached
+child writes one line to once every listener is bound, and which EOFs when the child dies. Treating
+the pid file as readiness reported success over a daemon that had not got there yet. Measured:
+`zerg up --detach` exited 0 saying "running", and two seconds later `zerg status` said stopped with
+`bind: address already in use` in the log. The lock is taken first because it is what makes the
+start exclusive; the line is written last because it is what makes the start true.
 
 The prerequisite list shrinks accordingly: Go and a logged-in harness. No tmux, no babashka, no zsh.
 

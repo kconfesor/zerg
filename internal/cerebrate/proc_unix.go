@@ -41,3 +41,10 @@ func superviseProcess(cmd *exec.Cmd, grace time.Duration) {
 	// After grace, Wait closes the pipes and SIGKILLs whatever is left.
 	cmd.WaitDelay = grace
 }
+
+// processGroup is the group a spawned agent leads.
+//
+// Asked of the kernel rather than assumed to be the pid. Setpgid with no Pgid
+// makes the two equal today, and a supervisor that writes down a number it will
+// later signal should not be the place that assumption is only implied.
+func processGroup(pid int) (int, error) { return syscall.Getpgid(pid) }

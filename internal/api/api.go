@@ -654,6 +654,22 @@ func (s *Server) start(w http.ResponseWriter, r *http.Request) {
 	}
 	err := s.over.Start(r.Context(), r.PathValue("id"))
 
+	// A worktree that may still hold an agent from a previous run. 409 with the
+	// message as written: it names the directory, the process group and the
+	// command to look with, all of which are for a person at the machine, and
+	// the daemon has nothing further to add.
+	var unaccounted *overmind.ErrAgentsUnaccountedFor
+	if errors.As(err, &unaccounted) {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	// A start that arrived while the daemon was going down. Nothing happened,
+	// and the daemon is not there to try again on.
+	if errors.Is(err, overmind.ErrClosing) {
+		writeError(w, http.StatusServiceUnavailable, err.Error())
+		return
+	}
+
 	var notReady *overmind.ErrNotReady
 	if errors.As(err, &notReady) {
 		// 409, with the readiness report attached: the caller needs to know
@@ -707,6 +723,19 @@ func (s *Server) statusBody(w http.ResponseWriter, r *http.Request, projectID st
 		// produced it, so the board said "no agents running" while an app was
 		// serving, and the link to it existed on one screen nobody was on.
 		"services": s.liveServices(r, projectID),
+	}
+	// Whether the operator has asked for this project to be running, which is
+	// not the same question as whether it is.
+	//
+	// The two came apart the moment a restart began putting swarms back: a
+	// resume that fails preflight leaves a project down and still wanted, and
+	// every later daemon start tries it again. The cockpit showed a Start
+	// button and nothing else, so the standing decision was invisible and the
+	// only control that could withdraw it was hidden behind the state it was
+	// stuck in. On the status poll because it changes with Start and Stop,
+	// which is exactly when this is polled.
+	if p, err := s.db.GetProject(r.Context(), projectID); err == nil {
+		body["wanted"] = p.StartRequestedAt != nil
 	}
 	// A deploy in flight, so the card that asked for one can say so while it is
 	// happening rather than only once it has finished. In memory already, so

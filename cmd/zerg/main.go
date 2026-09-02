@@ -274,15 +274,27 @@ func runUp(args []string) error {
 		return detach(*dbPath, childArgs)
 	}
 
+	// Claimed before anything is spawned, so nothing this daemon starts
+	// inherits the descriptor the parent is waiting on.
+	readyPipe := takeReadyPipe()
+	defer readyPipe.Close()
+
 	// One daemon per database, and something for `zerg down` and `zerg status`
 	// to find. Foreground too: the second `zerg up` in a forgotten terminal is
 	// the same mistake either way, and it fails here naming what to do rather
 	// than on a port bind naming a number.
-	releasePid, err := writePidFile(*dbPath)
+	//
+	// A kernel lock held for this daemon's whole life, not a note giving its
+	// pid: two `zerg up`s racing here both used to see nothing running and both
+	// take the file. This is also the lifetime lock and *not* the readiness
+	// signal — it is taken before the database is open or anything is bound,
+	// and a detached parent that treated it as "started" reported success over
+	// a daemon that went on to fail on its listener.
+	pidLock, err := lockPidFile(*dbPath)
 	if err != nil {
 		return err
 	}
-	defer releasePid()
+	defer pidLock.release()
 
 	// Signals cancel the context, which shuts the server down gracefully.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -354,6 +366,27 @@ func runUp(args []string) error {
 	// whole daemon shares (internal/artifact).
 	blobs := artifact.New(filepath.Join(filepath.Dir(*dbPath), "artifacts"))
 	api.PruneEvents(ctx, db, blobs, log, retentionSweep)
+
+	// Before the leases, because reclaiming a lease is handing that card to
+	// somebody else, and an agent still running is an agent still working on
+	// it. Each agent runs in a process group of its own and the group is
+	// signalled from cmd.Cancel, which a SIGKILLed daemon never reaches:
+	// measured, a coder was still writing files into its worktree thirty
+	// seconds after kill -9 on the daemon. Anything this cannot stop or
+	// identify keeps its row, which is what refuses a resume into that
+	// worktree further down.
+	if stopped, left, err := overmind.ReapPreviousRun(ctx, db, log); err != nil {
+		log.Error("could not check for agents left running by the previous daemon", "err", err)
+	} else {
+		if stopped > 0 {
+			log.Info("stopped agents left running by the previous daemon", "agents", stopped)
+		}
+		if len(left) > 0 {
+			log.Error("some agents from the previous run could not be accounted for; "+
+				"their projects will not start until an operator says they are gone",
+				"agents", len(left))
+		}
+	}
 
 	// Agents are children of this process, so any lease still open belongs to a
 	// process that no longer exists. Requeue it now rather than letting the
@@ -541,6 +574,17 @@ func runUp(args []string) error {
 	}
 	warnIfReachable(cfg.Addr, tlsCert != "")
 
+	// Everything that can refuse to start has now started: the database is
+	// migrated, TLS is resolved, the agent socket is listening and both HTTP
+	// listeners are bound. This is the earliest point at which telling a
+	// detached parent "it is running" is true, which is why it is here and not
+	// beside the pid lock at the top of the function.
+	urls := []string{scheme + "://" + shown}
+	if localLn != nil {
+		urls = append(urls, "http://"+localLn.Addr().String())
+	}
+	signalReady(readyPipe, urls...)
+
 	// Bring back whatever the operator left running, on a goroutine and after
 	// the listener is announced.
 	//
@@ -560,7 +604,14 @@ func runUp(args []string) error {
 		go func() {
 			defer close(resumed)
 			n, err := over.Resume(ctx)
-			if err != nil {
+			switch {
+			case errors.Is(err, overmind.ErrClosing):
+				// The daemon started shutting down partway through. Not a
+				// fault: the barrier is what stops a swarm being published
+				// into a teardown that has already counted what it must stop.
+				log.Info("shutdown interrupted the resume", "projects", n)
+				return
+			case err != nil:
 				log.Error("could not read which projects to resume", "err", err)
 				return
 			}
@@ -594,31 +645,48 @@ func runUp(args []string) error {
 		}
 	}()
 
+	// One shutdown, whichever way the daemon is ending. The listener failing
+	// used to return straight out of here, running the deferred StopAll while
+	// a resume was still spawning: a project that finished starting after that
+	// snapshot is a swarm nothing stops, and its agents are in process groups
+	// of their own, so they outlive the daemon holding worktrees.
+	var listenErr error
 	select {
-	case err := <-errCh:
-		return err
+	case listenErr = <-errCh:
+		log.Error("the cockpit's listener stopped", "err", listenErr)
 	case <-ctx.Done():
 		log.Info("shutting down")
-		// Before anything is torn down, and bounded: a resume that is wedged
-		// on a preflight check must not hold the shutdown open forever, and a
-		// project it has not reached yet was never started, so there is
-		// nothing of it to stop.
-		select {
-		case <-resumed:
-		case <-time.After(stopWaitForResume):
-			log.Warn("a resume was still running at shutdown; stopping anyway")
-		}
-		// Every service belonged to a process this daemon owned, so none of
-		// them survives it.
-		if n, err := db.StopServices(context.Background(), "", ""); err != nil {
-			log.Warn("could not mark services stopped", "err", err)
-		} else if n > 0 {
-			log.Info("services stopped with the daemon", "services", n)
-		}
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		return srv.Shutdown(shutdownCtx)
 	}
+
+	// The door first, then the wait. Nothing may publish a swarm from here on,
+	// so a resume that outlives the bounded wait below starts nothing rather
+	// than starting something into a daemon that has already counted what it
+	// has to stop.
+	over.Closing()
+
+	// Bounded: a resume that is wedged on a preflight check must not hold the
+	// shutdown open forever, and a project it has not reached yet was never
+	// started, so there is nothing of it to stop.
+	select {
+	case <-resumed:
+	case <-time.After(stopWaitForResume):
+		log.Warn("a resume was still running at shutdown; stopping anyway")
+	}
+
+	// Every service belonged to a process this daemon owned, so none of them
+	// survives it.
+	if n, err := db.StopServices(context.Background(), "", ""); err != nil {
+		log.Warn("could not mark services stopped", "err", err)
+	} else if n > 0 {
+		log.Info("services stopped with the daemon", "services", n)
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil && listenErr == nil {
+		return err
+	}
+	return listenErr
 }
 
 // resolveTLS turns the configured mode into a certificate and key, or empty

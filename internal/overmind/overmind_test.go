@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -461,10 +462,157 @@ func TestIdleAgentsAreNudgedWhenWorkArrives(t *testing.T) {
 		"an idle agent with queued work was never nudged")
 }
 
-func TestStopOnAProjectThatIsNotRunning(t *testing.T) {
+// Stop works on a project that is not running, and clears its standing intent.
+//
+// The one state nobody could get out of, before this: a resume that fails
+// preflight leaves the project down and still wanting to be up, so every
+// restart tried it again unattended, and Stop -- the button that exists to say
+// otherwise -- refused because there was no swarm to stop. Asserted against the
+// database rather than the return value, because the intent surviving is the
+// whole failure.
+func TestStopClearsTheIntentOfAProjectThatIsNotRunning(t *testing.T) {
+	ctx := context.Background()
 	h := newHarness(t, &scriptedHarness{script: idleAgent})
-	if err := h.over.Stop(context.Background(), h.project.ID, "test"); err == nil {
-		t.Error("stopping a stopped project was accepted")
+
+	// The state a failed resume leaves: wanted, not running, holding a
+	// conversation from the run that died.
+	if _, err := h.db.RequestStart(ctx, h.project.ID); err != nil {
+		t.Fatalf("RequestStart: %v", err)
+	}
+	if err := h.db.SaveRoleSession(ctx, h.project.ID, "coder", "scripted", "sess-1", "fp-1"); err != nil {
+		t.Fatalf("SaveRoleSession: %v", err)
+	}
+
+	if err := h.over.Stop(ctx, h.project.ID, "test"); err != nil {
+		t.Fatalf("stopping a project that is not running: %v", err)
+	}
+
+	wanting, err := h.db.ProjectsWantingStart(ctx)
+	if err != nil {
+		t.Fatalf("ProjectsWantingStart: %v", err)
+	}
+	if slices.Contains(wanting, h.project.ID) {
+		t.Error("a stopped project still wants to be running; the next daemon start would resume it")
+	}
+	sessions, err := h.db.ListRoleSessions(ctx, h.project.ID)
+	if err != nil {
+		t.Fatalf("ListRoleSessions: %v", err)
+	}
+	if len(sessions) != 0 {
+		t.Errorf("%d conversations survived an operator's Stop", len(sessions))
+	}
+}
+
+// A Start that succeeds has recorded the operator's decision, and a Start that
+// fails has left nothing behind.
+//
+// The intent used to be written after the swarm was up, with its failure
+// logged and swallowed: a Start could report success and then not come back
+// after a restart, with nothing on screen to say the decision had not been
+// kept. Writing it before the spawn means a failed spawn has to undo it, which
+// is the half this asserts.
+func TestAFailedStartLeavesNoIntentBehind(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t, &scriptedHarness{script: idleAgent})
+
+	// A project whose repository is not there. Preflight passes -- the harness
+	// is scripted and available -- and the spawn fails on the worktree.
+	if err := os.RemoveAll(h.project.Path); err != nil {
+		t.Fatalf("removing the repository: %v", err)
+	}
+
+	if err := h.over.Start(ctx, h.project.ID); err == nil {
+		t.Fatal("a project with no repository started")
+	}
+
+	wanting, err := h.db.ProjectsWantingStart(ctx)
+	if err != nil {
+		t.Fatalf("ProjectsWantingStart: %v", err)
+	}
+	if slices.Contains(wanting, h.project.ID) {
+		t.Error("a start that failed left the project wanting to be running; " +
+			"every later daemon start would try it again, unattended")
+	}
+}
+
+// A start that succeeds records the intent, so a restart brings it back.
+func TestAStartRecordsTheOperatorsDecision(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t, &scriptedHarness{script: idleAgent})
+
+	if err := h.over.Start(ctx, h.project.ID); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	wanting, err := h.db.ProjectsWantingStart(ctx)
+	if err != nil {
+		t.Fatalf("ProjectsWantingStart: %v", err)
+	}
+	if !slices.Contains(wanting, h.project.ID) {
+		t.Error("a running project is not recorded as wanted; a restart would leave it down")
+	}
+}
+
+// Nothing starts once the daemon has begun shutting down.
+//
+// StopAll snapshots what is running, and a swarm published after that snapshot
+// is one nothing stops: its agents are in process groups of their own, so they
+// outlive the daemon holding worktrees. The barrier is what makes the snapshot
+// final.
+func TestNothingStartsOnceTheDaemonIsClosing(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t, &scriptedHarness{script: idleAgent})
+
+	h.over.Closing()
+
+	err := h.over.Start(ctx, h.project.ID)
+	if !errors.Is(err, ErrClosing) {
+		t.Fatalf("Start during shutdown returned %v, want ErrClosing", err)
+	}
+	if h.over.Running(h.project.ID) {
+		t.Error("a swarm was published after the daemon began shutting down")
+	}
+	sessions, err := h.db.ListSessions(ctx, h.project.ID)
+	if err == nil {
+		for _, s := range sessions {
+			if s.EndedAt == nil {
+				t.Error("a refused start left an open session behind")
+			}
+		}
+	}
+}
+
+// A project whose previous agents could not be accounted for does not get a
+// second set on top of them.
+func TestAStartIsRefusedWhileAPreviousAgentMayHoldTheWorktree(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t, &scriptedHarness{script: idleAgent})
+
+	// What the boot sweep leaves when it cannot identify or stop a process
+	// group: the row stays.
+	if err := h.db.RecordAgentProcess(ctx, store.AgentProcess{
+		ProjectID: h.project.ID, Role: "coder",
+		PID: 424242, PGID: 424242, Identity: "ps:whatever",
+		Worktree: filepath.Join(h.project.Path, ".zerg", "coder"),
+	}); err != nil {
+		t.Fatalf("RecordAgentProcess: %v", err)
+	}
+
+	err := h.over.Start(ctx, h.project.ID)
+	var unaccounted *ErrAgentsUnaccountedFor
+	if !errors.As(err, &unaccounted) {
+		t.Fatalf("Start returned %v, want ErrAgentsUnaccountedFor", err)
+	}
+	if h.over.Running(h.project.ID) {
+		t.Fatal("a swarm was started into a worktree that may still hold an agent")
+	}
+
+	// And the operator's Stop is the way through: they can look at the machine,
+	// and this cannot.
+	if err := h.over.Stop(ctx, h.project.ID, "the operator says it is gone"); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if err := h.over.Start(ctx, h.project.ID); err != nil {
+		t.Fatalf("starting after the operator cleared it: %v", err)
 	}
 }
 

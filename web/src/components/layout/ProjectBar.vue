@@ -94,8 +94,28 @@ const resumesIn = computed(() => {
     >
       <Play :size="17" aria-hidden="true" />
     </Button>
+    <!-- Stop beside Start, for a project that is down and still wanted.
+         Stop used to appear only while something was running, which hid it in
+         the one state it is needed for: a resume that fails preflight leaves
+         the project stopped with the operator's standing intent intact, so
+         every daemon start tries it again, and the button that withdraws that
+         was behind the state it could not reach. Also how a start refused
+         because a previous run's agents are unaccounted for is cleared, since
+         that refusal is waiting for a person to say the worktree is free. -->
     <Button
-      v-else
+      v-if="!status.running && status.wanted"
+      size="icon-lg"
+      variant="outline"
+      :disabled="busy"
+      title="This project is set to start itself. Stop asking for it."
+      aria-label="Stop asking for this project to run"
+      :aria-busy="busy || undefined"
+      @click="emit('stop')"
+    >
+      <Square :size="15" aria-hidden="true" />
+    </Button>
+    <Button
+      v-else-if="status.running"
       size="icon-lg"
       variant="destructive"
       :disabled="busy"
