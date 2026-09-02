@@ -497,7 +497,7 @@ Every job tmux was doing has a better owner once agents emit structured events:
 | the delivery channel (`send-keys`) | Structured input over a pipe (§10.2) |
 | the observation channel (`capture-pane`) | The typed event stream (§10.1) |
 | per-project isolation via a socket path | The daemon owns every child; there is no shared namespace to collide in |
-| **surviving the operator's terminal closing** | See below: the one job that still needs an answer |
+| **surviving the operator's terminal closing** | `zerg up --detach`, plus the restart path below, which puts back what the terminal took with it |
 
 That last row is the only real loss, and tmux's version of it was weaker than it looked: it keeps a
 *process* alive, which does nothing when the orchestrator has lost its *state*. Observed: a daemon
@@ -505,20 +505,73 @@ terminating cleanly on a missing socket file, logging "stopped" and removing its
 from a normal shutdown, while agents sat alive and idle and mail piled up in outboxes with no error
 surfaced anywhere.
 
-zerg answers it in one piece today, and has one piece still to build:
+zerg answers it in three pieces:
 
-- **Restart is a first-class path, not a recovery hack.** If the daemon dies, its children die with
-  it; on restart every open lease is reclaimed immediately rather than being left to lapse, so
-  claimed-but-unacked work is back in the queue before the first agent asks for any. An approval
-  interrupted mid-integration is settled against the repository. Merged means the decision is
-  recorded and the card closed, not merged means it goes back to the operator as pending. Nothing
-  has to be reattached, and nothing is silently half-delivered.
-- **Not yet built: detaching, and harness session resume.** `zerg up` runs in the foreground and
-  closing its terminal stops the daemon; use a launchd/systemd unit, or `nohup`, until there is a
-  `--detach`. Roles respawn with fresh harness sessions rather than resuming the previous one
-  (`claude --resume`, `pi --session`): the queue survives, the model's own context does not. Both
-  are worth having and neither is implemented; this file used to describe them as though they were,
-  which is worse than not having them.
+- **Restart is a first-class path, not a recovery hack.** On restart every open lease is reclaimed
+  immediately rather than being left to lapse, so claimed-but-unacked work is back in the queue
+  before the first agent asks for any. An approval interrupted mid-integration is settled against
+  the repository. Merged means the decision is recorded and the card closed, not merged means it
+  goes back to the operator as pending. A session row left open by a daemon that was killed rather
+  than asked is closed, so a work period does not read as one that never ended. Nothing has to be
+  reattached, and nothing is silently half-delivered.
+
+  This file used to say that if the daemon dies its children die with it, and that is true only of
+  a daemon that is asked to stop. Each agent runs in a process group of its own (`Setpgid`, which
+  is what lets a bash tool call's descendants be killed as a unit), and the group is signalled from
+  `cmd.Cancel`, which a `SIGKILL`ed daemon never reaches. Measured: after `kill -9` on the daemon,
+  a coder was still running thirty seconds later and still writing files into its worktree, and it
+  exited on its own only some minutes afterwards. `zerg down` on the same swarm left nothing behind.
+  Two consequences, and both matter more now that a restart puts a swarm back: an orphan and a
+  resumed agent can hold the same worktree for a few seconds, and `--resume` can be aimed at a
+  session that is still live, which is the case claude answers by forking to a new id. The fork is
+  why the stored id is latched from the stream rather than trusted from what was sent. Killing the
+  previous run's agents at boot is not implemented; a crash is currently survived rather than
+  cleaned up after.
+- **The swarm comes back, because somebody asked for it and nothing has un-asked.**
+  `projects.start_requested_at` is the operator's standing intent, set on Start and cleared on Stop.
+  A daemon shutting down clears nothing, so the next one starts what was running. `sessions.ended_at`
+  cannot answer this and was tried: shutdown fills it in, so a clean stop and a killed daemon are
+  the same row afterwards. Settings has a switch (`resumeOnStart`), because an unattended restart
+  spends money; the conservatism is in the intent, not in the default.
+- **Agents resume the conversation they were holding.** Both harnesses keep it on disk and will
+  continue it, and the flags differ in a way that is not a detail: claude needs `--resume <id>`,
+  because `--session-id` is the flag that *creates* one and exits with "Session ID <uuid> is already
+  in use" when given a session it has already written; pi's `--session-id` creates or continues and
+  serves both. The id is latched from the harness's own stream rather than remembered from what was
+  passed, because claude answers `--resume` on a session that is still live by forking to a new id,
+  and the fork is the conversation the work goes into. This is not only about daemon restarts: a
+  cerebrate respawns a crashed agent with backoff, and that respawn was cold too.
+
+  A session is stored with a fingerprint of the harness, model, thinking level and composed system
+  prompt, and is not resumed when that changes. §11.3 restarts a role on a configuration change
+  precisely so the change applies; resuming across the edit would replay a conversation shaped by
+  the instructions that were just replaced while the board reported the new ones were in force.
+  An operator's Stop forgets the conversations for the same reason it withdraws the intent: a
+  process ending is not a decision and a person pressing Stop is, and continuing a week-old
+  conversation about a finished task is continuity of the wrong thing.
+
+  **A stored id is not proof the transcript exists, and a refused resume is dropped rather than
+  retried.** The id is latched off the harness's first frame; claude writes the transcript only once
+  there is something to write. A swarm killed before any role finished a turn therefore leaves ids
+  pointing at nothing, and the restart this feature exists for is exactly when that happens.
+  Measured against claude 2.1.258: both roles came back with `--resume`, each spawn exited 1 having
+  run no turns, and the backoff doubled towards a swarm that would never recover on its own. The
+  refusal arrives as `subtype: error_during_execution` with an empty `result` and the reason in
+  `errors[]` — a field zerg decoded nowhere, so the one sentence naming the cause was reported as
+  "the harness reported an error without describing it". The adapter now reads `errors[]`, marks
+  that specific refusal `StaleSession`, and the cerebrate drops the row so the next attempt is cold.
+  The drop has to happen in the spawn that saw the refusal, after that line's events are applied and
+  before anything is written down: recording the latched id first put the dead one back, and leaving
+  the flag set made the next spawn's first frame Forget without storing the new conversation.
+  It is deliberately not fatal: a cold spawn recovers, and stopping the role would be a worse answer
+  than losing one conversation. Forgetting is per role, because dropping the project's continuity to
+  fix one agent's would cost every other agent its memory.
+
+`zerg up --detach` re-execs into a session of its own with `setsid`, so closing the terminal leaves
+the daemon and its agents alone, and writes its output to `zerg.log` beside the database. The daemon
+records itself in `zerg.pid` there, which is what `zerg down` and `zerg status` read and what stops
+a second daemon opening the same database. It is deliberately not a service manager: it does not
+restart the daemon and has no opinion about boot, which is what launchd and systemd are for.
 
 The prerequisite list shrinks accordingly: Go and a logged-in harness. No tmux, no babashka, no zsh.
 
@@ -919,9 +972,16 @@ This is the second argument for the long-lived structured session of §7.2. The 
 bidirectional input. Restart a cerebrate when its configuration changes or it crashes, not between
 tasks.
 
+A crash or a daemon restart is not a reason to pay for a cold session either, which is what §7.4's
+resume is for: the harness is handed back the conversation it was writing to, so the accumulated
+history is a cache read rather than a re-send. Measured against claude 2.1.258, a resumed process
+read 21511 tokens from cache on its first turn.
+
 Corollary for the role editor: changing a role's **model** invalidates every cache tier, since
 caches are model-scoped. That is unavoidable and correct, since the change requires a restart anyway,
-but the UI should not present model switching as free.
+but the UI should not present model switching as free. It is also why a stored session carries
+a fingerprint of what it was started under, since a resume into a different model would be a cache
+miss dressed as a continuation.
 
 ### 11.4 Accounting rules
 
@@ -1257,13 +1317,15 @@ and §6.1 are almost entirely coordination bugs caught without spending a token.
 10. **Tailnet and TLS** (§17), because a board you cannot read from a phone gets read less.
 11. **Provider-limit handling** (§16): a spent quota window pauses a role
     instead of failing it.
+12. **Process continuation** (§7.4): `--detach`, a swarm that comes back after a daemon restart,
+    and agents that resume the conversation they were holding rather than respawning cold. The
+    money argument that had kept a swarm stopped is answered by the operator's own intent: only a
+    project somebody started and has not stopped comes back, and there is a switch for the people
+    that is not enough for.
 
 Still open: pty attach and takeover (§10.1, needs `github.com/creack/pty`), deploying an artifact
-somewhere (issue #9's second half, which has four open questions in it and no answers yet),
-authentication (§17), detaching the daemon from its terminal, and harness session resume across a
-respawn (§7.4). Nothing resumes a swarm after a daemon restart. Agents stop and stay stopped until
-Start is pressed, which is deliberate while spawning an LLM process costs money, but it is a
-decision rather than a finished answer.
+somewhere (issue #9's second half, which has four open questions in it and no answers yet), and
+authentication (§17).
 
 ---
 

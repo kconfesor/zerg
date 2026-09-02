@@ -46,6 +46,15 @@ type Adapter struct {
 	// what actually ran, and an alias that silently resolves elsewhere is
 	// precisely what this should make visible.
 	model atomic.Pointer[string]
+
+	// session is the conversation this process is actually writing to, latched
+	// the same way and for a sharper reason than the other two. claude answers
+	// --resume on a session that is still live by starting a copy under a new
+	// id and saying so on the stream; the id zerg passed would then name a
+	// conversation nobody is appending to, and the next restart would resume
+	// that dead one instead. Every frame carries session_id, so the answer is
+	// always the current one.
+	session atomic.Pointer[string]
 }
 
 func New() *Adapter {
@@ -54,12 +63,24 @@ func New() *Adapter {
 	a.billing.Store(&unknown)
 	empty := ""
 	a.model.Store(&empty)
+	a.session.Store(&empty)
 	return a
 }
 
 // NewSession gives one agent process its own latch. Everything else on the
 // adapter is configuration and is safe to share.
 func (*Adapter) NewSession() adapter.Adapter { return New() }
+
+// SessionID is the conversation this process is running, empty until claude has
+// named it. See adapter.SessionIdentified.
+func (a *Adapter) SessionID() string { return *a.session.Load() }
+
+// latchSession records the conversation claude says it is writing to.
+func (a *Adapter) latchSession(id string) {
+	if id != "" {
+		a.session.Store(&id)
+	}
+}
 
 // latchModel records the model actually serving this session. Called wherever
 // the harness names one, since the result event does not.
@@ -151,6 +172,19 @@ func (*Adapter) Command(ctx context.Context, spec adapter.Spec) (*exec.Cmd, erro
 	}
 	if spec.Thinking != "" {
 		args = append(args, "--effort", spec.Thinking)
+	}
+	// --resume rather than --session-id, which is the flag that creates one and
+	// refuses an id it has already written: given a session that exists it
+	// exits before the process is up, with "Session ID <uuid> is already in
+	// use". Since the id here always came from claude itself, the session
+	// always exists, and --resume is the only correct flag.
+	//
+	// Verified against claude 2.1.258 in exactly this mode: --resume under
+	// --print with both stream-json formats recovered a value planted in the
+	// previous process, kept the same session_id, and read 21511 tokens from
+	// cache rather than resending them.
+	if spec.ResumeSession != "" {
+		args = append(args, "--resume", spec.ResumeSession)
 	}
 	// A last-resort floor, not a policy. An agent running unattended with no
 	// permission setting at all will stop at the first prompt and look alive
@@ -257,6 +291,12 @@ type wire struct {
 	Subtype string `json:"subtype"`
 	Model   string `json:"model"`
 
+	// SessionID rides every frame, including the ones this decodes for nothing
+	// else, which is why it is latched in Parse rather than off the init event
+	// alone: a session that forks mid-run announces the new id on the frames
+	// that follow, and the init event has long since gone past.
+	SessionID string `json:"session_id"`
+
 	// Event carries the fragments emitted under --include-partial-messages.
 	// Only the text deltas are read: the block start, stop and message frames
 	// say nothing the whole message will not say authoritatively when it
@@ -304,6 +344,16 @@ type wire struct {
 	IsError      bool    `json:"is_error"`
 	Result       string  `json:"result"`
 	APIError     any     `json:"api_error_status"`
+
+	// Errors is where the CLI puts the reason when a result frame fails before
+	// a turn ever runs, and there is no `result` text to carry it. Observed
+	// against 2.1.258: resuming a session id the CLI has no transcript for
+	// returns subtype error_during_execution with an empty result and
+	// errors:["No conversation found with session ID: <uuid>"]. Decoding it
+	// nowhere is how that became "the harness reported an error without
+	// describing it" in the log, with the one sentence naming the cause
+	// sitting unread in the frame.
+	Errors []string `json:"errors"`
 }
 
 type usage struct {
@@ -333,6 +383,7 @@ func (a *Adapter) Parse(line []byte) ([]adapter.Event, error) {
 	if err := json.Unmarshal(line, &w); err != nil {
 		return nil, fmt.Errorf("claude: unreadable output line: %w", err)
 	}
+	a.latchSession(w.SessionID)
 
 	switch w.Type {
 	case "rate_limit_event":
@@ -425,9 +476,10 @@ func (a *Adapter) Parse(line []byte) ([]adapter.Event, error) {
 			// Observed: agents returning HTTP 400 on every turn for twenty
 			// minutes while looking perfectly alive.
 			out = append(out, adapter.Event{
-				Kind:  adapter.EventError,
-				Text:  errorText(w),
-				Fatal: isFatal(w),
+				Kind:         adapter.EventError,
+				Text:         errorText(w),
+				Fatal:        isFatal(w),
+				StaleSession: isStaleSession(w),
 			})
 			return out, nil
 		}
@@ -447,10 +499,24 @@ func errorText(w wire) string {
 	if w.Result != "" {
 		return w.Result
 	}
+	if len(w.Errors) > 0 {
+		return strings.Join(w.Errors, "; ")
+	}
 	if w.APIError != nil {
 		return fmt.Sprintf("api error: %v", w.APIError)
 	}
 	return "the harness reported an error without describing it"
+}
+
+// isStaleSession marks the one error a respawn fixes only by forgetting what
+// it was told to resume.
+//
+// The text is the CLI's, quoted from 2.1.258: "No conversation found with
+// session ID: <uuid>". Matching on prose is not something to do lightly, but
+// the frame carries no code to match on instead, and the alternative — treating
+// it as an ordinary crash — is the backoff loop this was written for.
+func isStaleSession(w wire) bool {
+	return strings.Contains(strings.ToLower(errorText(w)), "no conversation found with session id")
 }
 
 // isFatal marks the errors a restart cannot fix, so a cerebrate stops instead

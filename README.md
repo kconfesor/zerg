@@ -275,12 +275,24 @@ it without browser chrome.
 
 ## Running unattended
 
-`zerg up` runs in the foreground, and its agents are child processes. Closing the terminal stops the
-daemon and its agents. There is no `--detach` command or packaged service unit yet; use launchd,
-systemd, or `nohup` if you want it to survive a terminal session.
+`zerg up` runs in the foreground, and its agents are child processes, so closing the terminal stops
+both. `zerg up --detach` runs it in a session of its own instead, which the terminal closing cannot
+reach:
 
-After a restart, zerg reclaims open leases and reconciles approvals interrupted during integration.
-It does not restart swarms automatically because spawning agent processes can spend money.
+```sh
+zerg up --detach     # returns the shell; output goes to zerg.log beside the database
+zerg status          # whether a daemon is running for this database, and where its log is
+zerg down            # ask it to stop, and wait while it stops its agents
+```
+
+There is no packaged service unit; use launchd or systemd if you want it started at boot.
+
+After a restart, zerg reclaims open leases, reconciles approvals interrupted during integration,
+starts the projects you had running, and hands each agent back the conversation it was holding.
+Only projects you started and have not stopped come back, and each still has to pass its readiness
+checks. Because that spends money without you there, Settings has a switch for it under **Startup**;
+pressing Stop on a project is what takes it out of the set, and also clears what its agents
+remember, so its next start is a fresh one.
 
 ## Roadmap and limitations
 

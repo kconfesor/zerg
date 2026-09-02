@@ -95,6 +95,12 @@ type Project struct {
 	// when it is empty, so nothing has to be set for a project to be
 	// recognisable — this is for when the derived mark is not the one you want.
 	Icon string `json:"icon"`
+
+	// StartRequestedAt is when the operator last asked for this project to be
+	// running, and nil once they have asked for it to stop. It outlives the
+	// daemon on purpose: it is the standing intent, not a report of what is
+	// running now, which is what Status answers.
+	StartRequestedAt *time.Time `json:"startRequestedAt,omitempty"`
 }
 
 // What a role is for; see RoleTemplate.Purpose.

@@ -127,6 +127,23 @@ type Config struct {
 	// the base branch. They are cheap, but they accumulate forever and make
 	// `git branch` in the operator's own repository useless.
 	PruneMergedBranches bool `json:"pruneMergedBranches"`
+
+	// ResumeOnStart brings back the projects the operator left running when the
+	// daemon starts, and lets their agents resume the conversation they were
+	// holding.
+	//
+	// On by default, which is the one default here that is not the timid
+	// option, and the reason is that the timid option is not the safe one. A
+	// daemon that comes back with every project stopped is a queue full of
+	// claimed work that nothing is working on, and the operator finds out by
+	// noticing nothing has happened. The conservatism lives in the intent
+	// instead: only a project somebody started and has not stopped comes back,
+	// and preflight still gates it.
+	//
+	// The switch is here because an unattended restart does spend money, and
+	// somebody running zerg from a laptop that sleeps may want to be the one
+	// who decides when agents wake up.
+	ResumeOnStart bool `json:"resumeOnStart"`
 }
 
 // HarnessOptions is what every role on a harness gets.
@@ -190,6 +207,7 @@ func DefaultConfig() Config {
 		CleanPolicy:         CleanNever,
 		CleanIgnored:        true,
 		PruneMergedBranches: false,
+		ResumeOnStart:       true,
 	}
 }
 

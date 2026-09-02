@@ -284,9 +284,24 @@ const loopback = computed(() => {
          out for the save button. -->
     <Tabs v-model="tab" @update:model-value="(v) => (tab = String(v))">
       <div class="flex flex-wrap items-center gap-3">
-        <TabsList>
+        <!-- Wraps rather than scrolls. Six tabs measure 393px against a 390px
+             viewport on a phone, which put "Instructions" 20px off the right
+             edge of a list with overflow-x visible and scrollWidth equal to
+             clientWidth: not scrollable, just unreachable. A scroll strip would
+             hide it behind an affordance nothing announces, so the row is
+             allowed the second line it needs, which is what the header beside
+             it already does. Three classes, each load-bearing: max-w-full,
+             because the variant sizes the list w-fit and a box that is already
+             max-content wide has nothing to wrap against; flex-wrap, which is
+             not the default; and the height, which has to be written in the
+             same variant the component pins it with. A plain h-auto loses to
+             group-data-horizontal/tabs:h-8 on specificity and tailwind-merge
+             does not treat the two as the same declaration, so the list stayed
+             32px tall with its second row hanging outside its own background. -->
+        <TabsList class="max-w-full flex-wrap group-data-horizontal/tabs:h-auto">
           <TabsTrigger value="network">Network</TabsTrigger>
           <TabsTrigger value="roles">Roles</TabsTrigger>
+          <TabsTrigger value="startup">Startup</TabsTrigger>
           <TabsTrigger value="disk">Disk</TabsTrigger>
           <TabsTrigger value="harness">Harness</TabsTrigger>
           <TabsTrigger value="instructions">Instructions</TabsTrigger>
@@ -418,6 +433,44 @@ const loopback = computed(() => {
         </Card>
       </TabsContent>
 
+
+      <!-- ── Startup ──────────────────────────────────────────────────── -->
+      <TabsContent value="startup" class="pt-4">
+        <Card>
+          <CardHeader>
+            <CardTitle class="flex items-center gap-2 text-sm">
+              Coming back after a restart
+              <Badge variant="outline">applies at next start</Badge>
+            </CardTitle>
+            <CardDescription class="text-[11px]">
+              What the daemon does about work that was in flight when it stopped.
+            </CardDescription>
+          </CardHeader>
+          <CardContent class="flex flex-col gap-4">
+            <label class="flex items-start gap-2 text-xs">
+              <Checkbox
+                class="mt-0.5"
+                :model-value="form.resumeOnStart"
+                @update:model-value="(v) => (form!.resumeOnStart = !!v)"
+              />
+              <span>
+                Start the projects that were running, and let their agents pick up the conversation
+                they were holding
+              </span>
+            </label>
+            <p class="text-muted-foreground text-[11px] leading-snug">
+              Only projects you started and have not stopped come back, and each one still has to
+              pass its readiness checks. Pressing Stop is what tells the daemon to leave a project
+              alone, and it also clears what its agents remember, so the next start is a fresh one.
+            </p>
+            <p class="text-muted-foreground text-[11px] leading-snug">
+              Turn this off if you would rather nothing spent tokens without you there. In-flight
+              work is returned to the queue at startup either way, so nothing is lost by leaving it
+              off, only picked up later.
+            </p>
+          </CardContent>
+        </Card>
+      </TabsContent>
 
       <!-- ── Disk ─────────────────────────────────────────────────────── -->
       <TabsContent value="disk" class="pt-4">

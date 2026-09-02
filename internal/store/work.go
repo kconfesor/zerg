@@ -469,6 +469,24 @@ func (db *DB) EndSession(ctx context.Context, id, reason string) error {
 	return mustAffect(res, fmt.Sprintf("open session %s", id))
 }
 
+// CloseOpenSessions ends every session still marked open and reports how many
+// there were.
+//
+// For the start of a run. A session is closed by the shutdown that ends it, so
+// one still open at boot belongs to a daemon that was killed rather than asked,
+// and leaving it that way makes "how many sessions, how long" answer with a
+// period that never ended. Every agent it counted is gone regardless.
+func (db *DB) CloseOpenSessions(ctx context.Context, reason string) (int, error) {
+	res, err := db.sql.ExecContext(ctx,
+		`UPDATE sessions SET ended_at = ?, end_reason = ? WHERE ended_at IS NULL`,
+		time.Now().UTC().Format(time.RFC3339Nano), reason)
+	if err != nil {
+		return 0, fmt.Errorf("closing sessions from the previous run: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
 func (db *DB) ListSessions(ctx context.Context, projectID string) ([]Session, error) {
 	rows, err := db.read.QueryContext(ctx,
 		`SELECT id, project_id, started_at, ended_at, end_reason

@@ -981,6 +981,9 @@ export interface DaemonConfig {
   cleanPolicy: 'never' | 'on_done' | 'on_start'
   cleanIgnored: boolean
   pruneMergedBranches: boolean
+  /** Bring back the projects that were running, and let their agents resume the
+   *  conversation they were holding, when the daemon starts. */
+  resumeOnStart: boolean
 }
 
 /** What the local tailscaled reports. Absent Tailscale is a normal state, not
