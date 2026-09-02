@@ -25,3 +25,7 @@ internal/api/dist/*
 .pi/
 .pi-subagents/
 .playwright-mcp/
+
+# Claude Code's throwaway worktrees. The subdirectory, not .claude/: the
+# commands and the skill next to it are committed and shared.
+.claude/worktrees/
