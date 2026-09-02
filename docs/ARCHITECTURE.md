@@ -507,13 +507,26 @@ surfaced anywhere.
 
 zerg answers it in three pieces:
 
-- **Restart is a first-class path, not a recovery hack.** If the daemon dies, its children die with
-  it; on restart every open lease is reclaimed immediately rather than being left to lapse, so
-  claimed-but-unacked work is back in the queue before the first agent asks for any. An approval
-  interrupted mid-integration is settled against the repository. Merged means the decision is
-  recorded and the card closed, not merged means it goes back to the operator as pending. A session
-  row left open by a daemon that was killed rather than asked is closed, so a work period does not
-  read as one that never ended. Nothing has to be reattached, and nothing is silently half-delivered.
+- **Restart is a first-class path, not a recovery hack.** On restart every open lease is reclaimed
+  immediately rather than being left to lapse, so claimed-but-unacked work is back in the queue
+  before the first agent asks for any. An approval interrupted mid-integration is settled against
+  the repository. Merged means the decision is recorded and the card closed, not merged means it
+  goes back to the operator as pending. A session row left open by a daemon that was killed rather
+  than asked is closed, so a work period does not read as one that never ended. Nothing has to be
+  reattached, and nothing is silently half-delivered.
+
+  This file used to say that if the daemon dies its children die with it, and that is true only of
+  a daemon that is asked to stop. Each agent runs in a process group of its own (`Setpgid`, which
+  is what lets a bash tool call's descendants be killed as a unit), and the group is signalled from
+  `cmd.Cancel`, which a `SIGKILL`ed daemon never reaches. Measured: after `kill -9` on the daemon,
+  a coder was still running thirty seconds later and still writing files into its worktree, and it
+  exited on its own only some minutes afterwards. `zerg down` on the same swarm left nothing behind.
+  Two consequences, and both matter more now that a restart puts a swarm back: an orphan and a
+  resumed agent can hold the same worktree for a few seconds, and `--resume` can be aimed at a
+  session that is still live, which is the case claude answers by forking to a new id. The fork is
+  why the stored id is latched from the stream rather than trusted from what was sent. Killing the
+  previous run's agents at boot is not implemented; a crash is currently survived rather than
+  cleaned up after.
 - **The swarm comes back, because somebody asked for it and nothing has un-asked.**
   `projects.start_requested_at` is the operator's standing intent, set on Start and cleared on Stop.
   A daemon shutting down clears nothing, so the next one starts what was running. `sessions.ended_at`
