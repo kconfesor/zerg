@@ -1,0 +1,318 @@
+package overmind
+
+import (
+	"context"
+	"io"
+	"log/slog"
+	"os"
+	"os/exec"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/kconfesor/zerg/internal/adapter"
+	"github.com/kconfesor/zerg/internal/agent"
+	"github.com/kconfesor/zerg/internal/event"
+	"github.com/kconfesor/zerg/internal/preflight"
+	"github.com/kconfesor/zerg/internal/store"
+)
+
+// resumableHarness is a scripted agent that names its own conversation, which
+// is what both real harnesses do and the only thing that makes resume possible.
+//
+// It is a separate double from scriptedHarness rather than a flag on it because
+// it has to be session-scoped: the latch belongs to one process, and sharing it
+// is the bug adapter.SessionScoped exists to prevent.
+type resumableHarness struct {
+	// shared is state every instance reports into, since the point of the test
+	// is what the *next* spawn was given.
+	shared *spawnLog
+
+	session string
+}
+
+// spawnLog is what the harness was asked to run, across spawns.
+type spawnLog struct {
+	mu      sync.Mutex
+	resumed []string // Spec.ResumeSession, one entry per spawn, in order
+}
+
+func (l *spawnLog) record(id string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.resumed = append(l.resumed, id)
+}
+
+func (l *spawnLog) spawns() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]string{}, l.resumed...)
+}
+
+func (h *resumableHarness) Name() string            { return "scripted" }
+func (h *resumableHarness) Checks() []adapter.Check { return nil }
+func (h *resumableHarness) Capabilities() adapter.Caps {
+	return adapter.Caps{StructuredOutput: true, StructuredInput: true, ResumeSession: true}
+}
+func (h *resumableHarness) ListModels(adapter.Ctx) ([]adapter.Model, error) { return nil, nil }
+func (h *resumableHarness) NewSession() adapter.Adapter {
+	return &resumableHarness{shared: h.shared}
+}
+func (h *resumableHarness) SessionID() string { return h.session }
+
+func (h *resumableHarness) Command(ctx context.Context, spec adapter.Spec) (*exec.Cmd, error) {
+	h.shared.record(spec.ResumeSession)
+
+	// The conversation this process is writing to, announced on its own stream
+	// the way claude and pi announce theirs. A resumed process keeps the id it
+	// was handed; a cold one invents one, which is the harness naming a new
+	// conversation.
+	id := spec.ResumeSession
+	if id == "" {
+		id = "sess-" + spec.Role + "-" + store.NewID()[:8]
+	}
+	cmd := exec.CommandContext(ctx, "sh", "-c", "printf 'session:"+id+"\\n'; sleep 30")
+	cmd.Dir = spec.Worktree
+	cmd.Env = append(os.Environ(),
+		agent.EnvSocket+"="+spec.Socket,
+		agent.EnvToken+"="+spec.Token,
+		agent.EnvRole+"="+spec.Role,
+	)
+	return cmd, nil
+}
+
+func (h *resumableHarness) Parse(line []byte) ([]adapter.Event, error) {
+	text := strings.TrimSpace(string(line))
+	if id, ok := strings.CutPrefix(text, "session:"); ok {
+		h.session = id
+		return []adapter.Event{{Kind: adapter.EventReady}}, nil
+	}
+	return nil, nil
+}
+
+func (h *resumableHarness) EncodeTurn(text string) ([]byte, error) { return []byte(text + "\n"), nil }
+func (h *resumableHarness) EncodeInterrupt() ([]byte, error)       { return nil, adapter.ErrNoInterrupt }
+
+// newDaemon builds a second Overmind over an existing harness's database, which
+// is what a daemon restart is: the processes are gone, the database is not.
+//
+// It is given a fresh resumable harness sharing the same spawn log, because a
+// restarted daemon builds its adapters from the registry again. Reusing the
+// instance would hide the thing being tested: what the second daemon knows has
+// to come out of the database, not out of a Go value that outlived the process.
+func newDaemon(t *testing.T, h *harness, log *spawnLog) *Overmind {
+	t.Helper()
+	reg := adapter.NewRegistry()
+	reg.Register(&resumableHarness{shared: log})
+	over := New(Config{
+		DB: h.db, Nydus: h.nyd, Registry: reg,
+		Preflight: preflight.NewRunner(h.db, reg),
+		Bus:       event.NewBus(),
+		Agents:    h.agents,
+		Log:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		StateDir:  t.TempDir(),
+	})
+	t.Cleanup(func() { over.StopAll(context.Background(), "test over") })
+	return over
+}
+
+// resumableHarnessFor swaps the standard double for one that names sessions.
+func resumableHarnessFor(t *testing.T, log *spawnLog) *harness {
+	t.Helper()
+	// newHarness registers whatever it is given under the name the seeded roles
+	// use, so the swap is transparent to everything downstream.
+	h := newHarness(t, &scriptedHarness{script: idleAgent})
+	reg := adapter.NewRegistry()
+	reg.Register(&resumableHarness{shared: log})
+	h.over.registry = reg
+	h.over.preflight = preflight.NewRunner(h.db, reg)
+	return h
+}
+
+// A daemon restart puts the agents back into the conversation they were
+// holding, rather than starting them cold.
+//
+// The assertion is on the spec the second spawn actually received, and the id
+// in it came out of the first process's own output — not from anything the test
+// told the daemon to remember.
+func TestAgentsResumeTheConversationAfterADaemonRestart(t *testing.T) {
+	ctx := context.Background()
+	log := &spawnLog{}
+	h := resumableHarnessFor(t, log)
+
+	if err := h.over.Start(ctx, h.project.ID); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	waitFor(t, func() bool {
+		roles, err := h.db.ProjectsWantingStart(ctx)
+		return err == nil && len(roles) == 1 && anyRecorded(t, h.db, h.project.ID)
+	}, 10*time.Second, "no session was ever recorded for the running roles")
+
+	first := recordedSessions(t, h.db, h.project.ID)
+	if len(first) == 0 {
+		t.Fatal("expected at least one role to have recorded a session")
+	}
+
+	// The daemon goes down. Not the operator: nothing here is a decision.
+	h.over.StopAll(ctx, "the daemon shut down")
+
+	spawnsBefore := len(log.spawns())
+	next := newDaemon(t, h, log)
+	n, err := next.Resume(ctx)
+	if err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("expected the one running project to come back, got %d", n)
+	}
+
+	waitFor(t, func() bool { return len(log.spawns()) > spawnsBefore }, 10*time.Second,
+		"nothing was spawned after the restart")
+
+	// Every spawn of the second daemon asked to continue a conversation, and
+	// each id is one the first daemon's processes announced.
+	after := log.spawns()[spawnsBefore:]
+	if len(after) == 0 {
+		t.Fatal("no spawns recorded after the restart")
+	}
+	for i, got := range after {
+		if got == "" {
+			t.Errorf("spawn %d after the restart started a cold session; expected a resume", i)
+			continue
+		}
+		if !first[got] {
+			t.Errorf("spawn %d resumed %q, which no earlier process ever announced", i, got)
+		}
+	}
+}
+
+// Pressing Stop is a decision, and it is recorded as one: the project stops
+// wanting to run, and the conversations are forgotten.
+func TestAnOperatorStopWithdrawsWhatADaemonShutdownKeeps(t *testing.T) {
+	ctx := context.Background()
+	log := &spawnLog{}
+	h := resumableHarnessFor(t, log)
+
+	if err := h.over.Start(ctx, h.project.ID); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	waitFor(t, func() bool { return anyRecorded(t, h.db, h.project.ID) }, 10*time.Second,
+		"no session was recorded")
+
+	// A shutdown leaves both intact.
+	h.over.StopAll(ctx, "the daemon shut down")
+	if want, err := h.db.ProjectsWantingStart(ctx); err != nil || len(want) != 1 {
+		t.Fatalf("after a daemon shutdown the project should still want to run, got %v (%v)", want, err)
+	}
+	if len(recordedSessions(t, h.db, h.project.ID)) == 0 {
+		t.Fatal("a daemon shutdown discarded the conversations it should have kept")
+	}
+
+	// The operator's stop clears both. Started again first, because Stop needs
+	// something running to stop.
+	next := newDaemon(t, h, log)
+	if err := next.Start(ctx, h.project.ID); err != nil {
+		t.Fatalf("Start again: %v", err)
+	}
+	if err := next.Stop(ctx, h.project.ID, "stopped by the operator"); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if want, err := h.db.ProjectsWantingStart(ctx); err != nil || len(want) != 0 {
+		t.Fatalf("after an operator stop the project should not want to run, got %v (%v)", want, err)
+	}
+	if got := recordedSessions(t, h.db, h.project.ID); len(got) != 0 {
+		t.Fatalf("an operator stop left %d conversations behind", len(got))
+	}
+}
+
+// A project the operator stopped does not come back by itself, which is the
+// half of the feature that is about not doing something.
+func TestResumeLeavesAStoppedProjectStopped(t *testing.T) {
+	ctx := context.Background()
+	log := &spawnLog{}
+	h := resumableHarnessFor(t, log)
+
+	if err := h.over.Start(ctx, h.project.ID); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := h.over.Stop(ctx, h.project.ID, "stopped by the operator"); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+
+	next := newDaemon(t, h, log)
+	n, err := next.Resume(ctx)
+	if err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("a stopped project was started again by Resume (%d started)", n)
+	}
+	if next.Running(h.project.ID) {
+		t.Fatal("a stopped project is running after a restart")
+	}
+}
+
+// A prompt edit is exactly the change a resumed conversation would contradict,
+// so the stored session must not survive one.
+//
+// ARCHITECTURE §11.3 restarts a role when its configuration changes precisely
+// so the new configuration applies. Resuming across that would replay a
+// conversation shaped by the instructions that were just replaced, while the
+// board reported the new ones were in force.
+func TestAPromptEditIsNotResumedAcross(t *testing.T) {
+	ctx := context.Background()
+	log := &spawnLog{}
+	h := resumableHarnessFor(t, log)
+
+	if err := h.over.Start(ctx, h.project.ID); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	waitFor(t, func() bool { return anyRecorded(t, h.db, h.project.ID) }, 10*time.Second,
+		"no session was recorded")
+	h.over.StopAll(ctx, "the daemon shut down")
+
+	// The operator rewrites the shared instructions, which every role's
+	// composed prompt is built from.
+	if err := h.db.SetSetting(ctx, store.SettingSharedInstructions,
+		"Work only in Rust. This is not what the previous conversation was told."); err != nil {
+		t.Fatalf("SetSetting: %v", err)
+	}
+
+	spawnsBefore := len(log.spawns())
+	next := newDaemon(t, h, log)
+	if _, err := next.Resume(ctx); err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	waitFor(t, func() bool { return len(log.spawns()) > spawnsBefore }, 10*time.Second,
+		"nothing was spawned after the edit")
+
+	for i, got := range log.spawns()[spawnsBefore:] {
+		if got != "" {
+			t.Errorf("spawn %d resumed %q across a prompt edit; it should have started cold", i, got)
+		}
+	}
+}
+
+// anyRecorded reports whether any role of this project has a session on record,
+// under any fingerprint.
+func anyRecorded(t *testing.T, db *store.DB, projectID string) bool {
+	t.Helper()
+	return len(recordedSessions(t, db, projectID)) > 0
+}
+
+// recordedSessions is every session id stored for a project, as a set. Read
+// straight out of the table, because the point is what the daemon persisted
+// rather than what it was told.
+func recordedSessions(t *testing.T, db *store.DB, projectID string) map[string]bool {
+	t.Helper()
+	sessions, err := db.ListRoleSessions(context.Background(), projectID)
+	if err != nil {
+		t.Fatalf("reading recorded sessions: %v", err)
+	}
+	out := map[string]bool{}
+	for _, s := range sessions {
+		out[s.SessionID] = true
+	}
+	return out
+}

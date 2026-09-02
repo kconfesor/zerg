@@ -19,6 +19,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -133,12 +134,39 @@ type Config struct {
 	// Nil leaves the Config values in place, which is what the tests use.
 	Refresh func(context.Context) (Refreshed, error)
 
+	// Continuity is where a resumable harness session is kept between spawns.
+	// Nil means every spawn starts a cold conversation, which is what chat and
+	// the tests want.
+	Continuity Continuity
+
 	Bus         *event.Bus
 	Log         *slog.Logger
 	Preflight   Preflighter
 	StateDir    string // where the composed prompt is written
 	clock       func() time.Time
 	backoffBase time.Duration
+}
+
+// Continuity remembers which harness conversation this role was holding, so a
+// restart resumes it instead of starting a cold one.
+//
+// An interface rather than a *store.DB because cerebrate takes everything it
+// touches this way, and because the two callers want different answers: the
+// pipeline resumes, chat deliberately does not.
+type Continuity interface {
+	// Resume is the conversation to continue, or empty for a fresh one.
+	//
+	// fingerprint is what the session would be resumed *into*: harness, model,
+	// thinking level and composed system prompt. A stored session recorded
+	// under a different one must not come back, because a role restarts on a
+	// configuration change precisely so the change applies (ARCHITECTURE
+	// §11.3), and resuming across the edit would replay a conversation shaped
+	// by the instructions that were just replaced.
+	Resume(ctx context.Context, role, harness, fingerprint string) string
+
+	// Record stores the conversation the harness says it is running. Called
+	// whenever that answer changes, which is normally once per spawn.
+	Record(ctx context.Context, role, harness, sessionID, fingerprint string)
 }
 
 // Cerebrate supervises one role's agent process.
@@ -512,6 +540,15 @@ func (c *Cerebrate) runOnce(ctx context.Context) (fatal bool, ranFor time.Durati
 	c.session = a
 	c.mu.Unlock()
 
+	// What this spawn would be resuming into. Computed before the spec so the
+	// same value decides whether to resume and is stored with whatever comes
+	// back, which is what keeps the two from disagreeing.
+	fingerprint := configFingerprint(live)
+	var resume string
+	if c.cfg.Continuity != nil && a.Capabilities().ResumeSession {
+		resume = c.cfg.Continuity.Resume(ctx, live.role.Name, a.Name(), fingerprint)
+	}
+
 	spec := adapter.Spec{
 		Role:     live.role.Name,
 		Worktree: c.cfg.Worktree,
@@ -532,6 +569,14 @@ func (c *Cerebrate) runOnce(ctx context.Context) (fatal bool, ranFor time.Durati
 		// ignored or refused at spawn, and neither is worth finding out per
 		// role at runtime.
 		Streaming: c.cfg.Streaming && c.sessionAdapter().Capabilities().Streaming,
+
+		// Empty on a first spawn, and on every spawn of a harness that cannot
+		// resume. Both mean the same thing to an adapter: start fresh.
+		ResumeSession: resume,
+	}
+	if resume != "" {
+		c.cfg.Log.Info("resuming the conversation this role was holding",
+			"role", c.name(), "session", resume)
 	}
 
 	// Preflight runs before every spawn, not only at Start: a token expires, a
@@ -613,7 +658,7 @@ func (c *Cerebrate) runOnce(ctx context.Context) (fatal bool, ranFor time.Durati
 	// still holding one open — reading inline first would deadlock exactly
 	// when that happens.
 	readDone := make(chan error, 1)
-	go func() { readDone <- c.readStream(stdout) }()
+	go func() { readDone <- c.readStream(ctx, stdout, fingerprint) }()
 
 	// The parent's copy of the write end, so the reader sees EOF once the
 	// process and anything it spawned have let go of theirs.
@@ -649,16 +694,24 @@ func (c *Cerebrate) runOnce(ctx context.Context) (fatal bool, ranFor time.Durati
 
 // readStream consumes the agent's output until it closes, publishing events.
 // It returns the first fatal error seen, if any.
-func (c *Cerebrate) readStream(stdout io.Reader) error {
+func (c *Cerebrate) readStream(ctx context.Context, stdout io.Reader, fingerprint string) error {
 	scanner := bufio.NewScanner(stdout)
 	// Agent output carries whole file contents and diffs, so the default 64KB
 	// line limit is not enough; a truncated line would fail to parse and look
 	// like a harness bug.
 	scanner.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
 
+	// The conversation last written down, so an unchanged id is not written
+	// again on every line. It is recorded here rather than when the process
+	// exits because a daemon that is killed never reaches an exit: the id has
+	// to be durable while the agent is still working, which is the only case
+	// that needs it.
+	var recorded string
+
 	var fatal error
 	for scanner.Scan() {
 		events, err := c.sessionAdapter().Parse(scanner.Bytes())
+		recorded = c.recordSession(ctx, recorded, fingerprint)
 		if err != nil {
 			// An unparseable line is worth knowing about but is not grounds to
 			// kill a working agent: harnesses print things adapters have not
@@ -1003,6 +1056,49 @@ func (c *Cerebrate) waitOutThrottle(ctx context.Context, t adapter.Throttle) boo
 	case <-time.After(wait):
 		return true
 	}
+}
+
+// recordSession stores the conversation the harness has named, when that answer
+// has changed. It returns what is now on record.
+//
+// The id comes from the adapter's latch rather than from what was passed to it,
+// which is the difference between recording what is being written to and
+// recording what was asked for. claude answers --resume on a session that is
+// somehow still live by forking to a new id; the fork is the conversation the
+// work is going into, and the id zerg sent names one nothing appends to.
+func (c *Cerebrate) recordSession(ctx context.Context, recorded, fingerprint string) string {
+	if c.cfg.Continuity == nil {
+		return recorded
+	}
+	named, ok := c.sessionAdapter().(adapter.SessionIdentified)
+	if !ok {
+		return recorded
+	}
+	id := named.SessionID()
+	if id == "" || id == recorded {
+		return recorded
+	}
+	// WithoutCancel because the case this exists for is the daemon going
+	// down: the run context is already cancelled by the time an agent's
+	// output closes, and a write that gives up there records nothing exactly
+	// when there is something to record.
+	c.cfg.Continuity.Record(context.WithoutCancel(ctx), c.name(), c.sessionAdapter().Name(), id, fingerprint)
+	return id
+}
+
+// configFingerprint is everything about a role that a resumed conversation
+// would contradict.
+//
+// The composed system prompt is in it whole rather than by length or by a field
+// list: a prompt edit is exactly the change this has to notice, and any digest
+// of it that is cheaper than the text is a digest that can miss one.
+func configFingerprint(live liveConfig) string {
+	return strings.Join([]string{
+		live.role.Harness,
+		live.role.Model,
+		live.role.Thinking,
+		live.systemPrompt,
+	}, "\x00")
 }
 
 // sessionAdapter is this process's own instance, falling back to the shared

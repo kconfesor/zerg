@@ -97,7 +97,7 @@ func (db *DB) createProject(ctx context.Context, path, name, baseBranch string, 
 func (db *DB) ListProjects(ctx context.Context) ([]Project, error) {
 	rows, err := db.read.QueryContext(ctx,
 		`SELECT id, path, name, base_branch, integration, pr_draft, created_at, last_opened_at,
-		        chat_harness, chat_model, icon, team_preset_id, auto_run
+		        chat_harness, chat_model, icon, team_preset_id, auto_run, start_requested_at
 		 FROM projects ORDER BY COALESCE(last_opened_at, created_at) DESC`)
 	if err != nil {
 		return nil, fmt.Errorf("listing projects: %w", err)
@@ -119,7 +119,8 @@ func (db *DB) ListProjects(ctx context.Context) ([]Project, error) {
 func (db *DB) GetProject(ctx context.Context, id string) (*Project, error) {
 	row := db.read.QueryRowContext(ctx,
 		`SELECT id, path, name, base_branch, integration, pr_draft, created_at, last_opened_at,
-		        chat_harness, chat_model, icon, team_preset_id, auto_run FROM projects WHERE id = ?`, id)
+		        chat_harness, chat_model, icon, team_preset_id, auto_run, start_requested_at
+		 FROM projects WHERE id = ?`, id)
 	p, err := scanProject(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("project %s: %w", id, ErrNotFound)
@@ -512,9 +513,10 @@ func (db *DB) resolveLayeredTeam(ctx context.Context, p *Project) ([]ResolvedRol
 
 func scanProject(s scanner) (*Project, error) {
 	var (
-		p          Project
-		created    string
-		lastOpened sql.NullString
+		p           Project
+		created     string
+		lastOpened  sql.NullString
+		startWanted sql.NullString
 	)
 	var presetID sql.NullString
 	var draft int
@@ -523,7 +525,7 @@ func scanProject(s scanner) (*Project, error) {
 	// is not edited.
 	var unusedAutoRun int
 	if err := s.Scan(&p.ID, &p.Path, &p.Name, &p.BaseBranch, &p.Integration, &draft, &created, &lastOpened,
-		&p.ChatHarness, &p.ChatModel, &p.Icon, &presetID, &unusedAutoRun); err != nil {
+		&p.ChatHarness, &p.ChatModel, &p.Icon, &presetID, &unusedAutoRun, &startWanted); err != nil {
 		return nil, err
 	}
 	p.PRDraft = draft != 0
@@ -541,6 +543,13 @@ func scanProject(s scanner) (*Project, error) {
 			return nil, fmt.Errorf("project %s has an unreadable last_opened_at: %w", p.ID, err)
 		}
 		p.LastOpenedAt = &t
+	}
+	if startWanted.Valid {
+		t, err := parseStored(startWanted.String)
+		if err != nil {
+			return nil, fmt.Errorf("project %s has an unreadable start_requested_at: %w", p.ID, err)
+		}
+		p.StartRequestedAt = &t
 	}
 	return &p, nil
 }

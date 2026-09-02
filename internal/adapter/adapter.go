@@ -134,6 +134,17 @@ type Spec struct {
 	Socket string
 	Token  string
 
+	// ResumeSession is the harness conversation this process should continue,
+	// or empty to start a fresh one.
+	//
+	// Only ever an id a harness announced on its own stream, never one zerg
+	// invented. Both supported harnesses name the session they open, so there
+	// is nothing to mint, and the flag that creates a session is the one worth
+	// avoiding: reusing claude's --session-id on a conversation it has already
+	// written fails the spawn outright with "Session ID <uuid> is already in
+	// use". Resuming what the harness itself named cannot hit that.
+	ResumeSession string
+
 	// BinDir holds the zerg executable and is prepended to the agent's PATH.
 	//
 	// Agents are instructed to run `zerg next`, `zerg done` and `zerg send`.
@@ -522,6 +533,25 @@ func ForSession(a Adapter) Adapter {
 		return s.NewSession()
 	}
 	return a
+}
+
+// SessionIdentified is implemented by adapters whose harness names the
+// conversation it is running, so a later spawn can resume it.
+//
+// Latched from the stream rather than remembered from Spec, and the difference
+// is not pedantic: claude answers --resume on a session that is somehow still
+// live by forking to a *new* id and carrying on under that, so the id zerg
+// passed can name a conversation nothing is writing to any more. What the
+// harness says it is running is the only id worth storing.
+//
+// A session-scoped instance per agent, like the model and billing latches this
+// sits beside — one shared registry instance would have three concurrent roles
+// overwriting each other's session id, and the symptom would be a role resuming
+// somebody else's conversation.
+type SessionIdentified interface {
+	// SessionID is the conversation this process is running, or empty before
+	// the harness has said.
+	SessionID() string
 }
 
 // Throttler is implemented by adapters that can recognise their harness

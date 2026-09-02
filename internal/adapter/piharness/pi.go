@@ -24,6 +24,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/kconfesor/zerg/internal/adapter"
@@ -31,9 +32,30 @@ import (
 
 const binary = "pi"
 
-type Adapter struct{}
+type Adapter struct {
+	// session is the conversation this process is writing to, latched from the
+	// session frame pi opens with. pi resolves --session-id to a file under the
+	// working directory and accepts a partial id, so what it opened is worth
+	// reading back rather than assuming.
+	session atomic.Pointer[string]
+}
 
-func New() *Adapter { return &Adapter{} }
+func New() *Adapter {
+	a := &Adapter{}
+	empty := ""
+	a.session.Store(&empty)
+	return a
+}
+
+// NewSession gives one agent process its own latch, for the reason
+// adapter.SessionScoped states: a shared instance would have concurrent roles
+// overwriting each other's session id, and a role would resume somebody else's
+// conversation.
+func (*Adapter) NewSession() adapter.Adapter { return New() }
+
+// SessionID is the conversation this process is running, empty until pi has
+// named it. See adapter.SessionIdentified.
+func (a *Adapter) SessionID() string { return *a.session.Load() }
 
 func (*Adapter) Name() string { return "pi" }
 
@@ -61,7 +83,11 @@ func (*Adapter) Capabilities() adapter.Caps {
 		PrivateConfigDir: true,
 		SystemPromptFile: true, // --append-system-prompt resolves a path
 		ModelFlag:        true,
-		ResumeSession:    true, // --session <path|id>
+		// --session-id <id> creates the session if it is missing and continues
+		// it if it is not, so unlike claude the same flag serves both spawns.
+		// Verified against 0.84.4: a second process given the same id appended
+		// to the one session file rather than erroring.
+		ResumeSession: true,
 	}
 }
 
@@ -91,6 +117,13 @@ func (*Adapter) Command(ctx context.Context, spec adapter.Spec) (*exec.Cmd, erro
 	}
 	if spec.Thinking != "" {
 		args = append(args, "--thinking", spec.Thinking)
+	}
+	// --session-id continues the conversation it names and creates it when it
+	// is missing, so pi needs no second flag for the two cases. The session
+	// file is looked up under the working directory, which for a role is its
+	// own worktree and therefore the same one on every spawn.
+	if spec.ResumeSession != "" {
+		args = append(args, "--session-id", spec.ResumeSession)
 	}
 	// Extensions are opt-out because a broken extension tree takes the whole
 	// process down before it reads a single turn — which is exactly how pi
@@ -358,7 +391,11 @@ func parseTokenCount(s string) int {
 // which is the part of the Event contract this adapter confirmed rather than
 // changed.
 type wire struct {
-	Type    string `json:"type"`
+	Type string `json:"type"`
+
+	// ID names the conversation, on the session frame pi opens with.
+	ID string `json:"id"`
+
 	Message struct {
 		Role     string `json:"role"`
 		Provider string `json:"provider"`
@@ -401,7 +438,7 @@ type usage struct {
 // pi streams a text_delta per token via message_update, which would drown the
 // event log for no benefit — the completed message arrives anyway. Only
 // terminal states are emitted.
-func (*Adapter) Parse(line []byte) ([]adapter.Event, error) {
+func (a *Adapter) Parse(line []byte) ([]adapter.Event, error) {
 	line = bytes.TrimSpace(line)
 	if len(line) == 0 || line[0] != '{' {
 		return nil, nil // startup warnings reach stdout too
@@ -414,6 +451,10 @@ func (*Adapter) Parse(line []byte) ([]adapter.Event, error) {
 
 	switch w.Type {
 	case "session":
+		if w.ID != "" {
+			id := w.ID
+			a.session.Store(&id)
+		}
 		return []adapter.Event{{Kind: adapter.EventReady}}, nil
 
 	case "message_update":

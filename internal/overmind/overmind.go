@@ -453,6 +453,17 @@ func (o *Overmind) Start(ctx context.Context, projectID string) error {
 	o.mu.Unlock()
 	started = true
 
+	// After the swarm is up, not before: a project that failed preflight was
+	// never running, and recording an intent for it would have the next daemon
+	// start try again on its own and fail again, unattended, for as long as
+	// whatever is broken stays broken.
+	if err := o.db.RequestStart(context.WithoutCancel(ctx), projectID); err != nil {
+		// Not fatal. The swarm is running either way; what is lost is its
+		// coming back by itself after a restart.
+		o.log.Warn("could not record that this project should be running",
+			"project", projectID, "err", err)
+	}
+
 	s.live.Add(1)
 	go func() {
 		defer s.live.Done()
@@ -568,6 +579,7 @@ func (o *Overmind) spawnRole(runCtx context.Context, s *swarm, env *spawnEnv, ro
 		Log:          o.log,
 		Preflight:    o.preflight,
 		StateDir:     o.roleDir(projectID, role.Name, "state"),
+		Continuity:   continuity{db: o.db, projectID: projectID, log: o.log},
 	})
 
 	s.mu.Lock()
@@ -583,6 +595,41 @@ func (o *Overmind) spawnRole(runCtx context.Context, s *swarm, env *spawnEnv, ro
 		_ = c.Run(roleCtx)
 	}()
 	return nil
+}
+
+// continuity is the pipeline's answer to "which conversation was this role
+// holding", kept in the database so it outlives the process that asked.
+//
+// Failures here are logged and swallowed on purpose. Not knowing which session
+// to resume costs an agent its memory of the last run, which is the situation
+// every spawn was in before this existed; refusing to spawn over it would trade
+// a degraded start for no start at all.
+type continuity struct {
+	db        *store.DB
+	projectID string
+	log       *slog.Logger
+}
+
+func (c continuity) Resume(ctx context.Context, role, harness, fingerprint string) string {
+	sess, err := c.db.RoleSessionFor(ctx, c.projectID, role, harness, fingerprint)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		// Either nothing was ever recorded, or what was recorded belongs to a
+		// different configuration. Both mean a cold session, and neither is
+		// worth a line in the log on every spawn.
+		return ""
+	case err != nil:
+		c.log.Warn("could not look up a session to resume", "project", c.projectID, "role", role, "err", err)
+		return ""
+	}
+	return sess.SessionID
+}
+
+func (c continuity) Record(ctx context.Context, role, harness, sessionID, fingerprint string) {
+	if err := c.db.SaveRoleSession(ctx, c.projectID, role, harness, sessionID, fingerprint); err != nil {
+		c.log.Warn("could not record the session this role is holding",
+			"project", c.projectID, "role", role, "err", err)
+	}
 }
 
 // stopRole takes one role down and gives its token back.
@@ -681,10 +728,39 @@ func (o *Overmind) Reconcile(ctx context.Context, projectID string) error {
 // It holds the project's lifecycle lock for the whole teardown, so a Start
 // arriving mid-stop waits rather than spawning a second set of agents into
 // worktrees the first set has not finished leaving.
+// Stop takes a project down because somebody asked for it.
+//
+// This is the operator's decision and it is recorded as one: the project stops
+// wanting to be running, and its roles forget the conversations they were
+// holding, so the next Start is a genuinely fresh one. StopAll, which is the
+// daemon going down, does neither — see the difference described on
+// store.WithdrawStart.
 func (o *Overmind) Stop(ctx context.Context, projectID, reason string) error {
 	unlock := o.lock(projectID)
 	defer unlock()
-	return o.stop(ctx, projectID, reason)
+	if err := o.stop(ctx, projectID, reason); err != nil {
+		return err
+	}
+	o.forgetContinuity(ctx, projectID)
+	return nil
+}
+
+// forgetContinuity drops everything that would make the next start a resumed
+// one. Both failures are warnings: the swarm is already down, and the worst
+// case is a project that starts itself once more, or an agent that comes back
+// remembering a task that is finished.
+func (o *Overmind) forgetContinuity(ctx context.Context, projectID string) {
+	ctx = context.WithoutCancel(ctx)
+	if err := o.db.WithdrawStart(ctx, projectID); err != nil {
+		o.log.Warn("could not record that this project should stay stopped",
+			"project", projectID, "err", err)
+	}
+	if n, err := o.db.ForgetRoleSessions(ctx, projectID); err != nil {
+		o.log.Warn("could not clear this project's harness sessions",
+			"project", projectID, "err", err)
+	} else if n > 0 {
+		o.log.Info("cleared harness sessions on stop", "project", projectID, "roles", n)
+	}
 }
 
 // stop is the body, for callers that already hold the lifecycle lock.
@@ -767,12 +843,75 @@ func (o *Overmind) StopFor(ctx context.Context, projectID, reason string) (bool,
 	_, up := o.running[projectID]
 	o.mu.Unlock()
 	if !up {
+		// Still an operator saying stop, even with nothing running: a project
+		// whose swarm died and was never restarted still holds the intent, and
+		// leaving it set would have the daemon start it again.
+		o.forgetContinuity(ctx, projectID)
 		return false, nil
 	}
-	return true, o.stop(ctx, projectID, reason)
+	if err := o.stop(ctx, projectID, reason); err != nil {
+		return true, err
+	}
+	o.forgetContinuity(ctx, projectID)
+	return true, nil
+}
+
+// Resume starts the projects the operator left running when the daemon last
+// went down, and reports how many came back up.
+//
+// Deliberately not a stricter thing than Start. Every project goes through the
+// same preflight and the same spawn, so a resumed swarm is a started swarm and
+// there is no second path to keep correct. What is different is what a failure
+// means: nobody is watching, so a project that cannot start is logged and left
+// alone rather than reported, and it keeps its intent so the next daemon start
+// tries again. A harness that is logged out at boot and logged in at lunchtime
+// should not need the operator to remember which projects were running.
+func (o *Overmind) Resume(ctx context.Context) (int, error) {
+	ids, err := o.db.ProjectsWantingStart(ctx)
+	if err != nil {
+		return 0, err
+	}
+	started := 0
+	for _, id := range ids {
+		if ctx.Err() != nil {
+			return started, ctx.Err()
+		}
+		name := id
+		if p, err := o.db.GetProject(ctx, id); err == nil {
+			name = p.Name
+		}
+		// Counted before the start, because a start that fails still says
+		// something worth knowing: these are the conversations that were
+		// waiting to be picked up, and a project that cannot come back is a
+		// project whose agents are about to lose them to the next edit.
+		held := 0
+		if sessions, err := o.db.ListRoleSessions(ctx, id); err == nil {
+			held = len(sessions)
+		}
+
+		switch err := o.Start(ctx, id); {
+		case err == nil:
+			started++
+			o.log.Info("resumed a project that was running before the restart",
+				"project", name, "conversations", held)
+		default:
+			// Including ErrNotReady, which is the common one: a preflight check
+			// that fails at boot is usually a harness that has not finished
+			// starting or a token that needs a person.
+			o.log.Warn("could not resume a project that was running before the restart",
+				"project", name, "err", err)
+		}
+	}
+	return started, nil
 }
 
 // StopAll shuts every running project down, for daemon shutdown.
+//
+// Deliberately not Stop, which is the operator's decision and withdraws the
+// intent to be running along with the conversations the agents were holding.
+// A daemon going down decides nothing: it takes the processes with it and
+// leaves every record of what should be running exactly as it found it, which
+// is what lets the next start put it all back.
 func (o *Overmind) StopAll(ctx context.Context, reason string) {
 	o.mu.Lock()
 	ids := make([]string, 0, len(o.running))
@@ -782,7 +921,10 @@ func (o *Overmind) StopAll(ctx context.Context, reason string) {
 	o.mu.Unlock()
 
 	for _, id := range ids {
-		if err := o.Stop(ctx, id, reason); err != nil {
+		unlock := o.lock(id)
+		err := o.stop(ctx, id, reason)
+		unlock()
+		if err != nil {
 			o.log.Warn("stopping project", "project", id, "err", err)
 		}
 	}

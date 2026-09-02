@@ -441,3 +441,88 @@ func TestEffortReachesTheCommand(t *testing.T) {
 		t.Errorf("levels are %v, want the ones claude --help lists", a.Capabilities().Thinking)
 	}
 }
+
+// A session to continue reaches the command as --resume, and never as
+// --session-id.
+//
+// The distinction is measured rather than stylistic. Against claude 2.1.258,
+// --session-id on a conversation that already exists exits before the process
+// is up with "Session ID <uuid> is already in use", so the flag that creates a
+// session cannot be used to continue one. Every id zerg holds came from claude
+// itself and therefore names a session that exists.
+func TestResumingASessionUsesResumeAndNotSessionID(t *testing.T) {
+	a := New()
+	dir := t.TempDir()
+	cmd, err := a.Command(context.Background(), adapter.Spec{
+		Worktree: dir, ResumeSession: "6f6a4877-35d6-4764-a23c-f5b8e02a0c6a",
+	})
+	if err != nil {
+		t.Fatalf("Command: %v", err)
+	}
+	if slices.Contains(cmd.Args, "--session-id") {
+		t.Errorf("--session-id would refuse a session claude has already written: %v", cmd.Args)
+	}
+	found := false
+	for i, arg := range cmd.Args {
+		if arg == "--resume" {
+			found = true
+			if got := cmd.Args[i+1]; got != "6f6a4877-35d6-4764-a23c-f5b8e02a0c6a" {
+				t.Errorf("--resume %s, want the stored session id", got)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("no --resume in %v", cmd.Args)
+	}
+
+	// A role with nothing to resume starts a conversation of claude's own
+	// choosing, which is what every spawn did before this existed.
+	cmd, err = a.Command(context.Background(), adapter.Spec{Worktree: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(cmd.Args, "--resume") {
+		t.Errorf("--resume passed with no session to resume: %v", cmd.Args)
+	}
+}
+
+// The session id is read out of the stream, not remembered from what was
+// passed in.
+//
+// claude answers --resume on a session that is still live by forking to a new
+// id and carrying on under that. Latching from the stream is what makes the
+// stored id follow the conversation the work is actually going into; trusting
+// the id zerg sent would resume a dead one on the next restart. Every frame
+// carries session_id, so a fork announces itself on the frames after it.
+func TestSessionIDIsLatchedFromTheStream(t *testing.T) {
+	a := New()
+	if a.SessionID() != "" {
+		t.Errorf("a fresh adapter reported session %q before claude had said anything", a.SessionID())
+	}
+
+	if _, err := a.Parse([]byte(`{"type":"system","subtype":"init","model":"claude-opus-5",` +
+		`"apiKeySource":"none","session_id":"first-session"}`)); err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got := a.SessionID(); got != "first-session" {
+		t.Errorf("SessionID = %q, want first-session", got)
+	}
+
+	// A fork mid-run, announced on an ordinary frame rather than on init.
+	if _, err := a.Parse([]byte(`{"type":"assistant","session_id":"forked-session",` +
+		`"message":{"model":"claude-opus-5","content":[]}}`)); err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got := a.SessionID(); got != "forked-session" {
+		t.Errorf("SessionID = %q after a fork, want forked-session", got)
+	}
+
+	// A frame with no session_id says nothing about the session and must not
+	// erase what is known.
+	if _, err := a.Parse([]byte(`{"type":"stream_event","event":{"type":"content_block_delta"}}`)); err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got := a.SessionID(); got != "forked-session" {
+		t.Errorf("SessionID = %q after a frame that named none, want forked-session", got)
+	}
+}

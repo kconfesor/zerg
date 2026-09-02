@@ -305,3 +305,63 @@ func TestModelStoreDegradesQuietly(t *testing.T) {
 		t.Errorf("missing store returned %v, want nil", got)
 	}
 }
+
+// pi continues a conversation with the flag that also creates one.
+//
+// Verified against pi 0.84.4: a second process given a --session-id it had
+// already used appended to the same session file rather than refusing, which is
+// why this needs none of the create-or-continue distinction claude does. The
+// file is resolved under the working directory, and a role's working directory
+// is its own worktree on every spawn.
+func TestResumingASessionUsesSessionID(t *testing.T) {
+	a := New()
+	dir := t.TempDir()
+	cmd, err := a.Command(context.Background(), adapter.Spec{
+		Worktree: dir, ResumeSession: "9b526675-f043-4040-a58e-f5e2cbc844bd",
+	})
+	if err != nil {
+		t.Fatalf("Command: %v", err)
+	}
+	found := false
+	for i, arg := range cmd.Args {
+		if arg == "--session-id" {
+			found = true
+			if got := cmd.Args[i+1]; got != "9b526675-f043-4040-a58e-f5e2cbc844bd" {
+				t.Errorf("--session-id %s, want the stored session id", got)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("no --session-id in %v", cmd.Args)
+	}
+
+	cmd, err = a.Command(context.Background(), adapter.Spec{Worktree: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, arg := range cmd.Args {
+		if arg == "--session-id" {
+			t.Errorf("--session-id passed with no session to resume: %v", cmd.Args)
+		}
+	}
+}
+
+// pi names its session on the frame it opens with, and that is where the id
+// comes from.
+func TestPiSessionIDIsLatchedFromTheStream(t *testing.T) {
+	a := New()
+	if a.SessionID() != "" {
+		t.Errorf("a fresh adapter reported session %q before pi had said anything", a.SessionID())
+	}
+	evs, err := a.Parse([]byte(`{"type":"session","version":3,"id":"9b526675-f043",` +
+		`"timestamp":"2026-09-02T01:45:37.747Z","cwd":"/tmp/work"}`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(evs) != 1 || evs[0].Kind != adapter.EventReady {
+		t.Fatalf("the session frame should still report ready, got %v", evs)
+	}
+	if got := a.SessionID(); got != "9b526675-f043" {
+		t.Errorf("SessionID = %q, want 9b526675-f043", got)
+	}
+}

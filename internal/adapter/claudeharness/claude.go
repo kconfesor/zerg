@@ -46,6 +46,15 @@ type Adapter struct {
 	// what actually ran, and an alias that silently resolves elsewhere is
 	// precisely what this should make visible.
 	model atomic.Pointer[string]
+
+	// session is the conversation this process is actually writing to, latched
+	// the same way and for a sharper reason than the other two. claude answers
+	// --resume on a session that is still live by starting a copy under a new
+	// id and saying so on the stream; the id zerg passed would then name a
+	// conversation nobody is appending to, and the next restart would resume
+	// that dead one instead. Every frame carries session_id, so the answer is
+	// always the current one.
+	session atomic.Pointer[string]
 }
 
 func New() *Adapter {
@@ -54,12 +63,24 @@ func New() *Adapter {
 	a.billing.Store(&unknown)
 	empty := ""
 	a.model.Store(&empty)
+	a.session.Store(&empty)
 	return a
 }
 
 // NewSession gives one agent process its own latch. Everything else on the
 // adapter is configuration and is safe to share.
 func (*Adapter) NewSession() adapter.Adapter { return New() }
+
+// SessionID is the conversation this process is running, empty until claude has
+// named it. See adapter.SessionIdentified.
+func (a *Adapter) SessionID() string { return *a.session.Load() }
+
+// latchSession records the conversation claude says it is writing to.
+func (a *Adapter) latchSession(id string) {
+	if id != "" {
+		a.session.Store(&id)
+	}
+}
 
 // latchModel records the model actually serving this session. Called wherever
 // the harness names one, since the result event does not.
@@ -151,6 +172,19 @@ func (*Adapter) Command(ctx context.Context, spec adapter.Spec) (*exec.Cmd, erro
 	}
 	if spec.Thinking != "" {
 		args = append(args, "--effort", spec.Thinking)
+	}
+	// --resume rather than --session-id, which is the flag that creates one and
+	// refuses an id it has already written: given a session that exists it
+	// exits before the process is up, with "Session ID <uuid> is already in
+	// use". Since the id here always came from claude itself, the session
+	// always exists, and --resume is the only correct flag.
+	//
+	// Verified against claude 2.1.258 in exactly this mode: --resume under
+	// --print with both stream-json formats recovered a value planted in the
+	// previous process, kept the same session_id, and read 21511 tokens from
+	// cache rather than resending them.
+	if spec.ResumeSession != "" {
+		args = append(args, "--resume", spec.ResumeSession)
 	}
 	// A last-resort floor, not a policy. An agent running unattended with no
 	// permission setting at all will stop at the first prompt and look alive
@@ -257,6 +291,12 @@ type wire struct {
 	Subtype string `json:"subtype"`
 	Model   string `json:"model"`
 
+	// SessionID rides every frame, including the ones this decodes for nothing
+	// else, which is why it is latched in Parse rather than off the init event
+	// alone: a session that forks mid-run announces the new id on the frames
+	// that follow, and the init event has long since gone past.
+	SessionID string `json:"session_id"`
+
 	// Event carries the fragments emitted under --include-partial-messages.
 	// Only the text deltas are read: the block start, stop and message frames
 	// say nothing the whole message will not say authoritatively when it
@@ -333,6 +373,7 @@ func (a *Adapter) Parse(line []byte) ([]adapter.Event, error) {
 	if err := json.Unmarshal(line, &w); err != nil {
 		return nil, fmt.Errorf("claude: unreadable output line: %w", err)
 	}
+	a.latchSession(w.SessionID)
 
 	switch w.Type {
 	case "rate_limit_event":

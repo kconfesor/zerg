@@ -49,6 +49,13 @@ import (
 const (
 	eventRetention = 14 * 24 * time.Hour
 	retentionSweep = 6 * time.Hour
+
+	// stopWaitForResume is how long a shutdown waits for a resume in progress.
+	//
+	// Long enough for a preflight that is shelling out to a slow harness, and
+	// finite, because the reason to wait is to stop what it starts rather than
+	// to see it through.
+	stopWaitForResume = 15 * time.Second
 )
 
 func main() {
@@ -67,6 +74,10 @@ func run(args []string) error {
 	switch args[0] {
 	case "up":
 		return runUp(args[1:])
+	case "down":
+		return runDown(args[1:])
+	case "status":
+		return runStatus(args[1:])
 
 	// The agent-facing verbs. These run inside a spawned agent and reach the
 	// overmind over the unix socket named in its environment.
@@ -145,10 +156,15 @@ func printVersion() {
 func usage() {
 	fmt.Fprint(os.Stderr, `zerg, a multi-agent coding orchestrator
 
-  zerg up [--addr host:port] [--db path] [--no-dev-ui] [--verbose]
+  zerg up [--addr host:port] [--db path] [--no-dev-ui] [--verbose] [--detach]
       Run the overmind and serve the cockpit. In a checkout with no cockpit
       compiled in, this also runs the cockpit's dev server and serves it here,
       hot-reloading; --no-dev-ui turns that off.
+      --detach runs it in the background, so closing the terminal leaves it
+      and its agents alone. Its output goes to zerg.log beside the database.
+
+  zerg down [--db path] [--wait 30s]  ask a running daemon to stop
+  zerg status [--db path]             say whether one is running, and where
 
 Run by agents, not by you:
 
@@ -210,6 +226,7 @@ func runUp(args []string) error {
 	// the daemon alone: another Vite already running, or a machine without node.
 	noDev := fs.Bool("no-dev-ui", false, "do not start the cockpit's dev server even if its sources are here")
 	verbose := fs.Bool("verbose", false, "log every request")
+	background := fs.Bool("detach", false, "run in the background and give the terminal back")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -220,22 +237,52 @@ func runUp(args []string) error {
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 
-	if *dbPath == "" {
-		p, err := store.DefaultPath()
-		if err != nil {
-			return err
-		}
-		*dbPath = p
-	}
 	// Resolved before anything is derived from it. The agent socket, the
 	// worktrees and the blob store are all built from this path, and an agent
 	// runs in a worktree: `zerg up --db ./r.db` handed every agent the socket
 	// as "state/agent.sock", which resolves against its own directory and is
 	// not there. The agent then spends a turn hunting for the daemon it is
 	// already connected to, and the failure names nothing.
-	if abs, err := filepath.Abs(*dbPath); err == nil {
-		*dbPath = abs
+	resolved, err := resolveDBPath(*dbPath)
+	if err != nil {
+		return err
 	}
+	*dbPath = resolved
+
+	// Before the database is opened, so a detached start does not migrate a
+	// database the daemon it is about to spawn is going to migrate anyway.
+	//
+	// The child's flags are rebuilt from what was parsed rather than forwarded
+	// as typed. Forwarding raw arguments means the resolved --db is passed
+	// alongside whatever relative path the operator wrote, and the last one
+	// wins, so the daemon would open a different database from the one its pid
+	// file is beside.
+	if *background {
+		var childArgs []string
+		if *addr != "" {
+			childArgs = append(childArgs, "--addr", *addr)
+		}
+		if *noTLS {
+			childArgs = append(childArgs, "--no-tls")
+		}
+		if *noDev {
+			childArgs = append(childArgs, "--no-dev-ui")
+		}
+		if *verbose {
+			childArgs = append(childArgs, "--verbose")
+		}
+		return detach(*dbPath, childArgs)
+	}
+
+	// One daemon per database, and something for `zerg down` and `zerg status`
+	// to find. Foreground too: the second `zerg up` in a forgotten terminal is
+	// the same mistake either way, and it fails here naming what to do rather
+	// than on a port bind naming a number.
+	releasePid, err := writePidFile(*dbPath)
+	if err != nil {
+		return err
+	}
+	defer releasePid()
 
 	// Signals cancel the context, which shuts the server down gracefully.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -327,6 +374,16 @@ func runUp(args []string) error {
 	} else if settled > 0 || released > 0 {
 		log.Info("settled interrupted approvals from the previous run",
 			"completed", settled, "returned_to_pending", released)
+	}
+
+	// A session is closed by the shutdown that ends it, so one still open here
+	// belongs to a daemon that was killed rather than asked. Left that way it
+	// reports a work period that never ended, and the next Start opens a second
+	// one beside it.
+	if n, err := db.CloseOpenSessions(ctx, "the daemon stopped without shutting down"); err != nil {
+		log.Error("could not close sessions from the previous run", "err", err)
+	} else if n > 0 {
+		log.Info("closed sessions left open by the previous run", "sessions", n)
 	}
 
 	// Chat runs outside the pipeline: its own process, its own worktree, no
@@ -484,6 +541,37 @@ func runUp(args []string) error {
 	}
 	warnIfReachable(cfg.Addr, tlsCert != "")
 
+	// Bring back whatever the operator left running, on a goroutine and after
+	// the listener is announced.
+	//
+	// After, because Start runs preflight for every role and preflight shells
+	// out: doing this inline holds the cockpit closed for as long as several
+	// projects' checks take, and the cockpit is where somebody would go to find
+	// out why a project has not come back.
+	//
+	// Shutdown waits for it. StopAll takes a snapshot of what is running, and a
+	// project that finishes starting after that snapshot is a swarm nothing
+	// stops: its agents are in process groups of their own, so they outlive the
+	// daemon as orphans holding worktrees. The window is only as long as
+	// preflight, and a Ctrl-C a second after launching is not a rare way to
+	// change your mind.
+	resumed := make(chan struct{})
+	if cfg.ResumeOnStart {
+		go func() {
+			defer close(resumed)
+			n, err := over.Resume(ctx)
+			if err != nil {
+				log.Error("could not read which projects to resume", "err", err)
+				return
+			}
+			if n > 0 {
+				log.Info("resumed the projects that were running", "projects", n)
+			}
+		}()
+	} else {
+		close(resumed)
+	}
+
 	errCh := make(chan error, 1)
 	if localLn != nil {
 		// Same handler, same state — a different door into one daemon, never a
@@ -511,6 +599,15 @@ func runUp(args []string) error {
 		return err
 	case <-ctx.Done():
 		log.Info("shutting down")
+		// Before anything is torn down, and bounded: a resume that is wedged
+		// on a preflight check must not hold the shutdown open forever, and a
+		// project it has not reached yet was never started, so there is
+		// nothing of it to stop.
+		select {
+		case <-resumed:
+		case <-time.After(stopWaitForResume):
+			log.Warn("a resume was still running at shutdown; stopping anyway")
+		}
 		// Every service belonged to a process this daemon owned, so none of
 		// them survives it.
 		if n, err := db.StopServices(context.Background(), "", ""); err != nil {
