@@ -158,14 +158,6 @@ func (db *DB) ListRoleSessions(ctx context.Context, projectID string) ([]RoleSes
 	return out, rows.Err()
 }
 
-// ForgetRoleSessions drops every stored session for a project, so its next
-// start is a cold one.
-//
-// Called when the operator stops a swarm, and not when the daemon goes down.
-// The distinction is the same one start_requested_at draws: a process ending is
-// not a decision, and a person pressing Stop is. Resuming a week-old
-// conversation about a finished task on the next Start would be continuity of
-// the wrong thing.
 // ForgetRoleSession drops the stored session for one role, so that role's next
 // spawn is a cold one while the rest of the swarm keeps what it has.
 //
@@ -183,6 +175,14 @@ func (db *DB) ForgetRoleSession(ctx context.Context, projectID, role string) err
 	return nil
 }
 
+// ForgetRoleSessions drops every stored session for a project, so its next
+// start is a cold one.
+//
+// Called when the operator stops a swarm, and not when the daemon goes down.
+// The distinction is the same one start_requested_at draws: a process ending is
+// not a decision, and a person pressing Stop is. Resuming a week-old
+// conversation about a finished task on the next Start would be continuity of
+// the wrong thing.
 func (db *DB) ForgetRoleSessions(ctx context.Context, projectID string) (int, error) {
 	res, err := db.sql.ExecContext(ctx,
 		`DELETE FROM role_sessions WHERE project_id = ?`, projectID)

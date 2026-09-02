@@ -106,23 +106,45 @@ func readPidFile(dbPath string) (pid int, running bool) {
 // same protection and the same `zerg status` for free.
 func writePidFile(dbPath string) (release func(), err error) {
 	path := pidPath(dbPath)
-	if pid, running := readPidFile(dbPath); running {
-		return nil, fmt.Errorf("zerg is already running for this database (pid %d).\n"+
-			"Stop it with `zerg down`, or if that process is not zerg, delete %s", pid, path)
-	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("creating %s: %w", filepath.Dir(path), err)
 	}
-	if err := os.WriteFile(path, []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
-		return nil, fmt.Errorf("recording the daemon's pid in %s: %w", path, err)
-	}
-	return func() {
-		// Only ours. A daemon that lost a race and is exiting must not delete
-		// the file belonging to the one that won.
-		if pid, _ := readPidFile(dbPath); pid == os.Getpid() {
-			os.Remove(path)
+	// O_EXCL is the actual exclusion. Checking then WriteFile let two zerg up
+	// both see "not running" and both write, and the loser deleted the
+	// winner's file on the way out — a running daemon that status and down
+	// could not find.
+	payload := []byte(strconv.Itoa(os.Getpid()))
+	for {
+		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err == nil {
+			_, werr := f.Write(payload)
+			cerr := f.Close()
+			if werr != nil || cerr != nil {
+				os.Remove(path)
+				if werr == nil {
+					werr = cerr
+				}
+				return nil, fmt.Errorf("recording the daemon's pid in %s: %w", path, werr)
+			}
+			return func() {
+				// Only ours. A later daemon can replace a stale file after we
+				// have exited; deleting that would hide it from zerg down.
+				if pid, _ := readPidFile(dbPath); pid == os.Getpid() {
+					os.Remove(path)
+				}
+			}, nil
 		}
-	}, nil
+		if !errors.Is(err, os.ErrExist) {
+			return nil, fmt.Errorf("recording the daemon's pid in %s: %w", path, err)
+		}
+		if pid, running := readPidFile(dbPath); running {
+			return nil, fmt.Errorf("zerg is already running for this database (pid %d).\n"+
+				"Stop it with `zerg down`, or if that process is not zerg, delete %s", pid, path)
+		}
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("removing a stale pid file %s: %w", path, err)
+		}
+	}
 }
 
 // detach re-execs this binary in a session of its own and returns.

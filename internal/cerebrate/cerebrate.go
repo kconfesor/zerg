@@ -203,8 +203,9 @@ type Cerebrate struct {
 	lastStreamErr string
 
 	// staleSession records that this spawn was refused because the session it
-	// was told to resume does not exist. Read once, when deciding what to keep
-	// on record for the next spawn.
+	// was told to resume does not exist. Set while reading the stream, consumed
+	// by recordSession, and cleared at the start of each spawn so a leftover
+	// cannot drop the next one's id.
 	staleSession bool
 
 	// quota is the subscription's remaining headroom, as last reported.
@@ -513,6 +514,13 @@ func (c *Cerebrate) Run(ctx context.Context) error {
 // runOnce spawns the agent and reads it until the process exits. It reports
 // whether the failure was fatal and how long the process lasted.
 func (c *Cerebrate) runOnce(ctx context.Context) (fatal bool, ranFor time.Duration, err error) {
+	// A leftover from the previous spawn must not decide this one. The flag is
+	// set while reading that spawn's stream; leaving it set made the next
+	// spawn's first line Forget and skip recording the new id.
+	c.mu.Lock()
+	c.staleSession = false
+	c.mu.Unlock()
+
 	// Configuration as the database has it now, not as it was when the swarm
 	// started. A role that crashes and respawns must come back as currently
 	// configured, or an edit silently applies to some roles and not others.
@@ -668,7 +676,7 @@ func (c *Cerebrate) runOnce(ctx context.Context) (fatal bool, ranFor time.Durati
 	// still holding one open — reading inline first would deadlock exactly
 	// when that happens.
 	readDone := make(chan error, 1)
-	go func() { readDone <- c.readStream(ctx, stdout, fingerprint) }()
+	go func() { readDone <- c.readStream(ctx, stdout, fingerprint, resume) }()
 
 	// The parent's copy of the write end, so the reader sees EOF once the
 	// process and anything it spawned have let go of theirs.
@@ -704,29 +712,30 @@ func (c *Cerebrate) runOnce(ctx context.Context) (fatal bool, ranFor time.Durati
 
 // readStream consumes the agent's output until it closes, publishing events.
 // It returns the first fatal error seen, if any.
-func (c *Cerebrate) readStream(ctx context.Context, stdout io.Reader, fingerprint string) error {
+func (c *Cerebrate) readStream(ctx context.Context, stdout io.Reader, fingerprint, resume string) error {
 	scanner := bufio.NewScanner(stdout)
 	// Agent output carries whole file contents and diffs, so the default 64KB
 	// line limit is not enough; a truncated line would fail to parse and look
 	// like a harness bug.
 	scanner.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
 
-	// The conversation last written down, so an unchanged id is not written
-	// again on every line. It is recorded here rather than when the process
-	// exits because a daemon that is killed never reaches an exit: the id has
-	// to be durable while the agent is still working, which is the only case
-	// that needs it.
-	var recorded string
+	// Starts as the conversation this spawn asked to continue, so a refusal
+	// frame that latches the same dead id is not written back down. An
+	// unchanged id is then skipped on every later line. Recorded here rather
+	// than when the process exits because a daemon that is killed never
+	// reaches an exit: the id has to be durable while the agent is still
+	// working, which is the only case that needs it.
+	recorded := resume
 
 	var fatal error
 	for scanner.Scan() {
 		events, err := c.sessionAdapter().Parse(scanner.Bytes())
-		recorded = c.recordSession(ctx, recorded, fingerprint)
 		if err != nil {
 			// An unparseable line is worth knowing about but is not grounds to
 			// kill a working agent: harnesses print things adapters have not
 			// seen yet.
 			c.cfg.Log.Debug("unparsed agent output", "role", c.name(), "err", err)
+			recorded = c.recordSession(ctx, recorded, fingerprint)
 			continue
 		}
 		for _, ev := range events {
@@ -770,10 +779,19 @@ func (c *Cerebrate) readStream(ctx context.Context, stdout io.Reader, fingerprin
 				fatal = errors.New(ev.Text)
 			}
 		}
+		// After the events, so a StaleSession flag set by this line is visible
+		// here rather than only to the next one. A refused resume is typically
+		// one result frame and then EOF; recording first wrote the dead id
+		// back and left Forget for a spawn that had not happened yet.
+		recorded = c.recordSession(ctx, recorded, fingerprint)
 	}
 	if err := scanner.Err(); err != nil {
 		c.cfg.Log.Debug("agent output ended", "role", c.name(), "err", err)
 	}
+	// EOF. The refusing spawn has set the flag and produced no further line
+	// to record on; this is what actually Forgets if the last line somehow
+	// did not.
+	c.recordSession(ctx, recorded, fingerprint)
 	return fatal
 }
 
@@ -1083,11 +1101,12 @@ func (c *Cerebrate) recordSession(ctx context.Context, recorded, fingerprint str
 	if c.cfg.Continuity == nil {
 		return recorded
 	}
-	// A spawn refused for a session that is not there must not leave that id
-	// on record, and the refusal frame carries the same dead id in session_id,
-	// so the latch below would put it straight back. Forgetting here is what
-	// makes the next attempt a cold one instead of the fifth identical
-	// failure.
+	named, ok := c.sessionAdapter().(adapter.SessionIdentified)
+	id := ""
+	if ok {
+		id = named.SessionID()
+	}
+
 	c.mu.Lock()
 	stale := c.staleSession
 	c.staleSession = false
@@ -1096,16 +1115,19 @@ func (c *Cerebrate) recordSession(ctx context.Context, recorded, fingerprint str
 		c.cfg.Continuity.Forget(context.WithoutCancel(ctx), c.name())
 		c.cfg.Log.Warn("the conversation this role was resuming is gone; starting a fresh one",
 			"role", c.name(), "session", recorded)
-		return ""
-	}
-	named, ok := c.sessionAdapter().(adapter.SessionIdentified)
-	if !ok {
+		// The latch still names the conversation we just dropped. Recording it
+		// would put the dead id straight back. A different id on this spawn is
+		// a new conversation and is worth keeping.
+		if id == "" || id == recorded {
+			if id != "" {
+				return id
+			}
+			return ""
+		}
+	} else if id == "" || id == recorded {
 		return recorded
 	}
-	id := named.SessionID()
-	if id == "" || id == recorded {
-		return recorded
-	}
+
 	// WithoutCancel because the case this exists for is the daemon going
 	// down: the run context is already cancelled by the time an agent's
 	// output closes, and a write that gives up there records nothing exactly

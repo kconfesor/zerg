@@ -730,11 +730,6 @@ func (o *Overmind) Reconcile(ctx context.Context, projectID string) error {
 	return nil
 }
 
-// Stop takes a project's swarm down.
-//
-// It holds the project's lifecycle lock for the whole teardown, so a Start
-// arriving mid-stop waits rather than spawning a second set of agents into
-// worktrees the first set has not finished leaving.
 // Stop takes a project down because somebody asked for it.
 //
 // This is the operator's decision and it is recorded as one: the project stops
@@ -742,6 +737,10 @@ func (o *Overmind) Reconcile(ctx context.Context, projectID string) error {
 // holding, so the next Start is a genuinely fresh one. StopAll, which is the
 // daemon going down, does neither — see the difference described on
 // store.WithdrawStart.
+//
+// It holds the project's lifecycle lock for the whole teardown, so a Start
+// arriving mid-stop waits rather than spawning a second set of agents into
+// worktrees the first set has not finished leaving.
 func (o *Overmind) Stop(ctx context.Context, projectID, reason string) error {
 	unlock := o.lock(projectID)
 	defer unlock()

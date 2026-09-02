@@ -360,9 +360,11 @@ func TestASessionTheHarnessNoLongerHasIsDroppedRatherThanRetried(t *testing.T) {
 		t.Fatalf("Resume: %v", err)
 	}
 
-	// The recovery is a cold spawn, so the assertion is that one happens at
-	// all: without dropping the session every later attempt resumes the same
-	// dead id.
+	// The refusal itself drops the row, so the next spawn is cold and that
+	// spawn's new id is stored. Recording the latched id before noticing
+	// StaleSession left Forget for a later spawn's first line, and that
+	// leftover flag then dropped the cold spawn's id — so the assertion is
+	// both that a cold spawn happens and that what it announced is on record.
 	waitFor(t, func() bool {
 		for _, got := range log.spawns()[spawnsBefore:] {
 			if got == "" {
@@ -372,7 +374,6 @@ func TestASessionTheHarnessNoLongerHasIsDroppedRatherThanRetried(t *testing.T) {
 		return false
 	}, 30*time.Second, "every attempt after the refusal resumed the session that was refused")
 
-	// And the row is gone, so a third daemon does not walk into it again.
 	waitFor(t, func() bool {
 		now := recordedSessions(t, h.db, h.project.ID)
 		for id := range before {
@@ -382,6 +383,16 @@ func TestASessionTheHarnessNoLongerHasIsDroppedRatherThanRetried(t *testing.T) {
 		}
 		return true
 	}, 30*time.Second, "a session the harness rejected is still on record")
+
+	waitFor(t, func() bool {
+		now := recordedSessions(t, h.db, h.project.ID)
+		for id := range now {
+			if !before[id] {
+				return true
+			}
+		}
+		return false
+	}, 30*time.Second, "the cold spawn did not record a new session")
 }
 
 // anyRecorded reports whether any role of this project has a session on record,

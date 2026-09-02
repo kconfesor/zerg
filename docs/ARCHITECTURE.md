@@ -560,6 +560,9 @@ zerg answers it in three pieces:
   `errors[]` — a field zerg decoded nowhere, so the one sentence naming the cause was reported as
   "the harness reported an error without describing it". The adapter now reads `errors[]`, marks
   that specific refusal `StaleSession`, and the cerebrate drops the row so the next attempt is cold.
+  The drop has to happen in the spawn that saw the refusal, after that line's events are applied and
+  before anything is written down: recording the latched id first put the dead one back, and leaving
+  the flag set made the next spawn's first frame Forget without storing the new conversation.
   It is deliberately not fatal: a cold spawn recovers, and stopping the role would be a worse answer
   than losing one conversation. Forgetting is per role, because dropping the project's continuity to
   fix one agent's would cost every other agent its memory.

@@ -578,6 +578,127 @@ func TestSilenceIsMeasuredOnlyWhileMidTurn(t *testing.T) {
 	}
 }
 
+// memContinuity is one stored session, so a test can see Forget and Record as
+// they happen rather than inferring them from a later spawn.
+type memContinuity struct {
+	mu       sync.Mutex
+	session  string
+	recorded []string
+	forgot   int
+}
+
+func (m *memContinuity) Resume(context.Context, string, string, string) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.session
+}
+
+func (m *memContinuity) Record(_ context.Context, _, _, sessionID, _ string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.session = sessionID
+	m.recorded = append(m.recorded, sessionID)
+}
+
+func (m *memContinuity) Forget(context.Context, string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.forgot++
+	m.session = ""
+}
+
+func (m *memContinuity) snapshot() (forgot int, recorded []string, session string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.forgot, append([]string{}, m.recorded...), m.session
+}
+
+// latchingAdapter names its conversation the way claude and pi do, and refuses
+// a resume the way claude refuses a session it has no transcript for.
+type latchingAdapter struct {
+	scriptedAdapter
+	session string
+}
+
+func (a *latchingAdapter) Capabilities() adapter.Caps {
+	return adapter.Caps{StructuredOutput: true, StructuredInput: true, ResumeSession: true}
+}
+
+func (a *latchingAdapter) NewSession() adapter.Adapter {
+	return &latchingAdapter{scriptedAdapter: scriptedAdapter{script: a.script}}
+}
+
+func (a *latchingAdapter) SessionID() string { return a.session }
+
+func (a *latchingAdapter) Command(ctx context.Context, spec adapter.Spec) (*exec.Cmd, error) {
+	script := a.script
+	if spec.ResumeSession != "" {
+		script = "printf 'stale:" + spec.ResumeSession + "\\n'; exit 1"
+	}
+	cmd := exec.CommandContext(ctx, "sh", "-c", script)
+	cmd.Dir = spec.Worktree
+	return cmd, nil
+}
+
+func (a *latchingAdapter) Parse(line []byte) ([]adapter.Event, error) {
+	text := strings.TrimSpace(string(line))
+	if id, ok := strings.CutPrefix(text, "session:"); ok {
+		a.session = id
+		return []adapter.Event{{Kind: adapter.EventReady}}, nil
+	}
+	if id, ok := strings.CutPrefix(text, "stale:"); ok {
+		a.session = id
+		return []adapter.Event{{
+			Kind:         adapter.EventError,
+			Text:         "No conversation found with session ID: " + id,
+			StaleSession: true,
+		}}, nil
+	}
+	return a.scriptedAdapter.Parse(line)
+}
+
+// A refused resume is forgotten in the spawn that saw it, and the cold spawn
+// that follows stores the new conversation. Recording before noticing
+// StaleSession left the dead id on record and the flag set, so Forget waited
+// for the next spawn's first line and that leftover then dropped the new id.
+func TestARefusedResumeIsForgottenInTheSpawnThatSawIt(t *testing.T) {
+	cont := &memContinuity{session: "dead-id"}
+	a := &latchingAdapter{scriptedAdapter: scriptedAdapter{
+		script: `printf 'session:fresh\n'; sleep 30`,
+	}}
+	c, _ := newCerebrate(t, a, func(cfg *Config) { cfg.Continuity = cont })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go c.Run(ctx)
+
+	waitFor(t, func() bool {
+		forgot, recorded, _ := cont.snapshot()
+		if forgot == 0 {
+			return false
+		}
+		for _, id := range recorded {
+			if id == "fresh" {
+				return true
+			}
+		}
+		return false
+	}, 20*time.Second, "the refusing spawn did not forget, or the cold spawn did not record a new id")
+
+	forgot, recorded, session := cont.snapshot()
+	if forgot < 1 {
+		t.Fatalf("Forget was never called")
+	}
+	for _, id := range recorded {
+		if id == "dead-id" {
+			t.Errorf("the refused id was written back down: %q", recorded)
+		}
+	}
+	if session != "fresh" {
+		t.Errorf("stored session = %q, want the cold spawn's fresh", session)
+	}
+}
+
 // A turn stopped on request is not a failure.
 //
 // The harness reports an abandoned turn the way it reports a broken one: a
