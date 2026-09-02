@@ -9,8 +9,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -640,9 +642,30 @@ func TestReconcileOnAStoppedProjectDoesNothing(t *testing.T) {
 // straight afterwards put a second agent into a worktree the first had not left.
 func TestStopWaitsForAgentsToExit(t *testing.T) {
 	ctx := context.Background()
-	marker := filepath.Join(t.TempDir(), "exited")
+	// Each agent writes its own pid as it starts; when Stop returns, none of
+	// those processes may still exist.
+	//
+	// This used to be inferred from shell traps, and that premise does not
+	// hold: bash 3.2 waiting on `sleep` and signalled through its process
+	// group may run a TERM handler, an EXIT handler, both, or neither, so the
+	// mark count measured the shell rather than the daemon. Under the race
+	// detector it failed 19 runs in 20 against a daemon doing exactly what
+	// this test says it should. Whether a pid is still alive is a fact the
+	// kernel keeps, and it is also the thing that actually went wrong: a
+	// second agent entered a worktree the first had not left.
+	// The agent ignores SIGTERM, so "still exiting" is a state that lasts long
+	// enough to observe: cerebrate's WaitDelay SIGKILLs it after its shutdown
+	// grace, and a Stop that returned early would return inside that window.
+	// An agent that dies on the first signal is gone in microseconds, and a
+	// Stop that waited for nothing would pass.
+	//
+	// `trap "" TERM` rather than a handler: ignoring a signal is set once, at
+	// registration, so it does not depend on when or whether the shell gets
+	// around to dispatching a trap.
+	pids := filepath.Join(t.TempDir(), "pids")
 	h := newHarness(t, &scriptedHarness{script: func(adapter.Spec) string {
-		return `trap 'printf x >> ` + marker + `' EXIT TERM
+		return `trap '' TERM
+printf '%d\n' $$ >> ` + pids + `
 printf 'ready\n'
 sleep 30`
 	}})
@@ -650,21 +673,44 @@ sleep 30`
 	if err := h.over.Start(ctx, h.project.ID); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	waitFor(t, func() bool { return len(h.live(t)) == 2 }, 15*time.Second,
-		"the swarm never came up")
+	// Both processes running, not both roleProcs registered. The map is
+	// written at spawn and the shell runs a moment later, so waiting on the
+	// map let Stop arrive before the second agent had started: there was
+	// nothing to wait for, and the test passed for the wrong reason.
+	waitFor(t, func() bool { return len(recordedPids(pids)) == 2 }, 15*time.Second,
+		"both agents never started")
 
 	if err := h.over.Stop(ctx, h.project.ID, "test"); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
 
 	// Read immediately: the point is that Stop has already waited.
-	b, err := os.ReadFile(marker)
+	spawned := recordedPids(pids)
+	if len(spawned) != 2 {
+		t.Fatalf("%d agent(s) recorded a pid, want 2", len(spawned))
+	}
+	for _, field := range spawned {
+		pid, err := strconv.Atoi(field)
+		if err != nil {
+			t.Fatalf("an agent wrote %q where a pid was expected: %v", field, err)
+		}
+		// Signal 0 checks for existence without delivering anything. Every
+		// agent is reaped by cerebrate's Wait before Run returns, so a live
+		// pid here is a process Stop did not wait for rather than a zombie.
+		if err := syscall.Kill(pid, 0); err == nil {
+			t.Errorf("agent %d was still running when Stop returned", pid)
+		}
+	}
+}
+
+// recordedPids is every agent that has reached the point of writing its own
+// pid. A missing file is none of them yet, which is what the wait is for.
+func recordedPids(path string) []string {
+	b, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("no agent recorded its exit before Stop returned: %v", err)
+		return nil
 	}
-	if len(b) != 2 {
-		t.Errorf("%d of 2 agents had exited when Stop returned", len(b))
-	}
+	return strings.Fields(string(b))
 }
 
 // live is the set of roles the swarm is actually supervising right now.
