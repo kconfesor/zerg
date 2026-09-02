@@ -166,6 +166,23 @@ func (db *DB) ListRoleSessions(ctx context.Context, projectID string) ([]RoleSes
 // not a decision, and a person pressing Stop is. Resuming a week-old
 // conversation about a finished task on the next Start would be continuity of
 // the wrong thing.
+// ForgetRoleSession drops the stored session for one role, so that role's next
+// spawn is a cold one while the rest of the swarm keeps what it has.
+//
+// This is not the operator's Stop. It is for a session the harness turns out
+// not to have: zerg records the id off the first frame, and claude writes the
+// transcript only when there is something to write, so a swarm killed before
+// anyone finished a turn leaves an id pointing at nothing. Keeping it would
+// mean resuming into "No conversation found with session ID" on every attempt.
+func (db *DB) ForgetRoleSession(ctx context.Context, projectID, role string) error {
+	_, err := db.sql.ExecContext(ctx,
+		`DELETE FROM role_sessions WHERE project_id = ? AND role = ?`, projectID, role)
+	if err != nil {
+		return fmt.Errorf("forgetting the session for %s/%s: %w", projectID, role, err)
+	}
+	return nil
+}
+
 func (db *DB) ForgetRoleSessions(ctx context.Context, projectID string) (int, error) {
 	res, err := db.sql.ExecContext(ctx,
 		`DELETE FROM role_sessions WHERE project_id = ?`, projectID)

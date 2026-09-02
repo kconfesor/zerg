@@ -344,6 +344,16 @@ type wire struct {
 	IsError      bool    `json:"is_error"`
 	Result       string  `json:"result"`
 	APIError     any     `json:"api_error_status"`
+
+	// Errors is where the CLI puts the reason when a result frame fails before
+	// a turn ever runs, and there is no `result` text to carry it. Observed
+	// against 2.1.258: resuming a session id the CLI has no transcript for
+	// returns subtype error_during_execution with an empty result and
+	// errors:["No conversation found with session ID: <uuid>"]. Decoding it
+	// nowhere is how that became "the harness reported an error without
+	// describing it" in the log, with the one sentence naming the cause
+	// sitting unread in the frame.
+	Errors []string `json:"errors"`
 }
 
 type usage struct {
@@ -466,9 +476,10 @@ func (a *Adapter) Parse(line []byte) ([]adapter.Event, error) {
 			// Observed: agents returning HTTP 400 on every turn for twenty
 			// minutes while looking perfectly alive.
 			out = append(out, adapter.Event{
-				Kind:  adapter.EventError,
-				Text:  errorText(w),
-				Fatal: isFatal(w),
+				Kind:         adapter.EventError,
+				Text:         errorText(w),
+				Fatal:        isFatal(w),
+				StaleSession: isStaleSession(w),
 			})
 			return out, nil
 		}
@@ -488,10 +499,24 @@ func errorText(w wire) string {
 	if w.Result != "" {
 		return w.Result
 	}
+	if len(w.Errors) > 0 {
+		return strings.Join(w.Errors, "; ")
+	}
 	if w.APIError != nil {
 		return fmt.Sprintf("api error: %v", w.APIError)
 	}
 	return "the harness reported an error without describing it"
+}
+
+// isStaleSession marks the one error a respawn fixes only by forgetting what
+// it was told to resume.
+//
+// The text is the CLI's, quoted from 2.1.258: "No conversation found with
+// session ID: <uuid>". Matching on prose is not something to do lightly, but
+// the frame carries no code to match on instead, and the alternative — treating
+// it as an ordinary crash — is the backoff loop this was written for.
+func isStaleSession(w wire) bool {
+	return strings.Contains(strings.ToLower(errorText(w)), "no conversation found with session id")
 }
 
 // isFatal marks the errors a restart cannot fix, so a cerebrate stops instead

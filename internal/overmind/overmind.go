@@ -632,6 +632,13 @@ func (c continuity) Record(ctx context.Context, role, harness, sessionID, finger
 	}
 }
 
+func (c continuity) Forget(ctx context.Context, role string) {
+	if err := c.db.ForgetRoleSession(ctx, c.projectID, role); err != nil {
+		c.log.Warn("could not forget a session that is no longer there",
+			"project", c.projectID, "role", role, "err", err)
+	}
+}
+
 // stopRole takes one role down and gives its token back.
 //
 // It does not wait: the caller either waits on the whole swarm or is replacing

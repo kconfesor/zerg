@@ -36,12 +36,30 @@ type resumableHarness struct {
 type spawnLog struct {
 	mu      sync.Mutex
 	resumed []string // Spec.ResumeSession, one entry per spawn, in order
+
+	// reject makes every spawn that is handed a session refuse it the way
+	// claude refuses one it has no transcript for. Set on the log rather than
+	// on the harness because a restarted daemon builds its adapters afresh,
+	// and the double has to keep answering the same way across that.
+	reject bool
 }
 
 func (l *spawnLog) record(id string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.resumed = append(l.resumed, id)
+}
+
+func (l *spawnLog) rejectResumes() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.reject = true
+}
+
+func (l *spawnLog) rejecting() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.reject
 }
 
 func (l *spawnLog) spawns() []string {
@@ -72,7 +90,13 @@ func (h *resumableHarness) Command(ctx context.Context, spec adapter.Spec) (*exe
 	if id == "" {
 		id = "sess-" + spec.Role + "-" + store.NewID()[:8]
 	}
-	cmd := exec.CommandContext(ctx, "sh", "-c", "printf 'session:"+id+"\\n'; sleep 30")
+	script := "printf 'session:" + id + "\\n'; sleep 30"
+	if spec.ResumeSession != "" && h.shared.rejecting() {
+		// What claude does with a session id it has no transcript for: says so
+		// on the stream and exits non-zero, without ever running a turn.
+		script = "printf 'stale:" + spec.ResumeSession + "\\n'; exit 1"
+	}
+	cmd := exec.CommandContext(ctx, "sh", "-c", script)
 	cmd.Dir = spec.Worktree
 	cmd.Env = append(os.Environ(),
 		agent.EnvSocket+"="+spec.Socket,
@@ -87,6 +111,16 @@ func (h *resumableHarness) Parse(line []byte) ([]adapter.Event, error) {
 	if id, ok := strings.CutPrefix(text, "session:"); ok {
 		h.session = id
 		return []adapter.Event{{Kind: adapter.EventReady}}, nil
+	}
+	if id, ok := strings.CutPrefix(text, "stale:"); ok {
+		// The id still rides the frame, as it does on the real one, which is
+		// why forgetting cannot be left to the latch.
+		h.session = id
+		return []adapter.Event{{
+			Kind:         adapter.EventError,
+			Text:         "No conversation found with session ID: " + id,
+			StaleSession: true,
+		}}, nil
 	}
 	return nil, nil
 }
@@ -292,6 +326,62 @@ func TestAPromptEditIsNotResumedAcross(t *testing.T) {
 			t.Errorf("spawn %d resumed %q across a prompt edit; it should have started cold", i, got)
 		}
 	}
+}
+
+// A session the harness no longer has must be dropped, not retried.
+//
+// zerg latches a session id off the harness's first frame; claude writes the
+// transcript only when there is something to write. A swarm killed before any
+// role finished a turn therefore leaves ids pointing at nothing, and the
+// restart this feature exists for spawned into "No conversation found with
+// session ID" every time, doubling the backoff towards a swarm that would never
+// come back. Measured against claude 2.1.258 before this: five attempts per
+// role, no turns, no tokens, and the reason never reached the log.
+func TestASessionTheHarnessNoLongerHasIsDroppedRatherThanRetried(t *testing.T) {
+	ctx := context.Background()
+	log := &spawnLog{}
+	h := resumableHarnessFor(t, log)
+
+	if err := h.over.Start(ctx, h.project.ID); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	waitFor(t, func() bool { return anyRecorded(t, h.db, h.project.ID) }, 10*time.Second,
+		"no session was recorded")
+	before := recordedSessions(t, h.db, h.project.ID)
+	h.over.StopAll(ctx, "the daemon shut down")
+
+	// The transcripts are gone, which the daemon has no way of knowing until a
+	// spawn is refused.
+	log.rejectResumes()
+
+	spawnsBefore := len(log.spawns())
+	next := newDaemon(t, h, log)
+	if _, err := next.Resume(ctx); err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+
+	// The recovery is a cold spawn, so the assertion is that one happens at
+	// all: without dropping the session every later attempt resumes the same
+	// dead id.
+	waitFor(t, func() bool {
+		for _, got := range log.spawns()[spawnsBefore:] {
+			if got == "" {
+				return true
+			}
+		}
+		return false
+	}, 30*time.Second, "every attempt after the refusal resumed the session that was refused")
+
+	// And the row is gone, so a third daemon does not walk into it again.
+	waitFor(t, func() bool {
+		now := recordedSessions(t, h.db, h.project.ID)
+		for id := range before {
+			if now[id] {
+				return false
+			}
+		}
+		return true
+	}, 30*time.Second, "a session the harness rejected is still on record")
 }
 
 // anyRecorded reports whether any role of this project has a session on record,

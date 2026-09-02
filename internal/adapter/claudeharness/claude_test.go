@@ -526,3 +526,50 @@ func TestSessionIDIsLatchedFromTheStream(t *testing.T) {
 		t.Errorf("SessionID = %q after a frame that named none, want forked-session", got)
 	}
 }
+
+// A resume the CLI cannot honour says so in errors[], not in result, and that
+// sentence is the only thing telling an operator what went wrong. Decoding it
+// nowhere is how a swarm that could not come back reported "the harness
+// reported an error without describing it" five times with a doubling backoff.
+//
+// The frame is quoted from claude 2.1.258, spawned by hand against a session id
+// it had no transcript for.
+func TestAResumeWithNoTranscriptSaysWhichSessionIsMissing(t *testing.T) {
+	line := `{"type":"result","subtype":"error_during_execution","is_error":true,
+		"num_turns":0,"session_id":"1dc80989-7d59-48c1-a2ec-267f263158a0",
+		"total_cost_usd":0,"usage":{},
+		"errors":["No conversation found with session ID: 1dc80989-7d59-48c1-a2ec-267f263158a0"]}`
+
+	var errEv *adapter.Event
+	for _, ev := range parse(t, line) {
+		if ev.Kind == adapter.EventError {
+			e := ev
+			errEv = &e
+		}
+	}
+	if errEv == nil {
+		t.Fatal("a failed resume produced no error event")
+	}
+	if !strings.Contains(errEv.Text, "No conversation found with session ID") {
+		t.Errorf("error text = %q, want the reason the CLI gave", errEv.Text)
+	}
+	// Recoverable, but only by dropping the session: retrying the same resume
+	// fails identically for ever, while stopping the role is more than the
+	// situation deserves when a cold start would work.
+	if !errEv.StaleSession {
+		t.Error("a missing conversation must be marked stale, or the cerebrate resumes it again")
+	}
+	if errEv.Fatal {
+		t.Error("a missing conversation is not fatal: a cold spawn recovers")
+	}
+}
+
+// The generic fallback still has to exist for a frame that really says nothing.
+func TestAnErrorWithNothingToSayKeepsTheGenericText(t *testing.T) {
+	line := `{"type":"result","subtype":"error","is_error":true,"total_cost_usd":0,"usage":{}}`
+	for _, ev := range parse(t, line) {
+		if ev.Kind == adapter.EventError && ev.Text != "the harness reported an error without describing it" {
+			t.Errorf("error text = %q, want the generic fallback", ev.Text)
+		}
+	}
+}

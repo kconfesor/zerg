@@ -167,6 +167,11 @@ type Continuity interface {
 	// Record stores the conversation the harness says it is running. Called
 	// whenever that answer changes, which is normally once per spawn.
 	Record(ctx context.Context, role, harness, sessionID, fingerprint string)
+
+	// Forget drops what is stored for this role, so the next spawn is cold.
+	// Called when the harness says the conversation is not there, which no
+	// number of retries will change.
+	Forget(ctx context.Context, role string)
 }
 
 // Cerebrate supervises one role's agent process.
@@ -196,6 +201,11 @@ type Cerebrate struct {
 	// lastStreamErr is the most recent error the agent's own output carried,
 	// fatal or not. The process exit status rarely says why.
 	lastStreamErr string
+
+	// staleSession records that this spawn was refused because the session it
+	// was told to resume does not exist. Read once, when deciding what to keep
+	// on record for the next spawn.
+	staleSession bool
 
 	// quota is the subscription's remaining headroom, as last reported.
 	// Whether it arrived on the stream or was fetched does not matter here.
@@ -751,6 +761,9 @@ func (c *Cerebrate) readStream(ctx context.Context, stdout io.Reader, fingerprin
 				// to be able to recognise it on the non-fatal path too.
 				c.mu.Lock()
 				c.lastStreamErr = ev.Text
+				if ev.StaleSession {
+					c.staleSession = true
+				}
 				c.mu.Unlock()
 			}
 			if ev.Kind == adapter.EventError && ev.Fatal && fatal == nil {
@@ -1069,6 +1082,21 @@ func (c *Cerebrate) waitOutThrottle(ctx context.Context, t adapter.Throttle) boo
 func (c *Cerebrate) recordSession(ctx context.Context, recorded, fingerprint string) string {
 	if c.cfg.Continuity == nil {
 		return recorded
+	}
+	// A spawn refused for a session that is not there must not leave that id
+	// on record, and the refusal frame carries the same dead id in session_id,
+	// so the latch below would put it straight back. Forgetting here is what
+	// makes the next attempt a cold one instead of the fifth identical
+	// failure.
+	c.mu.Lock()
+	stale := c.staleSession
+	c.staleSession = false
+	c.mu.Unlock()
+	if stale {
+		c.cfg.Continuity.Forget(context.WithoutCancel(ctx), c.name())
+		c.cfg.Log.Warn("the conversation this role was resuming is gone; starting a fresh one",
+			"role", c.name(), "session", recorded)
+		return ""
 	}
 	named, ok := c.sessionAdapter().(adapter.SessionIdentified)
 	if !ok {

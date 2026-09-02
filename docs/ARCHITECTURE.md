@@ -550,6 +550,20 @@ zerg answers it in three pieces:
   process ending is not a decision and a person pressing Stop is, and continuing a week-old
   conversation about a finished task is continuity of the wrong thing.
 
+  **A stored id is not proof the transcript exists, and a refused resume is dropped rather than
+  retried.** The id is latched off the harness's first frame; claude writes the transcript only once
+  there is something to write. A swarm killed before any role finished a turn therefore leaves ids
+  pointing at nothing, and the restart this feature exists for is exactly when that happens.
+  Measured against claude 2.1.258: both roles came back with `--resume`, each spawn exited 1 having
+  run no turns, and the backoff doubled towards a swarm that would never recover on its own. The
+  refusal arrives as `subtype: error_during_execution` with an empty `result` and the reason in
+  `errors[]` — a field zerg decoded nowhere, so the one sentence naming the cause was reported as
+  "the harness reported an error without describing it". The adapter now reads `errors[]`, marks
+  that specific refusal `StaleSession`, and the cerebrate drops the row so the next attempt is cold.
+  It is deliberately not fatal: a cold spawn recovers, and stopping the role would be a worse answer
+  than losing one conversation. Forgetting is per role, because dropping the project's continuity to
+  fix one agent's would cost every other agent its memory.
+
 `zerg up --detach` re-execs into a session of its own with `setsid`, so closing the terminal leaves
 the daemon and its agents alone, and writes its output to `zerg.log` beside the database. The daemon
 records itself in `zerg.pid` there, which is what `zerg down` and `zerg status` read and what stops

@@ -424,6 +424,20 @@ type Event struct {
 	// Observed: codex agents sitting at a prompt for 20 minutes returning HTTP
 	// 400 on every turn, indistinguishable from working.
 	Fatal bool
+
+	// StaleSession marks an error that means the conversation this spawn was
+	// told to resume is not there any more. It is neither fatal nor ordinary:
+	// the spawn cannot succeed while it keeps being asked to continue a
+	// transcript the harness does not have, but a cold start would work
+	// immediately.
+	//
+	// Observed with a swarm that was killed before either agent finished a
+	// turn. zerg latches a session id off the harness's first frame, so it had
+	// one stored; claude writes a transcript only once there is something to
+	// write, so it had none. Every respawn passed --resume, every respawn
+	// exited 1, and the backoff doubled towards a swarm that would never come
+	// back on its own.
+	StaleSession bool
 }
 
 // ── provider limits ───────────────────────────────────────────────────────
