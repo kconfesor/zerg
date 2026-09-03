@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -335,19 +336,56 @@ func TestResumingASessionUsesSessionID(t *testing.T) {
 		t.Errorf("no --session-id in %v", cmd.Args)
 	}
 
-	cmd, err = a.Command(context.Background(), adapter.Spec{Worktree: dir})
+	// A cold spawn names one, because pi will not tell zerg what it chose.
+	//
+	// The `session` frame goes into the session file, not onto stdout: in
+	// --mode rpc pi announces nothing before its first turn. Leaving the id to
+	// the stream meant no pi role ever recorded a conversation and every one of
+	// them started cold on every restart, silently, with the conversation on
+	// disk the whole time.
+	fresh := New()
+	cmd, err = fresh.Command(context.Background(), adapter.Spec{Worktree: dir})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, arg := range cmd.Args {
+	named := ""
+	for i, arg := range cmd.Args {
 		if arg == "--session-id" {
-			t.Errorf("--session-id passed with no session to resume: %v", cmd.Args)
+			named = cmd.Args[i+1]
+		}
+	}
+	if named == "" {
+		t.Fatalf("a cold spawn named no session: %v", cmd.Args)
+	}
+	if got := fresh.SessionID(); got != named {
+		t.Errorf("SessionID() = %q, want the %q it just spawned with; the recorder "+
+			"reads this and would store nothing", got, named)
+	}
+	// The shape pi uses for its own, so a session directory stays in creation
+	// order and pi has nothing to object to.
+	if !regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`).
+		MatchString(named) {
+		t.Errorf("named session %q, want a version 7 UUID", named)
+	}
+
+	// Two spawns are two conversations. Sharing one would have a role resume
+	// somebody else's.
+	other, err := New().Command(context.Background(), adapter.Spec{Worktree: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, arg := range other.Args {
+		if arg == "--session-id" && other.Args[i+1] == named {
+			t.Error("two cold spawns were given the same session id")
 		}
 	}
 }
 
-// pi names its session on the frame it opens with, and that is where the id
-// comes from.
+// pi's own frame still wins, for a version that emits one.
+//
+// The id is named at spawn because 0.84.4 keeps that frame in the session file
+// rather than on the stream. Parse overwriting it costs nothing and means a pi
+// that starts announcing is believed rather than argued with.
 func TestPiSessionIDIsLatchedFromTheStream(t *testing.T) {
 	a := New()
 	if a.SessionID() != "" {

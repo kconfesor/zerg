@@ -540,10 +540,22 @@ zerg answers it in three pieces:
   continue it, and the flags differ in a way that is not a detail: claude needs `--resume <id>`,
   because `--session-id` is the flag that *creates* one and exits with "Session ID <uuid> is already
   in use" when given a session it has already written; pi's `--session-id` creates or continues and
-  serves both. The id is latched from the harness's own stream rather than remembered from what was
-  passed, because claude answers `--resume` on a session that is still live by forking to a new id,
-  and the fork is the conversation the work goes into. This is not only about daemon restarts: a
-  cerebrate respawns a crashed agent with backoff, and that respawn was cold too.
+  serves both. This is not only about daemon restarts: a cerebrate respawns a crashed agent with
+  backoff, and that respawn was cold too.
+
+  **Which end names the conversation is per harness, because the harnesses answer differently.**
+  claude's id is latched from its own stream rather than remembered from what was passed: it answers
+  `--resume` on a session that is still live by forking to a new id, and the fork is the conversation
+  the work goes into. pi is named by zerg, because pi will not say. Its `session` frame is the first
+  line of the session *file*, not of stdout, and in `--mode rpc` it announces nothing at all before
+  its first turn, so the latch never fired: no pi role ever recorded a conversation, and every one of
+  them started cold on every restart, silently, with the conversation on disk the whole time. One
+  role had 133 turns, 3.7M tokens, 513 recorded events and not a single `session` frame. zerg now
+  generates a version 7 UUID and passes `--session-id` on every spawn, cold or resumed. Verified
+  against pi 0.84.4 with two live turns: the first was told a word and pi reported "No project
+  session found with id ...; creating a new session with that id", and a second process given the
+  same id answered with that word and printed no warning. The latch is still read, so a pi that
+  starts announcing is believed rather than argued with.
 
   A session is stored with a fingerprint of the harness, model, thinking level and composed system
   prompt, and is not resumed when that changes. §11.3 restarts a role on a configuration change
