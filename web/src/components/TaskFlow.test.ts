@@ -148,3 +148,92 @@ describe('a card that skipped a role', () => {
     expect(w.text()).toContain('skipped')
   })
 })
+
+// What the architect decided, and why.
+//
+// The trail carried the note, the evidence commit and the questions the sidecar
+// answered, and drew "approved by supervisor". A card said a judgement had been
+// made and gave a reader no way to find out what it was.
+describe('a decision taken at a gate', () => {
+  const gated = (over: Partial<NonNullable<TaskStep['gate']>> = {}) =>
+    step({
+      gate: {
+        id: 'a1',
+        state: 'approved',
+        note: 'Approved with one correction. The **formatter** direction is fixed rather than papered over.',
+        createdAt: '2026-01-01T09:10:00.000Z',
+        decidedAt: '2026-01-01T09:12:00.000Z',
+        waitedMs: 120_000,
+        decidedBy: 'supervisor',
+        evidenceSha: 'cafebabe0123456789abcdef0123456789abcdef',
+        ...over,
+      },
+    })
+
+  it('opens onto the rationale, the decider and the commit that holds it', async () => {
+    const w = flow([gated()])
+    await w.findAll('button').find((b) => b.text() === 'the decision')!.trigger('click')
+
+    const panel = w.text()
+    expect(panel).toContain('approved by supervisor')
+    expect(panel).toContain('The formatter direction is fixed rather than papered over')
+    expect(panel).toContain('cafebabe0123456789abcdef0123456789abcdef')
+    // Markdown, not literal asterisks: an architect writes its reasoning the
+    // way it writes everything else.
+    expect(w.html()).toContain('<strong>formatter</strong>')
+  })
+
+  // Decisions taken before refs were resolved stored the literal string the
+  // agent sent. Drawn as a commit, `HEAD` is a link to the reasoning that
+  // resolves to something different in every tree that reads it, which is the
+  // failure resolving the ref fixed. Those rows cannot be repaired.
+  it('does not present a literal HEAD as the commit it is not', async () => {
+    const w = flow([gated({ evidenceSha: 'HEAD' })])
+    expect(w.text()).not.toContain('HEAD')
+
+    await w.findAll('button').find((b) => b.text() === 'the decision')!.trigger('click')
+    expect(w.text()).not.toContain('HEAD')
+    expect(w.text()).not.toContain('git show')
+    // The rest of the decision still reads.
+    expect(w.text()).toContain('Approved with one correction')
+  })
+
+  it('carries the questions it settled on the way', async () => {
+    const w = flow([
+      step({
+        clarifications: [
+          {
+            id: 'c1',
+            role: 'planner',
+            question: 'Sundays: close at 17:00 or 18:00?',
+            answer: '17:00, Sunday closes an hour early',
+            answeredBy: 'supervisor',
+            state: 'answered',
+            createdAt: '2026-01-01T09:05:00.000Z',
+          },
+        ],
+      }),
+    ])
+    await w.findAll('button').find((b) => b.text() === 'the decision')!.trigger('click')
+
+    expect(w.text()).toContain('Sundays: close at 17:00 or 18:00?')
+    expect(w.text()).toContain('17:00, Sunday closes an hour early')
+    expect(w.text()).toContain('answered by supervisor')
+  })
+
+  // A step with a gate and nothing written into it has nothing behind the
+  // disclosure, and an empty panel reads as something having gone wrong.
+  it('offers nothing to open when there is nothing recorded', () => {
+    const w = flow([
+      step({
+        gate: {
+          id: 'a1',
+          state: 'pending',
+          createdAt: '2026-01-01T09:10:00.000Z',
+          waitedMs: 1_000,
+        },
+      }),
+    ])
+    expect(w.findAll('button').some((b) => b.text() === 'the decision')).toBe(false)
+  })
+})

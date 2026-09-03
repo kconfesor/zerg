@@ -21,6 +21,7 @@
 import { computed, ref } from 'vue'
 import { ChevronLeft, ChevronDown, ChevronRight, ChevronUp } from '@lucide/vue'
 import { api, type ActivityEvent, type Project, type TaskStep } from '@/lib/api'
+import { renderMarkdown } from '@/lib/markdown'
 import { duration, landing, money } from '@/lib/utils'
 
 const props = defineProps<{
@@ -98,6 +99,44 @@ async function toggle(index: number, step: TaskStep) {
     running.delete(index)
     loading.value = running
   }
+}
+
+/**
+ * The commit an evidence field names, when it names one.
+ *
+ * Decisions taken before refs were resolved stored the literal string the agent
+ * sent, which was `HEAD`. Rendering that as a commit gives a reader something
+ * that looks like a link to the reasoning and resolves to a different commit in
+ * every tree that reads it, which is the failure the resolution fixed. Those
+ * rows cannot be repaired -- nothing recorded which commit `HEAD` meant -- so
+ * they are shown as no evidence at all rather than as a false one.
+ */
+function evidence(sha?: string): string {
+  return sha && /^[0-9a-f]{7,40}$/i.test(sha) ? sha : ''
+}
+
+/**
+ * The decision taken at a step: who took it, why, and where they wrote it down.
+ *
+ * The trail carried all of this and rendered "approved by supervisor". The note
+ * is the decision -- it is required for exactly that reason, and an architect
+ * that checked three claims against the tree before approving said so into a
+ * field nothing displayed. The questions it answered on the way belong in the
+ * same place: they are the rest of what it decided.
+ */
+const openDecision = ref<Set<number>>(new Set())
+
+function toggleDecision(index: number) {
+  const showing = new Set(openDecision.value)
+  if (showing.has(index)) showing.delete(index)
+  else showing.add(index)
+  openDecision.value = showing
+}
+
+/** Whether a step has a decision worth opening, as opposed to a bare gate. */
+function decided(step: TaskStep): boolean {
+  const gate = step.gate
+  return !!(gate?.note || evidence(gate?.evidenceSha) || step.clarifications?.length)
 }
 
 /** A step can only be opened where there is a window to read it over. */
@@ -363,11 +402,11 @@ const pullRequest = computed(() =>
                        the trail said a decision was made and gave no way to
                        reach the argument for it. -->
                   <code
-                    v-if="a.step.gate.evidenceSha"
+                    v-if="evidence(a.step.gate.evidenceSha)"
                     class="text-foreground/80"
                     :title="`the decision was written down in ${a.step.gate.evidenceSha}`"
                   >
-                    {{ a.step.gate.evidenceSha.slice(0, 8) }}
+                    {{ evidence(a.step.gate.evidenceSha).slice(0, 8) }}
                   </code>
                   <template v-if="a.step.gate.waitedMs >= 60_000">
                     after {{ duration(a.step.gate.waitedMs) }}
@@ -379,6 +418,76 @@ const pullRequest = computed(() =>
                 </span>
               </p>
               <slot name="note" :step="a.step" />
+
+              <!-- Why the work was let through, in one place. Everything here
+                   was already in the payload and none of it was drawn: a card
+                   said "approved by supervisor" and gave a reader no way to
+                   find out what that judgement was. -->
+              <button
+                v-if="decided(a.step)"
+                type="button"
+                class="text-muted-foreground hover:text-foreground focus-visible:outline-ring mt-1 flex items-center gap-1 text-[10px] focus-visible:outline-2"
+                @click="toggleDecision(i)"
+              >
+                <component
+                  :is="openDecision.has(i) ? ChevronUp : ChevronDown"
+                  :size="10"
+                  aria-hidden="true"
+                />
+                {{ openDecision.has(i) ? 'hide the decision' : 'the decision' }}
+              </button>
+              <div
+                v-if="openDecision.has(i)"
+                class="border-border/70 mt-1 ml-0.5 border-l pl-2 text-[10px]"
+              >
+                <template v-if="a.step.gate">
+                  <p class="text-muted-foreground">
+                    {{ a.step.gate.state }}
+                    <template v-if="a.step.gate.decidedBy">by {{ a.step.gate.decidedBy }}</template>
+                    <template v-if="a.step.gate.waitedMs >= 60_000">
+                      after {{ duration(a.step.gate.waitedMs) }} waiting
+                    </template>
+                  </p>
+                  <!-- The rationale as the decider wrote it, markdown and all.
+                       Escaped before any tag is built, like every other place
+                       agent prose is drawn. -->
+                  <div
+                    v-if="a.step.gate.note"
+                    class="md mt-1 min-w-0 overflow-x-auto leading-relaxed"
+                    v-html="renderMarkdown(a.step.gate.note)"
+                  />
+                  <!-- The commit itself lives on the decider's own worktree
+                       branch and never merges, so a reader needs the command:
+                       worktrees share the object database, and the sha resolves
+                       from the project root. -->
+                  <p v-if="evidence(a.step.gate.evidenceSha)" class="text-muted-foreground mt-1">
+                    written down in
+                    <code class="text-foreground/80 select-all">
+                      {{ evidence(a.step.gate.evidenceSha) }}
+                    </code>
+                    <span class="opacity-70">
+                      (git show {{ evidence(a.step.gate.evidenceSha).slice(0, 12) }})
+                    </span>
+                  </p>
+                </template>
+                <!-- What it settled on the way. A question answered mid-step is
+                     a decision too, and it was reachable only as a count. -->
+                <div
+                  v-for="c in a.step.clarifications ?? []"
+                  :key="c.id"
+                  class="border-border/70 mt-1.5 border-t pt-1.5"
+                >
+                  <p class="text-foreground/80">{{ c.question }}</p>
+                  <p v-if="c.answer" class="text-muted-foreground mt-0.5">
+                    {{ c.answer }}
+                    <template v-if="c.answeredBy">, answered by {{ c.answeredBy }}</template>
+                    <code v-if="evidence(c.evidenceSha)" class="text-foreground/80 ml-1 select-all">
+                      {{ evidence(c.evidenceSha).slice(0, 8) }}
+                    </code>
+                  </p>
+                  <p v-else class="text-[var(--status-warning)] mt-0.5">still open</p>
+                </div>
+              </div>
 
               <!-- What the role did in that time. The trail says two minutes
                    and seventy cents; this is the two minutes. -->

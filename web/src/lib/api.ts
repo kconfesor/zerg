@@ -363,10 +363,14 @@ export interface Clarification {
   options?: string[]
   state: string
   createdAt: string
+  /** What was decided. Absent while the question is still open. */
+  answer?: string
   /** Who wrote the answer: `operator` or a role name. Absent while open. */
   answeredBy?: string
   /** The card asked for an architect sidecar to answer this. */
   supervised?: boolean
+  /** The commit the answer's reasoning was written into, when there was one. */
+  evidenceSha?: string
 }
 
 /**
