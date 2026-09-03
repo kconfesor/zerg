@@ -13,6 +13,7 @@ import (
 
 	"github.com/kconfesor/zerg/internal/adapter"
 	"github.com/kconfesor/zerg/internal/agent"
+	"github.com/kconfesor/zerg/internal/cerebrate"
 	"github.com/kconfesor/zerg/internal/event"
 	"github.com/kconfesor/zerg/internal/preflight"
 	"github.com/kconfesor/zerg/internal/store"
@@ -42,6 +43,11 @@ type spawnLog struct {
 	// on the harness because a restarted daemon builds its adapters afresh,
 	// and the double has to keep answering the same way across that.
 	reject bool
+
+	// silent makes every spawn announce a session and then say nothing, which
+	// is a role that is never given work: it boots, reports ready and waits.
+	// The harness has named a conversation; there is no conversation.
+	silent bool
 }
 
 func (l *spawnLog) record(id string) {
@@ -54,6 +60,18 @@ func (l *spawnLog) rejectResumes() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.reject = true
+}
+
+func (l *spawnLog) staySilent() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.silent = true
+}
+
+func (l *spawnLog) quiet() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.silent
 }
 
 func (l *spawnLog) rejecting() bool {
@@ -90,7 +108,14 @@ func (h *resumableHarness) Command(ctx context.Context, spec adapter.Spec) (*exe
 	if id == "" {
 		id = "sess-" + spec.Role + "-" + store.NewID()[:8]
 	}
-	script := "printf 'session:" + id + "\\n'; sleep 30"
+	// Announced, then answered. The second line is what makes the conversation
+	// real: claude names a session in its first frame and writes the transcript
+	// only once there is something in it, so a double that only announces is a
+	// role that was never given work, not a role that can be resumed.
+	script := "printf 'session:" + id + "\\n'; printf 'said:ok\\n'; sleep 30"
+	if h.shared.quiet() {
+		script = "printf 'session:" + id + "\\n'; sleep 30"
+	}
 	if spec.ResumeSession != "" && h.shared.rejecting() {
 		// What claude does with a session id it has no transcript for: says so
 		// on the stream and exits non-zero, without ever running a turn.
@@ -111,6 +136,9 @@ func (h *resumableHarness) Parse(line []byte) ([]adapter.Event, error) {
 	if id, ok := strings.CutPrefix(text, "session:"); ok {
 		h.session = id
 		return []adapter.Event{{Kind: adapter.EventReady}}, nil
+	}
+	if _, ok := strings.CutPrefix(text, "said:"); ok {
+		return []adapter.Event{{Kind: adapter.EventMessage, Text: "ok"}}, nil
 	}
 	if id, ok := strings.CutPrefix(text, "stale:"); ok {
 		// The id still rides the frame, as it does on the real one, which is
@@ -416,4 +444,64 @@ func recordedSessions(t *testing.T, db *store.DB, projectID string) map[string]b
 		out[s.SessionID] = true
 	}
 	return out
+}
+
+// A conversation the harness named but never wrote is not recorded.
+//
+// The id a harness announces is a proxy for a resumable conversation, and on
+// claude it is not the thing itself: the transcript appears once there is
+// something in it. A role the cards keep skipping boots, reports ready and
+// waits, so the id went on record naming nothing. The next start resumed it,
+// claude answered "No conversation found with session ID", the agent exited 1,
+// and its replacement recorded another empty id: a failure that regenerated its
+// own cause on every restart, one wasted spawn per idle role, forever. Observed
+// on a live daemon across four restarts, each with a different dead id.
+//
+// Recording nothing is the honest answer. The role starts cold, which is what a
+// refused resume left it with anyway, one spawn later.
+func TestARoleThatNeverSpokeRecordsNoSessionToResume(t *testing.T) {
+	ctx := context.Background()
+	log := &spawnLog{}
+	log.staySilent()
+	h := resumableHarnessFor(t, log)
+
+	if err := h.over.Start(ctx, h.project.ID); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	// Ready is produced by the same line that latches the session id, and the
+	// recorder runs on that line's events, so a ready role has already been
+	// through every chance to record one. No sleeping for it.
+	waitFor(t, func() bool {
+		roles, err := h.over.Status(ctx, h.project.ID)
+		if err != nil || len(roles) == 0 {
+			return false
+		}
+		for _, r := range roles {
+			if r.State != cerebrate.StateReady {
+				return false
+			}
+		}
+		return true
+	}, 10*time.Second, "the swarm never came up")
+
+	if got := recordedSessions(t, h.db, h.project.ID); len(got) != 0 {
+		t.Fatalf("recorded %v for roles that said nothing; every one of those ids "+
+			"names a conversation the harness never wrote", got)
+	}
+
+	// And the restart it exists for starts them cold rather than resuming into
+	// a conversation that was never written.
+	h.over.StopAll(ctx, "the daemon shut down")
+	spawnsBefore := len(log.spawns())
+	next := newDaemon(t, h, log)
+	if _, err := next.Resume(ctx); err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	waitFor(t, func() bool { return len(log.spawns()) > spawnsBefore }, 10*time.Second,
+		"nothing was spawned after the restart")
+	for i, got := range log.spawns()[spawnsBefore:] {
+		if got != "" {
+			t.Errorf("spawn %d resumed %q, which the harness never wrote a transcript for", i, got)
+		}
+	}
 }

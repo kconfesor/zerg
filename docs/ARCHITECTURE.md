@@ -570,6 +570,19 @@ zerg answers it in three pieces:
   than losing one conversation. Forgetting is per role, because dropping the project's continuity to
   fix one agent's would cost every other agent its memory.
 
+  **Nothing is stored until the agent has answered, because the id is named before the conversation
+  exists.** Dropping a refused resume treats the symptom, and the cause outlived it: an id was put on
+  record on the strength of the harness announcing one. A role that is never given work, one the
+  cards keep skipping, boots, reports ready and waits, so claude writes no transcript and the stored
+  id names nothing. The next start resumes it, is refused, exits 1, and the replacement records
+  another empty id, which is a failure that regenerates its own cause. Seen on a live daemon across
+  four restarts, each with a different dead id, one wasted spawn and eleven seconds per restart, for
+  a role that had never run a turn. Measured directly: an agent started with no work announces
+  `session_id` in its first frame and creates no transcript for it. The cerebrate now records only
+  after the stream carries content -- a message, a tool call, a finished turn -- and not after
+  `ready`, usage or an error, which a harness emits whether or not a conversation happened. A role
+  that said nothing starts cold, which is what a refused resume left it with one spawn later anyway.
+
 `zerg up --detach` re-execs into a session of its own with `setsid`, so closing the terminal leaves
 the daemon and its agents alone, and writes its output to `zerg.log` beside the database. The daemon
 records itself in `zerg.pid` there, which is what `zerg down` and `zerg status` read and what stops
