@@ -20,7 +20,8 @@
  */
 import { computed, ref } from 'vue'
 import { ChevronLeft, ChevronDown, ChevronRight, ChevronUp } from '@lucide/vue'
-import { api, type ActivityEvent, type Project, type TaskStep } from '@/lib/api'
+import { api, type ActivityEvent, type ChangedFile, type Project, type TaskStep } from '@/lib/api'
+import DiffView from '@/components/DiffView.vue'
 import { renderMarkdown } from '@/lib/markdown'
 import { duration, landing, money } from '@/lib/utils'
 
@@ -131,6 +132,50 @@ function toggleDecision(index: number) {
   if (showing.has(index)) showing.delete(index)
   else showing.add(index)
   openDecision.value = showing
+}
+
+/**
+ * The change the decision was taken over, fetched when it is asked for.
+ *
+ * The rationale says what was concluded; this is what it was concluded about,
+ * and reading one without the other is taking the decider's word for it. The
+ * endpoint already served a resolved approval -- Attention has always used it
+ * for pending ones -- so the diff a decision was made over was reachable the
+ * whole time and nothing offered it.
+ *
+ * Per gate rather than per step, and only on request: a card with a dozen hops
+ * would otherwise fetch a dozen diffs to render a trail nobody has opened.
+ */
+const reviewed = ref<Record<string, ChangedFile[]>>({})
+const reviewing = ref<Set<string>>(new Set())
+const reviewFailed = ref<Record<string, string>>({})
+const openReview = ref<Set<string>>(new Set())
+
+async function toggleReviewed(gateID: string) {
+  const showing = new Set(openReview.value)
+  if (showing.has(gateID)) {
+    showing.delete(gateID)
+    openReview.value = showing
+    return
+  }
+  showing.add(gateID)
+  openReview.value = showing
+  if (reviewed.value[gateID] || reviewing.value.has(gateID)) return
+
+  reviewing.value = new Set(reviewing.value).add(gateID)
+  try {
+    const change = await api.approvalDiff(gateID)
+    reviewed.value = { ...reviewed.value, [gateID]: change.files }
+  } catch (e) {
+    reviewFailed.value = {
+      ...reviewFailed.value,
+      [gateID]: e instanceof Error ? e.message : String(e),
+    }
+  } finally {
+    const running = new Set(reviewing.value)
+    running.delete(gateID)
+    reviewing.value = running
+  }
 }
 
 /** Whether a step has a decision worth opening, as opposed to a bare gate. */
@@ -469,6 +514,54 @@ const pullRequest = computed(() =>
                       (git show {{ evidence(a.step.gate.evidenceSha).slice(0, 12) }})
                     </span>
                   </p>
+                  <!-- And what the decision was taken over. The rationale says
+                       what was concluded; without this a reader has only the
+                       decider's word for what it was concluded about. -->
+                  <button
+                    type="button"
+                    class="text-muted-foreground hover:text-foreground focus-visible:outline-ring mt-1 flex items-center gap-1 focus-visible:outline-2"
+                    @click="toggleReviewed(a.step.gate.id)"
+                  >
+                    <component
+                      :is="openReview.has(a.step.gate.id) ? ChevronUp : ChevronDown"
+                      :size="10"
+                      aria-hidden="true"
+                    />
+                    {{ openReview.has(a.step.gate.id) ? 'hide what it reviewed' : 'what it reviewed' }}
+                  </button>
+                  <div v-if="openReview.has(a.step.gate.id)" class="mt-1">
+                    <p v-if="reviewing.has(a.step.gate.id)" class="text-muted-foreground">Reading…</p>
+                    <p v-else-if="reviewFailed[a.step.gate.id]" class="text-destructive">
+                      {{ reviewFailed[a.step.gate.id] }}
+                    </p>
+                    <template v-else-if="reviewed[a.step.gate.id]?.length">
+                      <div
+                        v-for="f in reviewed[a.step.gate.id]"
+                        :key="f.path"
+                        class="border-border/70 mt-1 border-t pt-1"
+                      >
+                        <p class="text-foreground/80">
+                          <code>{{ f.path }}</code>
+                          <span class="text-muted-foreground ml-1">+{{ f.added }} −{{ f.removed }}</span>
+                        </p>
+                        <!-- A file with no diff to show says which of the two
+                             reasons it is, rather than rendering as an empty
+                             box that reads like a bug. -->
+                        <DiffView v-if="f.diff" :diff="f.diff" class="mt-1" />
+                        <p v-else-if="f.binary" class="text-muted-foreground">
+                          binary, not shown
+                        </p>
+                        <p v-else-if="f.tooLarge || f.deferred" class="text-muted-foreground">
+                          too large to show here
+                        </p>
+                      </div>
+                    </template>
+                    <!-- A decision over nothing is a real answer: a completion
+                         with no commit, or a change since reclaimed. -->
+                    <p v-else class="text-muted-foreground">
+                      No change is recorded against this decision.
+                    </p>
+                  </div>
                 </template>
                 <!-- What it settled on the way. A question answered mid-step is
                      a decision too, and it was reachable only as a count. -->

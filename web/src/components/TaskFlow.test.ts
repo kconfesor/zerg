@@ -3,10 +3,11 @@ import { enableAutoUnmount, flushPromises, mount } from '@vue/test-utils'
 import TaskFlow from './TaskFlow.vue'
 import { api, type ActivityEvent, type TaskStep } from '@/lib/api'
 
-vi.mock('@/lib/api', () => ({ api: { taskEvents: vi.fn() } }))
+vi.mock('@/lib/api', () => ({ api: { taskEvents: vi.fn(), approvalDiff: vi.fn() } }))
 enableAutoUnmount(afterEach)
 
 const taskEvents = vi.mocked(api.taskEvents)
+const approvalDiff = vi.mocked(api.approvalDiff)
 
 function step(over: Partial<TaskStep> = {}): TaskStep {
   return {
@@ -235,5 +236,75 @@ describe('a decision taken at a gate', () => {
       }),
     ])
     expect(w.findAll('button').some((b) => b.text() === 'the decision')).toBe(false)
+  })
+})
+
+// The rationale says what was concluded; this is what it was concluded about.
+//
+// The endpoint served a resolved approval all along, and Attention has always
+// used it for pending ones, so the change a decision was taken over was
+// reachable the whole time and nothing offered it. Reading a decision without
+// it is taking the decider's word for what it decided about.
+describe('the change a decision was taken over', () => {
+  const gated = () =>
+    step({
+      gate: {
+        id: 'a1',
+        state: 'approved',
+        note: 'Approved.',
+        createdAt: '2026-01-01T09:10:00.000Z',
+        decidedAt: '2026-01-01T09:12:00.000Z',
+        waitedMs: 1_000,
+        decidedBy: 'supervisor',
+      },
+    })
+
+  const openDecision = async (w: ReturnType<typeof mount>) => {
+    await w.findAll('button').find((b) => b.text() === 'the decision')!.trigger('click')
+  }
+
+  it('fetches it once, when asked, and shows the diff', async () => {
+    approvalDiff.mockResolvedValue({
+      files: [
+        {
+          path: 'docs/specs/sunday-hours.md',
+          status: 'M',
+          added: 41,
+          removed: 96,
+          diff: '@@ -1 +1 @@\n-Thursday to Saturday\n+Thursday to Sunday\n',
+        },
+      ],
+      range: true,
+      base: 'main',
+      seen: [],
+    })
+    const w = flow([gated()])
+    await openDecision(w)
+    expect(approvalDiff).not.toHaveBeenCalled()
+
+    await w.findAll('button').find((b) => b.text() === 'what it reviewed')!.trigger('click')
+    await flushPromises()
+
+    expect(approvalDiff).toHaveBeenCalledTimes(1)
+    expect(approvalDiff).toHaveBeenCalledWith('a1')
+    expect(w.text()).toContain('docs/specs/sunday-hours.md')
+    expect(w.text()).toContain('+41')
+    expect(w.text()).toContain('Thursday to Sunday')
+
+    // Closing and reopening reads what is already here.
+    await w.findAll('button').find((b) => b.text() === 'hide what it reviewed')!.trigger('click')
+    await w.findAll('button').find((b) => b.text() === 'what it reviewed')!.trigger('click')
+    await flushPromises()
+    expect(approvalDiff).toHaveBeenCalledTimes(1)
+  })
+
+  // An empty box reads like a bug. A decision over nothing is a real answer.
+  it('says so when no change is recorded against the decision', async () => {
+    approvalDiff.mockResolvedValue({ files: [], range: false, base: 'main', seen: [] })
+    const w = flow([gated()])
+    await openDecision(w)
+    await w.findAll('button').find((b) => b.text() === 'what it reviewed')!.trigger('click')
+    await flushPromises()
+    expect(w.text()).toContain('No change is recorded against this decision')
   })
 })
