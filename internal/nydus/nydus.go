@@ -1352,8 +1352,10 @@ func (n *Nydus) decide(ctx context.Context, scope store.DecisionScope, approvalI
 		expect = store.ApprovalIntegrating
 	}
 	res, err := tx.ExecContext(ctx,
-		`UPDATE approvals SET state = ?, note = ?, decided_at = ?, decided_by = ?, evidence_sha = ? WHERE id = ? AND state = ?`,
-		decision, notePtr, now, by, evidence, approvalID, expect)
+		`UPDATE approvals SET state = ?, note = ?, decided_at = ?, decided_by = ?, evidence_sha = ?,
+		        decided_model = ?, decided_harness = ?
+		  WHERE id = ? AND state = ?`,
+		decision, notePtr, now, by, evidence, scope.Model, scope.Harness, approvalID, expect)
 	if err != nil {
 		return fmt.Errorf("recording decision: %w", err)
 	}

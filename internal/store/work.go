@@ -68,6 +68,14 @@ type DecisionScope struct {
 	ProjectID string
 	// Role writing the decision: OperatorRole, or the sidecar's role name.
 	Role string
+
+	// Harness and Model are what the deciding process was actually running,
+	// recorded with the decision. A role's model is edited in the library at
+	// any time, so what the library says today is not evidence of what decided
+	// last week, and the weight a person gives a judgement depends on which
+	// model made it. Empty for the operator, who is not a model.
+	Harness string
+	Model   string
 }
 
 // Operator reports whether this is a person deciding from the cockpit rather
@@ -762,6 +770,12 @@ type Clarification struct {
 
 	// EvidenceSHA is the commit that recorded the rationale, when there was one.
 	EvidenceSHA string `json:"evidenceSha,omitempty"`
+
+	// AnsweredModel and AnsweredHarness are what the answering process was
+	// running. Empty for an operator, and for every answer written before
+	// schema 38, where nothing recorded it.
+	AnsweredModel   string `json:"answeredModel,omitempty"`
+	AnsweredHarness string `json:"answeredHarness,omitempty"`
 }
 
 // maxClarificationOptions is where a choice stops being one. Ten radio
@@ -911,10 +925,11 @@ func (db *DB) AnswerClarification(ctx context.Context, scope DecisionScope, id, 
 		}
 	}
 	res, err := db.sql.ExecContext(ctx,
-		`UPDATE clarifications SET answer = ?, state = ?, answered_at = ?, answered_by = ?, evidence_sha = ?
+		`UPDATE clarifications SET answer = ?, state = ?, answered_at = ?, answered_by = ?,
+		        evidence_sha = ?, answered_model = ?, answered_harness = ?
 		 WHERE id = ? AND state = ?`,
 		answer, ClarificationAnswered, time.Now().UTC().Format(time.RFC3339Nano), by, evidence,
-		id, ClarificationOpen)
+		scope.Model, scope.Harness, id, ClarificationOpen)
 	if err != nil {
 		return fmt.Errorf("answering clarification %s: %w", id, err)
 	}
@@ -1001,7 +1016,7 @@ func (db *DB) ListOpenClarifications(ctx context.Context, projectID string) ([]C
 	return out, rows.Err()
 }
 
-const clarificationCols = `c.id, c.project_id, c.task_id, c.role, c.question, c.options, c.answer, c.state, c.delivered_at, c.created_at, c.answered_at, c.answered_by, c.evidence_sha, COALESCE(t.supervised, 0)`
+const clarificationCols = `c.id, c.project_id, c.task_id, c.role, c.question, c.options, c.answer, c.state, c.delivered_at, c.created_at, c.answered_at, c.answered_by, c.evidence_sha, c.answered_model, c.answered_harness, COALESCE(t.supervised, 0)`
 
 func scanClarification(s scanner) (*Clarification, error) {
 	var (
@@ -1016,7 +1031,7 @@ func scanClarification(s scanner) (*Clarification, error) {
 	)
 	if err := s.Scan(&c.ID, &c.ProjectID, &taskID, &c.Role, &c.Question,
 		&options, &answer, &c.State, &delivered, &created, &answered, &c.AnsweredBy,
-		&c.EvidenceSHA, &supervised); err != nil {
+		&c.EvidenceSHA, &c.AnsweredModel, &c.AnsweredHarness, &supervised); err != nil {
 		return nil, err
 	}
 	c.Supervised = supervised != 0
@@ -1600,6 +1615,13 @@ type TrailGate struct {
 	// repository, and without this the trail had no way to reach it: the
 	// commit sits on the sidecar's worktree branch and nothing links to it.
 	EvidenceSHA string `json:"evidenceSha,omitempty"`
+
+	// DecidedModel and DecidedHarness are what took the decision, as opposed
+	// to which role it was filed under. A role's model moves; this does not.
+	// Empty for an operator, who is not a model, and for every decision taken
+	// before schema 38.
+	DecidedModel   string `json:"decidedModel,omitempty"`
+	DecidedHarness string `json:"decidedHarness,omitempty"`
 }
 
 // TaskTrail is every step a task took, with the numbers that belong to each.
@@ -1613,7 +1635,7 @@ func (db *DB) TaskTrail(ctx context.Context, taskID string) ([]TrailStep, error)
 		        COALESCE(m.commit_sha, ''), m.body, m.created_at, m.terminal,
 		        l.granted_at,
 		        a.id, a.state, a.note, a.created_at, a.decided_at, a.decided_by,
-		        a.evidence_sha
+		        a.evidence_sha, a.decided_model, a.decided_harness
 		   FROM messages m
 		   LEFT JOIN routes r ON r.message_id = m.id
 		   LEFT JOIN leases l ON l.id = m.source_lease_id
@@ -1634,11 +1656,12 @@ func (db *DB) TaskTrail(ctx context.Context, taskID string) ([]TrailStep, error)
 			gateID, gateState, gateNote sql.NullString
 			gateCreated, gateDecided    sql.NullString
 			gateBy, gateEvidence        sql.NullString
+			gateModel, gateHarness      sql.NullString
 			createdAt                   string
 		)
 		if err := rows.Scan(&s.From, &s.To, &s.Kind, &s.Commit, &s.Body, &createdAt, &final,
 			&granted, &gateID, &gateState, &gateNote, &gateCreated, &gateDecided, &gateBy,
-			&gateEvidence); err != nil {
+			&gateEvidence, &gateModel, &gateHarness); err != nil {
 			return nil, err
 		}
 		if s.At, err = parseStored(createdAt); err != nil {
@@ -1656,7 +1679,8 @@ func (db *DB) TaskTrail(ctx context.Context, taskID string) ([]TrailStep, error)
 		}
 		if gateID.Valid {
 			gate := TrailGate{ID: gateID.String, State: gateState.String, Note: gateNote.String,
-				DecidedBy: gateBy.String, EvidenceSHA: gateEvidence.String}
+				DecidedBy: gateBy.String, EvidenceSHA: gateEvidence.String,
+				DecidedModel: gateModel.String, DecidedHarness: gateHarness.String}
 			if gate.CreatedAt, err = parseStored(gateCreated.String); err != nil {
 				return nil, fmt.Errorf("approval has an unreadable timestamp: %w", err)
 			}

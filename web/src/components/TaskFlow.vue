@@ -489,6 +489,13 @@ const pullRequest = computed(() =>
                   <p class="text-muted-foreground">
                     {{ a.step.gate.state }}
                     <template v-if="a.step.gate.decidedBy">by {{ a.step.gate.decidedBy }}</template>
+                    <!-- Which model, not only which role. A role's model is
+                         edited at any time, so the library cannot answer this
+                         about a decision taken last week, and how much weight a
+                         judgement carries depends on what made it. -->
+                    <template v-if="a.step.gate.decidedModel">
+                      running {{ a.step.gate.decidedModel }}
+                    </template>
                     <template v-if="a.step.gate.waitedMs >= 60_000">
                       after {{ duration(a.step.gate.waitedMs) }} waiting
                     </template>
@@ -574,6 +581,7 @@ const pullRequest = computed(() =>
                   <p v-if="c.answer" class="text-muted-foreground mt-0.5">
                     {{ c.answer }}
                     <template v-if="c.answeredBy">, answered by {{ c.answeredBy }}</template>
+                    <template v-if="c.answeredModel"> running {{ c.answeredModel }}</template>
                     <code v-if="evidence(c.evidenceSha)" class="text-foreground/80 ml-1 select-all">
                       {{ evidence(c.evidenceSha).slice(0, 8) }}
                     </code>

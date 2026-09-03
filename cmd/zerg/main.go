@@ -413,6 +413,11 @@ func runUp(args []string) error {
 		Preflight: preflight.NewRunner(db, registry),
 		Bus:       bus, Agents: agents, Log: log, StateDir: stateDir,
 	})
+	// What each role's process is running, so a decision taken over the socket
+	// records what took it. Wired after the fact because the socket is built
+	// first: the overmind needs it to mint tokens.
+	agents.WatchRunning(over.RunningRole)
+
 	// Agents are children of this process, so leaving them running after the
 	// daemon exits would orphan work nobody is supervising.
 	defer over.StopAll(context.Background(), "the daemon shut down")

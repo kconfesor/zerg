@@ -371,6 +371,9 @@ export interface Clarification {
   supervised?: boolean
   /** The commit the answer's reasoning was written into, when there was one. */
   evidenceSha?: string
+  /** What answered it. Absent for a person, and for older answers. */
+  answeredModel?: string
+  answeredHarness?: string
 }
 
 /**
@@ -1106,6 +1109,12 @@ export interface TaskGate {
    *  sidecar records its reasoning in the repository, and this is the only
    *  link to it: the commit sits on the sidecar's own worktree branch. */
   evidenceSha?: string
+  /** What took the decision, as opposed to the role it was filed under. A
+   *  role's model is edited at any time, so this is the only record of what an
+   *  old approval was actually made by. Absent for a person, and for anything
+   *  decided before the daemon recorded it. */
+  decidedModel?: string
+  decidedHarness?: string
 }
 
 export interface TaskDetail {

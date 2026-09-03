@@ -264,6 +264,36 @@ func (o *Overmind) Interrupt(projectID, role, text string) bool {
 	return true
 }
 
+// RunningRole reports what a role's process is currently built from.
+//
+// The agent socket asks this when it records a decision, so the row says what
+// took it rather than what the library says that role is today. The two part
+// company the moment somebody edits a model, and a decision is evidence about
+// the past: reading it back off current configuration would quietly rewrite
+// what an old approval was made by.
+//
+// The sidecar is included, since it is the one whose decisions this is mostly
+// about, and it is deliberately not in the roles map.
+func (o *Overmind) RunningRole(projectID, role string) (harness, model string, ok bool) {
+	o.mu.Lock()
+	s, up := o.running[projectID]
+	o.mu.Unlock()
+	if !up {
+		return "", "", false
+	}
+	s.mu.Lock()
+	p, found := s.roles[role]
+	if !found && s.supervisor != nil && s.supervisor.cerebrate.Role().Name == role {
+		p, found = s.supervisor, true
+	}
+	s.mu.Unlock()
+	if !found {
+		return "", "", false
+	}
+	live := p.cerebrate.Role()
+	return p.harness, live.Model, true
+}
+
 // Status returns each role's live state, or nil when the project is stopped.
 func (o *Overmind) Status(ctx context.Context, projectID string) ([]Status, error) {
 	o.mu.Lock()

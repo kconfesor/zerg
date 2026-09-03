@@ -756,9 +756,11 @@ leases      (id, project_id, role, granted_at, expires_at, acked_at, expired_at)
 lease_items (lease_id, message_id, to_role)   -- a batch lease covers many messages
 events      (id, project_id, task_id, role, kind, ts, text, tool, data, fatal)  -- append-only
 approvals   (id, project_id, message_id, state, note, created_at, decided_at, decided_by,
-             evidence_sha)       -- the commit the decider wrote the rationale into
+             evidence_sha,       -- the commit the decider wrote the rationale into
+             decided_model, decided_harness)   -- what took it, not the role it is filed under
 clarifications (id, project_id, task_id, role, question, answer, state,
-                created_at, answered_at, answered_by, evidence_sha)
+                created_at, answered_at, answered_by, evidence_sha,
+                answered_model, answered_harness)
 
 -- one row per model turn, not per run: this is what the cost dashboard reads
 usage_turns (id, project_id, task_id, role, ts,
@@ -831,6 +833,19 @@ the same resolution `Send` does, before the transaction opens, and a ref that na
 folding it in would put unreviewed content into the land. It stays reachable because
 `PruneMergedBranches` uses `-d`, which refuses a branch carrying anything not already in the base;
 the trail carries `evidence_sha`, which is how a reader gets to it.
+
+**A decision records what took it, not only which role it is filed under.** `decided_by` says
+`supervisor`, and a role's model is edited in the library at any time, so today's configuration is
+not evidence about an approval taken last week. Whether an opus approved a card or something cheap
+did is the first question an operator has when they disagree with one. `decided_model` and
+`decided_harness` are written at the moment the decision is, from what the deciding *process* is
+running: `Overmind.RunningRole` reads it off the cerebrate rather than off the role template, and
+the agent socket asks for it through a function the daemon supplies, since the overmind imports the
+socket and cannot be imported back. Joining an approval to whichever `usage_turns` row sits nearest
+its `decided_at` was the alternative and is the §6.1 mistake again, a value naming an outcome
+derived from a proxy for it: a guess dressed as a record is worse than an empty column, because
+nothing afterwards can tell the two apart. Empty for an operator, who is not a model, and empty for
+every decision taken before schema 38, which is not backfilled for the same reason.
 
 **Whether a sidecar exists is not whether one was asked for.** `tasks.supervised` is a request.
 `Overmind.SupervisorState` is the outcome, being wanted, live, and the reason when those disagree,

@@ -2623,9 +2623,13 @@ func TestTheSupervisorCannotLandAndCanReleaseAHandoff(t *testing.T) {
 	}
 }
 
-// supervisorScope is the sidecar deciding inside its own project.
+// supervisorScope is the sidecar deciding inside its own project, with what it
+// is running, which is what the row records.
 func supervisorScope(projectID string) store.DecisionScope {
-	return store.DecisionScope{ProjectID: projectID, Role: "supervisor"}
+	return store.DecisionScope{
+		ProjectID: projectID, Role: "supervisor",
+		Harness: "claude", Model: "claude-opus-5",
+	}
 }
 
 // A decision is scoped to the project the token authenticated as, and to a
@@ -2781,5 +2785,88 @@ func TestEvidenceThatNamesNoCommitIsRefused(t *testing.T) {
 	}
 	if got := f.reload(t, task.ID); got.Lane == "coder" {
 		t.Error("the card moved on a decision that was refused")
+	}
+}
+
+// A decision records what took it, not only which role it was filed under.
+//
+// decided_by says "supervisor", and a role's model is edited in the library at
+// any time, so today's configuration is not evidence about a decision taken
+// last week. Whether an opus approved a card or something cheap did is the
+// first thing an operator asks when they disagree with one.
+func TestADecisionRecordsTheModelThatTookIt(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+
+	task, err := f.n.NewTaskWith(ctx, NewTaskOpts{
+		ProjectID: f.project.ID, Name: "Spec", Body: "write it", Supervised: true,
+	})
+	if err != nil {
+		t.Fatalf("NewTaskWith: %v", err)
+	}
+	if _, err := f.n.Send(ctx, f.project.ID, "planner", SendRequest{
+		To: "coder", TaskID: task.ID, Commit: "aaaaaaaaaa", Body: "the spec",
+	}); err != nil {
+		t.Fatalf("planner Send: %v", err)
+	}
+	pending, err := f.db.ListPendingApprovals(ctx, f.project.ID)
+	if err != nil || len(pending) != 1 {
+		t.Fatalf("ListPendingApprovals: %v %+v", err, pending)
+	}
+	if err := f.n.ApproveBy(ctx, supervisorScope(f.project.ID), pending[0].ID,
+		"the spec is enough", ""); err != nil {
+		t.Fatalf("ApproveBy: %v", err)
+	}
+
+	steps, err := f.db.TaskTrail(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("TaskTrail: %v", err)
+	}
+	var gate *store.TrailGate
+	for i := range steps {
+		if steps[i].Gate != nil {
+			gate = steps[i].Gate
+		}
+	}
+	if gate == nil {
+		t.Fatal("the trail carries no gate")
+	}
+	if gate.DecidedModel != "claude-opus-5" || gate.DecidedHarness != "claude" {
+		t.Errorf("decided by %s/%s, want claude/claude-opus-5",
+			gate.DecidedHarness, gate.DecidedModel)
+	}
+}
+
+// An operator is not a model, and the row says so rather than guessing one.
+func TestAnOperatorDecisionRecordsNoModel(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	task := f.task(t, "Calculator")
+
+	if _, err := f.n.Send(ctx, f.project.ID, "planner", SendRequest{
+		To: "coder", TaskID: task.ID, Commit: "aaaaaaaaaa", Body: "the spec",
+	}); err != nil {
+		t.Fatalf("planner Send: %v", err)
+	}
+	pending, err := f.db.ListPendingApprovals(ctx, f.project.ID)
+	if err != nil || len(pending) != 1 {
+		t.Fatalf("ListPendingApprovals: %v %+v", err, pending)
+	}
+	if err := f.n.Approve(ctx, pending[0].ID); err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+
+	steps, err := f.db.TaskTrail(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("TaskTrail: %v", err)
+	}
+	for _, s := range steps {
+		if s.Gate == nil {
+			continue
+		}
+		if s.Gate.DecidedModel != "" || s.Gate.DecidedHarness != "" {
+			t.Errorf("a person's decision recorded %s/%s as the model that took it",
+				s.Gate.DecidedHarness, s.Gate.DecidedModel)
+		}
 	}
 }

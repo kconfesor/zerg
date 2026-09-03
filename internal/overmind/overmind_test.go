@@ -945,3 +945,62 @@ func TestTheTickDoesNotWaitForTheLifecycleLock(t *testing.T) {
 		t.Fatal("the tick blocked on the lifecycle lock, which is what makes shutdown wait out its grace period")
 	}
 }
+
+// What a role is running is read off the process, not off the library.
+//
+// A decision records the model that took it, and the two answers part company
+// the moment somebody edits a role: reading it back off current configuration
+// would quietly rewrite what an old approval was made by. The sidecar is
+// included because it is the one whose decisions this is mostly about, and it
+// is deliberately not in the roles map.
+func TestRunningRoleReportsTheProcessRatherThanTheLibrary(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t, &scriptedHarness{script: idleAgent})
+
+	if err := h.over.Start(ctx, h.project.ID); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if _, err := h.nyd.NewTaskWith(ctx, nydus.NewTaskOpts{
+		ProjectID: h.project.ID, Name: "Spec", Body: "write it", Supervised: true,
+	}); err != nil {
+		t.Fatalf("NewTaskWith: %v", err)
+	}
+	if err := h.over.SyncSupervisor(ctx, h.project.ID); err != nil {
+		t.Fatalf("SyncSupervisor: %v", err)
+	}
+
+	for _, role := range []string{"coder", "supervisor"} {
+		harness, model, ok := h.over.RunningRole(h.project.ID, role)
+		if !ok {
+			t.Errorf("%s is running and RunningRole did not report it", role)
+			continue
+		}
+		if harness != "scripted" || model == "" {
+			t.Errorf("%s reported %s/%q, want the scripted harness and a model", role, harness, model)
+		}
+	}
+
+	// The library moves; the process does not. A decision taken now must
+	// record what is running now.
+	tpl, err := h.db.RoleFor(ctx, store.PurposeSupervisor)
+	if err != nil {
+		t.Fatalf("RoleFor: %v", err)
+	}
+	was := tpl.Model
+	tpl.Model = "some-other-model"
+	if err := h.db.UpdateTemplate(ctx, tpl); err != nil {
+		t.Fatalf("UpdateTemplate: %v", err)
+	}
+	if _, model, _ := h.over.RunningRole(h.project.ID, "supervisor"); model != was {
+		t.Errorf("model = %q after a library edit, want the %q the process is still running",
+			model, was)
+	}
+
+	// A role nobody is running has no answer, rather than a plausible one.
+	if _, _, ok := h.over.RunningRole(h.project.ID, "nobody"); ok {
+		t.Error("RunningRole answered for a role that is not running")
+	}
+	if _, _, ok := h.over.RunningRole("no-such-project", "coder"); ok {
+		t.Error("RunningRole answered for a project that is not running")
+	}
+}

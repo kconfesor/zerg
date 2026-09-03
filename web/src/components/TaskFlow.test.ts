@@ -171,6 +171,19 @@ describe('a decision taken at a gate', () => {
       },
     })
 
+  // Which model, not only which role. decidedBy says "supervisor", and a role's
+  // model is edited at any time, so the library cannot answer what an approval
+  // taken last week was actually made by.
+  it('names the model that took the decision, and says nothing when a person did', async () => {
+    const w = flow([gated({ decidedModel: 'claude-opus-5', decidedHarness: 'claude' })])
+    await w.findAll('button').find((b) => b.text() === 'the decision')!.trigger('click')
+    expect(w.text()).toContain('running claude-opus-5')
+
+    const byHand = flow([gated({ decidedBy: 'operator', decidedModel: undefined })])
+    await byHand.findAll('button').find((b) => b.text() === 'the decision')!.trigger('click')
+    expect(byHand.text()).not.toContain('running')
+  })
+
   it('opens onto the rationale, the decider and the commit that holds it', async () => {
     const w = flow([gated()])
     await w.findAll('button').find((b) => b.text() === 'the decision')!.trigger('click')

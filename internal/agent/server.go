@@ -101,6 +101,17 @@ type Server struct {
 	// to put them, which answers the verb rather than crashing on it.
 	blobs *artifact.Store
 
+	// running answers what a role's process is currently built from, so a
+	// decision records what took it rather than what the library says the role
+	// is today. Those two disagree the moment somebody edits a model, and a
+	// decision is evidence about the past.
+	//
+	// A function rather than a handle, because the overmind imports this
+	// package and cannot be imported back. Nil where nothing is supervising
+	// processes -- tests, and a daemon serving the socket alone -- and the
+	// decision is then recorded without it rather than refused.
+	running func(projectID, role string) (harness, model string, ok bool)
+
 	mu     sync.RWMutex
 	tokens map[string]Identity
 
@@ -135,6 +146,29 @@ func (s *Server) watcher() Watcher {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.watch
+}
+
+// WatchRunning supplies what each role's process is running. Set by the daemon
+// once the overmind exists, since the two are built in that order.
+func (s *Server) WatchRunning(f func(projectID, role string) (harness, model string, ok bool)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.running = f
+}
+
+// deciderScope is who is deciding, and what they are deciding with.
+func (s *Server) deciderScope(id Identity) store.DecisionScope {
+	scope := store.DecisionScope{ProjectID: id.ProjectID, Role: id.Role}
+	s.mu.RLock()
+	live := s.running
+	s.mu.RUnlock()
+	if live == nil {
+		return scope
+	}
+	if harness, model, ok := live(id.ProjectID, id.Role); ok {
+		scope.Harness, scope.Model = harness, model
+	}
+	return scope
 }
 
 func NewServer(db *store.DB, nyd *nydus.Nydus, blobs *artifact.Store, log *slog.Logger) *Server {
@@ -773,7 +807,7 @@ func (s *Server) decideApproval(w http.ResponseWriter, r *http.Request, ok bool)
 		writeError(w, http.StatusBadRequest, "an approval needs --note: the rationale")
 		return
 	}
-	scope := store.DecisionScope{ProjectID: id.ProjectID, Role: id.Role}
+	scope := s.deciderScope(id)
 	var err error
 	if ok {
 		err = s.nyd.ApproveBy(r.Context(), scope, req.ID, req.Note, req.Commit)
@@ -808,7 +842,7 @@ func (s *Server) answer(w http.ResponseWriter, r *http.Request) {
 	// place, rather than partly here: this handler used to check the project
 	// and nothing else, so a sidecar could answer a question on an
 	// unsupervised card, or the one it had asked itself.
-	scope := store.DecisionScope{ProjectID: id.ProjectID, Role: id.Role}
+	scope := s.deciderScope(id)
 	if err := s.nyd.AnswerBy(r.Context(), scope, req.ID, req.Answer, req.Commit); err != nil {
 		s.fail(w, err)
 		return
