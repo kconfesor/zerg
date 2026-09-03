@@ -206,10 +206,19 @@ func TestAgentsResumeTheConversationAfterADaemonRestart(t *testing.T) {
 	if err := h.over.Start(ctx, h.project.ID); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
+	// Every running role, not any of them.
+	//
+	// The assertion below is that each spawn after the restart resumes an id
+	// this daemon recorded, so the snapshot has to be complete before it is
+	// taken. Waiting for the first one meant a role that recorded a moment
+	// later was resumed against a set that predated it, and the test failed
+	// naming an id its own daemon had stored. Rare while every role recorded
+	// on its first line; a standing race once recording waits for the agent to
+	// answer, because the roles then reach it at their own pace.
 	waitFor(t, func() bool {
 		roles, err := h.db.ProjectsWantingStart(ctx)
-		return err == nil && len(roles) == 1 && anyRecorded(t, h.db, h.project.ID)
-	}, 10*time.Second, "no session was ever recorded for the running roles")
+		return err == nil && len(roles) == 1 && allRecorded(t, h)
+	}, 10*time.Second, "not every running role recorded a session")
 
 	first := recordedSessions(t, h.db, h.project.ID)
 	if len(first) == 0 {
@@ -428,6 +437,30 @@ func TestASessionTheHarnessNoLongerHasIsDroppedRatherThanRetried(t *testing.T) {
 func anyRecorded(t *testing.T, db *store.DB, projectID string) bool {
 	t.Helper()
 	return len(recordedSessions(t, db, projectID)) > 0
+}
+
+// allRecorded reports whether every role the swarm is running has a session
+// stored, which is what a test asserting on the whole set has to wait for.
+func allRecorded(t *testing.T, h *harness) bool {
+	t.Helper()
+	live := h.live(t)
+	if len(live) == 0 {
+		return false
+	}
+	stored, err := h.db.ListRoleSessions(context.Background(), h.project.ID)
+	if err != nil {
+		t.Fatalf("reading recorded sessions: %v", err)
+	}
+	byRole := map[string]bool{}
+	for _, s := range stored {
+		byRole[s.Role] = true
+	}
+	for role := range live {
+		if !byRole[role] {
+			return false
+		}
+	}
+	return true
 }
 
 // recordedSessions is every session id stored for a project, as a set. Read
