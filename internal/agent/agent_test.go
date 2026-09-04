@@ -287,7 +287,7 @@ func TestAskRecordsAQuestionAndReceivesAnAnswer(t *testing.T) {
 		for i := 0; i < 40; i++ {
 			open, err := f.db.ListOpenClarifications(ctx, f.project.ID)
 			if err == nil && len(open) > 0 {
-				_ = f.db.AnswerClarification(ctx, open[0].ID, "yes, make it idempotent")
+				_ = f.db.AnswerClarification(ctx, store.DecisionScope{}, open[0].ID, "yes, make it idempotent", "")
 				return
 			}
 			time.Sleep(50 * time.Millisecond)
@@ -329,7 +329,7 @@ func TestAnAnswerGivenAfterTheWaitRanOutReachesTheNextAsk(t *testing.T) {
 	}
 
 	// The operator answers now, with the agent no longer listening.
-	if err := f.db.AnswerClarification(ctx, pending.ID, offered[1]); err != nil {
+	if err := f.db.AnswerClarification(ctx, store.DecisionScope{}, pending.ID, offered[1], ""); err != nil {
 		t.Fatalf("AnswerClarification: %v", err)
 	}
 
@@ -371,7 +371,7 @@ func TestAskOffersOptionsAndReturnsTheChosenOne(t *testing.T) {
 					t.Errorf("the operator was offered %q, want %q", open[0].Options, offered)
 				}
 				// What the cockpit posts when the third radio is picked.
-				_ = f.db.AnswerClarification(ctx, open[0].ID, open[0].Options[2])
+				_ = f.db.AnswerClarification(ctx, store.DecisionScope{}, open[0].ID, open[0].Options[2], "")
 				return
 			}
 			time.Sleep(50 * time.Millisecond)

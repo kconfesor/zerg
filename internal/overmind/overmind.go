@@ -126,6 +126,25 @@ type swarm struct {
 
 	mu    sync.Mutex
 	roles map[string]*roleProc
+
+	// supervisor is the architect sidecar, when a live card asked for one.
+	// Held apart from roles so Reconcile cannot stop it as a role that left
+	// the team — it was never on the team.
+	//
+	// Cleared by the goroutine that runs it, so the pointer means "a process
+	// is running" and not "a process was started once". Read as liveness while
+	// it outlived the process, a sidecar that died fatally looked healthy: no
+	// replacement, no report, and a card sat waiting for a decider that was
+	// gone.
+	supervisor *roleProc
+
+	// supervisorErr is why that process ended, kept so the cockpit can say so
+	// and so the tick does not respawn into the same fatal error every two
+	// seconds. supervisorErrFor is the configuration it belongs to: an edit
+	// that changes the role or its harness is a new thing to try, and clears
+	// it.
+	supervisorErr    string
+	supervisorErrFor string
 }
 
 // roleProc is one supervised role, with the handle to stop just that one.
@@ -243,6 +262,36 @@ func (o *Overmind) Interrupt(projectID, role, text string) bool {
 		return false
 	}
 	return true
+}
+
+// RunningRole reports what a role's process is currently built from.
+//
+// The agent socket asks this when it records a decision, so the row says what
+// took it rather than what the library says that role is today. The two part
+// company the moment somebody edits a model, and a decision is evidence about
+// the past: reading it back off current configuration would quietly rewrite
+// what an old approval was made by.
+//
+// The sidecar is included, since it is the one whose decisions this is mostly
+// about, and it is deliberately not in the roles map.
+func (o *Overmind) RunningRole(projectID, role string) (harness, model string, ok bool) {
+	o.mu.Lock()
+	s, up := o.running[projectID]
+	o.mu.Unlock()
+	if !up {
+		return "", "", false
+	}
+	s.mu.Lock()
+	p, found := s.roles[role]
+	if !found && s.supervisor != nil && s.supervisor.cerebrate.Role().Name == role {
+		p, found = s.supervisor, true
+	}
+	s.mu.Unlock()
+	if !found {
+		return "", "", false
+	}
+	live := p.cerebrate.Role()
+	return p.harness, live.Model, true
 }
 
 // Status returns each role's live state, or nil when the project is stopped.
@@ -470,21 +519,46 @@ func (o *Overmind) Start(ctx context.Context, projectID string) error {
 		o.keepMoving(runCtx, projectID, s)
 	}()
 
+	if err := o.syncSupervisor(runCtx, s, spawn); err != nil {
+		o.log.Warn("could not start the architect sidecar", "project", projectID, "err", err)
+	}
+
 	o.log.Info("swarm up", "project", spawn.project.Name, "roles", len(s.roles))
 	return nil
 }
 
 // lock takes this project's lifecycle lock and returns the release.
 func (o *Overmind) lock(projectID string) func() {
+	m := o.gateFor(projectID)
+	m.Lock()
+	return m.Unlock
+}
+
+// tryLock is lock for a caller that must not block on it.
+//
+// keepMoving is counted in the swarm's `live` group, and Stop waits on that
+// group while holding the lifecycle lock. A tick that blocks acquiring the
+// same lock therefore cannot finish, Stop cannot proceed, and shutdown fell
+// through to the ten-second grace timeout every time the two overlapped.
+// Skipping the tick's housekeeping costs a two-second delay; the next tick
+// does it.
+func (o *Overmind) tryLock(projectID string) (func(), bool) {
+	m := o.gateFor(projectID)
+	if !m.TryLock() {
+		return nil, false
+	}
+	return m.Unlock, true
+}
+
+func (o *Overmind) gateFor(projectID string) *sync.Mutex {
 	o.mu.Lock()
+	defer o.mu.Unlock()
 	m, ok := o.gate[projectID]
 	if !ok {
 		m = &sync.Mutex{}
 		o.gate[projectID] = m
 	}
-	o.mu.Unlock()
-	m.Lock()
-	return m.Unlock
+	return m
 }
 
 // spawnEnv is everything a spawn needs that is the same for every role: what
@@ -724,6 +798,10 @@ func (o *Overmind) Reconcile(ctx context.Context, projectID string) error {
 		}
 		o.log.Info("role joined the team, starting it", "project", projectID, "role", name)
 	}
+	if err := o.syncSupervisor(s.ctx, s, env); err != nil {
+		o.log.Warn("could not sync the architect sidecar", "project", projectID, "err", err)
+	}
+
 	if len(failed) > 0 {
 		return fmt.Errorf("these roles could not be started: %s", strings.Join(failed, ", "))
 	}
@@ -805,6 +883,12 @@ func (o *Overmind) stop(ctx context.Context, projectID, reason string) error {
 	// watching any more.
 	for _, p := range s.snapshot() {
 		o.agents.Revoke(p.token)
+	}
+	s.mu.Lock()
+	sup := s.supervisor
+	s.mu.Unlock()
+	if sup != nil {
+		o.agents.Revoke(sup.token)
 	}
 	if err := o.db.EndSession(ctx, s.session.ID, reason); err != nil {
 		o.log.Warn("could not close the session record", "err", err)
@@ -974,7 +1058,11 @@ func (o *Overmind) keepMoving(ctx context.Context, projectID string, s *swarm) {
 				o.log.Info("returned unacknowledged work to the queue", "leases", n)
 			}
 			o.nudgeIdle(ctx, projectID, s)
+			o.nudgeSupervisor(ctx, projectID, s)
 			o.watchForSilence(projectID, s)
+			if err := o.syncSupervisorTick(ctx, projectID); err != nil {
+				o.log.Debug("syncing the architect sidecar", "err", err)
+			}
 		}
 	}
 }

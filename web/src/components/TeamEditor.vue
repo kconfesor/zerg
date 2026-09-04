@@ -138,7 +138,9 @@ const libraryById = computed(() => new Map(props.library.map((role) => [role.id,
  * offering it here as something to add to a team would be offering a lane it
  * never appears in and a queue it cannot claim from.
  */
-const pipeline = computed(() => props.library.filter((r) => r.purpose !== 'runner'))
+const pipeline = computed(() =>
+  props.library.filter((r) => r.purpose !== 'runner' && r.purpose !== 'supervisor'),
+)
 const selectedRoleIds = computed(
   () => new Set(activePreset.value?.roles.map((role) => role.templateId) ?? []),
 )

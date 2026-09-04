@@ -130,6 +130,24 @@ func (c *Client) Remember(ctx context.Context, note string) error {
 	return err
 }
 
+// Approve records a supervisor decision to release a held handoff.
+func (c *Client) Approve(ctx context.Context, id, note, commit string) error {
+	_, err := c.call(ctx, "/agent/approve", map[string]string{"id": id, "note": note, "commit": commit}, nil)
+	return err
+}
+
+// Reject records a supervisor decision to return a held handoff.
+func (c *Client) Reject(ctx context.Context, id, note, commit string) error {
+	_, err := c.call(ctx, "/agent/reject", map[string]string{"id": id, "note": note, "commit": commit}, nil)
+	return err
+}
+
+// Answer records a supervisor's answer to a pipeline question.
+func (c *Client) Answer(ctx context.Context, id, answer, commit string) error {
+	_, err := c.call(ctx, "/agent/answer", map[string]string{"id": id, "answer": answer, "commit": commit}, nil)
+	return err
+}
+
 func (c *Client) call(ctx context.Context, path string, body, out any) (int, error) {
 	payload, err := json.Marshal(body)
 	if err != nil {

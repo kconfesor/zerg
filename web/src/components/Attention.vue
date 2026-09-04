@@ -290,6 +290,25 @@ function nextUnread(id: string) {
  * questions, and a shortcut that fires while somebody is typing "just checking"
  * would jump the page twice and eat the letters.
  */
+/**
+ * Whether to say an architect is deciding this.
+ *
+ * The card's `supervised` flag is a request for a sidecar, not a report that
+ * one exists. Drawn from the flag alone, the badge said a decision was being
+ * made while the daemon was logging, to nobody, that there is no supervisor
+ * role in the library or that its harness would not start. An operator saw a
+ * card that needed no action and it never got one.
+ */
+const architectDeciding = computed(() => props.attention?.supervisor?.live === true)
+
+/**
+ * Why nothing is deciding a card that asked for an architect, when the reason
+ * is one the operator would not otherwise learn: a missing role, a harness
+ * that would not start. A stopped project reports nothing here, because they
+ * stopped it and the badge already says the decisions are theirs.
+ */
+const architectProblem = computed(() => props.attention?.supervisor?.error ?? '')
+
 function onKey(e: KeyboardEvent) {
   if (e.metaKey || e.ctrlKey || e.altKey) return
   const el = e.target as HTMLElement | null
@@ -849,6 +868,19 @@ function empty(a: Attention | null): boolean {
 
 <template>
   <div v-if="props.attention" ref="root" class="flex flex-col gap-3">
+    <!-- A card asked for an architect and there is not one. Both causes are
+         things an operator fixes -- add a role with the supervisor purpose, or
+         fix the harness that would not start -- and both used to be a daemon
+         log line and nothing else. A title attribute is not good enough here:
+         approvals get read on a phone, where there is no hover. -->
+    <p
+      v-if="architectProblem"
+      class="border-l-2 border-l-[var(--status-warning)] bg-card p-2 text-[11px] leading-relaxed"
+    >
+      A card asked for an architect to decide it, and none is running:
+      {{ architectProblem }}. Those decisions are yours until it is.
+    </p>
+
     <!-- Nothing waiting should feel like calm, not like a broken panel. -->
     <div
       v-if="empty(props.attention)"
@@ -867,6 +899,17 @@ function empty(a: Attention | null): boolean {
     >
       <div class="mb-2.5 flex flex-wrap items-center gap-2">
         <Badge>approval</Badge>
+        <Badge v-if="a.supervised && !a.terminal && architectDeciding" variant="secondary">
+          architect is deciding
+        </Badge>
+        <Badge
+          v-else-if="a.supervised && !a.terminal"
+          variant="secondary"
+          class="text-[var(--status-warning)]"
+          :title="architectProblem"
+        >
+          waiting for an architect
+        </Badge>
         <span class="text-xs font-semibold">{{ a.taskName || 'untitled' }}</span>
         <span class="text-muted-foreground text-[11px]">from {{ a.fromRole }}</span>
       </div>
@@ -1411,6 +1454,17 @@ function empty(a: Attention | null): boolean {
     >
       <div class="mb-2 flex flex-wrap items-center gap-2">
         <Badge variant="secondary">question</Badge>
+        <Badge v-if="c.supervised && c.role !== 'supervisor' && architectDeciding" variant="secondary">
+          architect is deciding
+        </Badge>
+        <Badge
+          v-else-if="c.supervised && c.role !== 'supervisor'"
+          variant="secondary"
+          class="text-[var(--status-warning)]"
+          :title="architectProblem"
+        >
+          waiting for an architect
+        </Badge>
         <span class="text-muted-foreground text-[11px]">{{ c.role }} asks</span>
       </div>
       <!-- Markdown, as an approval's note already is. An agent writes its

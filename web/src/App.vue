@@ -324,6 +324,8 @@ const taskDeploy = ref(false)
  */
 const taskSkip = ref<string[]>([])
 const skipping = ref(false)
+/** Architect sidecar on this card: it will decide plans and questions; you still land it. */
+const taskSupervised = ref(false)
 const composing = ref(false)
 
 /** The roles a card would visit, in order, given what is ticked. */
@@ -673,6 +675,7 @@ function openComposer() {
   taskDeploy.value = false
   taskSkip.value = []
   skipping.value = false
+  taskSupervised.value = false
   composing.value = true
 }
 
@@ -688,6 +691,7 @@ async function createTask() {
         taskBody.value,
         taskDeploy.value ? 'local' : '',
         taskSkip.value,
+        taskSupervised.value,
       )
       taskName.value = ''
       taskBody.value = ''
@@ -1329,6 +1333,7 @@ watch(current, () => (banner.value = null))
       :project="current"
       :skipped="openTaskSkipped"
       @close="openTask = null"
+      @updated="(t: Task) => { openTask = t; refresh() }"
     />
 
     <Dialog v-model:open="composing" @update:open="(v) => v && (dialogError = '')">
@@ -1415,6 +1420,20 @@ watch(current, () => (banner.value = null))
                 <p class="text-xs font-medium">Skip roles on this task</p>
                 <p class="text-muted-foreground mt-0.5 text-[11px]">
                   The pipeline stays as it is.
+                </p>
+              </div>
+            </div>
+
+            <div class="flex items-start gap-3 sm:col-span-2">
+              <Switch
+                v-model="taskSupervised"
+                aria-label="Architect supervises this card"
+                class="mt-0.5 shrink-0"
+              />
+              <div class="min-w-0">
+                <p class="text-xs font-medium">Architect supervises this card</p>
+                <p class="text-muted-foreground mt-0.5 text-[11px]">
+                  It will decide plans and questions. You still land the work.
                 </p>
               </div>
             </div>

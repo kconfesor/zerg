@@ -230,8 +230,9 @@ sentences makes agents spend output tokens on telemetry.
 
 ### 4.5 The built-in library
 
-Nine templates ship, covering every team shape worth presetting, as rows in a picker rather than
-as branches of the orchestrator you have to check out to change your team.
+Nine pipeline templates ship, covering every team shape worth presetting, plus two sidecars the
+daemon starts itself (runner, supervisor), as rows in a picker rather than as branches of the
+orchestrator you have to check out to change your team.
 
 | Template | Model | Receive | Gate | Does |
 |---|---|---|---|---|
@@ -241,6 +242,7 @@ as branches of the orchestrator you have to check out to change your team.
 | `debugger` | opus | task | none | reproduces a failure, finds the cause, fixes it behind a failing test |
 | `cleaner` | sonnet | batch | none | behavior-preserving cleanup, duplication, dead code |
 | `architect` | opus | batch | none | module boundaries, dependency direction, structural drift |
+| `supervisor` | opus | task | none | **purpose=supervisor**: architect sidecar for a supervised card; not a lane |
 | `hardener` | sonnet | batch | none | edge cases, error paths, mutation-style probing |
 | `security` | opus | batch | none | input handling, secrets, dependency and injection review |
 | `docs` | sonnet | batch | none | README, API docs, changelog |
@@ -405,7 +407,7 @@ decide routing; nydus does.
 
 ### 7.2 Agent-facing protocol
 
-The agent's whole world is four verbs against a unix socket. Same binary, different subcommand, so no
+The agent's whole world is a handful of verbs against a unix socket. Same binary, different subcommand, so no
 PATH-synced script directory, no `.sh`/`.bb` wrapper pairs, no cwd inference.
 
 ```
@@ -414,6 +416,7 @@ zerg done [--result f]   ack the lease
 zerg send --to <role> --commit HEAD --task <name>
 zerg ask  "<question>" [--option "<one answer>" ...]
                          raise a clarification to the operator
+zerg approve|reject|answer   supervisor sidecar only; never the land
 ```
 
 Identity arrives as `ZERG_SOCKET` and `ZERG_TOKEN`, injected at spawn. The token is role-scoped and
@@ -537,10 +540,22 @@ zerg answers it in three pieces:
   continue it, and the flags differ in a way that is not a detail: claude needs `--resume <id>`,
   because `--session-id` is the flag that *creates* one and exits with "Session ID <uuid> is already
   in use" when given a session it has already written; pi's `--session-id` creates or continues and
-  serves both. The id is latched from the harness's own stream rather than remembered from what was
-  passed, because claude answers `--resume` on a session that is still live by forking to a new id,
-  and the fork is the conversation the work goes into. This is not only about daemon restarts: a
-  cerebrate respawns a crashed agent with backoff, and that respawn was cold too.
+  serves both. This is not only about daemon restarts: a cerebrate respawns a crashed agent with
+  backoff, and that respawn was cold too.
+
+  **Which end names the conversation is per harness, because the harnesses answer differently.**
+  claude's id is latched from its own stream rather than remembered from what was passed: it answers
+  `--resume` on a session that is still live by forking to a new id, and the fork is the conversation
+  the work goes into. pi is named by zerg, because pi will not say. Its `session` frame is the first
+  line of the session *file*, not of stdout, and in `--mode rpc` it announces nothing at all before
+  its first turn, so the latch never fired: no pi role ever recorded a conversation, and every one of
+  them started cold on every restart, silently, with the conversation on disk the whole time. One
+  role had 133 turns, 3.7M tokens, 513 recorded events and not a single `session` frame. zerg now
+  generates a version 7 UUID and passes `--session-id` on every spawn, cold or resumed. Verified
+  against pi 0.84.4 with two live turns: the first was told a word and pi reported "No project
+  session found with id ...; creating a new session with that id", and a second process given the
+  same id answered with that word and printed no warning. The latch is still read, so a pi that
+  starts announcing is believed rather than argued with.
 
   A session is stored with a fingerprint of the harness, model, thinking level and composed system
   prompt, and is not resumed when that changes. §11.3 restarts a role on a configuration change
@@ -566,6 +581,19 @@ zerg answers it in three pieces:
   It is deliberately not fatal: a cold spawn recovers, and stopping the role would be a worse answer
   than losing one conversation. Forgetting is per role, because dropping the project's continuity to
   fix one agent's would cost every other agent its memory.
+
+  **Nothing is stored until the agent has answered, because the id is named before the conversation
+  exists.** Dropping a refused resume treats the symptom, and the cause outlived it: an id was put on
+  record on the strength of the harness announcing one. A role that is never given work, one the
+  cards keep skipping, boots, reports ready and waits, so claude writes no transcript and the stored
+  id names nothing. The next start resumes it, is refused, exits 1, and the replacement records
+  another empty id, which is a failure that regenerates its own cause. Seen on a live daemon across
+  four restarts, each with a different dead id, one wasted spawn and eleven seconds per restart, for
+  a role that had never run a turn. Measured directly: an agent started with no work announces
+  `session_id` in its first frame and creates no transcript for it. The cerebrate now records only
+  after the stream carries content -- a message, a tool call, a finished turn -- and not after
+  `ready`, usage or an error, which a harness emits whether or not a conversation happened. A role
+  that said nothing starts cold, which is what a refused resume left it with one spawn later anyway.
 
 `zerg up --detach` re-execs into a session of its own with `setsid`, so closing the terminal leaves
 the daemon and its agents alone, and writes its output to `zerg.log` beside the database. The daemon
@@ -718,6 +746,7 @@ tasks       (id, project_id, session_id, name, body, lane, state,
              rework_count,        -- laps backward through the pipeline
              deploy,              -- where this card's work is put when it lands; empty for most
              skip,                -- role template ids this card does not visit (§7.2); empty for most
+             supervised,          -- architect sidecar will run this card; the land still waits (§9.1)
              hidden)              -- put away by a person; §9.3
 
 messages    (id, project_id, task_id, from_role, kind, priority,
@@ -726,9 +755,12 @@ routes      (message_id, to_role, state, enqueued_at, delivered_at)  -- idempote
 leases      (id, project_id, role, granted_at, expires_at, acked_at, expired_at)
 lease_items (lease_id, message_id, to_role)   -- a batch lease covers many messages
 events      (id, project_id, task_id, role, kind, ts, text, tool, data, fatal)  -- append-only
-approvals   (id, project_id, message_id, state, note, created_at, decided_at)
+approvals   (id, project_id, message_id, state, note, created_at, decided_at, decided_by,
+             evidence_sha,       -- the commit the decider wrote the rationale into
+             decided_model, decided_harness)   -- what took it, not the role it is filed under
 clarifications (id, project_id, task_id, role, question, answer, state,
-                created_at, answered_at)
+                created_at, answered_at, answered_by, evidence_sha,
+                answered_model, answered_harness)
 
 -- one row per model turn, not per run: this is what the cost dashboard reads
 usage_turns (id, project_id, task_id, role, ts,
@@ -772,6 +804,60 @@ different views. A handoff shows what the sender just committed. A terminal comp
 `git diff base...sha`, everything that would land across every role and every lap, since
 approving the last commit on the strength of its own diff is approving a merge by its closing
 paragraph.
+
+**A supervised card holds the terminal send even if the finisher's gate is `none`.** Default is
+coder then reviewer, both ungated, so a finished card merges unattended. The flag is on the card
+(`tasks.supervised`), not on the finishing role, because skipping that role would otherwise move
+the policy with it. Mid-pipeline gates and questions are decided by the supervisor sidecar
+(`purpose=supervisor`, not the pipeline architect); the land stays a person.
+`approvals.decided_by` records who actually clicked. A pipeline token never gains `decide`:
+empty `Can` means every *pipeline* verb, and approve is explicit.
+
+**An approval id is a name, not an authority.** It is a string handed to an agent in an envelope,
+and holding one says nothing about being allowed to act on it. The first cut looked the row up by
+id alone, which meant a leaked id decided another project's card, and a sidecar that was handed a
+decision went on making it after the operator switched supervision off, because the check ran
+where the work was *offered* rather than where it was *written*. Every agent decision now carries
+a `store.DecisionScope`, naming the project it authenticated as and the role writing it, and the
+write re-checks: the row is in that project, the card is still supervised, and the question is not one
+the decider asked itself. The operator's own path is unchanged; the cockpit is already scoped by
+its route, and this is a limit on the sidecar rather than a lock on the gate.
+
+**A decision's evidence is a sha, resolved in the decider's own worktree.** The sidecar's prompt
+says `--commit HEAD`, and `HEAD` is not a commit: it names the tip of whichever tree resolves it.
+Stored literally it is the exact failure in §6.1's table, one layer over: a link to the reasoning
+that points at a different commit in every repository that reads it. `Nydus.resolveEvidence` runs
+the same resolution `Send` does, before the transaction opens, and a ref that names nothing is a
+400 rather than a stored string. The commit itself stays on the sidecar's worktree branch and is
+*not* merged into the routed work: it is a design note, not part of what the card ships, and
+folding it in would put unreviewed content into the land. It stays reachable because
+`PruneMergedBranches` uses `-d`, which refuses a branch carrying anything not already in the base;
+the trail carries `evidence_sha`, which is how a reader gets to it.
+
+**A decision records what took it, not only which role it is filed under.** `decided_by` says
+`supervisor`, and a role's model is edited in the library at any time, so today's configuration is
+not evidence about an approval taken last week. Whether an opus approved a card or something cheap
+did is the first question an operator has when they disagree with one. `decided_model` and
+`decided_harness` are written at the moment the decision is, from what the deciding *process* is
+running: `Overmind.RunningRole` reads it off the cerebrate rather than off the role template, and
+the agent socket asks for it through a function the daemon supplies, since the overmind imports the
+socket and cannot be imported back. Joining an approval to whichever `usage_turns` row sits nearest
+its `decided_at` was the alternative and is the §6.1 mistake again, a value naming an outcome
+derived from a proxy for it: a guess dressed as a record is worse than an empty column, because
+nothing afterwards can tell the two apart. Empty for an operator, who is not a model, and empty for
+every decision taken before schema 38, which is not backfilled for the same reason.
+
+**Whether a sidecar exists is not whether one was asked for.** `tasks.supervised` is a request.
+`Overmind.SupervisorState` is the outcome, being wanted, live, and the reason when those disagree,
+and the badge reads that. A missing supervisor role and a harness that will not start are both things
+an operator fixes, and both used to be a daemon log line and nothing else, under a board saying an
+architect was deciding. The pointer to the sidecar process is cleared by the goroutine that runs
+it, so it means "a process is running" rather than "a process was started once"; a fatal exit is
+reported and *not* respawned, because `cerebrate` stops on `StateFailed` deliberately and a tick
+starting a replacement every two seconds would undo that from outside. A change to the role or its
+harness is a new thing to try, and clears the failure. The harness case matters because `Refresh`
+re-reads the prompt and the flags but cannot swap the adapter the process was built with, which is
+what `Reconcile` has done for pipeline roles since the team editor shipped.
 
 ### 9.2 Where finished work goes
 

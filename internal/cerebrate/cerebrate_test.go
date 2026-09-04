@@ -663,8 +663,11 @@ func (a *latchingAdapter) Parse(line []byte) ([]adapter.Event, error) {
 // for the next spawn's first line and that leftover then dropped the new id.
 func TestARefusedResumeIsForgottenInTheSpawnThatSawIt(t *testing.T) {
 	cont := &memContinuity{session: "dead-id"}
+	// Announced, then answered. A harness names a conversation before it has
+	// written one, and only the answer makes it resumable, so a double that
+	// stops at the announcement is a role that was never given work.
 	a := &latchingAdapter{scriptedAdapter: scriptedAdapter{
-		script: `printf 'session:fresh\n'; sleep 30`,
+		script: `printf 'session:fresh\n'; printf 'message:ok\n'; sleep 30`,
 	}}
 	c, _ := newCerebrate(t, a, func(cfg *Config) { cfg.Continuity = cont })
 
@@ -746,3 +749,54 @@ type nopWriteCloser struct{}
 
 func (nopWriteCloser) Write(p []byte) (int, error) { return len(p), nil }
 func (nopWriteCloser) Close() error                { return nil }
+
+// A session is recorded once the agent has answered, and not before.
+//
+// The id is the harness's answer to "what am I writing to", and on claude the
+// transcript is written when there is something to write. A role that is never
+// given work boots, reports ready and waits, so the id it announced named
+// nothing; recording it made the next start resume into "No conversation found
+// with session ID", exit 1, and record another empty id, which is a failure
+// that regenerates its own cause on every restart.
+func TestASessionIsRecordedOnceTheAgentHasAnswered(t *testing.T) {
+	// The silent case is asserted on ready rather than after a wait, and that
+	// is an ordering rather than a hope: ready is produced by the same line
+	// that latches the id, and the recorder runs on that line's events. By the
+	// time the state is ready, the announcement has had its chance.
+	t.Run("announced and silent", func(t *testing.T) {
+		cont := &memContinuity{}
+		a := &latchingAdapter{scriptedAdapter: scriptedAdapter{
+			script: `printf 'session:quiet\n'; sleep 30`,
+		}}
+		c, _ := newCerebrate(t, a, func(cfg *Config) { cfg.Continuity = cont })
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go c.Run(ctx)
+
+		waitFor(t, func() bool { return c.State() == StateReady }, 5*time.Second,
+			"the agent never reported ready")
+
+		if _, recorded, _ := cont.snapshot(); len(recorded) != 0 {
+			t.Errorf("recorded %v for an agent that has said nothing; that id names "+
+				"a conversation the harness has not written", recorded)
+		}
+	})
+
+	t.Run("announced and answered", func(t *testing.T) {
+		cont := &memContinuity{}
+		a := &latchingAdapter{scriptedAdapter: scriptedAdapter{
+			script: `printf 'session:live\n'; printf 'message:working on it\n'; sleep 30`,
+		}}
+		c, _ := newCerebrate(t, a, func(cfg *Config) { cfg.Continuity = cont })
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go c.Run(ctx)
+
+		waitFor(t, func() bool {
+			_, recorded, _ := cont.snapshot()
+			return len(recorded) == 1 && recorded[0] == "live"
+		}, 5*time.Second, "an agent that answered recorded nothing to come back to")
+	})
+}

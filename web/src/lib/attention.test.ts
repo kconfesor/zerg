@@ -9,6 +9,7 @@ const looping = (id: string) => ({ id }) as Task
 const queue = (over: Partial<Attention> = {}): Attention => ({
   approvals: [],
   clarifications: [],
+  supervisor: { wanted: false, live: false },
   rework: { threshold: 3, tasks: [] },
   ...over,
 })

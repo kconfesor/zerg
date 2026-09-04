@@ -88,19 +88,18 @@ func TestListRolesReturnsTheSeededLibrary(t *testing.T) {
 	var roles []store.RoleTemplate
 	decodeInto(t, rec, &roles)
 
-	// Nine pipeline roles and the runner, which is a role like any other so
-	// that its harness, model, thinking and prompt are editable here rather
-	// than being the one agent nobody can configure. It is not in the nine
-	// because it is never part of a team.
-	if len(roles) != 10 {
-		t.Fatalf("library has %d roles, want nine built-ins and the runner", len(roles))
+	// Nine pipeline roles, the runner, and the supervisor sidecar. The last
+	// two are roles like any other so their harness, model, thinking and
+	// prompt are editable here; they are not in a team.
+	if len(roles) != 11 {
+		t.Fatalf("library has %d roles, want nine built-ins, the runner and the supervisor", len(roles))
 	}
 	names := map[string]bool{}
 	for _, r := range roles {
 		names[r.Name] = true
 	}
 	for _, want := range []string{"planner", "coder", "reviewer", "debugger", "cleaner",
-		"architect", "hardener", "security", "docs", "runner"} {
+		"architect", "hardener", "security", "docs", "runner", "supervisor"} {
 		if !names[want] {
 			t.Errorf("built-in %q is missing from the library", want)
 		}
@@ -1063,6 +1062,46 @@ func TestPostingATaskCarriesItsSkippedRoles(t *testing.T) {
 	// lane -- the point being that skip is stored, not merely echoed.
 	if board[0].Lane == "reviewer" {
 		t.Error("the card opened in the lane it was told to skip")
+	}
+}
+
+// Supervised is a property of the card, stored when it is written, and it
+// comes back on the board — not only on the create response.
+func TestPostingATaskCarriesSupervised(t *testing.T) {
+	h, _, p := newRoutingServer(t)
+
+	rec := do(t, h, "POST", "/api/projects/"+p.ID+"/tasks", map[string]any{
+		"name": "Calculator", "body": "do it", "supervised": true,
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201: %s", rec.Code, rec.Body.String())
+	}
+	var created store.Task
+	decodeInto(t, rec, &created)
+	if !created.Supervised {
+		t.Error("supervised = false in the response")
+	}
+
+	rec = do(t, h, "GET", "/api/projects/"+p.ID+"/tasks", nil)
+	var board []store.Task
+	decodeInto(t, rec, &board)
+	if len(board) != 1 {
+		t.Fatalf("board has %d cards, want 1", len(board))
+	}
+	if !board[0].Supervised {
+		t.Error("supervised = false on the board")
+	}
+
+	rec = do(t, h, "PUT", "/api/tasks/"+created.ID+"/supervised", map[string]any{
+		"supervised": false,
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d taking supervision off, want 200: %s", rec.Code, rec.Body.String())
+	}
+	var updated store.Task
+	decodeInto(t, rec, &updated)
+	if updated.Supervised {
+		t.Error("the card is still supervised after it was handed back")
 	}
 }
 

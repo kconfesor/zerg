@@ -93,6 +93,12 @@ func run(args []string) error {
 		return runRemember(args[1:])
 	case "ask":
 		return runAsk(args[1:])
+	case "approve":
+		return runApprove(args[1:])
+	case "reject":
+		return runReject(args[1:])
+	case "answer":
+		return runAnswer(args[1:])
 	case "version", "--version", "-v":
 		printVersion()
 		return nil
@@ -174,6 +180,10 @@ Run by agents, not by you:
   zerg ask "<question>" [--option "<one answer>" ...]
                                       ask the operator; --option, repeated,
                                       offers answers to choose from
+  zerg approve --id <id> --note "<why>" [--commit HEAD]
+  zerg reject  --id <id> --note "<what to change>" [--commit HEAD]
+  zerg answer  --id <id> "<the answer>" [--commit HEAD]
+                                      supervisor sidecar only; the land stays human
   zerg artifact add <path>            keep a file for a person to look at
   zerg artifact serve --port <n>      register a service you started
   zerg remember "<what you learned>"  how this project runs, for next time
@@ -403,6 +413,11 @@ func runUp(args []string) error {
 		Preflight: preflight.NewRunner(db, registry),
 		Bus:       bus, Agents: agents, Log: log, StateDir: stateDir,
 	})
+	// What each role's process is running, so a decision taken over the socket
+	// records what took it. Wired after the fact because the socket is built
+	// first: the overmind needs it to mint tokens.
+	agents.WatchRunning(over.RunningRole)
+
 	// Agents are children of this process, so leaving them running after the
 	// daemon exits would orphan work nobody is supervising.
 	defer over.StopAll(context.Background(), "the daemon shut down")

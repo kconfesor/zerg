@@ -13,6 +13,7 @@ import { latest } from '@/lib/latest'
 import { renderMarkdown } from '@/lib/markdown'
 import { duration, taskState } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
+import { Switch } from '@/components/ui/switch'
 import TaskFlow from '@/components/TaskFlow.vue'
 import Artifacts from '@/components/Artifacts.vue'
 import RunPanel from '@/components/RunPanel.vue'
@@ -37,7 +38,7 @@ const props = defineProps<{
    *  renaming a role cannot silently un-skip it. */
   skipped?: string[]
 }>()
-const emit = defineEmits<{ close: [] }>()
+const emit = defineEmits<{ close: []; updated: [task: Task] }>()
 
 const detail = ref<TaskDetail | null>(null)
 const failed = ref('')
@@ -79,6 +80,17 @@ watch(
   { immediate: true },
 )
 
+async function setSupervised(on: boolean) {
+  const t = props.task
+  if (!t) return
+  failed.value = ''
+  try {
+    emit('updated', await api.setTaskSupervised(t.id, on))
+  } catch (e) {
+    failed.value = e instanceof Error ? e.message : String(e)
+  }
+}
+
 function money(n: number): string {
   return n >= 1 ? `$${n.toFixed(2)}` : `$${n.toFixed(4)}`
 }
@@ -117,6 +129,21 @@ function tokensOf(u: TaskDetail['usage']): number {
                diagram below reads as a card that lost a role somewhere. -->
           <Badge v-if="skipped?.length" variant="secondary">
             skipped {{ skipped.join(', ') }}
+          </Badge>
+          <label
+            v-if="task && task.state !== 'done' && task.state !== 'rejected'"
+            class="text-muted-foreground flex items-center gap-1.5"
+          >
+            <Switch
+              :model-value="!!task.supervised"
+              aria-label="Architect supervises this card"
+              class="scale-90"
+              @update:model-value="setSupervised"
+            />
+            Architect supervises
+          </label>
+          <Badge v-else-if="task?.supervised" variant="secondary">
+            architect supervised
           </Badge>
           <span v-if="task?.activeMs" class="text-muted-foreground">
             {{ duration(task.activeMs) }} of agent time

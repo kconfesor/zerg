@@ -9,8 +9,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -30,6 +32,9 @@ import (
 type scriptedHarness struct {
 	script func(spec adapter.Spec) string
 	checks []adapter.Check
+	// harnessName overrides "scripted", for a test that needs two registered
+	// harnesses to move a role between them.
+	harnessName string
 
 	mu       sync.Mutex
 	prompts  []string
@@ -37,7 +42,13 @@ type scriptedHarness struct {
 	turnsGot int
 }
 
-func (h *scriptedHarness) Name() string            { return "scripted" }
+func (h *scriptedHarness) Name() string {
+	if h.harnessName != "" {
+		return h.harnessName
+	}
+	return "scripted"
+}
+
 func (h *scriptedHarness) Checks() []adapter.Check { return h.checks }
 func (h *scriptedHarness) Capabilities() adapter.Caps {
 	return adapter.Caps{StructuredOutput: true, StructuredInput: true}
@@ -631,9 +642,30 @@ func TestReconcileOnAStoppedProjectDoesNothing(t *testing.T) {
 // straight afterwards put a second agent into a worktree the first had not left.
 func TestStopWaitsForAgentsToExit(t *testing.T) {
 	ctx := context.Background()
-	marker := filepath.Join(t.TempDir(), "exited")
+	// Each agent writes its own pid as it starts; when Stop returns, none of
+	// those processes may still exist.
+	//
+	// This used to be inferred from shell traps, and that premise does not
+	// hold: bash 3.2 waiting on `sleep` and signalled through its process
+	// group may run a TERM handler, an EXIT handler, both, or neither, so the
+	// mark count measured the shell rather than the daemon. Under the race
+	// detector it failed 19 runs in 20 against a daemon doing exactly what
+	// this test says it should. Whether a pid is still alive is a fact the
+	// kernel keeps, and it is also the thing that actually went wrong: a
+	// second agent entered a worktree the first had not left.
+	// The agent ignores SIGTERM, so "still exiting" is a state that lasts long
+	// enough to observe: cerebrate's WaitDelay SIGKILLs it after its shutdown
+	// grace, and a Stop that returned early would return inside that window.
+	// An agent that dies on the first signal is gone in microseconds, and a
+	// Stop that waited for nothing would pass.
+	//
+	// `trap "" TERM` rather than a handler: ignoring a signal is set once, at
+	// registration, so it does not depend on when or whether the shell gets
+	// around to dispatching a trap.
+	pids := filepath.Join(t.TempDir(), "pids")
 	h := newHarness(t, &scriptedHarness{script: func(adapter.Spec) string {
-		return `trap 'printf x >> ` + marker + `' EXIT TERM
+		return `trap '' TERM
+printf '%d\n' $$ >> ` + pids + `
 printf 'ready\n'
 sleep 30`
 	}})
@@ -641,21 +673,44 @@ sleep 30`
 	if err := h.over.Start(ctx, h.project.ID); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	waitFor(t, func() bool { return len(h.live(t)) == 2 }, 15*time.Second,
-		"the swarm never came up")
+	// Both processes running, not both roleProcs registered. The map is
+	// written at spawn and the shell runs a moment later, so waiting on the
+	// map let Stop arrive before the second agent had started: there was
+	// nothing to wait for, and the test passed for the wrong reason.
+	waitFor(t, func() bool { return len(recordedPids(pids)) == 2 }, 15*time.Second,
+		"both agents never started")
 
 	if err := h.over.Stop(ctx, h.project.ID, "test"); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
 
 	// Read immediately: the point is that Stop has already waited.
-	b, err := os.ReadFile(marker)
+	spawned := recordedPids(pids)
+	if len(spawned) != 2 {
+		t.Fatalf("%d agent(s) recorded a pid, want 2", len(spawned))
+	}
+	for _, field := range spawned {
+		pid, err := strconv.Atoi(field)
+		if err != nil {
+			t.Fatalf("an agent wrote %q where a pid was expected: %v", field, err)
+		}
+		// Signal 0 checks for existence without delivering anything. Every
+		// agent is reaped by cerebrate's Wait before Run returns, so a live
+		// pid here is a process Stop did not wait for rather than a zombie.
+		if err := syscall.Kill(pid, 0); err == nil {
+			t.Errorf("agent %d was still running when Stop returned", pid)
+		}
+	}
+}
+
+// recordedPids is every agent that has reached the point of writing its own
+// pid. A missing file is none of them yet, which is what the wait is for.
+func recordedPids(path string) []string {
+	b, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("no agent recorded its exit before Stop returned: %v", err)
+		return nil
 	}
-	if len(b) != 2 {
-		t.Errorf("%d of 2 agents had exited when Stop returned", len(b))
-	}
+	return strings.Fields(string(b))
 }
 
 // live is the set of roles the swarm is actually supervising right now.
@@ -672,4 +727,280 @@ func (h *harness) live(t *testing.T) map[string]bool {
 		out[name] = true
 	}
 	return out
+}
+
+// ── the architect sidecar ─────────────────────────────────────────────────
+
+// A supervised card summons the sidecar, and what the cockpit reads is whether
+// a process is actually running.
+//
+// The first cut used the pointer as liveness and never cleared it, so a sidecar
+// that had stopped read as one that was working: no replacement, nothing
+// reported, and a card waiting on a decider that was gone. The badge was drawn
+// from the card's request rather than from this, which is the same mistake one
+// layer up.
+func TestTheArchitectsStateIsWhetherAProcessIsRunning(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t, &scriptedHarness{script: idleAgent})
+
+	if err := h.over.Start(ctx, h.project.ID); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if st := h.over.SupervisorState(ctx, h.project.ID); st.Wanted || st.Live {
+		t.Fatalf("state = %+v with no supervised card, want nothing wanted", st)
+	}
+
+	task, err := h.nyd.NewTaskWith(ctx, nydus.NewTaskOpts{
+		ProjectID: h.project.ID, Name: "Spec", Body: "write it", Supervised: true,
+	})
+	if err != nil {
+		t.Fatalf("NewTaskWith: %v", err)
+	}
+	if err := h.over.SyncSupervisor(ctx, h.project.ID); err != nil {
+		t.Fatalf("SyncSupervisor: %v", err)
+	}
+	st := h.over.SupervisorState(ctx, h.project.ID)
+	if !st.Wanted || !st.Live || st.Role != "supervisor" || st.Error != "" {
+		t.Fatalf("state = %+v, want a live supervisor", st)
+	}
+
+	// The process ends on its own. The pointer has to go with it, or the next
+	// sync sees a live sidecar that is not there.
+	s := h.swarm(t)
+	s.mu.Lock()
+	p := s.supervisor
+	s.mu.Unlock()
+	p.cancel()
+	waitFor(t, func() bool {
+		return !h.over.SupervisorState(ctx, h.project.ID).Live
+	}, 5*time.Second, "the architect's pointer outlived its process")
+
+	// A cancelled sidecar is not a failure, so the next sync starts a
+	// replacement rather than reporting one.
+	if err := h.over.SyncSupervisor(ctx, h.project.ID); err != nil {
+		t.Fatalf("SyncSupervisor after the process ended: %v", err)
+	}
+	if st := h.over.SupervisorState(ctx, h.project.ID); !st.Live {
+		t.Errorf("state = %+v, want a replacement after the process ended", st)
+	}
+
+	// Finishing the card retires it.
+	if err := h.db.SetTaskSupervised(ctx, task.ID, false); err != nil {
+		t.Fatalf("SetTaskSupervised: %v", err)
+	}
+	if err := h.over.SyncSupervisor(ctx, h.project.ID); err != nil {
+		t.Fatalf("SyncSupervisor: %v", err)
+	}
+	if st := h.over.SupervisorState(ctx, h.project.ID); st.Wanted || st.Live {
+		t.Errorf("state = %+v, want the architect retired", st)
+	}
+}
+
+// A card that asks for an architect the library cannot provide says so, rather
+// than looking like a card an architect is deciding.
+func TestASupervisedCardWithNoSupervisorRoleReportsItself(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t, &scriptedHarness{script: idleAgent})
+
+	// The operator deleted the role, or never had one.
+	tpl, err := h.db.RoleFor(ctx, store.PurposeSupervisor)
+	if err != nil {
+		t.Fatalf("RoleFor: %v", err)
+	}
+	if err := h.db.DeleteTemplate(ctx, tpl.ID); err != nil {
+		t.Fatalf("DeleteTemplate: %v", err)
+	}
+	if err := h.over.Start(ctx, h.project.ID); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if _, err := h.nyd.NewTaskWith(ctx, nydus.NewTaskOpts{
+		ProjectID: h.project.ID, Name: "Spec", Body: "write it", Supervised: true,
+	}); err != nil {
+		t.Fatalf("NewTaskWith: %v", err)
+	}
+	if err := h.over.SyncSupervisor(ctx, h.project.ID); err != nil {
+		t.Fatalf("SyncSupervisor: %v", err)
+	}
+
+	st := h.over.SupervisorState(ctx, h.project.ID)
+	if !st.Wanted {
+		t.Fatalf("state = %+v, want the card's request to be visible", st)
+	}
+	if st.Live {
+		t.Fatalf("state = %+v, want no process", st)
+	}
+	if !strings.Contains(st.Error, "supervisor purpose") {
+		t.Errorf("error = %q, want it to name what the operator has to add", st.Error)
+	}
+}
+
+// A harness change replaces the process rather than refreshing it.
+//
+// Refresh re-reads the prompt and the flags, and cannot swap the adapter the
+// process was built with: the sidecar went on running the old harness with the
+// new one's arguments. Reconcile has handled this for pipeline roles since the
+// team editor shipped; the sidecar is not on the team and was left out.
+func TestChangingTheArchitectsHarnessReplacesTheProcess(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t, &scriptedHarness{script: idleAgent})
+
+	other := &scriptedHarness{script: idleAgent, harnessName: "scripted-two"}
+	h.over.registry.Register(other)
+
+	if err := h.over.Start(ctx, h.project.ID); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if _, err := h.nyd.NewTaskWith(ctx, nydus.NewTaskOpts{
+		ProjectID: h.project.ID, Name: "Spec", Body: "write it", Supervised: true,
+	}); err != nil {
+		t.Fatalf("NewTaskWith: %v", err)
+	}
+	if err := h.over.SyncSupervisor(ctx, h.project.ID); err != nil {
+		t.Fatalf("SyncSupervisor: %v", err)
+	}
+	before := h.swarm(t)
+	before.mu.Lock()
+	first := before.supervisor
+	before.mu.Unlock()
+	if first == nil || first.harness != "scripted" {
+		t.Fatalf("supervisor harness = %+v, want scripted", first)
+	}
+
+	tpl, err := h.db.RoleFor(ctx, store.PurposeSupervisor)
+	if err != nil {
+		t.Fatalf("RoleFor: %v", err)
+	}
+	tpl.Harness = "scripted-two"
+	if err := h.db.UpdateTemplate(ctx, tpl); err != nil {
+		t.Fatalf("UpdateTemplate: %v", err)
+	}
+	if err := h.over.SyncSupervisor(ctx, h.project.ID); err != nil {
+		t.Fatalf("SyncSupervisor after the harness change: %v", err)
+	}
+
+	s := h.swarm(t)
+	s.mu.Lock()
+	second := s.supervisor
+	s.mu.Unlock()
+	if second == nil {
+		t.Fatal("the architect was stopped and not replaced")
+	}
+	if second == first {
+		t.Fatal("the same process is still running after the harness changed")
+	}
+	if second.harness != "scripted-two" {
+		t.Errorf("harness = %q, want scripted-two", second.harness)
+	}
+	waitFor(t, func() bool { return other.spawnCount() > 0 },
+		5*time.Second, "the new harness was never asked to spawn anything")
+}
+
+// swarm reaches the running swarm, for the assertions that are about the
+// process table rather than about what the API reports.
+func (h *harness) swarm(t *testing.T) *swarm {
+	t.Helper()
+	h.over.mu.Lock()
+	defer h.over.mu.Unlock()
+	s, ok := h.over.running[h.project.ID]
+	if !ok {
+		t.Fatal("the project is not running")
+	}
+	return s
+}
+
+// The swarm's own tick never waits for the lifecycle lock.
+//
+// keepMoving is counted in the swarm's `live` group, and Stop waits on that
+// group while holding that lock. A tick that blocked acquiring it could not
+// finish, so Stop could not either, and shutdown fell through to the
+// ten-second grace timeout whenever the two overlapped -- which is every stop
+// that lands mid-tick. Skipping one tick's housekeeping costs two seconds; the
+// next tick does it.
+func TestTheTickDoesNotWaitForTheLifecycleLock(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t, &scriptedHarness{script: idleAgent})
+
+	if err := h.over.Start(ctx, h.project.ID); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if _, err := h.nyd.NewTaskWith(ctx, nydus.NewTaskOpts{
+		ProjectID: h.project.ID, Name: "Spec", Body: "write it", Supervised: true,
+	}); err != nil {
+		t.Fatalf("NewTaskWith: %v", err)
+	}
+
+	// Stop is holding it while it waits for the processes; this stands in for
+	// that, without the race of trying to catch the real one mid-wait.
+	unlock := h.over.lock(h.project.ID)
+	defer unlock()
+
+	done := make(chan error, 1)
+	go func() { done <- h.over.syncSupervisorTick(ctx, h.project.ID) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("the tick returned %v, want it to skip quietly", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the tick blocked on the lifecycle lock, which is what makes shutdown wait out its grace period")
+	}
+}
+
+// What a role is running is read off the process, not off the library.
+//
+// A decision records the model that took it, and the two answers part company
+// the moment somebody edits a role: reading it back off current configuration
+// would quietly rewrite what an old approval was made by. The sidecar is
+// included because it is the one whose decisions this is mostly about, and it
+// is deliberately not in the roles map.
+func TestRunningRoleReportsTheProcessRatherThanTheLibrary(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t, &scriptedHarness{script: idleAgent})
+
+	if err := h.over.Start(ctx, h.project.ID); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if _, err := h.nyd.NewTaskWith(ctx, nydus.NewTaskOpts{
+		ProjectID: h.project.ID, Name: "Spec", Body: "write it", Supervised: true,
+	}); err != nil {
+		t.Fatalf("NewTaskWith: %v", err)
+	}
+	if err := h.over.SyncSupervisor(ctx, h.project.ID); err != nil {
+		t.Fatalf("SyncSupervisor: %v", err)
+	}
+
+	for _, role := range []string{"coder", "supervisor"} {
+		harness, model, ok := h.over.RunningRole(h.project.ID, role)
+		if !ok {
+			t.Errorf("%s is running and RunningRole did not report it", role)
+			continue
+		}
+		if harness != "scripted" || model == "" {
+			t.Errorf("%s reported %s/%q, want the scripted harness and a model", role, harness, model)
+		}
+	}
+
+	// The library moves; the process does not. A decision taken now must
+	// record what is running now.
+	tpl, err := h.db.RoleFor(ctx, store.PurposeSupervisor)
+	if err != nil {
+		t.Fatalf("RoleFor: %v", err)
+	}
+	was := tpl.Model
+	tpl.Model = "some-other-model"
+	if err := h.db.UpdateTemplate(ctx, tpl); err != nil {
+		t.Fatalf("UpdateTemplate: %v", err)
+	}
+	if _, model, _ := h.over.RunningRole(h.project.ID, "supervisor"); model != was {
+		t.Errorf("model = %q after a library edit, want the %q the process is still running",
+			model, was)
+	}
+
+	// A role nobody is running has no answer, rather than a plausible one.
+	if _, _, ok := h.over.RunningRole(h.project.ID, "nobody"); ok {
+		t.Error("RunningRole answered for a role that is not running")
+	}
+	if _, _, ok := h.over.RunningRole("no-such-project", "coder"); ok {
+		t.Error("RunningRole answered for a project that is not running")
+	}
 }

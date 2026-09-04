@@ -27,10 +27,11 @@ export interface RoleTemplate {
    *  finishing this particular pipeline. */
   finisher: boolean
   /**
-   * What the role is for: 'pipeline' (claims work, has a lane) or 'runner'
-   * (started by the daemon to show you the app, never on the board).
+   * What the role is for: 'pipeline' (claims work, has a lane), 'runner'
+   * (started by the daemon to show you the app), or 'supervisor' (architect
+   * sidecar for a supervised card). Sidecars are never on the board.
    */
-  purpose?: 'pipeline' | 'runner'
+  purpose?: 'pipeline' | 'runner' | 'supervisor'
   builtin: boolean
 }
 
@@ -236,6 +237,10 @@ export interface Task {
    *  is written and fixed afterwards. It changes where the work is routed, not
    *  the team: the pipeline is what it was for every other card. */
   skip?: string[]
+  /** An architect sidecar will decide this card's mid-pipeline gates and
+   *  questions. The land still waits for a person, even if the finishing
+   *  role's gate is none. */
+  supervised?: boolean
 }
 
 /** One worked task as the history screen reads it. */
@@ -340,6 +345,8 @@ export interface Approval {
   /** The approval that performs the merge, rather than one between roles. */
   terminal?: boolean
   createdAt: string
+  /** The card asked for an architect sidecar to decide this (not the land). */
+  supervised?: boolean
 }
 
 export interface Clarification {
@@ -356,11 +363,44 @@ export interface Clarification {
   options?: string[]
   state: string
   createdAt: string
+  /** What was decided. Absent while the question is still open. */
+  answer?: string
+  /** Who wrote the answer: `operator` or a role name. Absent while open. */
+  answeredBy?: string
+  /** The card asked for an architect sidecar to answer this. */
+  supervised?: boolean
+  /** The commit the answer's reasoning was written into, when there was one. */
+  evidenceSha?: string
+  /** What answered it. Absent for a person, and for older answers. */
+  answeredModel?: string
+  answeredHarness?: string
+}
+
+/**
+ * Whether the architect sidecar is actually running, as opposed to having been
+ * asked for. A card's `supervised` flag is a request; this is the outcome, and
+ * the two disagree whenever the supervisor role is missing from the library or
+ * its harness would not start.
+ */
+export interface SupervisorState {
+  /** A live card asked for a sidecar. */
+  wanted: boolean
+  /** A process is running right now. */
+  live: boolean
+  /** The library role it runs as. */
+  role?: string
+  /**
+   * Why there is no process despite the project running and a card wanting
+   * one: a missing supervisor role, a harness that would not start. Absent on
+   * a stopped project, which is not a fault the operator has to be told about.
+   */
+  error?: string
 }
 
 export interface Attention {
   approvals: Approval[]
   clarifications: Clarification[]
+  supervisor: SupervisorState
   rework: { threshold: number; tasks: Task[] }
 }
 
@@ -529,10 +569,22 @@ export const api = {
     const suffix = query.toString()
     return call<HistoryPage>(`/projects/${id}/history${suffix ? '?' + suffix : ''}`)
   },
-  newTask: (id: string, name: string, body: string, deploy: string, skip: string[]) =>
+  newTask: (
+    id: string,
+    name: string,
+    body: string,
+    deploy: string,
+    skip: string[],
+    supervised = false,
+  ) =>
     call<Task>(`/projects/${id}/tasks`, {
       method: 'POST',
-      body: JSON.stringify({ name, body, deploy, skip }),
+      body: JSON.stringify({ name, body, deploy, skip, supervised }),
+    }),
+  setTaskSupervised: (id: string, supervised: boolean) =>
+    call<Task>(`/tasks/${id}/supervised`, {
+      method: 'PUT',
+      body: JSON.stringify({ supervised }),
     }),
 
   attention: (id: string) => call<Attention>(`/projects/${id}/attention`),
@@ -1050,6 +1102,19 @@ export interface TaskGate {
   /** How long it was pending. This is where wall time goes when active time is
    *  short, and no per-task total shows it. */
   waitedMs: number
+  /** Who resolved it: `operator` for the cockpit, a role name for an agent,
+   *  absent while pending. */
+  decidedBy?: string
+  /** The commit the decider wrote the rationale into, when there was one. The
+   *  sidecar records its reasoning in the repository, and this is the only
+   *  link to it: the commit sits on the sidecar's own worktree branch. */
+  evidenceSha?: string
+  /** What took the decision, as opposed to the role it was filed under. A
+   *  role's model is edited at any time, so this is the only record of what an
+   *  old approval was actually made by. Absent for a person, and for anything
+   *  decided before the daemon recorded it. */
+  decidedModel?: string
+  decidedHarness?: string
 }
 
 export interface TaskDetail {

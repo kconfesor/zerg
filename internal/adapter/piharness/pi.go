@@ -13,6 +13,7 @@ package piharness
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -53,9 +54,29 @@ func New() *Adapter {
 // conversation.
 func (*Adapter) NewSession() adapter.Adapter { return New() }
 
-// SessionID is the conversation this process is running, empty until pi has
-// named it. See adapter.SessionIdentified.
+// SessionID is the conversation this process is running. Named at spawn, since
+// pi does not put its `session` frame on the stream. See
+// adapter.SessionIdentified.
 func (a *Adapter) SessionID() string { return *a.session.Load() }
+
+// newSessionID names a conversation in the shape pi names its own: a version 7
+// UUID, whose leading timestamp keeps a directory of them in creation order.
+//
+// Generated rather than taken from store.NewID, which is a different alphabet
+// and would sort a session directory by nothing in particular. An adapter also
+// has no business depending on the store.
+func newSessionID() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	ms := uint64(time.Now().UnixMilli())
+	b[0], b[1], b[2] = byte(ms>>40), byte(ms>>32), byte(ms>>24)
+	b[3], b[4], b[5] = byte(ms>>16), byte(ms>>8), byte(ms)
+	b[6] = (b[6] & 0x0f) | 0x70 // version 7
+	b[8] = (b[8] & 0x3f) | 0x80 // variant 10
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
+}
 
 func (*Adapter) Name() string { return "pi" }
 
@@ -96,7 +117,7 @@ func (*Adapter) Capabilities() adapter.Caps {
 // --mode rpc is the bidirectional mode: the process stays up, takes turns as
 // JSON on stdin, and streams events on stdout. No prompt is passed as an
 // argument, because work arrives over the pipe.
-func (*Adapter) Command(ctx context.Context, spec adapter.Spec) (*exec.Cmd, error) {
+func (a *Adapter) Command(ctx context.Context, spec adapter.Spec) (*exec.Cmd, error) {
 	if spec.Worktree == "" {
 		return nil, fmt.Errorf("pi: a role needs a worktree to run in")
 	}
@@ -118,13 +139,35 @@ func (*Adapter) Command(ctx context.Context, spec adapter.Spec) (*exec.Cmd, erro
 	if spec.Thinking != "" {
 		args = append(args, "--thinking", spec.Thinking)
 	}
+	// The conversation this spawn writes to, named here rather than read back
+	// off the stream.
+	//
 	// --session-id continues the conversation it names and creates it when it
 	// is missing, so pi needs no second flag for the two cases. The session
 	// file is looked up under the working directory, which for a role is its
 	// own worktree and therefore the same one on every spawn.
-	if spec.ResumeSession != "" {
-		args = append(args, "--session-id", spec.ResumeSession)
+	//
+	// Naming it is the only way zerg gets to know it. pi writes its `session`
+	// frame into the session file, not to stdout: in --mode rpc it announces
+	// nothing at all before its first turn, so the latch below never fired,
+	// nothing was ever recorded for a pi role, and every one of them started
+	// cold on every restart while its conversation sat on disk. Silently, which
+	// is worse than the noisy version of the same bug: a claude role at least
+	// spawned into an error. Measured on 0.84.4: one role, 133 turns, 513
+	// recorded events, not one `session` frame on the stream.
+	session := spec.ResumeSession
+	if session == "" {
+		fresh, err := newSessionID()
+		if err != nil {
+			return nil, fmt.Errorf("pi: naming a session: %w", err)
+		}
+		session = fresh
 	}
+	args = append(args, "--session-id", session)
+	// The latch still exists and pi still wins it if a later version does
+	// announce: Parse overwrites this. Which name is used matters more than
+	// where it came from, and one of the two has to say it first.
+	a.session.Store(&session)
 	// Extensions are opt-out because a broken extension tree takes the whole
 	// process down before it reads a single turn — which is exactly how pi
 	// failed on this machine, with every bundled extension erroring on a

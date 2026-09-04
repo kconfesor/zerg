@@ -52,8 +52,8 @@ func TestTheRunnerIsAConfigurableRoleAndNotAPipelineOne(t *testing.T) {
 			t.Errorf("the runner's purpose is %q", r.Purpose)
 		}
 	}
-	if pipeline != len(all)-1 {
-		t.Errorf("%d of %d roles are pipeline roles; only the runner should not be", pipeline, len(all))
+	if pipeline != len(all)-2 {
+		t.Errorf("%d of %d roles are pipeline roles; only the runner and supervisor should not be", pipeline, len(all))
 	}
 }
 
@@ -109,6 +109,24 @@ func TestATeamCannotContainARoleThePipelineDoesNotRun(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "runner") {
 		t.Errorf("err = %v, want it to name the role", err)
+	}
+
+	supervisor, err := db.RoleFor(ctx, PurposeSupervisor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.CreateTeamPreset(ctx, &TeamPreset{
+		Name: "With a supervisor in it", ProjectID: &project.ID,
+		Roles: []TeamPresetRole{
+			{TemplateID: coder.ID, Enabled: true},
+			{TemplateID: supervisor.ID, Enabled: true},
+		},
+	})
+	if err == nil {
+		t.Fatal("a team was created with the supervisor in its pipeline")
+	}
+	if !strings.Contains(err.Error(), "supervisor") {
+		t.Errorf("err = %v, want it to name the supervisor", err)
 	}
 
 	// And the team was not half-written: the refusal happens inside the same

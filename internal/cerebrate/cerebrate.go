@@ -208,6 +208,16 @@ type Cerebrate struct {
 	// cannot drop the next one's id.
 	staleSession bool
 
+	// conversed records that this conversation has content, which is what makes
+	// it resumable. Same lifetime as staleSession: set while reading the
+	// stream, cleared at the start of each spawn.
+	//
+	// A harness names a session before it has written one. claude announces an
+	// id in its first frame and creates the transcript only once there is
+	// something in the conversation, so an agent that boots, reports ready and
+	// is never given work leaves nothing behind for that id to name.
+	conversed bool
+
 	// quota is the subscription's remaining headroom, as last reported.
 	// Whether it arrived on the stream or was fetched does not matter here.
 	quota     *adapter.Quota
@@ -519,6 +529,7 @@ func (c *Cerebrate) runOnce(ctx context.Context) (fatal bool, ranFor time.Durati
 	// spawn's first line Forget and skip recording the new id.
 	c.mu.Lock()
 	c.staleSession = false
+	c.conversed = false
 	c.mu.Unlock()
 
 	// Configuration as the database has it now, not as it was when the swarm
@@ -761,6 +772,17 @@ func (c *Cerebrate) readStream(ctx context.Context, stdout io.Reader, fingerprin
 			}
 			c.observe(ev)
 			c.publish(ev)
+			// Content, as opposed to the frames a harness emits whether or not
+			// a conversation happened: ready, usage, quota, an error. Anything
+			// here means the agent has answered, which is when claude has a
+			// transcript to resume.
+			switch ev.Kind {
+			case adapter.EventMessage, adapter.EventMessageDelta, adapter.EventThinking,
+				adapter.EventToolCall, adapter.EventToolDone, adapter.EventTurnEnd:
+				c.mu.Lock()
+				c.conversed = true
+				c.mu.Unlock()
+			}
 			if ev.Kind == adapter.EventQuota && ev.Quota != nil {
 				c.setQuota(ev.Quota)
 			}
@@ -1110,6 +1132,7 @@ func (c *Cerebrate) recordSession(ctx context.Context, recorded, fingerprint str
 	c.mu.Lock()
 	stale := c.staleSession
 	c.staleSession = false
+	conversed := c.conversed
 	c.mu.Unlock()
 	if stale {
 		c.cfg.Continuity.Forget(context.WithoutCancel(ctx), c.name())
@@ -1125,6 +1148,23 @@ func (c *Cerebrate) recordSession(ctx context.Context, recorded, fingerprint str
 			return ""
 		}
 	} else if id == "" || id == recorded {
+		return recorded
+	}
+
+	// Only a conversation the harness has actually written to.
+	//
+	// Recording on the strength of the id alone is the §6.1 mistake: the value
+	// says "this can be resumed" and was derived from "the harness printed an
+	// id", which is a proxy for it. A role that is never given work -- one the
+	// cards keep skipping -- boots, says ready and stops there, so claude never
+	// writes the transcript. Its id went on record anyway, the next start
+	// resumed it, claude said "No conversation found with session ID", the
+	// agent exited 1, and the replacement recorded another empty id: a failure
+	// that regenerated its own cause on every restart, once per role, forever.
+	//
+	// Nothing on record is the honest answer for a conversation that does not
+	// exist. That role starts cold, which is what it would have got anyway.
+	if !conversed {
 		return recorded
 	}
 

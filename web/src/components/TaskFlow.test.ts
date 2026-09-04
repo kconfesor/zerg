@@ -3,10 +3,11 @@ import { enableAutoUnmount, flushPromises, mount } from '@vue/test-utils'
 import TaskFlow from './TaskFlow.vue'
 import { api, type ActivityEvent, type TaskStep } from '@/lib/api'
 
-vi.mock('@/lib/api', () => ({ api: { taskEvents: vi.fn() } }))
+vi.mock('@/lib/api', () => ({ api: { taskEvents: vi.fn(), approvalDiff: vi.fn() } }))
 enableAutoUnmount(afterEach)
 
 const taskEvents = vi.mocked(api.taskEvents)
+const approvalDiff = vi.mocked(api.approvalDiff)
 
 function step(over: Partial<TaskStep> = {}): TaskStep {
   return {
@@ -146,5 +147,177 @@ describe('a card that skipped a role', () => {
 
     expect(w.text()).toContain('coder')
     expect(w.text()).toContain('skipped')
+  })
+})
+
+// What the architect decided, and why.
+//
+// The trail carried the note, the evidence commit and the questions the sidecar
+// answered, and drew "approved by supervisor". A card said a judgement had been
+// made and gave a reader no way to find out what it was.
+describe('a decision taken at a gate', () => {
+  const gated = (over: Partial<NonNullable<TaskStep['gate']>> = {}) =>
+    step({
+      gate: {
+        id: 'a1',
+        state: 'approved',
+        note: 'Approved with one correction. The **formatter** direction is fixed rather than papered over.',
+        createdAt: '2026-01-01T09:10:00.000Z',
+        decidedAt: '2026-01-01T09:12:00.000Z',
+        waitedMs: 120_000,
+        decidedBy: 'supervisor',
+        evidenceSha: 'cafebabe0123456789abcdef0123456789abcdef',
+        ...over,
+      },
+    })
+
+  // Which model, not only which role. decidedBy says "supervisor", and a role's
+  // model is edited at any time, so the library cannot answer what an approval
+  // taken last week was actually made by.
+  it('names the model that took the decision, and says nothing when a person did', async () => {
+    const w = flow([gated({ decidedModel: 'claude-opus-5', decidedHarness: 'claude' })])
+    await w.findAll('button').find((b) => b.text() === 'the decision')!.trigger('click')
+    expect(w.text()).toContain('running claude-opus-5')
+
+    const byHand = flow([gated({ decidedBy: 'operator', decidedModel: undefined })])
+    await byHand.findAll('button').find((b) => b.text() === 'the decision')!.trigger('click')
+    expect(byHand.text()).not.toContain('running')
+  })
+
+  it('opens onto the rationale, the decider and the commit that holds it', async () => {
+    const w = flow([gated()])
+    await w.findAll('button').find((b) => b.text() === 'the decision')!.trigger('click')
+
+    const panel = w.text()
+    expect(panel).toContain('approved by supervisor')
+    expect(panel).toContain('The formatter direction is fixed rather than papered over')
+    expect(panel).toContain('cafebabe0123456789abcdef0123456789abcdef')
+    // Markdown, not literal asterisks: an architect writes its reasoning the
+    // way it writes everything else.
+    expect(w.html()).toContain('<strong>formatter</strong>')
+  })
+
+  // Decisions taken before refs were resolved stored the literal string the
+  // agent sent. Drawn as a commit, `HEAD` is a link to the reasoning that
+  // resolves to something different in every tree that reads it, which is the
+  // failure resolving the ref fixed. Those rows cannot be repaired.
+  it('does not present a literal HEAD as the commit it is not', async () => {
+    const w = flow([gated({ evidenceSha: 'HEAD' })])
+    expect(w.text()).not.toContain('HEAD')
+
+    await w.findAll('button').find((b) => b.text() === 'the decision')!.trigger('click')
+    expect(w.text()).not.toContain('HEAD')
+    expect(w.text()).not.toContain('git show')
+    // The rest of the decision still reads.
+    expect(w.text()).toContain('Approved with one correction')
+  })
+
+  it('carries the questions it settled on the way', async () => {
+    const w = flow([
+      step({
+        clarifications: [
+          {
+            id: 'c1',
+            role: 'planner',
+            question: 'Sundays: close at 17:00 or 18:00?',
+            answer: '17:00, Sunday closes an hour early',
+            answeredBy: 'supervisor',
+            state: 'answered',
+            createdAt: '2026-01-01T09:05:00.000Z',
+          },
+        ],
+      }),
+    ])
+    await w.findAll('button').find((b) => b.text() === 'the decision')!.trigger('click')
+
+    expect(w.text()).toContain('Sundays: close at 17:00 or 18:00?')
+    expect(w.text()).toContain('17:00, Sunday closes an hour early')
+    expect(w.text()).toContain('answered by supervisor')
+  })
+
+  // A step with a gate and nothing written into it has nothing behind the
+  // disclosure, and an empty panel reads as something having gone wrong.
+  it('offers nothing to open when there is nothing recorded', () => {
+    const w = flow([
+      step({
+        gate: {
+          id: 'a1',
+          state: 'pending',
+          createdAt: '2026-01-01T09:10:00.000Z',
+          waitedMs: 1_000,
+        },
+      }),
+    ])
+    expect(w.findAll('button').some((b) => b.text() === 'the decision')).toBe(false)
+  })
+})
+
+// The rationale says what was concluded; this is what it was concluded about.
+//
+// The endpoint served a resolved approval all along, and Attention has always
+// used it for pending ones, so the change a decision was taken over was
+// reachable the whole time and nothing offered it. Reading a decision without
+// it is taking the decider's word for what it decided about.
+describe('the change a decision was taken over', () => {
+  const gated = () =>
+    step({
+      gate: {
+        id: 'a1',
+        state: 'approved',
+        note: 'Approved.',
+        createdAt: '2026-01-01T09:10:00.000Z',
+        decidedAt: '2026-01-01T09:12:00.000Z',
+        waitedMs: 1_000,
+        decidedBy: 'supervisor',
+      },
+    })
+
+  const openDecision = async (w: ReturnType<typeof mount>) => {
+    await w.findAll('button').find((b) => b.text() === 'the decision')!.trigger('click')
+  }
+
+  it('fetches it once, when asked, and shows the diff', async () => {
+    approvalDiff.mockResolvedValue({
+      files: [
+        {
+          path: 'docs/specs/sunday-hours.md',
+          status: 'M',
+          added: 41,
+          removed: 96,
+          diff: '@@ -1 +1 @@\n-Thursday to Saturday\n+Thursday to Sunday\n',
+        },
+      ],
+      range: true,
+      base: 'main',
+      seen: [],
+    })
+    const w = flow([gated()])
+    await openDecision(w)
+    expect(approvalDiff).not.toHaveBeenCalled()
+
+    await w.findAll('button').find((b) => b.text() === 'what it reviewed')!.trigger('click')
+    await flushPromises()
+
+    expect(approvalDiff).toHaveBeenCalledTimes(1)
+    expect(approvalDiff).toHaveBeenCalledWith('a1')
+    expect(w.text()).toContain('docs/specs/sunday-hours.md')
+    expect(w.text()).toContain('+41')
+    expect(w.text()).toContain('Thursday to Sunday')
+
+    // Closing and reopening reads what is already here.
+    await w.findAll('button').find((b) => b.text() === 'hide what it reviewed')!.trigger('click')
+    await w.findAll('button').find((b) => b.text() === 'what it reviewed')!.trigger('click')
+    await flushPromises()
+    expect(approvalDiff).toHaveBeenCalledTimes(1)
+  })
+
+  // An empty box reads like a bug. A decision over nothing is a real answer.
+  it('says so when no change is recorded against the decision', async () => {
+    approvalDiff.mockResolvedValue({ files: [], range: false, base: 'main', seen: [] })
+    const w = flow([gated()])
+    await openDecision(w)
+    await w.findAll('button').find((b) => b.text() === 'what it reviewed')!.trigger('click')
+    await flushPromises()
+    expect(w.text()).toContain('No change is recorded against this decision')
   })
 })
