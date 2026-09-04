@@ -5,10 +5,9 @@ A plan under argument, not a description of anything that exists. Issue [#40].
 One card gets a switch that turns it from a unit of work into a feature: the architect splits it,
 creates the subtasks, orders them, supervises them, and reviews the whole before a person lands it.
 
-This document exists to settle six decisions before any of it is built, because five of them are
-cheap to argue about now and expensive to change afterwards. Each one lists what it turns on, the
-options, a recommendation, and what the recommendation costs. Argue with the recommendations; they
-are starting positions, not conclusions.
+Eight decisions were settled on 2026-09-04 and are recorded below with what each one rules out, so
+a later reader can see the alternative rather than only the choice. What remains open is at the
+bottom. Nothing here is built yet.
 
 [#40]: https://github.com/kconfesor/zerg/issues/40
 
@@ -37,122 +36,121 @@ And what is missing, which is the size of the work:
 - One worktree and one process per role, and leases, sessions, quotas, nudges and silence watching
   all keyed by role name.
 
-## The six decisions
+## Decisions
 
-### 1. Where does subtask work land?
+### 1. Subtask work lands on a per-feature branch
 
-**Turns on:** whether the feature review can say "do not ship this" or only "that went wrong".
+`zerg-feature/<slug>` is created when the plan is approved. Subtasks merge into it as they finish,
+and the feature lands as one thing after the architect's review and the operator's approval.
 
-- **(a) Each subtask merges to base as it finishes.** Today's behaviour, no new machinery. The
-  feature review happens after every piece is already on the base branch, so it is advisory, and
-  "half a feature on main after the review rejects the other half" is a live outcome.
-- **(b) Subtasks merge into a per-feature branch, which lands once.** `zerg-feature/<slug>` is
-  created when the plan is approved, subtasks merge into it instead of into base, and the feature
-  lands as one commit after the architect's review and the operator's approval.
+**Why.** The point of reviewing a whole is being able to refuse it. Merging each subtask to base as
+it finishes makes the review advisory: it can say "that went wrong" and not "do not ship this", and
+a rejected review leaves half a feature on the base branch.
 
-**Recommendation: (b).** The point of reviewing a whole is being able to refuse it, and (a) cannot.
-Mechanically it is cheaper than it sounds: `Merge` already takes the target branch as a parameter,
-so this is a different string plus creating and landing one branch.
+**Why it is affordable.** `Integrator.Merge(ctx, path, baseBranch, commit)` already takes the target
+branch as a parameter, and `projects.integration` already has a `branch` mode meaning "the task is
+finished, landing it is someone else's decision". This is a different string and one branch to
+create and land, not new git machinery.
 
-ARCHITECTURE 9.2 says integration is per project and *deliberately not per role*, because attaching
-the policy to a role means disabling that role moves it. A per-feature target does not have that
-failure: a feature is a coherent unit with a start and an end, and the policy is attached to the
-thing being landed rather than to a role that might be skipped.
+ARCHITECTURE 9.2 bans integration policy *per role*, because disabling a role moves the policy to
+whichever role happens to be last. A per-feature target does not have that failure: a feature is a
+unit with a start and an end, and the policy is attached to the thing being landed.
 
-**What it costs:** the feature branch diverges from base while a long feature runs, so subtasks
-conflict with work that landed meanwhile. Needs an answer for refreshing the branch from base, and
-it argues for keeping features short.
+**What it costs.** The feature branch diverges from base while a long feature runs, so subtasks
+conflict with work that landed meanwhile. Needs a refresh story, and argues for keeping features
+short.
 
-### 2. Is a feature a task?
+### 2. A feature is a row in `tasks`
 
-**Turns on:** how much existing surface comes free, against how many queries have to learn a new
-exception.
+A `kind` of `work` or `feature`, and `parent_id` on subtasks.
 
-- **(a) A row in `tasks` with a `kind` of `work` or `feature`, and `parent_id` on subtasks.** Free:
-  the board, the trail, history, the cost view, hidden, pinned, delete-cascade, the supervised
-  switch, rework counting. A feature is never routed, so `Claim` will never hand it to anyone, since
-  claiming selects through messages and routes rather than through tasks.
-- **(b) A separate `features` table with `tasks.feature_id`.** No risk of a feature turning up in a
-  lane. Costs a second implementation of history, cost and trail views.
+**Why.** The board, the trail, history, the cost view, hidden, pinned, delete-cascade, the
+supervised switch and rework counting all come free. The obvious danger does not exist: `Claim`
+selects `FROM routes JOIN messages` with `tasks` only left-joined for `skip`, so a feature row,
+which has no route, can never be handed to a role.
 
-**Recommendation: (a), with an audit as part of the work.** The free surface is large and the danger
-is specific rather than diffuse: every query that lists cards for a person to look at has to exclude
-features, or a card appears that nobody can work. The call sites to check are `ListTasks`, the board
-query, history paging, `ListReworkedTasks` and the attention queries. That list is short enough to
-be checked once and covered by a test that asserts a feature never appears in a lane.
+**What it rules out.** A separate `features` table, which would need a second implementation of the
+history, spend and trail views.
 
-**What it costs:** `tasks.lane` is `NOT NULL` and `state` has a `CHECK` constraint. A feature needs a
-lane value no role owns, and its lifecycle is not the same as a card's. Per AGENTS.md, a `CHECK` in
-the way means adding a column rather than rebuilding the table.
+**What it costs.** Every query that lists cards *for a person to look at* must exclude features, or
+a card appears that nobody can work. The audit is `ListTasks`, the board query, history paging,
+`ListReworkedTasks` and the attention queries, and it wants a test asserting a feature never appears
+in a lane. `tasks.lane` is `NOT NULL`, so a feature needs a lane value no role owns, and `state` has
+a `CHECK`, so per AGENTS.md that means adding a column rather than rebuilding the table.
 
-### 3. Can the architect review a plan it wrote?
+### 3. The architect may reject a feature, and may not approve one
 
-**Turns on:** whether the feature review is a gate or a report.
+Its review is written as evidence on the final approval, so the operator reads the verdict and the
+reasoning before landing. It may send a feature back on its own authority. Approving stays human.
 
-The precedent is already set twice: `NextDecision` refuses to offer the supervisor a question it
-asked itself, and a terminal completion is refused for anyone but the operator. Reviewing work
-against a plan it wrote is the same shape one level up.
+**Why.** #38 already ruled that a supervisor cannot answer its own question, and that the land stays
+with a person. Reviewing work against a plan it wrote is the same shape one level up, so the review
+is a report rather than a gate it can pass by itself. The asymmetry earns its keep: a feature that
+is wrong should not wait for a person to be told so.
 
-- **(a) The review is a report attached to the land.** The architect produces a verdict and its
-  evidence; the operator sees both at the final approval and decides. Consistent with the existing
-  rule, no new machinery.
-- **(b) A second architect, different role or model, reviews.** Genuinely independent, doubles the
-  cost of the most expensive step, and needs a second sidecar.
-- **(c) Asymmetric: the architect may reject the feature but not approve it.** Rejecting sends work
-  back without waiting for a person, which is a real saving on the common case; approving stays
-  human.
+**What it rules out.** A second architect on a different model, which would be genuinely independent
+and would double the cost of the most expensive step.
 
-**Recommendation: (a) plus (c).** They compose: the architect writes its review as evidence, and may
-send the feature back on its own authority, but the land stays where #38 put it. The asymmetry is
-worth having because a feature that is wrong should not wait for a person to be told so.
+### 4. A failing subtask stalls the feature and says so
 
-### 4. What happens when a subtask goes wrong?
+The feature stops advancing and appears in Attention, reusing the rework threshold that already
+surfaces a card going backward too often.
 
-**Turns on:** whether one bad subtask stalls a feature, re-plans it, or is dropped.
+**What it rules out.** Automated re-planning, which recovers without the operator and turns one bad
+subtask into several new ones while spending money doing it. Revisit when there is evidence about
+how often this happens, rather than before.
 
-- **(a) The feature stalls and the operator is told.** The rework threshold and Attention already do
-  exactly this for a single card.
-- **(b) The architect re-plans: edits, replaces or adds subtasks.**
-- **(c) The subtask is dropped, and its dependents are cancelled or unblocked.**
+### 5. Nothing is created until the operator approves the plan
 
-**Recommendation: (a) first, and resist (b).** Automated re-planning turns one bad subtask into
-several new ones, spends money doing it, and is the hardest thing on this list to reason about when
-it goes wrong. Surface it, let a person decide, and revisit once there is evidence about how often
-it happens.
+The approval states how many subtasks and what they are likely to cost. `usage_turns` holds enough
+per-role history for that estimate to be computed rather than guessed.
 
-### 5. What stops a split producing thirty subtasks?
+**Why.** Creating the subtasks is the step that spends the money and cannot be undone with a button.
+It is the only irreversible moment in the flow and therefore the only place a gate belongs.
 
-**Turns on:** whether the expensive irreversible step has a gate.
+**What it rules out.** A bare cap on subtask count, which is blunt: eight badly chosen subtasks cost
+what eight good ones do, and a cap says nothing about whether the split was right.
 
-**Recommendation: the operator approves the plan before any subtask exists**, and the approval
-screen states the count and an estimate. `usage_turns` has enough history to estimate a per-role
-average, so "9 subtasks, roughly 40 to 70 dollars" is answerable rather than guessed. A hard cap is
-a blunt second line and can wait.
+### 6. Parallelism is whatever already exists, for now
 
-This is the single most important gate in the design. Creating the subtasks is the step that spends
-the money and is not undoable by pressing a button.
+Independent subtasks in different roles already run at once. Per-task worktrees and several
+processes per role become their own issue.
 
-### 6. How parallel is parallel?
+**Why.** Everything else here is useful without it, and the cost is not mainly the worktrees.
+`hatchery.Path` takes a name and chat already derives one per conversation, so that half is
+precedented. The rest is not: leases are keyed `(project, role)`, `role_sessions` by
+`(project, role, harness, fingerprint)`, `s.roles` is a map by role name, and `nudgeIdle`,
+`watchForSilence`, quota reporting and `Status` all key by role. Making a role plural changes that
+key nearly everywhere, and N processes per role multiplies token spend and machine load as well as
+code.
 
-**Turns on:** how large this feature actually is. This is the piece that makes it the biggest thing
-on the roadmap.
+**Measure first.** Whether cross-role parallelism is enough is an empirical question and the answer
+should come from a real feature rather than from this document.
 
-Today a role has one worktree and one process, and a lease is held per role, so two cards in one
-lane are worked one after the other. Parallelism across subtasks is therefore only real where the
-subtasks sit in different roles at the same time.
+### 7. The plan is rows, with the reasoning in prose beside it
 
-- **(a) Take the parallelism that exists.** Independent subtasks in different roles already run at
-  once. Free, and possibly enough.
-- **(b) Per-task worktrees and more than one process per role.** `hatchery.Path` takes a name and
-  chat already derives one per conversation, so the worktree half is precedented. The rest is not:
-  leases are keyed `(project, role)`, `role_sessions` by `(project, role, harness, fingerprint)`,
-  `s.roles` is a map by role name, and `nudgeIdle`, `watchForSilence`, quota reporting and `Status`
-  all key by role. Making a role plural means changing that key nearly everywhere.
+Subtasks, dependencies and priorities are rows, because the queue has to read them. The architect's
+reasoning is a document committed to the repository, the way `docs/zerg/<slug>/decisions.md` already
+is.
 
-**Recommendation: (a) first, and treat (b) as its own project with its own issue.** Everything else
-in this document is useful without it. Measure whether cross-role parallelism is enough before
-paying for the rest, and note that N processes per role multiplies token spend and machine load as
-well as code.
+**Why.** The queue needs something unambiguous and the operator needs an argument. Splitting them
+means neither is bent to serve the other, and there is no chance of the two disagreeing about what
+the work actually is.
+
+**What it rules out.** Parsing subtasks out of prose an agent wrote, where a malformed plan becomes
+a malformed queue.
+
+### 8. The plan is accepted or rejected, not edited
+
+Rejecting carries a note, and the architect re-plans against it.
+
+**Why.** One author for the plan, so the feature review measures the work against something the
+architect actually reasoned about. An edited plan has two authors and the review then measures
+against something its writer did not entirely write.
+
+**What it costs.** A whole re-planning turn when the operator only wanted to drop one subtask. If
+that turns out to be the common case, the escape hatch is to allow editing *and* hand the architect
+the diff, so its review measures against the edited plan.
 
 ## Proposed phases
 
@@ -171,7 +169,12 @@ a branch that lives for a month.
    time, because a cycle is work that can never start while looking queued.
 4. **Feature branch and the land.** Decision 1, plus the architect's feature review as evidence on
    the final human approval.
-5. **Real parallelism.** Decision 6b, if it is still wanted by then.
+5. **Real parallelism.** Per-task worktrees and several processes per role, as its own issue, and
+   only once a real feature has shown that cross-role parallelism is not enough.
+
+The order is deliberate. Phase 1 is useful with no architect involvement at all, and phases 2 and 3
+are useful before anything lands differently, so the branch that changes how work reaches the base
+branch is the fourth thing built rather than the first.
 
 ## Failure modes to design against
 
@@ -192,12 +195,22 @@ from a proxy for it.
   was computed from "no unfinished dependencies" and a dropped dependency is neither finished nor
   unfinished.
 
-## Not yet argued
+## Still open
 
-- What the plan artifact actually is. A markdown document in the repository, a structured row, or
-  both. It has to be reviewable by a person at the approval gate and readable by the architect at
-  the review, and those want different shapes.
-- Whether a subtask can itself be a feature. Recursion is a real question and the answer is probably
-  no, at least at first.
-- How a feature interacts with `skip` and `deploy`, which are per card today.
-- Whether the operator can edit the plan at the approval gate, or only accept and reject it.
+Design questions the decisions above did not settle, and which the phase that meets them should
+answer rather than this document.
+
+- **Is the plan approval an `approvals` row?** Reusing them would bring Attention, the decision
+  panel, `decided_by`, `evidence_sha` and the model that decided, all of which fit. An approval is
+  tied to a message and a route today, and a plan is tied to neither, so this is a real question and
+  not a formality. Phase 2.
+- **How the feature branch is refreshed from base** while a long feature runs. Phase 4, and it is
+  the cost decision 1 accepted.
+- **Whether a subtask can itself be a feature.** Recursion is a real question. The answer is no
+  until something demands otherwise, because a plan that plans is much harder to put a cost estimate
+  on, and the estimate is what makes decision 5 work.
+- **How a feature interacts with `skip` and `deploy`,** which are per card today. Probably inherited
+  by subtasks from the feature, which is the same shape as supervision.
+- **What the board actually shows.** Badge, colour, a group under the feature name, or a separate
+  view of the plan as a graph. Deliberately unanswered: phase 1 exists to answer it by looking at
+  it, in a browser, with a number read back out rather than reasoned about.
