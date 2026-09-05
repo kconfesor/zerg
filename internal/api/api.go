@@ -175,6 +175,8 @@ func (s *Server) Routes() http.Handler {
 	// The board and what needs a human.
 	mux.HandleFunc("GET /api/projects/{id}/tasks", s.listTasks)
 	mux.HandleFunc("GET /api/projects/{id}/history", s.listHistory)
+	mux.HandleFunc("GET /api/projects/{id}/features", s.listFeatures)
+	mux.HandleFunc("POST /api/projects/{id}/features", s.newFeature)
 	mux.HandleFunc("POST /api/projects/{id}/tasks", s.newTask)
 	mux.HandleFunc("GET /api/projects/{id}/attention", s.attention)
 	mux.HandleFunc("GET /api/projects/{id}/usage", s.usage)
@@ -186,6 +188,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("PUT /api/tasks/{id}/hidden", s.setTaskHidden)
 	mux.HandleFunc("PUT /api/tasks/{id}/pinned", s.setTaskPinned)
 	mux.HandleFunc("PUT /api/tasks/{id}/supervised", s.setTaskSupervised)
+	mux.HandleFunc("PUT /api/tasks/{id}/parent", s.setTaskParent)
 	mux.HandleFunc("POST /api/tasks/{id}/stop", s.stopTask)
 	mux.HandleFunc("DELETE /api/tasks/{id}", s.deleteTask)
 	mux.HandleFunc("GET /api/tasks/{id}/review", s.reviewThreads)
@@ -194,6 +197,12 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/tasks/{id}/review/ask", s.askAboutTheChange)
 	mux.HandleFunc("POST /api/review-threads/{id}/raise", s.raiseReviewThread)
 	mux.HandleFunc("PUT /api/review-threads/{id}/resolved", s.resolveReviewThread)
+	mux.HandleFunc("POST /api/plans/{id}/approve", s.approvePlan)
+	mux.HandleFunc("POST /api/plans/{id}/reject", s.rejectPlan)
+	mux.HandleFunc("POST /api/tasks/{id}/retry", s.retryChild)
+	mux.HandleFunc("POST /api/tasks/{id}/waive", s.waiveDependency)
+	mux.HandleFunc("POST /api/features/{id}/land", s.landFeature)
+	mux.HandleFunc("POST /api/features/{id}/cancel", s.cancelFeature)
 	mux.HandleFunc("GET /api/approvals/{id}/diff", s.approvalDiff)
 	mux.HandleFunc("GET /api/approvals/{id}/mergeable", s.approvalMergeable)
 	mux.HandleFunc("GET /api/approvals/{id}/file", s.approvalFile)
@@ -770,6 +779,40 @@ func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, orEmpty(tasks))
 }
 
+func (s *Server) listFeatures(w http.ResponseWriter, r *http.Request) {
+	features, err := s.db.ListFeatures(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, orEmpty(features))
+}
+
+type newFeatureRequest struct {
+	Name string `json:"name"`
+	Body string `json:"body"`
+}
+
+// newFeature opens a grouping row. Nothing is queued: a feature is not work.
+func (s *Server) newFeature(w http.ResponseWriter, r *http.Request) {
+	var req newFeatureRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	projectID := r.PathValue("id")
+	feature, err := s.db.CreateFeature(r.Context(), projectID, req.Name, req.Body)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if s.over != nil {
+		if err := s.over.SyncSupervisor(r.Context(), projectID); err != nil {
+			s.log.Warn("could not summon the architect", "project", projectID, "err", err)
+		}
+	}
+	writeJSON(w, http.StatusCreated, feature)
+}
+
 type newTaskRequest struct {
 	Name string `json:"name"`
 	Body string `json:"body"`
@@ -784,6 +827,8 @@ type newTaskRequest struct {
 	// Supervised means an architect sidecar will run this card; the land
 	// still waits for a person. See tasks.supervised.
 	Supervised bool `json:"supervised"`
+	// ParentID is the feature this card belongs to. Empty means none.
+	ParentID string `json:"parentId"`
 }
 
 // newTask opens a card and queues it for the first role it will visit.
@@ -800,6 +845,7 @@ func (s *Server) newTask(w http.ResponseWriter, r *http.Request) {
 	task, err := s.nyd.NewTaskWith(r.Context(), nydus.NewTaskOpts{
 		ProjectID: projectID, Name: req.Name, Body: req.Body,
 		Deploy: req.Deploy, Skip: req.Skip, Supervised: req.Supervised,
+		ParentID: req.ParentID,
 	})
 	if err != nil {
 		s.fail(w, r, err)
@@ -845,15 +891,152 @@ func (s *Server) attention(w http.ResponseWriter, r *http.Request) {
 	if s.over != nil {
 		supervisor = s.over.SupervisorState(r.Context(), id)
 	}
+	plans, err := s.db.ListPendingPlans(r.Context(), id)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	features, err := s.db.ListFeatureGates(r.Context(), id)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	stalls, err := s.db.ListFeatureStalls(r.Context(), id)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"approvals":      orEmpty(approvals),
 		"clarifications": orEmpty(questions),
+		"plans":          orEmpty(plans),
+		"features":       orEmpty(features),
+		"stalls":         orEmpty(stalls),
 		"supervisor":     supervisor,
 		"rework": map[string]any{
 			"threshold": threshold,
 			"tasks":     orEmpty(looping),
 		},
 	})
+}
+
+func (s *Server) approvePlan(w http.ResponseWriter, r *http.Request) {
+	if s.nyd == nil {
+		writeError(w, http.StatusNotImplemented, "this build cannot route work")
+		return
+	}
+	projectID, err := s.nyd.AcceptPlan(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	s.syncArchitect(r.Context(), projectID)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "approved"})
+}
+
+func (s *Server) rejectPlan(w http.ResponseWriter, r *http.Request) {
+	var req rejectRequest
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	projectID, err := s.db.RejectPlan(r.Context(), r.PathValue("id"), req.Note, store.OperatorRole)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	s.syncArchitect(r.Context(), projectID)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "rejected"})
+}
+
+// retryChild puts a failed subtask back in front of the pipeline. One of the
+// named actions a stalled feature offers.
+func (s *Server) retryChild(w http.ResponseWriter, r *http.Request) {
+	if s.nyd == nil {
+		writeError(w, http.StatusNotImplemented, "this build cannot route work")
+		return
+	}
+	id := r.PathValue("id")
+	task, err := s.db.GetTask(r.Context(), id)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if err := s.nyd.RetryChild(r.Context(), id); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	s.syncArchitect(r.Context(), task.ProjectID)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "queued"})
+}
+
+// waiveDependency releases a card whose dependency is not coming, with the
+// reason carried on the message the next role claims.
+func (s *Server) waiveDependency(w http.ResponseWriter, r *http.Request) {
+	if s.nyd == nil {
+		writeError(w, http.StatusNotImplemented, "this build cannot route work")
+		return
+	}
+	var req rejectRequest
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	id := r.PathValue("id")
+	task, err := s.db.GetTask(r.Context(), id)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if err := s.nyd.WaiveDependency(r.Context(), id, req.Note); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	s.syncArchitect(r.Context(), task.ProjectID)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "queued"})
+}
+
+func (s *Server) landFeature(w http.ResponseWriter, r *http.Request) {
+	if s.nyd == nil {
+		writeError(w, http.StatusNotImplemented, "this build cannot route work")
+		return
+	}
+	id := r.PathValue("id")
+	task, err := s.db.GetTask(r.Context(), id)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if err := s.nyd.LandFeature(r.Context(), id); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	// The architect is kept alive by work that is left; a landed feature is
+	// one less reason for it to be running.
+	s.syncArchitect(r.Context(), task.ProjectID)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "landed"})
+}
+
+func (s *Server) cancelFeature(w http.ResponseWriter, r *http.Request) {
+	if s.nyd == nil {
+		writeError(w, http.StatusNotImplemented, "this build cannot route work")
+		return
+	}
+	id := r.PathValue("id")
+	task, err := s.db.GetTask(r.Context(), id)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if err := s.nyd.CancelFeature(r.Context(), id); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	s.syncArchitect(r.Context(), task.ProjectID)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "cancelled"})
+}
+
+func (s *Server) syncArchitect(ctx context.Context, projectID string) {
+	if s.over == nil || projectID == "" {
+		return
+	}
+	if err := s.over.SyncSupervisor(ctx, projectID); err != nil {
+		s.log.Warn("could not sync the architect", "project", projectID, "err", err)
+	}
 }
 
 func (s *Server) approve(w http.ResponseWriter, r *http.Request) {

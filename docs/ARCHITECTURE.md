@@ -288,6 +288,12 @@ in the config, in routing, and on the board: a special case that has to be handl
 appears. When the terminal role completes, the *overmind* merges to the base branch. Integration
 belongs to the orchestrator, never to whichever agent happened to be last.
 
+A feature (§9.4) adds one more integration checkout, `.worktrees/feature-<id>`, holding
+`zerg-feature/<id>`. Its subtasks integrate there rather than onto base, because a review that
+cannot refuse the whole is advisory, and because `Git.Merge` needs the branch it is landing on
+checked out where it runs, and integrating features at the repo root would move the root's HEAD
+and serialise every feature in the project.
+
 ## 6. Rejected approaches, and the failures behind them
 
 Every row is a design that was tried and observed failing, not a hypothetical. They are recorded
@@ -747,7 +753,22 @@ tasks       (id, project_id, session_id, name, body, lane, state,
              deploy,              -- where this card's work is put when it lands; empty for most
              skip,                -- role template ids this card does not visit (§7.2); empty for most
              supervised,          -- architect sidecar will run this card; the land still waits (§9.1)
-             hidden)              -- put away by a person; §9.3
+             hidden,              -- put away by a person; §9.3
+             kind,                -- work (a card) or feature (a grouping row, never a lane)
+             parent_id,           -- the feature this card belongs to; empty for a feature
+             priority,            -- inherited by every message this card produces
+             blocked)             -- waiting on a feature dependency; not a new state
+
+-- a feature's split, immutable. Rejecting produces a new revision.
+-- not an approvals row: those are tied to a message and a route.
+feature_plan_revisions (id, feature_id, n, digest, prose_sha, state,
+                        item_count, estimate_tokens, estimate_cost_usd,
+                        note, created_at, decided_at, decided_by)
+feature_plan_items     (id, revision_id, position, name, body, priority, child_task_id)
+feature_plan_deps      (revision_id, from_item, to_item)
+feature_runs           (feature_id, branch, base_sha, head_sha, state)
+feature_reviews        (id, feature_id, head_sha, verdict, note, evidence_sha)
+                       -- bound to a head; ok is a recommendation, the operator lands
 
 messages    (id, project_id, task_id, from_role, kind, priority,
              commit_sha, body, terminal, created_at)
@@ -808,7 +829,9 @@ paragraph.
 **A supervised card holds the terminal send even if the finisher's gate is `none`.** Default is
 coder then reviewer, both ungated, so a finished card merges unattended. The flag is on the card
 (`tasks.supervised`), not on the finishing role, because skipping that role would otherwise move
-the policy with it. Mid-pipeline gates and questions are decided by the supervisor sidecar
+the policy with it. A feature's subtask is the exception, and deliberately: its last handoff is an
+integration into the feature, not a land, so there is nothing to hold. The only terminal event in a
+feature is the feature landing, and that stays a person. Mid-pipeline gates and questions are decided by the supervisor sidecar
 (`purpose=supervisor`, not the pipeline architect); the land stays a person.
 `approvals.decided_by` records who actually clicked. A pipeline token never gains `decide`:
 empty `Can` means every *pipeline* verb, and approve is explicit.
@@ -885,6 +908,63 @@ cards are *shown* is per browser, and lives in `localStorage`.
 
 Hiding changes nothing else: not the lane, not the state. A hidden card is finished work that is
 still finished, and unhiding returns it unchanged.
+
+### 9.4 Features
+
+A feature is a row in `tasks` with `kind = 'feature'`: it groups cards, and it is not one. `Claim`
+selects `FROM routes JOIN messages`, and a feature has no route, so nothing can hand it to a role.
+Every query that lists cards for a person filters `kind = 'work'`.
+
+Its lifecycle is not in `tasks.state`, which is a four-value `CHECK`. Companion tables carry it:
+`feature_plan_revisions` (immutable; rejecting produces a new one), `feature_plan_items`,
+`feature_plan_deps`, `feature_runs` (the branch and its shas) and `feature_reviews` (a verdict bound
+to the head it looked at).
+
+The order matters more than the tables:
+
+- **Nothing exists until the operator accepts the plan.** The split is rows plus a prose commit,
+  with a digest binding them; accepting is what creates the branch, the worktree and every card, in
+  one transaction, and it is the step that spends the money.
+- **A subtask integrates into the feature, never onto base.** Its final handoff has a recipient,
+  the feature, so it is not terminal and the operator-only check on a terminal approval never fires
+  on it. Only the feature's own landing is terminal.
+- **A dependency is satisfied by integration, not by a state column.** The route that unblocks a
+  dependent carries the *feature head*, so the dependent's worktree receives everything it depends
+  on rather than one commit of it.
+- **A subtask runs on `zerg-subtask/<role>`, started at the feature head.** Role worktrees are
+  reused and role branches accumulate, so without this a subtask's commit contains the last card
+  that role touched, and worse, the *next* ordinary card inherits the feature. Base is an ancestor
+  of the feature branch, so `merge --ff-only` accepts such a commit and takes the whole unreviewed
+  feature with it. Measured, not reasoned about. `landApproved` refuses a commit that contains a
+  live feature as the second line of defence.
+- **A conflict is cleared, not left.** No agent works in the integration worktree, and git refuses
+  every later merge while a conflict sits there, so one conflict would end every remaining subtask.
+  The run is marked `conflict`, the card that hit it is told to merge the head and resolve in its
+  own tree, and Attention says so. A repository someone else is holding is not a conflict: git does
+  not wait for `index.lock`, and reporting that as one marked the whole feature conflicted and sent
+  an agent looking for conflict markers that were never written.
+- **Integration is serialised, and the head write is guarded.** The merge is a git subprocess and
+  cannot run inside the write transaction, so recording where the feature got to is a second step.
+  Two roles finishing independent subtasks at the same moment interleaved those steps, and the later
+  transaction wrote the earlier head: the branch held both commits, the row held one, and the land
+  shipped a feature with a subtask missing while that card read done. `nydus.integrate` covers
+  merge-then-record, and the update carries `WHERE head_sha = ?` so a row that disagrees with the
+  branch is an error rather than a silence.
+- **The envelope says which of the two a completion is.** `terminal` stays true for a subtask, since
+  the send omits `--to` either way, but the shared instructions read that as "merged into the
+  project's branch". A subtask's envelope carries `feature`, and a sentence saying the commit is
+  integrated there and a person lands the whole thing later.
+- **A feature ends once.** Landing closes it; cancelling writes a cancelled run even when no plan was
+  ever accepted, because without that row a cancellation before the accept was nothing but a
+  rejected revision, which is how the architect is asked to try again. Deleting is refused while a
+  run is `running` or `conflict`: every child being done is the state a feature waits to be landed
+  in, and deleting it there cascaded the run, the plan and the review away while the branch stayed
+  on disk.
+- **What stalls is visible and has named actions.** `ListFeatureStalls` is a failed card, a
+  deadlocked one, an integration conflict or an architect's rejection; the operator retries a card,
+  waives a dependency with a rationale, or cancels the feature. Cancelling is soft: children are
+  stopped and the row stays, because `DeleteTask` acts on one id and cascading a live hierarchy
+  would leave agents writing to rows that had gone.
 
 ## 10. Cockpit
 

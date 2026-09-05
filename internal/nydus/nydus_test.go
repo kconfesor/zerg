@@ -3,6 +3,7 @@ package nydus
 import (
 	"context"
 	"errors"
+	"fmt"
 	"github.com/kconfesor/zerg/internal/hatchery"
 	"github.com/kconfesor/zerg/internal/store"
 	"os"
@@ -18,9 +19,21 @@ import (
 // fakeIntegrator records merges so a test can assert integration happened
 // without needing a repository.
 type fakeIntegrator struct {
-	mu             sync.Mutex
-	merges         []string
-	into           []string
+	mu     sync.Mutex
+	merges []string
+	into   []string
+	// switched records "<branch>@<startPoint>" for each claim, which is how a
+	// test says which branch a feature subtask was put on.
+	switched []string
+	aborted  []string
+	intoErr  error
+	contains map[string]bool
+	// slowResolve parks the first read of a feature head until the test
+	// releases it, widening the merge-then-record window on purpose.
+	// A flag rather than a sync.Once, which would make the second caller wait
+	// for the first and serialise exactly what the test is trying to overlap.
+	slowResolve    chan struct{}
+	parked         bool
 	published      []string
 	publishedDraft []bool
 	// publishedURL is what each title's pull request answers to, so Landed can
@@ -73,9 +86,28 @@ func (f *fakeIntegrator) Publish(_ context.Context, _, base, commit, title, body
 // already. A test about `--commit HEAD` sets `resolve`, because the whole
 // point of that path is that the string the agent sent is not the string that
 // gets stored.
-func (f *fakeIntegrator) Resolve(_ context.Context, _, ref string) (string, error) {
+func (f *fakeIntegrator) Resolve(_ context.Context, path, ref string) (string, error) {
 	if f.resolveErr != nil {
 		return "", f.resolveErr
+	}
+	// A feature's integration tree answers HEAD with where its merges have
+	// got to, so a test can tell one integration's head from the next.
+	if ref == "HEAD" && strings.Contains(path, "feature-") {
+		f.mu.Lock()
+		head := fmt.Sprintf("featurehead-%d", len(f.into))
+		var hold chan struct{}
+		if f.slowResolve != nil && !f.parked {
+			f.parked, hold = true, f.slowResolve
+		}
+		f.mu.Unlock()
+		// The gap that matters is between reading the head and recording it,
+		// and a fake closes it in nanoseconds. Parking the first caller there
+		// is what makes a test about two subtasks finishing at once fail
+		// against unguarded code instead of passing by luck.
+		if hold != nil {
+			<-hold
+		}
+		return head, nil
 	}
 	if sha, ok := f.resolve[ref]; ok {
 		return sha, nil
@@ -83,11 +115,36 @@ func (f *fakeIntegrator) Resolve(_ context.Context, _, ref string) (string, erro
 	return ref, nil
 }
 
-func (f *fakeIntegrator) MergeInto(_ context.Context, _, commit string) error {
+func (f *fakeIntegrator) MergeInto(_ context.Context, path, commit string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.intoErr != nil && strings.Contains(path, "feature-") {
+		return f.intoErr
+	}
 	f.into = append(f.into, commit)
 	return nil
+}
+
+func (f *fakeIntegrator) Switch(_ context.Context, _, branch, startPoint string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.switched = append(f.switched, branch+"@"+startPoint)
+	return nil
+}
+
+func (f *fakeIntegrator) AbortMerge(_ context.Context, path string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.aborted = append(f.aborted, path)
+	return nil
+}
+
+// Contains answers from what a test set up: the question is whether a commit
+// carries a feature, and a fake tree cannot be asked.
+func (f *fakeIntegrator) Contains(_ context.Context, _, commit, ancestor string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.contains[commit+"<-"+ancestor], nil
 }
 
 // Landed answers from what Merge and Publish recorded, so a test can replay a

@@ -148,6 +148,31 @@ func (c *Client) Answer(ctx context.Context, id, answer, commit string) error {
 	return err
 }
 
+// Split submits an inert plan for a feature. Nothing is queued until the
+// operator accepts it.
+func (c *Client) Split(ctx context.Context, feature, commit string, items []store.PlanDraft) (*store.PlanRevision, error) {
+	var out store.PlanRevision
+	_, err := c.call(ctx, "/agent/split", map[string]any{
+		"feature": feature, "commit": commit, "items": items,
+	}, &out)
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// Review records the architect's verdict about a feature head. It does not land.
+func (c *Client) Review(ctx context.Context, feature, verdict, note, commit string) (*store.FeatureReview, error) {
+	var out store.FeatureReview
+	_, err := c.call(ctx, "/agent/review", map[string]string{
+		"feature": feature, "verdict": verdict, "note": note, "commit": commit,
+	}, &out)
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 func (c *Client) call(ctx context.Context, path string, body, out any) (int, error) {
 	payload, err := json.Marshal(body)
 	if err != nil {

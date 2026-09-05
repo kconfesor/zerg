@@ -1105,6 +1105,151 @@ func TestPostingATaskCarriesSupervised(t *testing.T) {
 	}
 }
 
+// A feature is a grouping row. Creating one must not put it in a lane, and a
+// card attached to it must come back on the board carrying the parent.
+func TestAFeatureIsNotACardOnTheBoard(t *testing.T) {
+	h, _, p := newRoutingServer(t)
+
+	rec := do(t, h, "POST", "/api/projects/"+p.ID+"/features", map[string]any{
+		"name": "Billing", "body": "the rewrite",
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d creating a feature, want 201: %s", rec.Code, rec.Body.String())
+	}
+	var feat store.Task
+	decodeInto(t, rec, &feat)
+	if feat.Kind != store.TaskKindFeature {
+		t.Errorf("kind = %q, want feature", feat.Kind)
+	}
+
+	rec = do(t, h, "POST", "/api/projects/"+p.ID+"/tasks", map[string]any{
+		"name": "Invoice PDF", "body": "do it", "parentId": feat.ID,
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d creating a card, want 201: %s", rec.Code, rec.Body.String())
+	}
+
+	rec = do(t, h, "GET", "/api/projects/"+p.ID+"/tasks", nil)
+	var board []store.Task
+	decodeInto(t, rec, &board)
+	if len(board) != 1 {
+		t.Fatalf("board has %d cards, want 1", len(board))
+	}
+	if board[0].Kind == store.TaskKindFeature {
+		t.Error("a feature appeared in a lane")
+	}
+	if board[0].ParentID != feat.ID {
+		t.Errorf("parent = %q, want the feature", board[0].ParentID)
+	}
+
+	rec = do(t, h, "GET", "/api/projects/"+p.ID+"/features", nil)
+	var features []store.Task
+	decodeInto(t, rec, &features)
+	if len(features) != 1 || features[0].ID != feat.ID {
+		t.Fatalf("features = %d, want the grouping row", len(features))
+	}
+}
+
+// A submitted plan sits in Attention, not on the board, and accepting it is
+// what creates the cards.
+func TestAPendingPlanShowsInAttention(t *testing.T) {
+	h, db, p := newRoutingServer(t)
+
+	feat, err := db.CreateFeature(context.Background(), p.ID, "Billing", "rewrite")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rev, err := db.SubmitPlan(context.Background(), p.ID, feat.ID, []store.PlanDraft{
+		{Name: "Schema", Body: "the tables"},
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rec := do(t, h, "GET", "/api/projects/"+p.ID+"/attention", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	var att struct {
+		Plans []store.PlanRevision `json:"plans"`
+	}
+	decodeInto(t, rec, &att)
+	if len(att.Plans) != 1 || att.Plans[0].ID != rev.ID {
+		t.Fatalf("plans = %d, want the pending revision", len(att.Plans))
+	}
+
+	rec = do(t, h, "POST", "/api/plans/"+rev.ID+"/approve", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d approving, want 200: %s", rec.Code, rec.Body.String())
+	}
+	board, err := db.ListTasks(context.Background(), p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(board) != 1 || board[0].Name != "Schema" || board[0].Kind == store.TaskKindFeature {
+		t.Fatalf("board = %v, want the subtask and not the feature", board)
+	}
+}
+
+// A feature whose subtask failed is in none of the other lists: the land gate
+// needs a review of the current head, and the architect is not offered a
+// feature with a failed child. Without the stall list the operator's only
+// visible action was deleting the feature.
+func TestAFailedSubtaskReachesTheOperatorWithAnAction(t *testing.T) {
+	ctx := context.Background()
+	h, db, p := newRoutingServer(t)
+
+	feat, err := db.CreateFeature(ctx, p.ID, "Billing", "rewrite")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rev, err := db.SubmitPlan(ctx, p.ID, feat.ID, []store.PlanDraft{
+		{Name: "Schema", Body: "the tables"},
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec := do(t, h, "POST", "/api/plans/"+rev.ID+"/approve", nil); rec.Code != http.StatusOK {
+		t.Fatalf("status = %d approving, want 200: %s", rec.Code, rec.Body.String())
+	}
+	board, err := db.ListTasks(ctx, p.ID)
+	if err != nil || len(board) != 1 {
+		t.Fatalf("board = %v (%v), want the subtask", board, err)
+	}
+	child := board[0]
+	if rec := do(t, h, "POST", "/api/tasks/"+child.ID+"/stop", nil); rec.Code != http.StatusOK {
+		t.Fatalf("status = %d stopping the card, want 200: %s", rec.Code, rec.Body.String())
+	}
+
+	rec := do(t, h, "GET", "/api/projects/"+p.ID+"/attention", nil)
+	var att struct {
+		Stalls []store.FeatureStall `json:"stalls"`
+	}
+	decodeInto(t, rec, &att)
+	if len(att.Stalls) != 1 || att.Stalls[0].Reason != store.StallFailed {
+		t.Fatalf("stalls = %+v, want the feature reported as failed", att.Stalls)
+	}
+	if len(att.Stalls[0].Cards) != 1 || att.Stalls[0].Cards[0].Action != store.ActionRetry {
+		t.Fatalf("cards = %+v, want a retry on the failed card", att.Stalls[0].Cards)
+	}
+
+	if rec := do(t, h, "POST", "/api/tasks/"+child.ID+"/retry", nil); rec.Code != http.StatusOK {
+		t.Fatalf("status = %d retrying, want 200: %s", rec.Code, rec.Body.String())
+	}
+	got, err := db.GetTask(ctx, child.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != store.TaskQueued {
+		t.Errorf("state = %s, want the card back in the queue", got.State)
+	}
+	rec = do(t, h, "GET", "/api/projects/"+p.ID+"/attention", nil)
+	decodeInto(t, rec, &att)
+	if len(att.Stalls) != 0 {
+		t.Errorf("stalls = %+v, want none once the card is moving again", att.Stalls)
+	}
+}
+
 // Both ways a skip can be wrong are the operator's to fix, so both are 400s
 // that name what is wrong rather than faults.
 func TestABadSkipIsRefusedWithAReason(t *testing.T) {

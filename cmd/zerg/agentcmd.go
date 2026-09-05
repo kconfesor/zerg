@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/kconfesor/zerg/internal/agent"
+	"github.com/kconfesor/zerg/internal/store"
 )
 
 // The agent-facing side of the binary. An agent gets these five verbs and
@@ -157,6 +158,63 @@ func runDecide(args []string, verb string, ok bool) error {
 		return client.Approve(ctx, *id, *note, *commit)
 	}
 	return client.Reject(ctx, *id, *note, *commit)
+}
+
+func runReview(args []string) error {
+	fs := flag.NewFlagSet("review", flag.ContinueOnError)
+	feature := fs.String("feature", "", "the feature being reviewed")
+	verdict := fs.String("verdict", "", "ok or reject")
+	note := fs.String("note", "", "the rationale, required when rejecting")
+	commit := fs.String("commit", "", "the commit that recorded the review")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *feature == "" {
+		return errors.New("review needs --feature")
+	}
+	if *verdict == "" {
+		return errors.New("review needs --verdict ok or reject")
+	}
+	client, err := agent.NewClientFromEnv()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	out, err := client.Review(ctx, *feature, *verdict, *note, *commit)
+	if err != nil {
+		return err
+	}
+	return printJSON(out)
+}
+
+func runSplit(args []string) error {
+	fs := flag.NewFlagSet("split", flag.ContinueOnError)
+	feature := fs.String("feature", "", "the feature being planned")
+	commit := fs.String("commit", "", "the commit that recorded the plan prose")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *feature == "" {
+		return errors.New("split needs --feature, the feature being planned")
+	}
+	var body struct {
+		Items []store.PlanDraft `json:"items"`
+	}
+	if err := json.NewDecoder(os.Stdin).Decode(&body); err != nil {
+		return fmt.Errorf("reading the plan from stdin: %w", err)
+	}
+	client, err := agent.NewClientFromEnv()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	out, err := client.Split(ctx, *feature, *commit, body.Items)
+	if err != nil {
+		return err
+	}
+	return printJSON(out)
 }
 
 func runAnswer(args []string) error {

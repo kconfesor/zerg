@@ -99,6 +99,10 @@ func run(args []string) error {
 		return runReject(args[1:])
 	case "answer":
 		return runAnswer(args[1:])
+	case "split":
+		return runSplit(args[1:])
+	case "review":
+		return runReview(args[1:])
 	case "version", "--version", "-v":
 		printVersion()
 		return nil
@@ -184,6 +188,10 @@ Run by agents, not by you:
   zerg reject  --id <id> --note "<what to change>" [--commit HEAD]
   zerg answer  --id <id> "<the answer>" [--commit HEAD]
                                       supervisor sidecar only; the land stays human
+  zerg split --feature <name> [--commit HEAD]
+                                      submit a plan (JSON on stdin); operator accepts it
+  zerg review --feature <name> --verdict ok|reject [--note] [--commit HEAD]
+                                      architect verdict on a feature head; does not land
   zerg artifact add <path>            keep a file for a person to look at
   zerg artifact serve --port <n>      register a service you started
   zerg remember "<what you learned>"  how this project runs, for next time

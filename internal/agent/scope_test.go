@@ -2,10 +2,13 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"net"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/kconfesor/zerg/internal/nydus"
 	"github.com/kconfesor/zerg/internal/store"
 )
 
@@ -77,6 +80,53 @@ func TestAnUnscopedTokenKeepsEveryVerb(t *testing.T) {
 	}
 }
 
+// Split is never implied. A pipeline token that could spawn ten subtasks
+// would spend the money the operator gate exists to stop.
+func TestSplitIsNotImpliedOnAPipelineToken(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	feat, err := f.db.CreateFeature(ctx, f.project.ID, "Billing", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := f.client(t, "coder")
+	if _, err := c.Split(ctx, feat.Name, "", []store.PlanDraft{{Name: "Schema"}}); err == nil {
+		t.Error("a pipeline role submitted a plan")
+	} else if !strings.Contains(err.Error(), "cannot split") {
+		t.Errorf("refusal was %q, which does not say what was refused", err)
+	}
+}
+
+func TestSupervisorNextReturnsAPlan(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	feat, err := f.db.CreateFeature(ctx, f.project.ID, "Billing", "rewrite invoicing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sup := NewClient(f.socket, f.srv.MintScoped(f.project.ID, "supervisor",
+		CanClaim, CanAsk, CanDecide, CanSplit))
+	work, err := sup.Next(ctx, 0)
+	if err != nil {
+		t.Fatalf("next: %v", err)
+	}
+	if work.Kind != "plan" || work.Task == nil || work.Task.ID != feat.ID {
+		t.Fatalf("kind=%q task=%v, want a plan for the feature", work.Kind, work.Task)
+	}
+	rev, err := sup.Split(ctx, feat.Name, "deadbeef", []store.PlanDraft{
+		{Name: "Schema", Body: "the tables"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rev.State != store.PlanPending || rev.ItemCount != 1 {
+		t.Fatalf("revision = %+v", rev)
+	}
+	if _, err := sup.Next(ctx, 0); !errors.Is(err, ErrNoWork) {
+		t.Errorf("next after submitting = %v, want no work while the operator decides", err)
+	}
+}
+
 // Whose process is it, which decides what stops it.
 //
 // A pipeline role's dev server dies when the swarm stops, because the agent
@@ -128,5 +178,63 @@ func TestWhatARunnerStartsSurvivesTheSwarmStopping(t *testing.T) {
 	}
 	if !after.Live() {
 		t.Error("the preview was marked dead when the pipeline stopped, and it is still running")
+	}
+}
+
+// The last role on a feature's card is not landing anything, and the envelope
+// has to say so. The shared instructions read `"terminal": true` as "the commit
+// is merged into the project's branch", which for a subtask is false: the
+// daemon integrates it into the feature instead.
+func TestASubtasksEnvelopeSaysItFinishesIntoTheFeature(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+
+	feat, err := f.db.CreateFeature(ctx, f.project.ID, "Billing", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := f.nyd.NewTaskWith(ctx, nydus.NewTaskOpts{
+		ProjectID: f.project.ID, Name: "Schema", Body: "the tables", ParentID: feat.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.SQL().ExecContext(ctx,
+		`INSERT INTO feature_runs (feature_id, branch, base_sha, head_sha, state, created_at)
+		 VALUES (?,?,?,?,?,?)`,
+		feat.ID, "zerg-feature/"+feat.ID, "aaaa", "bbbb", store.FeatureRunning,
+		"2026-09-05T00:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+
+	coder := f.client(t, "coder")
+	work, err := coder.Next(ctx, 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if work.Feature != "" {
+		t.Errorf("feature = %q on a card that is not finishing yet", work.Feature)
+	}
+	if _, err := coder.Send(ctx, SendArgs{
+		To: "reviewer", TaskID: task.ID, Commit: "aaaaaaaaaa", Body: "schema is in",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := coder.Done(ctx, work.LeaseID); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := f.client(t, "reviewer").Next(ctx, 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Terminal {
+		t.Fatal("the last role was not told it finishes the card")
+	}
+	if got.Feature != "Billing" {
+		t.Errorf("feature = %q, want the feature this integrates into", got.Feature)
+	}
+	if !strings.Contains(got.Body, "does not land anything") {
+		t.Errorf("body = %q, which does not correct the shared instructions", got.Body)
 	}
 }

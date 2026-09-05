@@ -39,7 +39,7 @@ const noSupervisorRole = "no role in the library has the supervisor purpose"
 // SupervisorState reports whether the architect sidecar is actually there.
 func (o *Overmind) SupervisorState(ctx context.Context, projectID string) SupervisorState {
 	var st SupervisorState
-	want, err := o.db.HasOpenSupervised(ctx, projectID)
+	want, err := o.db.HasWorkForSupervisor(ctx, projectID)
 	if err != nil {
 		return SupervisorState{Error: err.Error()}
 	}
@@ -104,7 +104,7 @@ func (o *Overmind) syncSupervisorLocked(ctx context.Context, projectID string) e
 }
 
 func (o *Overmind) syncSupervisor(ctx context.Context, s *swarm, env *spawnEnv) error {
-	want, err := o.db.HasOpenSupervised(ctx, env.project.ID)
+	want, err := o.db.HasWorkForSupervisor(ctx, env.project.ID)
 	if err != nil {
 		return err
 	}
@@ -216,7 +216,7 @@ func (o *Overmind) spawnSupervisor(runCtx context.Context, s *swarm, env *spawnE
 	}
 
 	token := o.agents.MintScoped(env.project.ID, role.Name,
-		agent.CanClaim, agent.CanAsk, agent.CanDecide)
+		agent.CanClaim, agent.CanAsk, agent.CanDecide, agent.CanSplit)
 
 	configDir := ""
 	if a.Capabilities().PrivateConfigDir {
