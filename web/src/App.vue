@@ -61,6 +61,14 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
+import {
   Dialog,
   DialogBody,
   DialogContent,
@@ -76,6 +84,7 @@ import {
 const pathId = useId()
 const taskNameId = useId()
 const taskBodyId = useId()
+const taskParentId = useId()
 
 const projects = ref<Project[]>([])
 const current = ref<Project | null>(null)
@@ -262,6 +271,7 @@ const presets = ref<TeamPreset[]>([])
 const projectTeam = ref<ProjectTeam>({ presetId: null, roles: [] })
 const team = ref<ResolvedRole[]>([])
 const tasks = ref<Task[]>([])
+const features = ref<Task[]>([])
 const attention = ref<AttentionData | null>(null)
 const readiness = ref<Readiness | null>(null)
 
@@ -326,6 +336,10 @@ const taskSkip = ref<string[]>([])
 const skipping = ref(false)
 /** Architect sidecar on this card: it will decide plans and questions; you still land it. */
 const taskSupervised = ref(false)
+/** A grouping row, not a card. Nothing is queued. */
+const taskIsFeature = ref(false)
+/** Feature id this new card belongs to, or 'none'. */
+const taskParent = ref('none')
 const composing = ref(false)
 
 /** The roles a card would visit, in order, given what is ticked. */
@@ -361,7 +375,18 @@ let timer: number | undefined
 const attentionCount = computed(() => {
   const a = attention.value
   if (!a) return 0
-  return a.approvals.length + a.clarifications.length + a.rework.tasks.length
+  // Every kind the panel draws. A plan, a feature waiting to be landed and a
+  // stalled feature were all missing from this, so the badge that opens the
+  // panel never appeared for them: the whole of the architect's queue was
+  // reachable only by having something else pending at the same time.
+  return (
+    a.approvals.length +
+    a.clarifications.length +
+    a.rework.tasks.length +
+    (a.plans?.length ?? 0) +
+    (a.features?.length ?? 0) +
+    (a.stalls?.length ?? 0)
+  )
 })
 
 /** What that count is made of, for the panel's own header. */
@@ -510,12 +535,13 @@ async function refresh() {
   if (!project) return
   const current_ = newestRefresh()
   try {
-    const [t, tk, at, st, ps] = await Promise.all([
+    const [t, tk, at, st, ps, feat] = await Promise.all([
       api.team(project.id),
       api.tasks(project.id),
       api.attention(project.id),
       api.status(project.id),
       api.teamPresets(project.id),
+      api.features(project.id),
     ])
     // A newer refresh has been asked for; this data is already history.
     if (!current_()) return
@@ -524,6 +550,7 @@ async function refresh() {
     team.value = t.roles
     presets.value = ps
     tasks.value = tk
+    features.value = feat
     attention.value = at
     status.value = st
 
@@ -676,6 +703,8 @@ function openComposer() {
   taskSkip.value = []
   skipping.value = false
   taskSupervised.value = false
+  taskIsFeature.value = false
+  taskParent.value = 'none'
   composing.value = true
 }
 
@@ -685,14 +714,19 @@ async function createTask() {
   await busy.run('newTask', async () => {
     try {
       dialogError.value = ''
-      await api.newTask(
-        project.id,
-        taskName.value.trim(),
-        taskBody.value,
-        taskDeploy.value ? 'local' : '',
-        taskSkip.value,
-        taskSupervised.value,
-      )
+      if (taskIsFeature.value) {
+        await api.newFeature(project.id, taskName.value.trim(), taskBody.value)
+      } else {
+        await api.newTask(
+          project.id,
+          taskName.value.trim(),
+          taskBody.value,
+          taskDeploy.value ? 'local' : '',
+          taskSkip.value,
+          taskSupervised.value,
+          taskParent.value === 'none' ? '' : taskParent.value,
+        )
+      }
       taskName.value = ''
       taskBody.value = ''
       composing.value = false
@@ -830,6 +864,66 @@ const act = {
       dialogError.value = ''
       try {
         await api.reject(id, note)
+      } catch (err) {
+        failIn(err)
+      }
+      await refresh()
+    }),
+  acceptPlan: (id: string) =>
+    busy.run(`decide:${id}`, async () => {
+      dialogError.value = ''
+      try {
+        await api.approvePlan(id)
+      } catch (err) {
+        failIn(err)
+      }
+      await refresh()
+    }),
+  rejectPlan: (id: string, note: string) =>
+    busy.run(`decide:${id}`, async () => {
+      dialogError.value = ''
+      try {
+        await api.rejectPlan(id, note)
+      } catch (err) {
+        failIn(err)
+      }
+      await refresh()
+    }),
+  landFeature: (id: string) =>
+    busy.run(`decide:${id}`, async () => {
+      dialogError.value = ''
+      try {
+        await api.landFeature(id)
+      } catch (err) {
+        failIn(err)
+      }
+      await refresh()
+    }),
+  cancelFeature: (id: string) =>
+    busy.run(`decide:${id}`, async () => {
+      dialogError.value = ''
+      try {
+        await api.cancelFeature(id)
+      } catch (err) {
+        failIn(err)
+      }
+      await refresh()
+    }),
+  retryCard: (id: string) =>
+    busy.run(`decide:${id}`, async () => {
+      dialogError.value = ''
+      try {
+        await api.retryCard(id)
+      } catch (err) {
+        failIn(err)
+      }
+      await refresh()
+    }),
+  waiveCard: (id: string, note: string) =>
+    busy.run(`decide:${id}`, async () => {
+      dialogError.value = ''
+      try {
+        await api.waiveDependency(id, note)
       } catch (err) {
         failIn(err)
       }
@@ -1022,6 +1116,7 @@ watch(current, () => (banner.value = null))
             <div class="flex min-h-0 flex-1 flex-col pt-4"><Board
                 :team="team"
                 :tasks="tasks"
+                :features="features"
                 :show-hidden="showHidden"
                 :needs-attention="attentionTaskIds"
                 :blocked-on="attentionByTask"
@@ -1191,7 +1286,11 @@ watch(current, () => (banner.value = null))
       <DialogContent variant="confirm" class="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>Delete “{{ confirmDeleteTask?.name }}”?</DialogTitle>
-          <DialogDescription>
+          <DialogDescription v-if="confirmDeleteTask?.kind === 'feature'">
+            The feature goes. Cards that belonged to it stay on the board, ungrouped. Nothing in
+            the repository changes.
+          </DialogDescription>
+          <DialogDescription v-else>
             The card and everything recorded against it, meaning its messages, its approvals and
             its whole transcript, is deleted. What it cost stays in the project's usage, because it
             was spent. Commits the agents made stay on their branches; nothing touches the
@@ -1286,6 +1385,12 @@ watch(current, () => (banner.value = null))
             :busy="busy.is"
             @approve="act.approve"
             @reject="act.reject"
+            @accept-plan="act.acceptPlan"
+            @reject-plan="act.rejectPlan"
+            @land-feature="act.landFeature"
+            @cancel-feature="act.cancelFeature"
+            @retry-card="act.retryCard"
+            @waive-card="act.waiveCard"
             @answer="act.answer"
           />
         </DialogBody>
@@ -1329,6 +1434,7 @@ watch(current, () => (banner.value = null))
 
     <TaskDetail
       :task="openTask"
+      :features="features"
       :roles="team.filter((r) => r.enabled).map((r) => r.name)"
       :project="current"
       :skipped="openTaskSkipped"
@@ -1397,7 +1503,39 @@ watch(current, () => (banner.value = null))
                else. One column on a phone, where two would leave each label
                wrapping over three lines. -->
           <div class="hairline-t grid gap-3 pt-3 sm:grid-cols-2 sm:gap-4">
-            <div class="flex items-start gap-3">
+            <div class="flex items-start gap-3 sm:col-span-2">
+              <Switch
+                v-model="taskIsFeature"
+                aria-label="This is a feature, not a card"
+                class="mt-0.5 shrink-0"
+                @update:model-value="(on: boolean) => on && (taskParent = 'none')"
+              />
+              <div class="min-w-0">
+                <p class="text-xs font-medium">This is a feature</p>
+                <p class="text-muted-foreground mt-0.5 text-[11px]">
+                  A group of cards. Nothing is queued until you add work under it.
+                </p>
+              </div>
+            </div>
+
+            <div v-if="!taskIsFeature && features.length" class="flex min-w-0 flex-col gap-1.5 sm:col-span-2">
+              <Label :for="taskParentId">Part of</Label>
+              <Select v-model="taskParent">
+                <SelectTrigger :id="taskParentId" class="w-full">
+                  <SelectValue placeholder="None" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectGroup>
+                    <SelectItem value="none">None</SelectItem>
+                    <SelectItem v-for="f in features" :key="f.id" :value="f.id">
+                      {{ f.name }}
+                    </SelectItem>
+                  </SelectGroup>
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div v-if="!taskIsFeature" class="flex items-start gap-3">
               <Switch
                 v-model="taskDeploy"
                 aria-label="Deploy this task locally when it lands"
@@ -1409,7 +1547,7 @@ watch(current, () => (banner.value = null))
               </div>
             </div>
 
-            <div class="flex items-start gap-3">
+            <div v-if="!taskIsFeature" class="flex items-start gap-3">
               <Switch
                 v-model="skipping"
                 aria-label="Skip some roles on this task"
@@ -1424,7 +1562,7 @@ watch(current, () => (banner.value = null))
               </div>
             </div>
 
-            <div class="flex items-start gap-3 sm:col-span-2">
+            <div v-if="!taskIsFeature" class="flex items-start gap-3 sm:col-span-2">
               <Switch
                 v-model="taskSupervised"
                 aria-label="Architect supervises this card"
@@ -1441,7 +1579,7 @@ watch(current, () => (banner.value = null))
             <!-- Full width under both, not inside the skip column: four role
                  names in half a dialog is a list of one-word lines with the
                  tick boxes crowded against them. -->
-            <div v-if="skipping" class="flex flex-wrap gap-x-5 gap-y-2 sm:col-span-2">
+            <div v-if="!taskIsFeature && skipping" class="flex flex-wrap gap-x-5 gap-y-2 sm:col-span-2">
               <div
                 v-for="role in team.filter((r) => r.enabled)"
                 :key="role.id"
@@ -1465,10 +1603,10 @@ watch(current, () => (banner.value = null))
         <DialogFooter class="hairline-t shrink-0 px-5 py-4">
           <Button variant="outline" @click="composing = false">Cancel</Button>
           <Button
-            :disabled="!taskName.trim() || !taskRoute.length || busy.is('newTask')"
+            :disabled="!taskName.trim() || busy.is('newTask') || (!taskIsFeature && !taskRoute.length)"
             @click="createTask"
           >
-            {{ busy.is('newTask') ? 'Queueing…' : 'Queue it' }}
+            {{ busy.is('newTask') ? (taskIsFeature ? 'Creating…' : 'Queueing…') : (taskIsFeature ? 'Create feature' : 'Queue it') }}
           </Button>
         </DialogFooter>
       </DialogContent>

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"net"
 	"strings"
 	"testing"
@@ -74,6 +75,53 @@ func TestAnUnscopedTokenKeepsEveryVerb(t *testing.T) {
 	c := f.client(t, "coder")
 	if _, err := c.Next(ctx, 0); err != nil {
 		t.Errorf("a role could not claim work: %v", err)
+	}
+}
+
+// Split is never implied. A pipeline token that could spawn ten subtasks
+// would spend the money the operator gate exists to stop.
+func TestSplitIsNotImpliedOnAPipelineToken(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	feat, err := f.db.CreateFeature(ctx, f.project.ID, "Billing", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := f.client(t, "coder")
+	if _, err := c.Split(ctx, feat.Name, "", []store.PlanDraft{{Name: "Schema"}}); err == nil {
+		t.Error("a pipeline role submitted a plan")
+	} else if !strings.Contains(err.Error(), "cannot split") {
+		t.Errorf("refusal was %q, which does not say what was refused", err)
+	}
+}
+
+func TestSupervisorNextReturnsAPlan(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	feat, err := f.db.CreateFeature(ctx, f.project.ID, "Billing", "rewrite invoicing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sup := NewClient(f.socket, f.srv.MintScoped(f.project.ID, "supervisor",
+		CanClaim, CanAsk, CanDecide, CanSplit))
+	work, err := sup.Next(ctx, 0)
+	if err != nil {
+		t.Fatalf("next: %v", err)
+	}
+	if work.Kind != "plan" || work.Task == nil || work.Task.ID != feat.ID {
+		t.Fatalf("kind=%q task=%v, want a plan for the feature", work.Kind, work.Task)
+	}
+	rev, err := sup.Split(ctx, feat.Name, "deadbeef", []store.PlanDraft{
+		{Name: "Schema", Body: "the tables"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rev.State != store.PlanPending || rev.ItemCount != 1 {
+		t.Fatalf("revision = %+v", rev)
+	}
+	if _, err := sup.Next(ctx, 0); !errors.Is(err, ErrNoWork) {
+		t.Errorf("next after submitting = %v, want no work while the operator decides", err)
 	}
 }
 

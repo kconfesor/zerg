@@ -14,6 +14,14 @@ import { renderMarkdown } from '@/lib/markdown'
 import { duration, taskState } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import { Switch } from '@/components/ui/switch'
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 import TaskFlow from '@/components/TaskFlow.vue'
 import Artifacts from '@/components/Artifacts.vue'
 import RunPanel from '@/components/RunPanel.vue'
@@ -37,6 +45,8 @@ const props = defineProps<{
    *  is the one holding the team: the card stores template ids so that
    *  renaming a role cannot silently un-skip it. */
   skipped?: string[]
+  /** Grouping rows this card can belong to. */
+  features?: Task[]
 }>()
 const emit = defineEmits<{ close: []; updated: [task: Task] }>()
 
@@ -86,6 +96,17 @@ async function setSupervised(on: boolean) {
   failed.value = ''
   try {
     emit('updated', await api.setTaskSupervised(t.id, on))
+  } catch (e) {
+    failed.value = e instanceof Error ? e.message : String(e)
+  }
+}
+
+async function setParent(parentId: string) {
+  const t = props.task
+  if (!t) return
+  failed.value = ''
+  try {
+    emit('updated', await api.setTaskParent(t.id, parentId === 'none' ? null : parentId))
   } catch (e) {
     failed.value = e instanceof Error ? e.message : String(e)
   }
@@ -145,6 +166,28 @@ function tokensOf(u: TaskDetail['usage']): number {
           <Badge v-else-if="task?.supervised" variant="secondary">
             architect supervised
           </Badge>
+          <label
+            v-if="task && features?.length && task.kind !== 'feature'"
+            class="text-muted-foreground flex items-center gap-1.5"
+          >
+            Part of
+            <Select
+              :model-value="task.parentId || 'none'"
+              @update:model-value="(v) => typeof v === 'string' && setParent(v)"
+            >
+              <SelectTrigger size="sm" class="h-6 w-36 text-[11px]">
+                <SelectValue placeholder="None" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectGroup>
+                  <SelectItem value="none">None</SelectItem>
+                  <SelectItem v-for="f in features" :key="f.id" :value="f.id">
+                    {{ f.name }}
+                  </SelectItem>
+                </SelectGroup>
+              </SelectContent>
+            </Select>
+          </label>
           <span v-if="task?.activeMs" class="text-muted-foreground">
             {{ duration(task.activeMs) }} of agent time
           </span>

@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import { summarizeAttention } from './attention'
-import type { Attention, Approval, Clarification, Task } from './api'
+import type {
+  Attention,
+  Approval,
+  Clarification,
+  FeatureStall,
+  PlanRevision,
+  Task,
+} from './api'
 
 const approval = (id: string) => ({ id }) as Approval
 const question = (id: string) => ({ id }) as Clarification
@@ -21,9 +28,20 @@ describe('what the queue is holding', () => {
         queue({
           approvals: [approval('a1'), approval('a2')],
           clarifications: [question('c1')],
+          plans: [{ id: 'p1' } as PlanRevision],
         }),
       ),
-    ).toBe('2 approvals · 1 question')
+    ).toBe('2 approvals · 1 plan · 1 question')
+  })
+
+  // A stalled feature is the one thing here nobody is working on: no agent
+  // will touch it again until a person does something.
+  it('counts a stalled feature', () => {
+    expect(
+      summarizeAttention(
+        queue({ stalls: [{ featureId: 'f1', name: 'Billing', reason: 'failed' } as FeatureStall] }),
+      ),
+    ).toBe('1 stalled feature')
   })
 
   it('is singular for one of something', () => {

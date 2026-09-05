@@ -63,6 +63,12 @@ function answering(id: string): boolean {
 const emit = defineEmits<{
   approve: [id: string]
   reject: [id: string, note: string]
+  acceptPlan: [id: string]
+  rejectPlan: [id: string, note: string]
+  landFeature: [id: string]
+  cancelFeature: [id: string]
+  retryCard: [id: string]
+  waiveCard: [id: string, note: string]
   answer: [id: string, answer: string]
 }>()
 
@@ -862,7 +868,36 @@ function submit(c: { id: string; options?: string[] }): void {
 
 function empty(a: Attention | null): boolean {
   if (!a) return true
-  return !a.approvals.length && !a.clarifications.length && !a.rework.tasks.length
+  return (
+    !a.approvals.length &&
+    !a.clarifications.length &&
+    !a.rework.tasks.length &&
+    !a.plans?.length &&
+    !a.features?.length &&
+    !a.stalls?.length
+  )
+}
+
+function money(n: number): string {
+  if (!n) return 'no history to estimate from'
+  return n >= 1 ? `$${n.toFixed(2)}` : `$${n.toFixed(3)}`
+}
+
+// What a stalled feature says about itself. The daemon fills note for the two
+// that quote something (the conflict, the architect); the rest is the same
+// sentence every time and belongs here.
+function stallSays(reason: string): string {
+  if (reason === 'failed') return 'A card in this feature failed. Nothing else in it will move.'
+  if (reason === 'blocked') return 'Every card left is waiting on work that is not coming.'
+  if (reason === 'rejected') return 'The architect sent this feature back.'
+  return 'Integration stopped.'
+}
+
+function compactTokens(n: number): string {
+  if (!n) return '0'
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
+  if (n >= 1_000) return `${Math.round(n / 1000)}k`
+  return String(n)
 }
 </script>
 
@@ -888,8 +923,163 @@ function empty(a: Attention | null): boolean {
     >
       <span class="text-[var(--status-good)]/70 text-lg leading-none">✓</span>
       <p class="text-xs">Nothing needs you.</p>
-      <p class="text-[11px]">Approvals, questions and looping cards appear here.</p>
+      <p class="text-[11px]">Approvals, plans, questions and looping cards appear here.</p>
     </div>
+
+    <!-- A feature split. Accepting is the expensive click: it creates every
+         card below, opens the feature's branch and starts spending. The count
+         and the estimate are here for that reason, rather than discovered as a
+         bill afterwards. -->
+    <article
+      v-for="p in props.attention.plans ?? []"
+      :key="p.id"
+      class="rise bg-card border-l-primary border border-l-2 p-3"
+    >
+      <div class="mb-2.5 flex flex-wrap items-center gap-2">
+        <Badge>plan</Badge>
+        <span class="text-xs font-semibold">{{ p.featureName || 'untitled' }}</span>
+        <span class="text-muted-foreground text-[11px]">
+          {{ p.itemCount }} subtask{{ p.itemCount === 1 ? '' : 's' }}
+          · {{ compactTokens(p.estimateTokens) }} tokens
+          · {{ money(p.estimateCostUsd) }}
+        </span>
+      </div>
+      <p v-if="p.featureBody" class="text-muted-foreground mb-2 text-xs leading-relaxed">
+        {{ p.featureBody }}
+      </p>
+      <ol class="mb-2.5 flex flex-col gap-1.5">
+        <li v-for="it in p.items ?? []" :key="it.id" class="text-xs">
+          <span class="font-medium">{{ it.name }}</span>
+          <span v-if="it.after?.length" class="text-muted-foreground">
+            after {{ it.after.join(', ') }}
+          </span>
+          <p v-if="it.body" class="text-muted-foreground mt-0.5 leading-relaxed">{{ it.body }}</p>
+        </li>
+      </ol>
+      <p v-if="p.proseSha" class="text-muted-foreground mb-2 font-mono text-[10px]">
+        {{ p.proseSha.slice(0, 12) }}
+      </p>
+      <div class="bg-card sticky bottom-0 z-10 -mx-3 -mb-3 px-3 pt-2 pb-3">
+        <InputGroup class="h-11 has-[>[data-align=block-end]]:h-auto">
+          <InputGroupInput
+            v-model="notes[p.id]"
+            class="h-11 text-sm md:text-sm"
+            placeholder="reason, if rejecting"
+          />
+          <InputGroupAddon :align="narrow ? 'block-end' : 'inline-end'" class="gap-1.5">
+            <InputGroupButton
+              variant="default"
+              size="sm"
+              class="h-9 w-11 [&>svg]:size-4.5"
+              :disabled="deciding(p.id)"
+              title="Accept: create these cards and start the work"
+              aria-label="Accept plan"
+              @click="emit('acceptPlan', p.id)"
+            >
+              <Check aria-hidden="true" />
+            </InputGroupButton>
+            <InputGroupButton
+              variant="destructive"
+              size="sm"
+              class="h-9 w-11 [&>svg]:size-4.5"
+              :disabled="deciding(p.id)"
+              title="Reject: the architect will submit a new revision"
+              aria-label="Reject plan"
+              @click="emit('rejectPlan', p.id, notes[p.id] ?? '')"
+            >
+              <X aria-hidden="true" />
+            </InputGroupButton>
+          </InputGroupAddon>
+        </InputGroup>
+      </div>
+    </article>
+
+    <article
+      v-for="f in props.attention.features ?? []"
+      :key="f.id"
+      class="rise bg-card border-l-primary border border-l-2 p-3"
+    >
+      <div class="mb-2.5 flex flex-wrap items-center gap-2">
+        <Badge>land</Badge>
+        <span class="text-xs font-semibold">{{ f.featureName || 'untitled' }}</span>
+        <span class="text-muted-foreground font-mono text-[10px]">{{ f.headSha.slice(0, 12) }}</span>
+      </div>
+      <p v-if="f.note" class="mb-2.5 text-xs leading-relaxed">{{ f.note }}</p>
+      <div class="flex flex-wrap gap-2">
+        <Button
+          size="sm"
+          :disabled="deciding(f.featureId)"
+          @click="emit('landFeature', f.featureId)"
+        >
+          Land on base
+        </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          :disabled="deciding(f.featureId)"
+          @click="emit('cancelFeature', f.featureId)"
+        >
+          Cancel feature
+        </Button>
+      </div>
+    </article>
+
+    <!-- A feature nothing will move on its own. Before this it showed nowhere:
+         the land gate needs a review of the current head, and the architect is
+         not offered a feature with a failed card, so the only visible way out
+         was deleting the feature, which ungroups its cards and takes the plan
+         with it. -->
+    <article
+      v-for="st in props.attention.stalls ?? []"
+      :key="st.featureId"
+      class="rise bg-card border-l-destructive border border-l-2 p-3"
+    >
+      <div class="mb-2.5 flex flex-wrap items-center gap-2">
+        <Badge variant="destructive">stalled</Badge>
+        <span class="text-xs font-semibold">{{ st.name || 'untitled' }}</span>
+        <span v-if="st.headSha" class="text-muted-foreground font-mono text-[10px]">
+          {{ st.headSha.slice(0, 12) }}
+        </span>
+      </div>
+      <p class="mb-1 text-xs leading-relaxed">{{ stallSays(st.reason) }}</p>
+      <p v-if="st.note" class="text-muted-foreground mb-2.5 text-xs leading-relaxed">{{ st.note }}</p>
+      <div v-if="st.cards?.length" class="mb-2.5 flex flex-wrap gap-2">
+        <Button
+          v-for="c in st.cards"
+          :key="c.id"
+          variant="outline"
+          size="sm"
+          :disabled="deciding(c.id)"
+          :title="
+            c.action === 'retry'
+              ? 'Put this card back in front of the pipeline'
+              : 'Start this card without the work it was planned to depend on'
+          "
+          @click="
+            c.action === 'retry'
+              ? emit('retryCard', c.id)
+              : emit('waiveCard', c.id, notes[st.featureId] ?? '')
+          "
+        >
+          {{ c.action === 'retry' ? 'Retry' : 'Release' }} {{ c.name }}
+        </Button>
+      </div>
+      <InputGroup v-if="st.cards?.some((c) => c.action === 'waive')" class="mb-2.5 h-11">
+        <InputGroupInput
+          v-model="notes[st.featureId]"
+          class="h-11 text-sm md:text-sm"
+          placeholder="why this card can start without its dependency"
+        />
+      </InputGroup>
+      <Button
+        variant="outline"
+        size="sm"
+        :disabled="deciding(st.featureId)"
+        @click="emit('cancelFeature', st.featureId)"
+      >
+        Cancel feature
+      </Button>
+    </article>
 
     <!-- Approvals: a spec waiting to be read before anything downstream runs. -->
     <article

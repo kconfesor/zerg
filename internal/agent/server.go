@@ -75,14 +75,15 @@ const (
 	CanArtifact = "artifact" // register what it produced
 	CanRemember = "remember" // write down what it learned about this project
 	CanDecide   = "decide"   // approve, reject, answer as the supervisor sidecar
+	CanSplit    = "split"    // write a feature plan; never implied, never inherited
 )
 
 // allows reports whether this identity may call a verb.
 func (i Identity) allows(verb string) bool {
-	// Decide is never implied. A pipeline token holds every other verb by
-	// leaving Can empty; granting approve that way would let any coder land
-	// a card, which is the same class of failure as a forgeable --from.
-	if verb == CanDecide {
+	// Decide and split are never implied. A pipeline token holds every other
+	// verb by leaving Can empty; granting approve that way would let any coder
+	// land a card, and granting split would let any coder spawn ten pipelines.
+	if verb == CanDecide || verb == CanSplit {
 		return i.Can[verb]
 	}
 	if len(i.Can) == 0 {
@@ -333,6 +334,8 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /agent/approve", s.approve)
 	mux.HandleFunc("POST /agent/reject", s.reject)
 	mux.HandleFunc("POST /agent/answer", s.answer)
+	mux.HandleFunc("POST /agent/split", s.split)
+	mux.HandleFunc("POST /agent/review", s.reviewFeature)
 	return mux
 }
 
@@ -358,7 +361,8 @@ type NextResponse struct {
 	Terminal bool   `json:"terminal"`
 
 	// Kind is "decide" when this is a judgement for the supervisor sidecar,
-	// empty for ordinary pipeline work. A pipeline agent never sees decide.
+	// "plan" when a feature needs splitting, empty for ordinary pipeline work.
+	// A pipeline agent never sees either.
 	Kind            string   `json:"kind,omitempty"`
 	ApprovalID      string   `json:"approvalId,omitempty"`
 	ClarificationID string   `json:"clarificationId,omitempty"`
@@ -416,7 +420,30 @@ func (s *Server) next(w http.ResponseWriter, r *http.Request) {
 				writeJSON(w, http.StatusOK, out)
 				return
 			}
-		} else {
+		}
+		if id.allows(CanSplit) {
+			out, err := s.describePlan(r.Context(), id)
+			if err != nil {
+				s.fail(w, err)
+				return
+			}
+			if out != nil {
+				writeJSON(w, http.StatusOK, out)
+				return
+			}
+		}
+		if id.allows(CanDecide) {
+			out, err := s.describeReview(r.Context(), id)
+			if err != nil {
+				s.fail(w, err)
+				return
+			}
+			if out != nil {
+				writeJSON(w, http.StatusOK, out)
+				return
+			}
+		}
+		if !id.allows(CanDecide) && !id.allows(CanSplit) {
 			lease, err := s.nyd.Claim(r.Context(), id.ProjectID, id.Role)
 			if err != nil {
 				s.fail(w, err)
@@ -769,6 +796,102 @@ func (s *Server) describeDecision(ctx context.Context, id Identity) (*NextRespon
 		}
 	}
 	return &out, nil
+}
+
+func (s *Server) describePlan(ctx context.Context, id Identity) (*NextResponse, error) {
+	feature, note, err := s.db.NextFeatureToPlan(ctx, id.ProjectID)
+	if err != nil {
+		return nil, err
+	}
+	if feature == nil {
+		return nil, nil
+	}
+	body := fmt.Sprintf("Split this feature into subtasks. Submit with: zerg split --feature %s [--commit HEAD]. JSON on stdin: {\"items\":[{\"name\":\"...\",\"body\":\"...\",\"priority\":50,\"after\":[\"dep-name\"]}]}. Do not implement the work. Do not create the subtasks. The operator accepts the plan before anything is queued.", feature.Name)
+	if note != "" {
+		body = "The last plan was rejected: " + note + "\n\n" + body
+	}
+	return &NextResponse{
+		Kind: "plan", Role: id.Role, Terminal: false, Task: feature, Body: body,
+	}, nil
+}
+
+type splitRequest struct {
+	Feature string            `json:"feature"`
+	Commit  string            `json:"commit"`
+	Items   []store.PlanDraft `json:"items"`
+}
+
+func (s *Server) split(w http.ResponseWriter, r *http.Request) {
+	id, permitted := s.permit(w, r, CanSplit)
+	if !permitted {
+		return
+	}
+	var req splitRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	if req.Feature == "" {
+		writeError(w, http.StatusBadRequest, "split needs --feature, the feature being planned")
+		return
+	}
+	featureID, err := s.resolveTask(r.Context(), id.ProjectID, req.Feature)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	rev, err := s.db.SubmitPlan(r.Context(), id.ProjectID, featureID, req.Items, req.Commit)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, rev)
+}
+
+func (s *Server) describeReview(ctx context.Context, id Identity) (*NextResponse, error) {
+	feature, head, err := s.db.NextFeatureToReview(ctx, id.ProjectID)
+	if err != nil {
+		return nil, err
+	}
+	if feature == nil {
+		return nil, nil
+	}
+	body := fmt.Sprintf("Review this feature against its plan. The head is %s. Submit with: zerg review --feature %s --verdict ok|reject --note \"...\" [--commit HEAD]. You may reject. You may not land it.", head, feature.Name)
+	return &NextResponse{
+		Kind: "review", Role: id.Role, Terminal: false, Task: feature, Body: body, Commit: head,
+	}, nil
+}
+
+type reviewRequest struct {
+	Feature string `json:"feature"`
+	Verdict string `json:"verdict"`
+	Note    string `json:"note"`
+	Commit  string `json:"commit"`
+}
+
+func (s *Server) reviewFeature(w http.ResponseWriter, r *http.Request) {
+	id, permitted := s.permit(w, r, CanDecide)
+	if !permitted {
+		return
+	}
+	var req reviewRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	if req.Feature == "" {
+		writeError(w, http.StatusBadRequest, "review needs --feature")
+		return
+	}
+	featureID, err := s.resolveTask(r.Context(), id.ProjectID, req.Feature)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	rev, err := s.nyd.SubmitFeatureReview(r.Context(), s.deciderScope(id), featureID, req.Verdict, req.Note, req.Commit)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, rev)
 }
 
 type decideRequest struct {

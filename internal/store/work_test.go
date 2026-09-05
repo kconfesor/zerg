@@ -1236,3 +1236,131 @@ func TestAnAgentsAnswerIsCheckedAgainstTheQuestion(t *testing.T) {
 		}
 	}
 }
+
+// A feature is a grouping row, not a card. The board, history and rework lists
+// are what a person reads as work, and a feature in any of them would sit in a
+// lane no role will ever claim.
+func TestAFeatureIsNotACardOnTheBoard(t *testing.T) {
+	ctx := context.Background()
+	db, p := seeded(t)
+
+	feat, err := db.CreateFeature(ctx, p.ID, "Billing", "the rewrite")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if feat.Kind != TaskKindFeature {
+		t.Errorf("kind = %q, want feature", feat.Kind)
+	}
+	card, err := db.CreateTask(ctx, p.ID, "Invoice PDF", "do it", "coder")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetTaskParent(ctx, card.ID, feat.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	board, err := db.ListTasks(ctx, p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(board) != 1 {
+		t.Fatalf("board has %d cards, want 1", len(board))
+	}
+	if board[0].Kind == TaskKindFeature {
+		t.Error("a feature appeared in a lane")
+	}
+	if board[0].ParentID != feat.ID {
+		t.Errorf("parent = %q, want the feature", board[0].ParentID)
+	}
+
+	features, err := db.ListFeatures(ctx, p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(features) != 1 || features[0].ID != feat.ID {
+		t.Fatalf("features = %d, want the one grouping row", len(features))
+	}
+
+	page, _, err := db.ListHistory(ctx, p.ID, HistoryFilter{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range page {
+		if e.Kind == TaskKindFeature {
+			t.Error("a feature appeared in history")
+		}
+	}
+
+	if _, err := db.SQL().ExecContext(ctx,
+		`UPDATE tasks SET rework_count = 4 WHERE id = ?`, feat.ID); err != nil {
+		t.Fatal(err)
+	}
+	looping, err := db.ListReworkedTasks(ctx, p.ID, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tsk := range looping {
+		if tsk.Kind == TaskKindFeature {
+			t.Error("a feature appeared in rework")
+		}
+	}
+}
+
+func TestACardCanOnlyBelongToAFeature(t *testing.T) {
+	ctx := context.Background()
+	db, p := seeded(t)
+
+	feat, err := db.CreateFeature(ctx, p.ID, "Billing", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := db.CreateTask(ctx, p.ID, "A", "", "coder")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := db.CreateTask(ctx, p.ID, "B", "", "coder")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := db.SetTaskParent(ctx, a.ID, b.ID); err == nil {
+		t.Error("a card was allowed to belong to another card")
+	}
+	if err := db.SetTaskParent(ctx, a.ID, "missing"); err == nil {
+		t.Error("a missing parent was accepted")
+	}
+	if err := db.SetTaskParent(ctx, feat.ID, a.ID); err == nil {
+		t.Error("a feature was allowed a parent")
+	}
+	if err := db.SetTaskParent(ctx, a.ID, feat.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DeleteTask(ctx, p.ID, feat.ID); err == nil {
+		t.Fatal("deleting a feature with a live child was allowed")
+	}
+	if err := db.StopTask(ctx, p.ID, a.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DeleteTask(ctx, p.ID, feat.ID); err != nil {
+		t.Fatal(err)
+	}
+	got, err := db.GetTask(ctx, a.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ParentID != "" {
+		t.Errorf("parent = %q after the feature was deleted, want empty", got.ParentID)
+	}
+}
+
+func TestStopTaskRefusesAFeature(t *testing.T) {
+	ctx := context.Background()
+	db, p := seeded(t)
+	feat, err := db.CreateFeature(ctx, p.ID, "Billing", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.StopTask(ctx, p.ID, feat.ID); err == nil {
+		t.Error("stopping a feature was allowed")
+	}
+}

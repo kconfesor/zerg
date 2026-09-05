@@ -34,6 +34,7 @@ import {
   EyeOff,
   ExternalLink,
   Hourglass,
+  Layers,
   LoaderCircle,
   MessageCircleQuestion,
   ScrollText,
@@ -45,6 +46,9 @@ import { Badge } from '@/components/ui/badge'
 const props = defineProps<{
   team: ResolvedRole[]
   tasks: Task[]
+  /** Grouping rows. Never drawn in a lane; the strip and the card badge
+   *  are how a person sees which cards belong together. */
+  features?: Task[]
   /** Ids of tasks with something waiting on a person. */
   needsAttention?: string[]
   /** What each is waiting for, so the card can say which kind. */
@@ -140,6 +144,15 @@ function deploySays(state: string): string {
   return 'Deploying'
 }
 
+function featureName(task: Task): string {
+  if (!task.parentId) return ''
+  return (props.features ?? []).find((f) => f.id === task.parentId)?.name ?? ''
+}
+
+function childCount(id: string): number {
+  return props.tasks.filter((t) => t.parentId === id).length
+}
+
 /** Lanes are the enabled roles in pipeline order, then the Done well. */
 const lanes = computed(() => {
   const roles = props.team.filter((r) => r.enabled).map((r) => r.name)
@@ -188,6 +201,30 @@ const byLane = computed(() => {
          stays put for the whole scroll. Sized to their own content, the short
          lanes' headings scrolled away while the busy lane's stayed, which reads
          as the headings being broken rather than as the lanes being empty. -->
+    <div
+      v-if="features?.length"
+      class="flex flex-wrap items-center gap-1.5 pb-3"
+    >
+      <Badge
+        v-for="f in features"
+        :key="f.id"
+        variant="secondary"
+        class="gap-1"
+      >
+        <Layers :size="10" aria-hidden="true" />
+        {{ f.name }}
+        <span class="tabular text-muted-foreground">{{ childCount(f.id) }}</span>
+        <button
+          type="button"
+          title="Delete this feature"
+          aria-label="Delete this feature"
+          class="text-muted-foreground hover:text-destructive grid size-4 place-items-center"
+          @click.stop="emit('remove', f)"
+        >
+          <Trash2 :size="10" aria-hidden="true" />
+        </button>
+      </Badge>
+    </div>
     <div class="flex flex-wrap items-stretch gap-3 sm:flex-nowrap">
       <section
         v-for="(lane, i) in lanes"
@@ -301,6 +338,22 @@ const byLane = computed(() => {
                   aria-hidden="true"
                 />
                 {{ blockedOn?.get(task.id) === 'question' ? 'answer' : 'approve' }}
+              </Badge>
+              <Badge
+                v-if="task.blocked"
+                variant="secondary"
+                title="Waiting for a dependency to land in the feature"
+              >
+                blocked
+              </Badge>
+              <Badge
+                v-if="featureName(task)"
+                variant="outline"
+                class="gap-1"
+                :title="`part of ${featureName(task)}`"
+              >
+                <Layers :size="10" aria-hidden="true" />
+                {{ featureName(task) }}
               </Badge>
               <Badge
                 v-if="task.supervised"
