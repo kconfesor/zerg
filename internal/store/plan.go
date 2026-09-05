@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -343,7 +344,12 @@ func (db *DB) ListPendingPlans(ctx context.Context, projectID string) ([]PlanRev
 
 // NextFeatureToPlan is the oldest feature that still needs a split: none yet,
 // or the latest was rejected. A pending or accepted plan is not the architect's
-// to rewrite.
+// to rewrite, and a feature that has landed or been cancelled is not either.
+//
+// The run matters because rejecting a plan puts the feature back in front of
+// the architect. Cancelling before anyone accepted a plan rejected the pending
+// revision and recorded nothing else, so the architect planned the feature
+// again while the operator had been told it was cancelled.
 func (db *DB) NextFeatureToPlan(ctx context.Context, projectID string) (*Task, string, error) {
 	var id string
 	err := db.read.QueryRowContext(ctx,
@@ -353,8 +359,13 @@ func (db *DB) NextFeatureToPlan(ctx context.Context, projectID string) (*Task, s
 		        SELECT 1 FROM feature_plan_revisions r
 		         WHERE r.feature_id = t.id AND r.state IN (?, ?)
 		    )
+		    AND NOT EXISTS (
+		        SELECT 1 FROM feature_runs fr
+		         WHERE fr.feature_id = t.id AND fr.state IN (?, ?)
+		    )
 		  ORDER BY t.created_at LIMIT 1`,
-		projectID, TaskKindFeature, PlanPending, PlanApproved).Scan(&id)
+		projectID, TaskKindFeature, PlanPending, PlanApproved,
+		FeatureDone, FeatureCancelled).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, "", nil
 	}
@@ -391,8 +402,13 @@ func (db *DB) HasWorkForSupervisor(ctx context.Context, projectID string) (bool,
 		    AND NOT EXISTS (
 		        SELECT 1 FROM feature_plan_revisions r
 		         WHERE r.feature_id = t.id AND r.state IN (?, ?)
+		    )
+		    AND NOT EXISTS (
+		        SELECT 1 FROM feature_runs fr
+		         WHERE fr.feature_id = t.id AND fr.state IN (?, ?)
 		    )`,
-		projectID, TaskKindFeature, PlanPending, PlanApproved).Scan(&n)
+		projectID, TaskKindFeature, PlanPending, PlanApproved,
+		FeatureDone, FeatureCancelled).Scan(&n)
 	if err != nil {
 		return false, fmt.Errorf("looking for features to plan: %w", err)
 	}
@@ -510,6 +526,13 @@ func validatePlan(drafts []PlanDraft) ([]PlanItem, map[string][]string, error) {
 			if !seen[after] {
 				return nil, nil, invalid("%q depends on %q, which is not in this plan", it.Name, after)
 			}
+			// Named twice means the same edge, not two. Left in, the second
+			// insert broke the primary key, and the wrapper around it is not
+			// invalid(), so an architect that wrote ["A","A"] got a 500 with
+			// SQLite's wording rather than a plan.
+			if slices.Contains(edges[after], it.Name) {
+				continue
+			}
 			edges[after] = append(edges[after], it.Name)
 		}
 	}
@@ -620,6 +643,43 @@ func (db *DB) GetPlan(ctx context.Context, id string) (*PlanRevision, error) {
 	}
 	r.Items = list
 	return &r, nil
+}
+
+// VerifyPlanDigest re-hashes a revision's rows and compares them with the
+// digest written when it was submitted.
+//
+// Decision 8 binds the rows to the prose the architect committed, and the
+// digest was being written and never read again, which makes it a column
+// rather than a binding. The rows are immutable, so this catches a hand edit
+// of the database between the split and the accept, and the accept is the
+// point where it matters: it is what turns rows into cards and money.
+func (db *DB) VerifyPlanDigest(ctx context.Context, rev *PlanRevision) error {
+	edges := map[string][]string{}
+	for _, it := range rev.Items {
+		for _, after := range it.After {
+			edges[after] = append(edges[after], it.Name)
+		}
+	}
+	if got := planDigest(rev.Items, edges); got != rev.Digest {
+		return invalid(
+			"this plan's rows no longer match the split that was submitted, "+
+				"so the document beside it describes something else; reject it and ask for a new one (%s, not %s)",
+			shortDigest(got), shortDigest(rev.Digest))
+	}
+	return nil
+}
+
+// shortDigest is the first few characters, and survives a stored value that is
+// not a full hash. Sliced blindly it panicked on the row that most wants
+// checking: one somebody had written by hand.
+func shortDigest(d string) string {
+	if len(d) > 12 {
+		return d[:12]
+	}
+	if d == "" {
+		return "nothing"
+	}
+	return d
 }
 
 // GetFeatureRun returns the live integration row, or nil if none.
@@ -800,6 +860,24 @@ func (db *DB) CurrentReview(ctx context.Context, featureID string) (*FeatureRevi
 		return nil, err
 	}
 	return &v, nil
+}
+
+// CancelFeatureRun records that a feature is over, whether or not it ever had
+// an integration to cancel.
+//
+// A run row exists only from the moment a plan is accepted. Without this a
+// cancellation before that point had nowhere to be written down, so nothing
+// downstream could tell a cancelled feature from a new one.
+func (db *DB) CancelFeatureRun(ctx context.Context, featureID, branch string) error {
+	_, err := db.sql.ExecContext(ctx,
+		`INSERT INTO feature_runs (feature_id, branch, base_sha, head_sha, state, created_at)
+		 VALUES (?,?,'','',?,?)
+		 ON CONFLICT(feature_id) DO UPDATE SET state = excluded.state`,
+		featureID, branch, FeatureCancelled, time.Now().UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return fmt.Errorf("cancelling feature %s: %w", featureID, err)
+	}
+	return nil
 }
 
 // LiveFeatureRuns are the runs whose work has not landed, named, for the checks

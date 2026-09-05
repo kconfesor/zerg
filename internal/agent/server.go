@@ -371,6 +371,11 @@ type NextResponse struct {
 	From            string   `json:"from,omitempty"`
 	Body            string   `json:"body,omitempty"`
 	Commit          string   `json:"commit,omitempty"`
+
+	// Feature names the feature this card belongs to, when finishing it
+	// integrates there rather than landing on the base branch. Empty for an
+	// ordinary card, which is most of them.
+	Feature string `json:"feature,omitempty"`
 }
 
 // Item is one unit of work inside a lease.
@@ -520,6 +525,33 @@ func (s *Server) describe(ctx context.Context, id Identity, lease *store.Lease) 
 	}
 	route := store.Route(team, skip)
 	out.Next, out.Terminal = store.Onward(team, route, id.Role)
+
+	// A subtask's last hop is not a land, and the envelope has to say so.
+	//
+	// Terminal stays true, because it is the protocol: the send omits --to
+	// either way. But the shared instructions read that as "the commit is
+	// merged into the project's branch", which for a feature's card is false
+	// - the daemon integrates it into the feature instead. An agent told it is
+	// landing on the base branch behaves differently on its last turn, and
+	// this project's rule is that the envelope and the daemon do not disagree.
+	if out.Terminal && out.Task != nil && out.Task.ParentID != "" {
+		feature, err := s.db.GetTask(ctx, out.Task.ParentID)
+		if err != nil {
+			return out, fmt.Errorf("reading the feature of task %s: %w", out.Task.ID, err)
+		}
+		run, err := s.db.GetFeatureRun(ctx, out.Task.ParentID)
+		if err != nil {
+			return out, err
+		}
+		if run != nil && (run.State == store.FeatureRunning || run.State == store.FeatureConflict) {
+			out.Feature = feature.Name
+			out.Body = fmt.Sprintf(
+				"This card belongs to the feature %q. Finishing it does not land anything: "+
+					"your commit is integrated into the feature's branch, and a person lands the "+
+					"whole feature after the architect has reviewed it. Send with no --to as usual.",
+				feature.Name)
+		}
+	}
 	return out, nil
 }
 
@@ -839,7 +871,7 @@ func (s *Server) split(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
-	rev, err := s.db.SubmitPlan(r.Context(), id.ProjectID, featureID, req.Items, req.Commit)
+	rev, err := s.nyd.SubmitFeaturePlan(r.Context(), s.deciderScope(id), featureID, req.Items, req.Commit)
 	if err != nil {
 		s.fail(w, err)
 		return

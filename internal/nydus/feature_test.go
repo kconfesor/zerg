@@ -5,7 +5,9 @@ import (
 	"errors"
 	"os"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/kconfesor/zerg/internal/hatchery"
 	"github.com/kconfesor/zerg/internal/store"
@@ -456,4 +458,155 @@ func acceptOne(t *testing.T, f *fixture) (*store.Task, store.Task) {
 		t.Fatalf("board has %d, want 1", len(board))
 	}
 	return feat, board[0]
+}
+
+// Two independent subtasks finishing at once is the only parallelism a feature
+// has, and it lost one of them: both merged, both resolved, and the later
+// transaction wrote the earlier head, so the run pointed below a subtask whose
+// card read done. The review and the land then shipped the feature without it.
+func TestTwoSubtasksFinishingAtOnceKeepBothInTheHead(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	feat, err := f.db.CreateFeature(ctx, f.project.ID, "Billing", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rev, err := f.db.SubmitPlan(ctx, f.project.ID, feat.ID, []store.PlanDraft{
+		{Name: "Schema", Body: "the tables"},
+		{Name: "Docs", Body: "the prose"},
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.n.AcceptPlan(ctx, rev.ID); err != nil {
+		t.Fatal(err)
+	}
+	board, err := f.db.ListTasks(ctx, f.project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(board) != 2 {
+		t.Fatalf("board = %d cards, want 2 independent subtasks", len(board))
+	}
+
+	// The first finisher is parked between reading the feature head and
+	// recording it, which is the window the second one used to slip through.
+	release := make(chan struct{})
+	f.git.slowResolve = release
+
+	var wg sync.WaitGroup
+	errs := make([]error, len(board))
+	finish := func(i int, id string) {
+		defer wg.Done()
+		_, errs[i] = f.n.Send(ctx, f.project.ID, "reviewer", SendRequest{
+			TaskID: id, Commit: "aaaaaaaaaa" + id[:2], Body: "done",
+		})
+	}
+	wg.Add(2)
+	go finish(0, board[0].ID)
+	time.Sleep(150 * time.Millisecond) // the first one is now parked
+	go finish(1, board[1].ID)
+	time.Sleep(150 * time.Millisecond)
+	close(release)
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("subtask %d: %v", i, err)
+		}
+	}
+
+	run, err := f.db.GetFeatureRun(ctx, feat.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The fake tree answers HEAD with how many merges it has taken, so the
+	// head after both is the second one. Recording the first would be the
+	// feature quietly losing a subtask that says it is done.
+	if run.HeadSHA != "featurehead-2" {
+		t.Errorf("head = %s, want featurehead-2: a finished subtask is not in the head", run.HeadSHA)
+	}
+	if len(f.git.into) != 2 {
+		t.Errorf("merged %v, want both subtasks integrated", f.git.into)
+	}
+}
+
+// Cancelling before anyone accepted a plan recorded nothing but a rejected
+// revision, and a rejected revision is how the architect is asked to try again.
+// The operator cancelled the feature and watched it come back.
+func TestCancellingBeforeAcceptStopsTheArchitect(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	feat, err := f.db.CreateFeature(ctx, f.project.ID, "Billing", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.SubmitPlan(ctx, f.project.ID, feat.ID, []store.PlanDraft{
+		{Name: "Schema", Body: "the tables"},
+	}, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.n.CancelFeature(ctx, feat.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	next, _, err := f.db.NextFeatureToPlan(ctx, f.project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next != nil {
+		t.Errorf("the architect was handed %q again after it was cancelled", next.Name)
+	}
+	want, err := f.db.HasWorkForSupervisor(ctx, f.project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want {
+		t.Error("the architect is still wanted for a cancelled feature")
+	}
+	pending, err := f.db.ListPendingPlans(ctx, f.project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 0 {
+		t.Errorf("a cancelled feature still has %d plans waiting on the operator", len(pending))
+	}
+	features, err := f.db.ListFeatures(ctx, f.project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(features) != 0 {
+		t.Error("a cancelled feature is still in the board's strip")
+	}
+}
+
+// The rows are what the queue reads and the prose is what a person reads;
+// nothing bound them if the rows moved between the split and the accept.
+func TestAcceptRefusesAPlanWhoseRowsMoved(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	feat, err := f.db.CreateFeature(ctx, f.project.ID, "Billing", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rev, err := f.db.SubmitPlan(ctx, f.project.ID, feat.ID, []store.PlanDraft{
+		{Name: "Schema", Body: "the tables"},
+	}, "cafecafecafe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.SQL().ExecContext(ctx,
+		`UPDATE feature_plan_items SET body = ? WHERE revision_id = ?`,
+		"and everything else as well", rev.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.n.AcceptPlan(ctx, rev.ID); err == nil {
+		t.Fatal("a plan whose rows had changed was accepted")
+	}
+	board, err := f.db.ListTasks(ctx, f.project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(board) != 0 {
+		t.Errorf("cards were created anyway: %v", board)
+	}
 }

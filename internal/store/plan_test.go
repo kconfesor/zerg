@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -153,5 +154,72 @@ func TestHasWorkForSupervisorIncludesAFeatureToPlan(t *testing.T) {
 	}
 	if !want {
 		t.Error("a feature with no plan did not want a sidecar")
+	}
+}
+
+// Naming a dependency twice means the same edge. Left as two, the second insert
+// broke the primary key and came back as a 500 with SQLite's wording, on the
+// one path where the caller is an agent that could have fixed its own JSON.
+func TestADependencyNamedTwiceIsOneEdge(t *testing.T) {
+	ctx := context.Background()
+	db, p := seeded(t)
+	feat, err := db.CreateFeature(ctx, p.ID, "Billing", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rev, err := db.SubmitPlan(ctx, p.ID, feat.ID, []PlanDraft{
+		{Name: "Schema"},
+		{Name: "API", After: []string{"Schema", "Schema"}},
+	}, "")
+	if err != nil {
+		t.Fatalf("a plan naming one dependency twice was refused: %v", err)
+	}
+	got, err := db.GetPlan(ctx, rev.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, it := range got.Items {
+		if it.Name == "API" && len(it.After) != 1 {
+			t.Errorf("API.after = %v, want one edge", it.After)
+		}
+	}
+}
+
+// A feature with every card done is waiting to be landed, and deleting it there
+// cascaded the run, the plan and the review away: the land vanished out of
+// Attention and the branch it was about stayed on disk with nothing pointing
+// at it.
+func TestAFeatureWaitingToLandCannotBeDeleted(t *testing.T) {
+	ctx := context.Background()
+	db, p := seeded(t)
+	feat, err := db.CreateFeature(ctx, p.ID, "Billing", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SQL().ExecContext(ctx,
+		`INSERT INTO feature_runs (feature_id, branch, base_sha, head_sha, state, created_at)
+		 VALUES (?,?,?,?,?,?)`,
+		feat.ID, "zerg-feature/"+feat.ID, "aaaa", "bbbb", FeatureRunning, "2026-09-05T00:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+
+	err = db.DeleteTask(ctx, p.ID, feat.ID)
+	if err == nil {
+		t.Fatal("a feature with work waiting to land was deleted")
+	}
+	var bad *ValidationError
+	if !errors.As(err, &bad) {
+		t.Errorf("error was %v, want one the operator can act on", err)
+	}
+	if !strings.Contains(err.Error(), "zerg-feature/"+feat.ID) {
+		t.Errorf("refusal was %q, which does not name the branch the work is on", err)
+	}
+
+	// Cancelled, it can go.
+	if err := db.CancelFeatureRun(ctx, feat.ID, "zerg-feature/"+feat.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DeleteTask(ctx, p.ID, feat.ID); err != nil {
+		t.Errorf("a cancelled feature could not be deleted: %v", err)
 	}
 }

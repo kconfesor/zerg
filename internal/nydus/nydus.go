@@ -14,10 +14,12 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/kconfesor/zerg/internal/hatchery"
@@ -72,12 +74,25 @@ type Integrator interface {
 
 // Nydus is the transport. It is safe for concurrent use: every operation that
 // changes queue state does so inside one transaction.
+//
+// Feature integration is the exception and carries its own lock. A merge is a
+// git subprocess and cannot be held inside the write transaction, so the merge
+// and the row that records where it got to are two steps; two roles finishing
+// subtasks at the same moment interleaved them and the second head write was
+// overwritten by the first. See integrate.
 type Nydus struct {
 	db         *store.DB
 	integrator Integrator
 	onTaskDone func(ctx context.Context, projectID, taskID, commit string)
 	leaseFor   time.Duration
 	now        func() time.Time
+	log        *slog.Logger
+
+	// integrate serialises merge-then-record for every feature in this
+	// process. One lock rather than one per feature: integration happens once
+	// per finished subtask and takes a git merge, so contention is not the
+	// cost worth optimising, and a map of locks is a lifetime problem.
+	integrate sync.Mutex
 }
 
 type Option func(*Nydus)
@@ -90,6 +105,11 @@ func WithClock(f func() time.Time) Option { return func(n *Nydus) { n.now = f } 
 
 // WithIntegrator supplies the merge strategy for terminal completion.
 func WithIntegrator(i Integrator) Option { return func(n *Nydus) { n.integrator = i } }
+
+// WithLogger gives nydus somewhere to report what it could not do but must not
+// fail for: preparing a worktree, mainly, which happens after a claim is
+// already committed and so has nothing to hand the error back to.
+func WithLogger(l *slog.Logger) Option { return func(n *Nydus) { n.log = l } }
 
 // WithOnTaskDone registers what to run once a task lands in Done.
 //
@@ -1026,7 +1046,13 @@ func (n *Nydus) deliverCommits(ctx context.Context, projectID string, lease *sto
 	if err := n.integrator.Switch(ctx, worktree, branch, start); err != nil {
 		// Best effort, like the merges below: the claim is already committed,
 		// so there is nothing to hand back to. The refusal in landApproved is
-		// what stops a wrong branch reaching the base branch.
+		// what stops a wrong branch reaching the base branch, but it fires at
+		// the land, which is hours later and looks like a different bug. This
+		// is the line that names it when it happens.
+		if n.log != nil {
+			n.log.Warn("could not put a worktree on the right branch",
+				"role", lease.Role, "branch", branch, "start", start, "err", err)
+		}
 		return
 	}
 

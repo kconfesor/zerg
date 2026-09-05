@@ -1513,7 +1513,8 @@ watch(current, () => (banner.value = null))
               <div class="min-w-0">
                 <p class="text-xs font-medium">This is a feature</p>
                 <p class="text-muted-foreground mt-0.5 text-[11px]">
-                  A group of cards. Nothing is queued until you add work under it.
+                  A group of cards. The architect reads it and proposes a split; nothing is
+                  created, and nothing is spent on the work, until you accept that.
                 </p>
               </div>
             </div>

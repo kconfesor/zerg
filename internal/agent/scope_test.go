@@ -6,7 +6,9 @@ import (
 	"net"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/kconfesor/zerg/internal/nydus"
 	"github.com/kconfesor/zerg/internal/store"
 )
 
@@ -176,5 +178,63 @@ func TestWhatARunnerStartsSurvivesTheSwarmStopping(t *testing.T) {
 	}
 	if !after.Live() {
 		t.Error("the preview was marked dead when the pipeline stopped, and it is still running")
+	}
+}
+
+// The last role on a feature's card is not landing anything, and the envelope
+// has to say so. The shared instructions read `"terminal": true` as "the commit
+// is merged into the project's branch", which for a subtask is false: the
+// daemon integrates it into the feature instead.
+func TestASubtasksEnvelopeSaysItFinishesIntoTheFeature(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+
+	feat, err := f.db.CreateFeature(ctx, f.project.ID, "Billing", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := f.nyd.NewTaskWith(ctx, nydus.NewTaskOpts{
+		ProjectID: f.project.ID, Name: "Schema", Body: "the tables", ParentID: feat.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.SQL().ExecContext(ctx,
+		`INSERT INTO feature_runs (feature_id, branch, base_sha, head_sha, state, created_at)
+		 VALUES (?,?,?,?,?,?)`,
+		feat.ID, "zerg-feature/"+feat.ID, "aaaa", "bbbb", store.FeatureRunning,
+		"2026-09-05T00:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+
+	coder := f.client(t, "coder")
+	work, err := coder.Next(ctx, 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if work.Feature != "" {
+		t.Errorf("feature = %q on a card that is not finishing yet", work.Feature)
+	}
+	if _, err := coder.Send(ctx, SendArgs{
+		To: "reviewer", TaskID: task.ID, Commit: "aaaaaaaaaa", Body: "schema is in",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := coder.Done(ctx, work.LeaseID); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := f.client(t, "reviewer").Next(ctx, 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Terminal {
+		t.Fatal("the last role was not told it finishes the card")
+	}
+	if got.Feature != "Billing" {
+		t.Errorf("feature = %q, want the feature this integrates into", got.Feature)
+	}
+	if !strings.Contains(got.Body, "does not land anything") {
+		t.Errorf("body = %q, which does not correct the shared instructions", got.Body)
 	}
 }

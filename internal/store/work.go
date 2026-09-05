@@ -475,12 +475,18 @@ func (db *DB) ListTasks(ctx context.Context, projectID string) ([]Task, error) {
 	return out, rows.Err()
 }
 
-// ListFeatures returns a project's grouping rows, newest first. They are not
-// on the board: ListTasks is the lane query and excludes them.
+// ListFeatures returns a project's live grouping rows, newest first. They are
+// not on the board: ListTasks is the lane query and excludes them.
+//
+// Live only. A landed or cancelled feature stayed in the strip until somebody
+// pressed the trash button on it, so the one row of the board that is meant to
+// say what is being worked on filled up with what is not.
 func (db *DB) ListFeatures(ctx context.Context, projectID string) ([]Task, error) {
 	rows, err := db.read.QueryContext(ctx,
-		`SELECT `+taskCols+` FROM tasks WHERE project_id = ? AND kind = ? ORDER BY created_at DESC`,
-		projectID, TaskKindFeature)
+		`SELECT `+taskCols+` FROM tasks
+		  WHERE project_id = ? AND kind = ? AND state NOT IN (?, ?)
+		  ORDER BY created_at DESC`,
+		projectID, TaskKindFeature, TaskDone, TaskRejected)
 	if err != nil {
 		return nil, fmt.Errorf("listing features: %w", err)
 	}
@@ -1367,6 +1373,24 @@ func (db *DB) SetTaskSupervised(ctx context.Context, id string, on bool) error {
 	return mustAffect(res, fmt.Sprintf("task %s", id))
 }
 
+// CloseFeature ends a grouping row: done when it landed, rejected when it was
+// cancelled. The board's strip lists live features only, so a feature that is
+// over stops taking up room in it.
+func (db *DB) CloseFeature(ctx context.Context, featureID, state string) error {
+	stopped := any(nil)
+	if state == TaskRejected {
+		stopped = time.Now().UTC().Format(time.RFC3339Nano)
+	}
+	res, err := db.sql.ExecContext(ctx,
+		`UPDATE tasks SET state = ?, stopped_at = COALESCE(?, stopped_at)
+		  WHERE id = ? AND kind = ?`,
+		state, stopped, featureID, TaskKindFeature)
+	if err != nil {
+		return fmt.Errorf("closing feature %s: %w", featureID, err)
+	}
+	return mustAffect(res, fmt.Sprintf("feature %s", featureID))
+}
+
 // SetTaskParent groups a card under a feature, or detaches it. The parent must
 // be a feature in the same project; a feature cannot belong to another feature.
 func (db *DB) SetTaskParent(ctx context.Context, id, parentID string) error {
@@ -1507,6 +1531,20 @@ func (db *DB) DeleteTask(ctx context.Context, projectID, taskID string) error {
 		}
 		if live {
 			return invalid("that feature still has cards being worked; stop them first")
+		}
+		// And not while there is work on a branch waiting to go somewhere.
+		// Every child being done is the state a feature waits to be landed in,
+		// and deleting it there cascaded the run, the plan and the review away:
+		// the land disappeared out of Attention, and the branch it was about
+		// stayed on disk with nothing pointing at it.
+		run, err := db.GetFeatureRun(ctx, taskID)
+		if err != nil {
+			return err
+		}
+		if run != nil && (run.State == FeatureRunning || run.State == FeatureConflict) {
+			return invalid(
+				"that feature still has work on %s; land it or cancel it before deleting it",
+				run.Branch)
 		}
 	}
 	tx, err := db.sql.BeginTx(ctx, nil)

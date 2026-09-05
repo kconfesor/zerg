@@ -56,7 +56,9 @@ restate what is in the files. If the detail belongs anywhere permanent, it
 belongs in the commit message or the code, not here.
 
 If the envelope said ` + "`\"terminal\": true`" + `, you finish the task instead. Omit
-` + "`--to`" + ` entirely, and the commit is merged into the project's branch:
+` + "`--to`" + ` entirely, and the commit is merged into the project's branch (or,
+when the envelope also carries ` + "`feature`" + `, into that feature's branch, where it
+waits for the whole feature to be reviewed and landed by a person):
 
     zerg send --commit HEAD --task "<task name>" --body "<what happened>"
 

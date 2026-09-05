@@ -940,7 +940,26 @@ The order matters more than the tables:
 - **A conflict is cleared, not left.** No agent works in the integration worktree, and git refuses
   every later merge while a conflict sits there, so one conflict would end every remaining subtask.
   The run is marked `conflict`, the card that hit it is told to merge the head and resolve in its
-  own tree, and Attention says so.
+  own tree, and Attention says so. A repository someone else is holding is not a conflict: git does
+  not wait for `index.lock`, and reporting that as one marked the whole feature conflicted and sent
+  an agent looking for conflict markers that were never written.
+- **Integration is serialised, and the head write is guarded.** The merge is a git subprocess and
+  cannot run inside the write transaction, so recording where the feature got to is a second step.
+  Two roles finishing independent subtasks at the same moment interleaved those steps, and the later
+  transaction wrote the earlier head: the branch held both commits, the row held one, and the land
+  shipped a feature with a subtask missing while that card read done. `nydus.integrate` covers
+  merge-then-record, and the update carries `WHERE head_sha = ?` so a row that disagrees with the
+  branch is an error rather than a silence.
+- **The envelope says which of the two a completion is.** `terminal` stays true for a subtask, since
+  the send omits `--to` either way, but the shared instructions read that as "merged into the
+  project's branch". A subtask's envelope carries `feature`, and a sentence saying the commit is
+  integrated there and a person lands the whole thing later.
+- **A feature ends once.** Landing closes it; cancelling writes a cancelled run even when no plan was
+  ever accepted, because without that row a cancellation before the accept was nothing but a
+  rejected revision, which is how the architect is asked to try again. Deleting is refused while a
+  run is `running` or `conflict`: every child being done is the state a feature waits to be landed
+  in, and deleting it there cascaded the run, the plan and the review away while the branch stayed
+  on disk.
 - **What stalls is visible and has named actions.** `ListFeatureStalls` is a failed card, a
   deadlocked one, an integration conflict or an architect's rejection; the operator retries a card,
   waives a dependency with a rationale, or cancels the feature. Cancelling is soft: children are

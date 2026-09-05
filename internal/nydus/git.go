@@ -210,6 +210,20 @@ func (Git) Contains(ctx context.Context, repoPath, commit, ancestor string) (boo
 	return true, nil
 }
 
+// busyRepo is another process holding the repository, not a conflict.
+//
+// git does not wait for index.lock: it fails immediately with "Unable to create
+// '.../index.lock': File exists". Reported as a conflict it would mark a whole
+// feature conflicted and send an agent looking for conflict markers that were
+// never written.
+func busyRepo(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "index.lock") || strings.Contains(msg, "Another git process")
+}
+
 // MergeInto brings commit into the worktree at path.
 //
 // Not --ff-only, unlike base-branch integration: a role's branch has its own
