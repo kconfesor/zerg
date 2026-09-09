@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -135,7 +136,11 @@ func TestAFeatureDoesNotLandBecauseItsChildrenFinished(t *testing.T) {
 	if err := f.n.LandFeature(ctx, feat.ID); err == nil {
 		t.Fatal("landed without a review")
 	}
-	if _, err := f.db.SubmitReview(ctx, feat.ID, store.ReviewOK, "looks whole", ""); err != nil {
+	_, head, err := f.db.NextFeatureToReview(ctx, f.project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.SubmitReview(ctx, feat.ID, head, store.ReviewOK, "looks whole", ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.n.LandFeature(ctx, feat.ID); err != nil {
@@ -162,7 +167,11 @@ func TestAStaleReviewCannotLand(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.db.SubmitReview(ctx, feat.ID, store.ReviewOK, "ok", ""); err != nil {
+	_, head, err := f.db.NextFeatureToReview(ctx, f.project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.SubmitReview(ctx, feat.ID, head, store.ReviewOK, "ok", ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := f.db.SQL().ExecContext(ctx,
@@ -328,10 +337,21 @@ func TestACardGroupedUnderAnUnplannedFeatureStillFinishes(t *testing.T) {
 func TestACardCarryingAFeatureCannotLand(t *testing.T) {
 	ctx := context.Background()
 	f := newFixture(t)
-	feat, _ := acceptOne(t, f)
+	feat, schema := acceptOne(t, f)
+	// With something on the branch: a feature whose head is still the base it
+	// was cut from has nothing unlanded to carry, and reading that as carrying
+	// it refused every card in the project.
+	if _, err := f.n.Send(ctx, f.project.ID, "reviewer", SendRequest{
+		TaskID: schema.ID, Commit: "aaaaaaaaaa", Body: "done",
+	}); err != nil {
+		t.Fatal(err)
+	}
 	run, err := f.db.GetFeatureRun(ctx, feat.ID)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if run.HeadSHA == run.BaseSHA {
+		t.Fatalf("head is still the base %s; the feature has nothing to carry", run.BaseSHA)
 	}
 	task, err := f.n.NewTask(ctx, f.project.ID, "Unrelated", "nothing to do with the feature", "", nil)
 	if err != nil {
@@ -608,5 +628,264 @@ func TestAcceptRefusesAPlanWhoseRowsMoved(t *testing.T) {
 	}
 	if len(board) != 0 {
 		t.Errorf("cards were created anyway: %v", board)
+	}
+}
+
+// ── the review of PR #42 ──────────────────────────────────────────────────
+
+// Resuming a lease is not claiming again. The subtask branch is created at the
+// feature head on the first claim; repeating that on a resume resets the branch
+// the agent is working on, which is a `checkout --force -B` over its commits and
+// its uncommitted edits. Driven against real git, because the loss is the point:
+// a fake would only show which arguments were passed.
+func TestResumingAFeatureLeaseKeepsTheSubtaskWork(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t, WithIntegrator(Git{}))
+	acceptOne(t, f)
+
+	hat := hatchery.New(f.project.Path)
+	if _, err := hat.EnsureWorktree(ctx, "planner", "main"); err != nil {
+		t.Fatal(err)
+	}
+	// An identity for the commit below: EnsureRepo passes one per invocation
+	// rather than writing it, so a runner without a global one has none here.
+	for _, kv := range [][2]string{{"user.email", "test@example.com"}, {"user.name", "Test"}} {
+		if _, err := runGit(ctx, f.project.Path, "config", kv[0], kv[1]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := f.n.Claim(ctx, f.project.ID, "planner"); err != nil {
+		t.Fatal(err)
+	}
+
+	tree := hat.Path("planner")
+	write(t, tree, "schema.sql", "create table t (id);\n")
+	done := commitAll(t, tree, "the subtask's work")
+	write(t, tree, "schema.sql", "create table t (id, name);\n")
+
+	// The lease is still open, so this hands the same work back.
+	if _, err := f.n.Claim(ctx, f.project.ID, "planner"); err != nil {
+		t.Fatal(err)
+	}
+
+	head, err := runGit(ctx, tree, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if head != done {
+		t.Errorf("head = %s, want the subtask's commit %s; the resume rolled the branch back", head, done)
+	}
+	body, err := os.ReadFile(filepath.Join(tree, "schema.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), "name") {
+		t.Errorf("schema.sql = %q, want the uncommitted edit still in the tree", body)
+	}
+}
+
+// A feature that was just accepted has a head equal to base, and every ordinary
+// commit contains base. The guard that stops a card carrying a live feature onto
+// the base branch read that as "this card carries the feature" and refused every
+// card in the project until the feature's head moved.
+func TestAcceptingAPlanDoesNotBlockUnrelatedCards(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	feat, _ := acceptOne(t, f)
+	run, err := f.db.GetFeatureRun(ctx, feat.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.HeadSHA != run.BaseSHA {
+		t.Fatalf("head %s and base %s differ; this is not the state the bug is about", run.HeadSHA, run.BaseSHA)
+	}
+	task, err := f.n.NewTask(ctx, f.project.ID, "Unrelated", "nothing to do with the feature", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// What git answers for any commit built on the base branch.
+	f.git.contains = map[string]bool{"cccccccccc<-" + run.HeadSHA: true}
+
+	if _, err := f.n.Send(ctx, f.project.ID, "reviewer", SendRequest{
+		TaskID: task.ID, Commit: "cccccccccc", Body: "done",
+	}); err != nil {
+		t.Fatalf("an unrelated card was refused because a plan had been accepted: %v", err)
+	}
+	if len(f.git.merges) != 1 {
+		t.Errorf("merges = %v, want the card to land the way any other does", f.git.merges)
+	}
+}
+
+// A prerequisite that was deleted is not a prerequisite that was met. The plan
+// item keeps its row with a null child, and the join that asked whether every
+// dependency was done dropped the missing one instead of counting it unfinished.
+func TestDeletingAPrerequisiteLeavesItsDependentBlocked(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	feat, err := f.db.CreateFeature(ctx, f.project.ID, "Billing", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rev, err := f.db.SubmitPlan(ctx, f.project.ID, feat.ID, []store.PlanDraft{
+		{Name: "Schema", Body: "the tables"},
+		{Name: "Ports", Body: "the wiring"},
+		{Name: "API", Body: "the handlers", After: []string{"Schema", "Ports"}},
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.n.AcceptPlan(ctx, rev.ID); err != nil {
+		t.Fatal(err)
+	}
+	board, err := f.db.ListTasks(ctx, f.project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]store.Task{}
+	for _, c := range board {
+		byName[c.Name] = c
+	}
+
+	if err := f.db.DeleteTask(ctx, f.project.ID, byName["Schema"].ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.n.Send(ctx, f.project.ID, "reviewer", SendRequest{
+		TaskID: byName["Ports"].ID, Commit: "aaaaaaaaaa", Body: "done",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	api, err := f.db.GetTask(ctx, byName["API"].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !api.Blocked {
+		t.Error("API was released without Schema's work and without anyone waiving it")
+	}
+	// And nothing is claimable for it: the flag and the route have to agree, or
+	// a role picks the card up while the board still draws it as waiting.
+	var routed int
+	if err := f.db.SQL().QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM routes r JOIN messages m ON m.id = r.message_id
+		  WHERE m.task_id = ? AND r.state = 'queued'`, api.ID).Scan(&routed); err != nil {
+		t.Fatal(err)
+	}
+	if routed != 0 {
+		t.Errorf("API has %d queued routes, want nothing claimable", routed)
+	}
+}
+
+// A rejection has to be answerable. The feature's own answer is retrying a card
+// so the head moves and earns a fresh review — but a feature only reaches review
+// when every child is done, and retry took none of them.
+func TestARejectedFeatureCanBeRetried(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	feat, schema := acceptOne(t, f)
+	if _, err := f.n.Send(ctx, f.project.ID, "reviewer", SendRequest{
+		TaskID: schema.ID, Commit: "aaaaaaaaaa", Body: "done",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, head, err := f.db.NextFeatureToReview(ctx, f.project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.SubmitReview(ctx, feat.ID, head, store.ReviewReject, "the schema is wrong", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	stalls, err := f.db.ListFeatureStalls(ctx, f.project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stalls) != 1 || stalls[0].Reason != store.StallRejected {
+		t.Fatalf("stalls = %+v, want the rejection reported", stalls)
+	}
+	if len(stalls[0].Cards) == 0 {
+		t.Fatal("the rejection offered no card to act on")
+	}
+	if stalls[0].Cards[0].Action != store.ActionRetry {
+		t.Errorf("action = %q, want retry", stalls[0].Cards[0].Action)
+	}
+
+	if err := f.n.RetryChild(ctx, schema.ID); err != nil {
+		t.Fatalf("the card the rejection points at cannot be retried: %v", err)
+	}
+	got, err := f.db.GetTask(ctx, schema.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != store.TaskQueued {
+		t.Errorf("state = %s, want the card back in the queue", got.State)
+	}
+
+	// And the loop closes: the redone card moves the head, which is what earns
+	// the feature a review that is not the rejected one.
+	if _, err := f.n.Send(ctx, f.project.ID, "reviewer", SendRequest{
+		TaskID: schema.ID, Commit: "bbbbbbbbbb", Body: "fixed the schema",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, again, err := f.db.NextFeatureToReview(ctx, f.project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again == "" || again == head {
+		t.Errorf("next review head = %q, want a head past the rejected %s", again, head)
+	}
+}
+
+// A verdict is about the head the architect read. Assigning it the head that is
+// there at submission time means work that landed while the architect was
+// reading is approved by a review that never saw it.
+func TestAReviewCannotApproveAHeadItDidNotSee(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	feat, schema := acceptOne(t, f)
+	if _, err := f.n.Send(ctx, f.project.ID, "reviewer", SendRequest{
+		TaskID: schema.ID, Commit: "aaaaaaaaaa", Body: "done",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, reviewed, err := f.db.NextFeatureToReview(ctx, f.project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reviewed == "" {
+		t.Fatal("no feature was offered for review")
+	}
+
+	// While the architect reads, the operator groups another card under the
+	// feature and it finishes, moving the head.
+	late, err := f.n.NewTaskWith(ctx, NewTaskOpts{
+		ProjectID: f.project.ID, Name: "Late", Body: "added while the architect read",
+		ParentID: feat.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.n.Send(ctx, f.project.ID, "reviewer", SendRequest{
+		TaskID: late.ID, Commit: "bbbbbbbbbb", Body: "done",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	run, err := f.db.GetFeatureRun(ctx, feat.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.HeadSHA == reviewed {
+		t.Fatalf("head is still %s; the second card did not move it", reviewed)
+	}
+
+	_, err = f.db.SubmitReview(ctx, feat.ID, reviewed, store.ReviewOK, "read the whole thing", "")
+	if err == nil {
+		t.Fatal("a verdict about an older head was recorded against the head that is there now")
+	}
+	if !strings.Contains(err.Error(), "moved") {
+		t.Errorf("error was %q, which does not say the head moved", err)
+	}
+	if err := f.n.LandFeature(ctx, feat.ID); err == nil {
+		t.Fatal("the feature landed on a review of a head nobody looked at")
 	}
 }

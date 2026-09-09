@@ -913,7 +913,10 @@ still finished, and unhiding returns it unchanged.
 
 A feature is a row in `tasks` with `kind = 'feature'`: it groups cards, and it is not one. `Claim`
 selects `FROM routes JOIN messages`, and a feature has no route, so nothing can hand it to a role.
-Every query that lists cards for a person filters `kind = 'work'`.
+Every query that lists cards for a person filters `kind = 'work'`. That rule is about lanes, not
+about attention: applied to the open clarifications as well, it left `ask --task <feature>`
+succeeding with the question on no screen at all, and the architect waiting for an answer nobody
+could see was being asked for.
 
 Its lifecycle is not in `tasks.state`, which is a four-value `CHECK`. Companion tables carry it:
 `feature_plan_revisions` (immutable; rejecting produces a new one), `feature_plan_items`,
@@ -936,7 +939,20 @@ The order matters more than the tables:
   that role touched, and worse, the *next* ordinary card inherits the feature. Base is an ancestor
   of the feature branch, so `merge --ff-only` accepts such a commit and takes the whole unreviewed
   feature with it. Measured, not reasoned about. `landApproved` refuses a commit that contains a
-  live feature as the second line of defence.
+  live feature as the second line of defence — but only past the base it was cut from. A newly
+  accepted feature has `head_sha == base_sha`, every ordinary commit contains that, and reading it
+  as carrying the feature refused every card in the project from the accept until some subtask moved
+  the head. Ancestry the base branch already has is not a feature's work.
+- **The branch is chosen on a claim, not on a resume.** `next` on a lease the role is already
+  holding hands the same work back, and repeating the start point is `checkout --force -B` at the
+  feature head: measured against a real repository, it rolled the subtask's commit away and took the
+  uncommitted edits with it. A resume asks only to be put on the branch, and creates it only when
+  there is none — the claim whose first switch never ran, where there is nothing on it to lose.
+- **A prerequisite that was deleted is not one that was met.** `feature_plan_items.child_task_id` is
+  `SET NULL` on delete, so the join that asked whether every dependency was done dropped the missing
+  row and read its absence as satisfaction: deleting one card released everything waiting on it,
+  with neither its work nor a waiver saying why. The join is a `LEFT JOIN` and a null child counts
+  as unfinished.
 - **A conflict is cleared, not left.** No agent works in the integration worktree, and git refuses
   every later merge while a conflict sits there, so one conflict would end every remaining subtask.
   The run is marked `conflict`, the card that hit it is told to merge the head and resolve in its
@@ -965,6 +981,15 @@ The order matters more than the tables:
   waives a dependency with a rationale, or cancels the feature. Cancelling is soft: children are
   stopped and the row stays, because `DeleteTask` acts on one id and cascading a live hierarchy
   would leave agents writing to rows that had gone.
+- **A rejection retries a finished card.** A feature only reaches review once every child is done,
+  so a retry that took only failed cards left the one stall the architect can cause with no action
+  at all — including the one this design names as the answer to it. A done card is retried when, and
+  only when, the current review of the head is a rejection, and it carries that note, since its own
+  trail says it finished and nothing else would tell the role why it is doing the work again.
+- **A verdict names the head it read.** `zerg review` takes `--head`, the sha the envelope handed
+  out, and a verdict about anything else is refused. Assigning the head at submission time meant a
+  card that integrated while the architect was reading came out approved by a review that never saw
+  it, and the operator's land then put it on the base branch. §6.1's class of bug, on a new path.
 
 ## 10. Cockpit
 

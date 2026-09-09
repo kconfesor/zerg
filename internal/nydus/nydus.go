@@ -847,7 +847,7 @@ func (n *Nydus) Claim(ctx context.Context, projectID, role string) (*store.Lease
 		if err := tx.Commit(); err != nil {
 			return nil, err
 		}
-		n.deliverCommits(ctx, projectID, open)
+		n.deliverCommits(ctx, projectID, open, true)
 		return open, nil
 	}
 
@@ -980,7 +980,7 @@ func (n *Nydus) Claim(ctx context.Context, projectID, role string) (*store.Lease
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("committing claim: %w", err)
 	}
-	n.deliverCommits(ctx, projectID, lease)
+	n.deliverCommits(ctx, projectID, lease, false)
 	return lease, nil
 }
 
@@ -1019,7 +1019,7 @@ func (n *Nydus) resolveCommit(ctx context.Context, projectID, role, ref string) 
 	return sha, nil
 }
 
-func (n *Nydus) deliverCommits(ctx context.Context, projectID string, lease *store.Lease) {
+func (n *Nydus) deliverCommits(ctx context.Context, projectID string, lease *store.Lease, resumed bool) {
 	lease.Merged = make(map[string]bool, len(lease.Items))
 	if n.integrator == nil {
 		return
@@ -1043,7 +1043,24 @@ func (n *Nydus) deliverCommits(ctx context.Context, projectID string, lease *sto
 	if head := n.featureHead(ctx, lease); head != "" {
 		branch, start = SubtaskBranch(lease.Role), head
 	}
-	if err := n.integrator.Switch(ctx, worktree, branch, start); err != nil {
+	// A resume is not a claim. Starting the branch again is `checkout --force
+	// -B <branch> <head>`, which rolls it back to the feature head and takes
+	// the agent's commits and its uncommitted edits with it. Measured against a
+	// real repository: a second `next` on a lease the role was already holding
+	// left the tree at the feature head with the subtask's file gone.
+	//
+	// So a resume asks only to be put on the branch, and falls back to creating
+	// it for the one case that needs it — a claim whose first switch never ran,
+	// where there is no branch and nothing on it to lose.
+	first := start
+	if resumed {
+		first = ""
+	}
+	err = n.integrator.Switch(ctx, worktree, branch, first)
+	if err != nil && first != start {
+		err = n.integrator.Switch(ctx, worktree, branch, start)
+	}
+	if err != nil {
 		// Best effort, like the merges below: the claim is already committed,
 		// so there is nothing to hand back to. The refusal in landApproved is
 		// what stops a wrong branch reaching the base branch, but it fires at
@@ -2157,6 +2174,15 @@ func (n *Nydus) refuseCarryingAFeature(ctx context.Context, projectID, taskID, t
 	for _, r := range runs {
 		// The feature landing itself is the one thing that may carry it.
 		if r.FeatureID == taskID || r.HeadSHA == "" {
+			continue
+		}
+		// A feature with nothing on its branch yet has a head equal to the base
+		// it was cut from, and every ordinary commit contains that. Read as
+		// carrying the feature it refused every card in the project from the
+		// moment a plan was accepted until some subtask moved the head — and
+		// refused a second feature's land for carrying the first. Ancestry the
+		// base branch already has is not a feature's work.
+		if r.HeadSHA == r.BaseSHA {
 			continue
 		}
 		has, err := n.integrator.Contains(ctx, project.Path, commit, r.HeadSHA)

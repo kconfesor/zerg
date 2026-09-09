@@ -1364,3 +1364,38 @@ func TestStopTaskRefusesAFeature(t *testing.T) {
 		t.Error("stopping a feature was allowed")
 	}
 }
+
+// A question about a feature is still a question. Features are kept out of the
+// board's lanes because they are not work; excluding them from the open
+// clarifications as well left `ask --task <feature>` succeeding and the operator
+// never seeing what was asked.
+func TestAQuestionAboutAFeatureReachesAttention(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	if err := Seed(ctx, db, "claude"); err != nil {
+		t.Fatal(err)
+	}
+	p, err := db.CreateProject(ctx, t.TempDir(), "calc", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	feat, err := db.CreateFeature(ctx, p.ID, "Billing", "rewrite it")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.AskClarification(ctx, p.ID, "architect",
+		"Should the ledger keep the old rows?", nil, &feat.ID); err != nil {
+		t.Fatalf("AskClarification: %v", err)
+	}
+
+	open, err := db.ListOpenClarifications(ctx, p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(open) != 1 {
+		t.Fatalf("Attention has %d open questions, want the architect's one about the feature", len(open))
+	}
+	if open[0].TaskID == nil || *open[0].TaskID != feat.ID {
+		t.Errorf("question is about %v, want the feature %s", open[0].TaskID, feat.ID)
+	}
+}

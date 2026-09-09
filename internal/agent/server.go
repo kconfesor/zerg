@@ -887,7 +887,7 @@ func (s *Server) describeReview(ctx context.Context, id Identity) (*NextResponse
 	if feature == nil {
 		return nil, nil
 	}
-	body := fmt.Sprintf("Review this feature against its plan. The head is %s. Submit with: zerg review --feature %s --verdict ok|reject --note \"...\" [--commit HEAD]. You may reject. You may not land it.", head, feature.Name)
+	body := fmt.Sprintf("Review this feature against its plan. The head is %s. Submit with: zerg review --feature %s --head %s --verdict ok|reject --note \"...\" [--commit HEAD]. --head is the commit you read: a verdict is refused if the feature moved while you were reading, because it would be approving work you never saw. You may reject. You may not land it.", head, feature.Name, head)
 	return &NextResponse{
 		Kind: "review", Role: id.Role, Terminal: false, Task: feature, Body: body, Commit: head,
 	}, nil
@@ -895,6 +895,10 @@ func (s *Server) describeReview(ctx context.Context, id Identity) (*NextResponse
 
 type reviewRequest struct {
 	Feature string `json:"feature"`
+	// Head is the feature head this verdict is about, as the review envelope
+	// gave it. Commit is something else: the architect's own commit recording
+	// how it reviewed, which is evidence.
+	Head    string `json:"head"`
 	Verdict string `json:"verdict"`
 	Note    string `json:"note"`
 	Commit  string `json:"commit"`
@@ -918,7 +922,7 @@ func (s *Server) reviewFeature(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
-	rev, err := s.nyd.SubmitFeatureReview(r.Context(), s.deciderScope(id), featureID, req.Verdict, req.Note, req.Commit)
+	rev, err := s.nyd.SubmitFeatureReview(r.Context(), s.deciderScope(id), featureID, req.Head, req.Verdict, req.Note, req.Commit)
 	if err != nil {
 		s.fail(w, err)
 		return

@@ -1090,13 +1090,18 @@ func (db *DB) ClarificationsForTask(ctx context.Context, taskID string) ([]Clari
 }
 
 // ListOpenClarifications returns what Attention must show.
+//
+// Every open question, whatever it is about. A feature is kept out of the
+// board's lanes because it is not work, and that rule was applied here too:
+// `ask --task <feature>` succeeded, the architect waited, and the question the
+// operator had to answer was on no screen at all.
 func (db *DB) ListOpenClarifications(ctx context.Context, projectID string) ([]Clarification, error) {
 	rows, err := db.read.QueryContext(ctx,
 		`SELECT `+clarificationCols+`
 		 FROM clarifications c LEFT JOIN tasks t ON t.id = c.task_id
-		 WHERE c.project_id = ? AND c.state = ? AND (t.id IS NULL OR t.kind = ?)
+		 WHERE c.project_id = ? AND c.state = ?
 		 ORDER BY c.created_at`,
-		projectID, ClarificationOpen, TaskKindWork)
+		projectID, ClarificationOpen)
 	if err != nil {
 		return nil, fmt.Errorf("listing clarifications: %w", err)
 	}

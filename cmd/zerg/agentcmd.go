@@ -163,6 +163,7 @@ func runDecide(args []string, verb string, ok bool) error {
 func runReview(args []string) error {
 	fs := flag.NewFlagSet("review", flag.ContinueOnError)
 	feature := fs.String("feature", "", "the feature being reviewed")
+	head := fs.String("head", "", "the feature head this verdict is about, as the review envelope gave it")
 	verdict := fs.String("verdict", "", "ok or reject")
 	note := fs.String("note", "", "the rationale, required when rejecting")
 	commit := fs.String("commit", "", "the commit that recorded the review")
@@ -171,6 +172,9 @@ func runReview(args []string) error {
 	}
 	if *feature == "" {
 		return errors.New("review needs --feature")
+	}
+	if *head == "" {
+		return errors.New("review needs --head, the feature head it is about; the review envelope names it")
 	}
 	if *verdict == "" {
 		return errors.New("review needs --verdict ok or reject")
@@ -181,7 +185,7 @@ func runReview(args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	out, err := client.Review(ctx, *feature, *verdict, *note, *commit)
+	out, err := client.Review(ctx, *feature, *head, *verdict, *note, *commit)
 	if err != nil {
 		return err
 	}

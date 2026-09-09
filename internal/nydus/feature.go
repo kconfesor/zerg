@@ -313,6 +313,14 @@ func (n *Nydus) integrateChild(ctx context.Context, projectID string, sender sto
 	return msg, nil
 }
 
+// releaseDependents queues the cards whose every prerequisite is now in the
+// feature head.
+//
+// The dependency join is a LEFT JOIN, and a missing card counts as unfinished.
+// `feature_plan_items.child_task_id` is SET NULL when a card is deleted, so an
+// inner join dropped the deleted prerequisite from the row set and read its
+// absence as satisfaction: deleting one card of a plan silently released
+// everything waiting on it, with neither its work nor a waiver saying why.
 func (n *Nydus) releaseDependents(ctx context.Context, tx *sql.Tx, projectID, finishedID, head string, now time.Time) error {
 	rows, err := tx.QueryContext(ctx,
 		`SELECT item.child_task_id, t.name, t.body, t.priority, t.lane
@@ -324,8 +332,8 @@ func (n *Nydus) releaseDependents(ctx context.Context, tx *sql.Tx, projectID, fi
 		    AND NOT EXISTS (
 		        SELECT 1 FROM feature_plan_deps d2
 		          JOIN feature_plan_items p2 ON p2.id = d2.from_item
-		          JOIN tasks t2 ON t2.id = p2.child_task_id
-		         WHERE d2.to_item = item.id AND t2.state <> ?
+		          LEFT JOIN tasks t2 ON t2.id = p2.child_task_id
+		         WHERE d2.to_item = item.id AND (t2.id IS NULL OR t2.state <> ?)
 		    )`, finishedID, store.TaskDone)
 	if err != nil {
 		return fmt.Errorf("finding dependents: %w", err)
@@ -377,12 +385,16 @@ func (n *Nydus) SubmitFeaturePlan(ctx context.Context, scope store.DecisionScope
 
 // SubmitFeatureReview records the architect's verdict, with --commit resolved
 // in that role's worktree the way an approval's evidence is.
-func (n *Nydus) SubmitFeatureReview(ctx context.Context, scope store.DecisionScope, featureID, verdict, note, evidence string) (*store.FeatureReview, error) {
+//
+// head is not resolved: it is the sha the review envelope handed out, and the
+// architect's worktree is not the feature's, so a ref read there would name a
+// different commit. It is compared, not translated.
+func (n *Nydus) SubmitFeatureReview(ctx context.Context, scope store.DecisionScope, featureID, head, verdict, note, evidence string) (*store.FeatureReview, error) {
 	evidence, err := n.resolveEvidence(ctx, scope, evidence)
 	if err != nil {
 		return nil, err
 	}
-	return n.db.SubmitReview(ctx, featureID, verdict, note, evidence)
+	return n.db.SubmitReview(ctx, featureID, head, verdict, note, evidence)
 }
 
 // LandFeature merges the reviewed head onto base. The architect cannot call
@@ -506,13 +518,19 @@ func (n *Nydus) CancelFeature(ctx context.Context, featureID string) error {
 	return nil
 }
 
-// RetryChild puts a failed subtask back in front of the pipeline, starting from
-// the feature head as it stands now.
+// RetryChild puts a subtask back in front of the pipeline, starting from the
+// feature head as it stands now.
 //
 // One of decision 10's named actions, and the one the refusal to review a
 // feature with a failed subtask tells the reader to take. From the first role
 // rather than the lane it died in: the card is being attempted again, not
 // handed on, and the role that produced the work is the one that fixes it.
+//
+// A finished card is retried too, and only then: a rejection is answered by
+// moving the head so the feature earns a fresh review, and a feature reaches
+// review only once every child is done. Taking rejected cards alone left an
+// architect's reject with no action at all — not the retry the panel offered,
+// and not the one this project's own description named as the answer to it.
 func (n *Nydus) RetryChild(ctx context.Context, taskID string) error {
 	task, err := n.db.GetTask(ctx, taskID)
 	if err != nil {
@@ -521,8 +539,26 @@ func (n *Nydus) RetryChild(ctx context.Context, taskID string) error {
 	if task.ParentID == "" {
 		return invalid("that card is not part of a feature")
 	}
-	if task.State != store.TaskRejected {
-		return invalid("that card has not failed; only a stopped or rejected card is retried")
+	body := "Retried by the operator. The feature head is where this starts from; " +
+		"read the trail above for what failed."
+	switch task.State {
+	case store.TaskRejected:
+	case store.TaskDone:
+		review, err := n.db.CurrentReview(ctx, task.ParentID)
+		if err != nil {
+			return err
+		}
+		if review == nil || review.Verdict != store.ReviewReject {
+			return invalid("that card is finished; a finished card is retried to answer a rejected " +
+				"feature, and this feature has not been rejected")
+		}
+		// The rejection travels with the card. Its own trail says it finished,
+		// so without this the role picks up work it already did and is told
+		// nothing about why it is doing it again.
+		body = "Retried by the operator to answer the architect's rejection of this feature: " +
+			review.Note + "\n\nThe feature head is where this starts from."
+	default:
+		return invalid("that card has not failed; only a stopped, rejected or finished card is retried")
 	}
 	run, err := n.liveRun(ctx, task.ParentID)
 	if err != nil {
@@ -557,8 +593,6 @@ func (n *Nydus) RetryChild(ctx context.Context, taskID string) error {
 		  WHERE id = ?`, store.TaskQueued, first.Name, taskID); err != nil {
 		return fmt.Errorf("requeueing %s: %w", taskID, err)
 	}
-	body := "Retried by the operator. The feature head is where this starts from; " +
-		"read the trail above for what failed."
 	if err := n.queueChild(ctx, tx, task.ProjectID, taskID, body, first.Name,
 		priorityOr(task.Priority), run.HeadSHA, now); err != nil {
 		return err

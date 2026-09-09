@@ -162,10 +162,10 @@ func (c *Client) Split(ctx context.Context, feature, commit string, items []stor
 }
 
 // Review records the architect's verdict about a feature head. It does not land.
-func (c *Client) Review(ctx context.Context, feature, verdict, note, commit string) (*store.FeatureReview, error) {
+func (c *Client) Review(ctx context.Context, feature, head, verdict, note, commit string) (*store.FeatureReview, error) {
 	var out store.FeatureReview
 	_, err := c.call(ctx, "/agent/review", map[string]string{
-		"feature": feature, "verdict": verdict, "note": note, "commit": commit,
+		"feature": feature, "head": head, "verdict": verdict, "note": note, "commit": commit,
 	}, &out)
 	if err != nil {
 		return nil, err

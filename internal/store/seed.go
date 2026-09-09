@@ -309,11 +309,14 @@ note; submit a new revision, do not edit the last one.
 For a review (` + "`kind: review`" + `): every subtask is integrated. Read the feature
 head against the plan. You may reject. You may not land it.
 
-    zerg review --feature <name> --verdict ok --note "<why>" --commit HEAD
-    zerg review --feature <name> --verdict reject --note "<what to change>"
+    zerg review --feature <name> --head <sha> --verdict ok --note "<why>" --commit HEAD
+    zerg review --feature <name> --head <sha> --verdict reject --note "<what to change>"
 
-` + "`--commit`" + ` is the document you wrote. The verdict is bound to the head you
-were given; if it moves, this review no longer counts.
+` + "`--head`" + ` is the sha the review envelope gave you: the commit you actually
+read. ` + "`--commit`" + ` is the document you wrote, which is something else. The
+verdict is bound to the head, and is refused if the feature moved while you
+were reading — read the new head and submit again rather than approving work
+you never saw.
 
 If you are unsure, ` + "`zerg ask`" + ` reaches the operator. Do not guess a
 requirement you could ask about.

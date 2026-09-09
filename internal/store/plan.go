@@ -739,13 +739,24 @@ func (db *DB) NextFeatureToReview(ctx context.Context, projectID string) (*Task,
 	return t, head, nil
 }
 
-// SubmitReview records the architect's verdict about the current feature head.
-func (db *DB) SubmitReview(ctx context.Context, featureID, verdict, note, evidence string) (*FeatureReview, error) {
+// SubmitReview records the architect's verdict about the head it read.
+//
+// head is the sha the review envelope handed out, and it has to still be the
+// feature's head. Taking the verdict to be about whatever is there at
+// submission time is the bug schema_042.sql was written against: a card that
+// integrated while the architect was reading came out approved by a review that
+// never saw it, and the operator's land then put it on the base branch. The
+// architect is told which head it is looking at, so it can say so.
+func (db *DB) SubmitReview(ctx context.Context, featureID, head, verdict, note, evidence string) (*FeatureReview, error) {
 	if verdict != ReviewOK && verdict != ReviewReject {
 		return nil, invalid("a review is ok or reject")
 	}
 	if verdict == ReviewReject && strings.TrimSpace(note) == "" {
 		return nil, invalid("rejecting a feature needs a note: what to change")
+	}
+	if strings.TrimSpace(head) == "" {
+		return nil, invalid("a review needs --head, the feature head it is about; " +
+			"it is the commit the review envelope named")
 	}
 	run, err := db.GetFeatureRun(ctx, featureID)
 	if err != nil {
@@ -753,6 +764,13 @@ func (db *DB) SubmitReview(ctx context.Context, featureID, verdict, note, eviden
 	}
 	if run == nil || run.State != FeatureRunning {
 		return nil, invalid("that feature is not running")
+	}
+	if head != run.HeadSHA {
+		return nil, invalid(
+			"the feature moved while it was being reviewed: you read %s, the head is now %s. "+
+				"Read it again and submit a verdict about %s",
+			head[:min(10, len(head))], run.HeadSHA[:min(10, len(run.HeadSHA))],
+			run.HeadSHA[:min(10, len(run.HeadSHA))])
 	}
 	live, err := db.HasLiveChildren(ctx, featureID)
 	if err != nil {
@@ -971,7 +989,7 @@ func (db *DB) stallOf(ctx context.Context, run FeatureRun) (*FeatureStall, error
 	}
 	defer rows.Close()
 
-	var failed, blocked []StallCard
+	var failed, blocked, finished []StallCard
 	var moving int
 	for rows.Next() {
 		var c StallCard
@@ -989,6 +1007,13 @@ func (db *DB) stallOf(ctx context.Context, run FeatureRun) (*FeatureStall, error
 			blocked = append(blocked, c)
 		case state == TaskQueued || state == TaskWorking:
 			moving++
+		case state == TaskDone:
+			// Only a rejection can act on these, and only the branch below
+			// attaches them. A feature reaches review with every child done, so
+			// a rejection whose cards were the failed and blocked lists was a
+			// stall the operator could read and not answer.
+			c.Action = ActionRetry
+			finished = append(finished, c)
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -1017,6 +1042,7 @@ func (db *DB) stallOf(ctx context.Context, run FeatureRun) (*FeatureStall, error
 		}
 		stall.Reason = StallRejected
 		stall.Note = review.Note
+		stall.Cards = finished
 	}
 	return stall, nil
 }
