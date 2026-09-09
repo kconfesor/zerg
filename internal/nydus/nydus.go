@@ -293,7 +293,7 @@ func (n *Nydus) NewTaskWith(ctx context.Context, opts NewTaskOpts) (*store.Task,
 type SendRequest struct {
 	TaskID   string
 	Kind     string // handoff or note; defaults to handoff
-	Priority int    // 0 uses 50
+	Priority int    // 0 inherits the task's priority, or uses 50 without a task
 	Commit   string // required for a handoff
 	Body     string
 
@@ -442,6 +442,15 @@ func (n *Nydus) Send(ctx context.Context, projectID, fromRole string, req SendRe
 		}
 	}
 
+	// Resolve once for every send path. Doing this only for routed handoffs
+	// left completions at 50 even when the card carried a planned priority.
+	if req.Priority == 0 {
+		if task != nil {
+			req.Priority = task.Priority
+		}
+		req.Priority = priorityOr(req.Priority)
+	}
+
 	if req.To == "" {
 		// Terminal for this card, which is not the same as terminal for the
 		// project: a card that skips the reviewer is finished by the coder,
@@ -516,13 +525,6 @@ func (n *Nydus) Send(ctx context.Context, projectID, fromRole string, req SendRe
 			recipient.Name, nextOrEnd(team, task, sender))
 	}
 
-	priority := req.Priority
-	if priority == 0 && task != nil && task.Priority != 0 {
-		priority = task.Priority
-	}
-	if priority == 0 {
-		priority = 50
-	}
 	var taskID *string
 	if req.TaskID != "" {
 		taskID = &req.TaskID
@@ -534,7 +536,7 @@ func (n *Nydus) Send(ctx context.Context, projectID, fromRole string, req SendRe
 		FromRole:    fromRole,
 		ToRoles:     []string{req.To},
 		Kind:        kind,
-		Priority:    priority,
+		Priority:    req.Priority,
 		Commit:      req.Commit,
 		Body:        req.Body,
 		gate:        sender.Gate,
@@ -756,7 +758,7 @@ func (n *Nydus) complete(ctx context.Context, projectID string, sender store.Res
 	now := n.now()
 	msg := &store.Message{
 		ID: store.NewID(), ProjectID: projectID, TaskID: &task.ID,
-		FromRole: sender.Name, Kind: store.KindHandoff, Priority: 50,
+		FromRole: sender.Name, Kind: store.KindHandoff, Priority: req.Priority,
 		Body: req.Body, Terminal: true, CreatedAt: now,
 	}
 	if req.Commit != "" {
@@ -1402,15 +1404,16 @@ func (n *Nydus) decide(ctx context.Context, scope store.DecisionScope, approvalI
 		body       string
 		projectID  string
 		supervised int
+		priority   int
 	)
 	err = tx.QueryRowContext(ctx,
 		`SELECT a.message_id, a.state, m.task_id, m.from_role,
 		        m.terminal, m.commit_sha, m.body, a.project_id,
-		        COALESCE(t.supervised, 0)
+		        COALESCE(t.supervised, 0), COALESCE(t.priority, 0)
 		 FROM approvals a JOIN messages m ON m.id = a.message_id
 		 LEFT JOIN tasks t ON t.id = m.task_id
 		 WHERE a.id = ?`, approvalID).Scan(&messageID, &state, &taskID, &fromRole,
-		&terminal, &commit, &body, &projectID, &supervised)
+		&terminal, &commit, &body, &projectID, &supervised, &priority)
 	if errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("approval %s: %w", approvalID, store.ErrNotFound)
 	}
@@ -1580,9 +1583,12 @@ func (n *Nydus) decide(ctx context.Context, scope store.DecisionScope, approvalI
 			if err != nil {
 				return err
 			}
+			// Rework inherits the card, not a handoff-only override or the old
+			// constant 50 that sent urgent work to the back of the queue.
+			priority = priorityOr(priority)
 			msg := &store.Message{
 				ID: store.NewID(), ProjectID: projectID, TaskID: &taskID.String,
-				FromRole: store.OperatorRole, Kind: store.KindNote, Priority: 50,
+				FromRole: store.OperatorRole, Kind: store.KindNote, Priority: priority,
 				Body: feedback, CreatedAt: at,
 			}
 			// sendIn moves the card as it routes, which is the same lane change
@@ -1593,7 +1599,7 @@ func (n *Nydus) decide(ctx context.Context, scope store.DecisionScope, approvalI
 				FromRole:  store.OperatorRole,
 				ToRoles:   []string{fromRole},
 				Kind:      store.KindNote,
-				Priority:  50,
+				Priority:  priority,
 				Body:      feedback,
 				gate:      store.GateNone, // a rejection is not itself gated
 			}, at); err != nil {
@@ -2096,7 +2102,7 @@ func (n *Nydus) holdCompletion(ctx context.Context, projectID string, sender sto
 	now := n.now()
 	msg := &store.Message{
 		ID: store.NewID(), ProjectID: projectID, TaskID: &task.ID,
-		FromRole: sender.Name, Kind: store.KindHandoff, Priority: 50,
+		FromRole: sender.Name, Kind: store.KindHandoff, Priority: req.Priority,
 		Body: req.Body, Terminal: true, CreatedAt: now,
 	}
 	c := req.Commit

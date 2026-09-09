@@ -438,8 +438,8 @@ PATH-synced script directory, no `.sh`/`.bb` wrapper pairs, no cwd inference.
 
 ```
 zerg next [--wait 30s]   claim work (long-poll); JSON on stdout
-zerg done [--result f]   ack the lease
-zerg send --to <role> --commit HEAD --task <name>
+zerg done --lease <id>  ack the lease after sending every result
+zerg send --to <role> --commit HEAD --task <id-or-name> --body "what changed"
 zerg ask  "<question>" [--option "<one answer>" ...]
                          raise a clarification to the operator
 zerg approve|reject|answer   supervisor sidecar only; never the land
@@ -948,6 +948,16 @@ The order matters more than the tables:
 - **Nothing exists until the operator accepts the plan.** The split is rows plus a prose commit,
   with a digest binding them; accepting is what creates the branch, the worktree and every card, in
   one transaction, and it is the step that spends the money.
+- **A live architect still needs a turn.** Starting the sidecar for a feature did not wake it:
+  the nudge checked only gates and questions, so both planning and final review waited forever
+  beside a running process. It now checks the same decision, plan and review queries as `next`.
+  `HasWorkForSupervisor` is deliberately broader: it keeps the sidecar alive while children work,
+  but using it to nudge would spend a turn every tick with nothing to decide.
+- **Planned priority survives the CLI and rework.** The card carries the default for every send,
+  including completion; an explicit `--priority` overrides only that message. The CLI used to send
+  50 even without the flag, which overrode the planned value while direct router tests still passed.
+  Zero now means inherit, falling back to 50 without a card. Rejection queues work at the card's
+  priority too, rather than resetting it to 50 or carrying a handoff-only override into the retry.
 - **A subtask integrates into the feature, never onto base.** Its final handoff has a recipient,
   the feature, so it is not terminal and the operator-only check on a terminal approval never fires
   on it. Only the feature's own landing is terminal.

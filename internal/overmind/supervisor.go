@@ -360,8 +360,22 @@ func (o *Overmind) nudgeSupervisor(ctx context.Context, projectID string, s *swa
 		return
 	}
 	d, err := o.db.NextDecision(ctx, projectID, p.cerebrate.Role().Name)
-	if err != nil || d == nil {
+	if err != nil {
 		return
+	}
+	// Match the work offered by next. HasWorkForSupervisor keeps the sidecar
+	// alive while children work, but nudging on that would spend idle turns.
+	if d == nil {
+		feature, _, err := o.db.NextFeatureToPlan(ctx, projectID)
+		if err != nil {
+			return
+		}
+		if feature == nil {
+			feature, _, err = o.db.NextFeatureToReview(ctx, projectID)
+			if err != nil || feature == nil {
+				return
+			}
+		}
 	}
 	if err := p.cerebrate.Submit(nudge); err != nil {
 		o.log.Debug("could not nudge the architect", "err", err)

@@ -72,7 +72,8 @@ func runSend(args []string) error {
 	commit := fs.String("commit", "", "the commit this handoff points at")
 	body := fs.String("body", "", "a short note for the recipient")
 	kind := fs.String("kind", "handoff", "handoff or note")
-	priority := fs.Int("priority", 50, "lower is sooner")
+	// A default of 50 looks like an explicit override of the card's priority.
+	priority := fs.Int("priority", 0, "lower is sooner; 0 inherits the task's priority, otherwise 50")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}

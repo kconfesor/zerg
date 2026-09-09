@@ -252,11 +252,8 @@ func (n *Nydus) integrateChild(ctx context.Context, projectID string, sender sto
 	now := n.now()
 	msg := &store.Message{
 		ID: store.NewID(), ProjectID: projectID, TaskID: &task.ID,
-		FromRole: sender.Name, Kind: store.KindHandoff, Priority: task.Priority,
+		FromRole: sender.Name, Kind: store.KindHandoff, Priority: req.Priority,
 		Body: req.Body, CreatedAt: now,
-	}
-	if msg.Priority == 0 {
-		msg.Priority = 50
 	}
 	c := req.Commit
 	msg.CommitSHA = &c
