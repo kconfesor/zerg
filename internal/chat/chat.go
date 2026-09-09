@@ -75,6 +75,8 @@ const Operator = "operator"
 // turn discovering that.
 const systemPrompt = `You are answering questions about the repository you are in.
 
+` + store.NoSubagentsInstruction + `
+
 You have read access to the project and the ordinary tools. Answer from what is
 actually in the tree rather than from what a project like this usually contains.
 Read the files before describing them.

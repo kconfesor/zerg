@@ -838,7 +838,7 @@ func (s *Server) describePlan(ctx context.Context, id Identity) (*NextResponse, 
 	if feature == nil {
 		return nil, nil
 	}
-	body := fmt.Sprintf("Split this feature into subtasks. Submit with: zerg split --feature %s [--commit HEAD]. JSON on stdin: {\"items\":[{\"name\":\"...\",\"body\":\"...\",\"priority\":50,\"after\":[\"dep-name\"]}]}. Do not implement the work. Do not create the subtasks. The operator accepts the plan before anything is queued.", feature.Name)
+	body := fmt.Sprintf("Split this feature into subtasks. Submit with: zerg split --feature %s [--commit HEAD]. JSON on stdin: {\"items\":[{\"name\":\"...\",\"body\":\"...\",\"priority\":50,\"after\":[\"dep-name\"]}]}. Do not implement the work. Do not create the subtasks. The operator accepts the plan before anything is queued.", feature.ID)
 	if note != "" {
 		body = "The last plan was rejected: " + note + "\n\n" + body
 	}
@@ -887,7 +887,7 @@ func (s *Server) describeReview(ctx context.Context, id Identity) (*NextResponse
 	if feature == nil {
 		return nil, nil
 	}
-	body := fmt.Sprintf("Review this feature against its plan. The head is %s. Submit with: zerg review --feature %s --head %s --verdict ok|reject --note \"...\" [--commit HEAD]. --head is the commit you read: a verdict is refused if the feature moved while you were reading, because it would be approving work you never saw. You may reject. You may not land it.", head, feature.Name, head)
+	body := fmt.Sprintf("Review this feature against its plan. The head is %s. Submit with: zerg review --feature %s --head %s --verdict ok|reject --note \"...\" [--commit HEAD]. --head is the commit you read: a verdict is refused if the feature moved while you were reading, because it would be approving work you never saw. You may reject. You may not land it.", head, feature.ID, head)
 	return &NextResponse{
 		Kind: "review", Role: id.Role, Terminal: false, Task: feature, Body: body, Commit: head,
 	}, nil

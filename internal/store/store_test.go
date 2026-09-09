@@ -195,6 +195,10 @@ func TestSeedIsIdempotentAndPreservesEdits(t *testing.T) {
 		t.Fatalf("UpdateTemplate: %v", err)
 	}
 
+	if err := db.SetSetting(ctx, SettingSharedInstructions, "my own shared protocol"); err != nil {
+		t.Fatal(err)
+	}
+
 	// Restarting must not clobber that edit — the whole point of config living
 	// in the database rather than being copied from a file every launch.
 	if err := Seed(ctx, db, "claude"); err != nil {
@@ -213,6 +217,10 @@ func TestSeedIsIdempotentAndPreservesEdits(t *testing.T) {
 	}
 	if planner.Prompt != "my own spec instructions" {
 		t.Error("re-seeding overwrote a user's edit to a built-in role")
+	}
+	shared, err := db.GetSetting(ctx, SettingSharedInstructions)
+	if err != nil || shared != "my own shared protocol" {
+		t.Errorf("re-seeding changed shared instructions: %q, %v", shared, err)
 	}
 }
 

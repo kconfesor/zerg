@@ -223,10 +223,30 @@ looks for where the project already keeps design documents before falling back t
 An earlier version hardcoded that path, which meant pointing zerg at any existing repository
 created a directory in someone else's tree on the first run.
 
-**Budget.** Shared instructions are ~760 tokens; role prompts are 85–225. Under 1k per agent, and
-byte-frozen per §11.2 so it is a cache hit after the first turn. Nothing instructs an agent to
-narrate its status. Structured events carry that natively (§11.1), and a dashboard that greps for
-sentences makes agents spend output tokens on telemetry.
+**No nested agents.** The prompt defaults forbid subagents, agent teams, delegation tools and
+nested coding-agent sessions, including read-only research and review. The operator saw delegated
+work causing trouble: a child can share the role's checkout and credentials without having its own
+claim. zerg owns the agents and their routing; normal tools, tests, builds and app servers are not
+subagents. Runner and chat do not receive the shared protocol, so their own defaults carry the rule
+too. This is an instruction, not a harness-level tool restriction.
+
+**Receipt is not completion.** The shared prompt used to say `zerg done`, without its required
+`--lease`, and to acknowledge *before* committing and sending. The CLI refused the literal example;
+adding the missing flag closed the route before a successful handoff existed. The prompt now says
+commit, send each distinct task in `items`, then `done --lease` once for the whole batch. An unchanged
+review still sends its commit. `terminal` submits completion under the configured gate and integration
+policy; it does not promise a merge or authorise an agent to land anything itself. Sidecar envelopes
+(`decide`, `plan`, `review`) have no work lease and do not use `done` or `send`.
+
+**Defaults are not an upgrade mechanism.** `store.Seed` leaves existing shared instructions and
+role prompts alone. Fixing a default therefore reaches new rows, not a running installation's saved
+prompts; the latter must be updated deliberately, preserving local edits, and loaded on the next
+spawn. A prompt audit has to read the saved shared text and any team/project overrides too.
+
+**Budget.** Keep prompts short and byte-frozen per §11.2; protocol corrections belong in the shared
+document rather than repeated in every pipeline role. Nothing instructs an agent to narrate its
+status. Structured events carry that natively (§11.1), and a dashboard that greps for sentences makes
+agents spend output tokens on telemetry.
 
 ### 4.5 The built-in library
 
@@ -242,7 +262,7 @@ orchestrator you have to check out to change your team.
 | `debugger` | opus | task | none | reproduces a failure, finds the cause, fixes it behind a failing test |
 | `cleaner` | sonnet | batch | none | behavior-preserving cleanup, duplication, dead code |
 | `architect` | opus | batch | none | module boundaries, dependency direction, structural drift |
-| `supervisor` | opus | task | none | **purpose=supervisor**: architect sidecar for a supervised card; not a lane |
+| `supervisor` | opus | task | none | **purpose=supervisor**: decides supervised gates/questions, splits and reviews features; not a lane |
 | `hardener` | sonnet | batch | none | edge cases, error paths, mutation-style probing |
 | `security` | opus | batch | none | input handling, secrets, dependency and injection review |
 | `docs` | sonnet | batch | none | README, API docs, changelog |

@@ -100,7 +100,7 @@ func TestSplitIsNotImpliedOnAPipelineToken(t *testing.T) {
 func TestSupervisorNextReturnsAPlan(t *testing.T) {
 	ctx := context.Background()
 	f := newFixture(t)
-	feat, err := f.db.CreateFeature(ctx, f.project.ID, "Billing", "rewrite invoicing")
+	feat, err := f.db.CreateFeature(ctx, f.project.ID, "Billing with spaces", "rewrite invoicing")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,6 +112,10 @@ func TestSupervisorNextReturnsAPlan(t *testing.T) {
 	}
 	if work.Kind != "plan" || work.Task == nil || work.Task.ID != feat.ID {
 		t.Fatalf("kind=%q task=%v, want a plan for the feature", work.Kind, work.Task)
+	}
+	// A copied command must not turn a multi-word name into positional args.
+	if !strings.Contains(work.Body, "zerg split --feature "+feat.ID+" ") {
+		t.Errorf("split example does not use the feature's unambiguous id: %s", work.Body)
 	}
 	rev, err := sup.Split(ctx, feat.Name, "deadbeef", []store.PlanDraft{
 		{Name: "Schema", Body: "the tables"},
