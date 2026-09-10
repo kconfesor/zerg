@@ -241,6 +241,16 @@ export interface Task {
    *  questions. The land still waits for a person, even if the finishing
    *  role's gate is none. */
   supervised?: boolean
+  /** work (a card) or feature (a grouping row). Missing reads as work. A
+   *  feature never appears in a lane. */
+  kind?: 'work' | 'feature'
+  /** The feature this card belongs to. Empty for a card that stands alone
+   *  and for the feature itself. */
+  parentId?: string
+  /** Inherited by every message this card produces. Lower is sooner. */
+  priority?: number
+  /** A dependency has not been integrated into the feature head yet. */
+  blocked?: boolean
 }
 
 /** One worked task as the history screen reads it. */
@@ -342,7 +352,9 @@ export interface Approval {
   /** What the role wrote when it handed the work on. */
   body?: string
   commit?: string
-  /** The approval that performs the merge, rather than one between roles. */
+  /** A whole subtask integration, never a land on the project's base. */
+  featureId?: string
+  /** The approval that performs the base land, rather than one between roles. */
   terminal?: boolean
   createdAt: string
   /** The card asked for an architect sidecar to decide this (not the land). */
@@ -397,9 +409,96 @@ export interface SupervisorState {
   error?: string
 }
 
+export interface PlanItem {
+  id: string
+  name: string
+  body: string
+  priority: number
+  position: number
+  childTaskId?: string
+  after?: string[]
+}
+
+/** A feature split waiting on the operator. Nothing is queued until it is accepted. */
+export interface PlanRevision {
+  id: string
+  featureId: string
+  featureName?: string
+  featureBody?: string
+  n: number
+  digest: string
+  proseSha?: string
+  state: string
+  itemCount: number
+  estimateTokens: number
+  estimateCostUsd: number
+  note?: string
+  createdAt: string
+  decidedAt?: string
+  decidedBy?: string
+  items?: PlanItem[]
+}
+
+/** Architect verdict on a feature head. ok is a recommendation; only a person lands. */
+export interface FeatureReview {
+  id: string
+  featureId: string
+  featureName?: string
+  featureBody?: string
+  headSha: string
+  verdict: 'ok' | 'reject'
+  decidedBy: string
+  note?: string
+  evidenceSha?: string
+  createdAt: string
+}
+
+export interface FeatureRun {
+  featureId: string
+  branch: string
+  baseSha: string
+  headSha: string
+  state: 'running' | 'conflict' | 'done' | 'cancelled'
+}
+
+export interface FeatureDetail {
+  task: Task
+  run: FeatureRun | null
+  plans: PlanRevision[]
+  reviews: FeatureReview[]
+  children: Task[]
+  history: TaskStep[]
+  usage: UsageTotal
+  integration: string
+  baseBranch: string
+}
+
+/** One card in a stalled feature, and what can be done about it. */
+export interface StallCard {
+  id: string
+  name: string
+  action: 'retry' | 'waive'
+}
+
+/** A feature nothing will move on its own. The operator's named actions. */
+export interface FeatureStall {
+  featureId: string
+  name: string
+  reason: 'conflict' | 'failed' | 'blocked' | 'rejected'
+  note?: string
+  headSha?: string
+  cards?: StallCard[]
+}
+
 export interface Attention {
   approvals: Approval[]
   clarifications: Clarification[]
+  /** Feature splits waiting on the operator. Absent on older daemons. */
+  plans?: PlanRevision[]
+  /** Reviewed feature heads the operator can land. */
+  features?: FeatureReview[]
+  /** Features that need a person for some other reason. */
+  stalls?: FeatureStall[]
   supervisor: SupervisorState
   rework: { threshold: number; tasks: Task[] }
 }
@@ -557,6 +656,17 @@ export const api = {
   stop: (id: string) => call<{ status: string }>(`/projects/${id}/stop`, { method: 'POST' }),
 
   tasks: (id: string) => call<Task[]>(`/projects/${id}/tasks`),
+  features: (id: string) => call<Task[]>(`/projects/${id}/features`),
+  newFeature: (id: string, name: string, body: string) =>
+    call<Task>(`/projects/${id}/features`, {
+      method: 'POST',
+      body: JSON.stringify({ name, body }),
+    }),
+  setTaskParent: (id: string, parentId: string | null) =>
+    call<Task>(`/tasks/${id}/parent`, {
+      method: 'PUT',
+      body: JSON.stringify({ parentId: parentId ?? '' }),
+    }),
   /** Worked tasks, newest first. `before` is the `next` of the page before. */
   history: (
     id: string,
@@ -576,10 +686,11 @@ export const api = {
     deploy: string,
     skip: string[],
     supervised = false,
+    parentId = '',
   ) =>
     call<Task>(`/projects/${id}/tasks`, {
       method: 'POST',
-      body: JSON.stringify({ name, body, deploy, skip, supervised }),
+      body: JSON.stringify({ name, body, deploy, skip, supervised, parentId }),
     }),
   setTaskSupervised: (id: string, supervised: boolean) =>
     call<Task>(`/tasks/${id}/supervised`, {
@@ -591,6 +702,26 @@ export const api = {
   approve: (id: string) => call<void>(`/approvals/${id}/approve`, { method: 'POST' }),
   reject: (id: string, note: string) =>
     call<void>(`/approvals/${id}/reject`, { method: 'POST', body: JSON.stringify({ note }) }),
+  approvePlan: (id: string) => call<void>(`/plans/${id}/approve`, { method: 'POST' }),
+  rejectPlan: (id: string, note: string) =>
+    call<void>(`/plans/${id}/reject`, { method: 'POST', body: JSON.stringify({ note }) }),
+  featureDetail: (id: string) => call<FeatureDetail>(`/features/${id}`),
+  featureFiles: (id: string, head: string, evidence = '') =>
+    call<{ files: ChangedFile[]; base: string; head: string }>(
+      `/features/${id}/files?${new URLSearchParams({ head, evidence })}`,
+    ),
+  featureFile: (id: string, head: string, base: string, path: string, evidence = '') =>
+    call<ChangedFile>(`/features/${id}/files?${new URLSearchParams({ head, base, path, evidence })}`),
+  landFeature: (id: string, head: string) =>
+    call<void>(`/features/${id}/land`, { method: 'POST', body: JSON.stringify({ head }) }),
+  refreshFeature: (id: string, head: string) =>
+    call<void>(`/features/${id}/refresh`, { method: 'POST', body: JSON.stringify({ head }) }),
+  rejectFeature: (id: string, head: string, note: string) =>
+    call<void>(`/features/${id}/reject`, { method: 'POST', body: JSON.stringify({ head, note }) }),
+  retryCard: (id: string) => call<void>(`/tasks/${id}/retry`, { method: 'POST' }),
+  waiveDependency: (id: string, note: string) =>
+    call<void>(`/tasks/${id}/waive`, { method: 'POST', body: JSON.stringify({ note }) }),
+  cancelFeature: (id: string) => call<void>(`/features/${id}/cancel`, { method: 'POST' }),
   answer: (id: string, answer: string) =>
     call<void>(`/clarifications/${id}/answer`, { method: 'POST', body: JSON.stringify({ answer }) }),
 

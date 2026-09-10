@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useMediaQuery } from '@vueuse/core'
-import type { Attention } from '@/lib/api'
+import type { Attention, Task } from '@/lib/api'
 import {
   AlertTriangle,
   BookOpen,
@@ -15,6 +15,7 @@ import {
 import { api, type ChangedFile, type Mergeable, type ReviewThread } from '@/lib/api'
 import { renderMarkdown } from '@/lib/markdown'
 import DiffView from '@/components/DiffView.vue'
+import FeaturePanel from '@/components/FeaturePanel.vue'
 import ReviewThreadView from '@/components/ReviewThread.vue'
 import Artifacts from '@/components/Artifacts.vue'
 import { Badge } from '@/components/ui/badge'
@@ -63,6 +64,8 @@ function answering(id: string): boolean {
 const emit = defineEmits<{
   approve: [id: string]
   reject: [id: string, note: string]
+  featureUpdated: []
+  openTask: [task: Task]
   answer: [id: string, answer: string]
 }>()
 
@@ -82,7 +85,7 @@ const key = (id: string, path: string) => `${id}::${path}`
  * open. A reader who wants it back is one click away; a reader who wants the
  * diff should not scroll through a spec to reach it.
  */
-function defaultOpen(a: { id: string; terminal?: boolean }, f: ChangedFile): boolean {
+function defaultOpen(a: { id: string; terminal?: boolean; featureId?: string }, f: ChangedFile): boolean {
   const k = key(a.id, f.path)
   if (k in fileOpen.value) return fileOpen.value[k]
   // A deferred file has no content yet and does not fetch itself: opening by
@@ -90,7 +93,7 @@ function defaultOpen(a: { id: string; terminal?: boolean }, f: ChangedFile): boo
   // exists to stop) or show "Loading…" under every file past the thirtieth,
   // for a request nobody made. It opens when the reader opens it.
   if (f.deferred) return false
-  return a.terminal ? !isDoc(f) : true
+  return a.terminal || a.featureId ? !isDoc(f) : true
 }
 
 function toggleFile(a: { id: string; terminal?: boolean }, f: ChangedFile) {
@@ -780,7 +783,7 @@ watch(
     for (const a of props.attention?.approvals ?? []) {
       if (a.commit && !diffs.value[a.id]) void loadFiles(a.id)
       if (a.commit && !guides.value[a.id]) void loadGuide(a.id)
-      if (a.terminal && a.commit && !merges.value[a.id]) void loadMergeable(a.id)
+      if ((a.terminal || a.featureId) && a.commit && !merges.value[a.id]) void loadMergeable(a.id)
       if (a.taskId && !threads.value[a.taskId]) void loadThreads(a.taskId)
     }
   },
@@ -862,8 +865,26 @@ function submit(c: { id: string; options?: string[] }): void {
 
 function empty(a: Attention | null): boolean {
   if (!a) return true
-  return !a.approvals.length && !a.clarifications.length && !a.rework.tasks.length
+  return (
+    !a.approvals.length &&
+    !a.clarifications.length &&
+    !a.rework.tasks.length &&
+    !a.plans?.length &&
+    !a.features?.length &&
+    !a.stalls?.length
+  )
 }
+
+// One review surface per feature, even when more than one attention query
+// names it. The version refreshes an open panel when its head or stall changes.
+const featureWork = computed(() => {
+  const a = props.attention
+  const byId = new Map<string, string>()
+  for (const p of a?.plans ?? []) byId.set(p.featureId, p.id)
+  for (const f of a?.features ?? []) byId.set(f.featureId, f.id)
+  for (const st of a?.stalls ?? []) byId.set(st.featureId, JSON.stringify(st))
+  return [...byId].map(([id, version]) => ({ id, version }))
+})
 </script>
 
 <template>
@@ -888,8 +909,18 @@ function empty(a: Attention | null): boolean {
     >
       <span class="text-[var(--status-good)]/70 text-lg leading-none">✓</span>
       <p class="text-xs">Nothing needs you.</p>
-      <p class="text-[11px]">Approvals, questions and looping cards appear here.</p>
+      <p class="text-[11px]">Approvals, plans, questions and looping cards appear here.</p>
     </div>
+
+    <FeaturePanel
+      v-for="f in featureWork"
+      :key="f.id"
+      :feature-id="f.id"
+      :version="f.version"
+      class="rise bg-card border-l-primary border border-l-2 p-3"
+      @updated="emit('featureUpdated')"
+      @open-task="emit('openTask', $event)"
+    />
 
     <!-- Approvals: a spec waiting to be read before anything downstream runs. -->
     <article
@@ -1360,7 +1391,7 @@ function empty(a: Attention | null): boolean {
            is the moment a person decides, and until now nothing said whether
            the decision could be carried out. -->
       <p
-        v-if="a.terminal && a.commit && (mergeState(a.id) || mergeError(a.id))"
+        v-if="(a.terminal || a.featureId) && a.commit && (mergeState(a.id) || mergeError(a.id))"
         class="mt-1 mb-2.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px]"
       >
         <template v-if="mergeState(a.id)?.clean">

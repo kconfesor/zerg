@@ -39,7 +39,7 @@ const noSupervisorRole = "no role in the library has the supervisor purpose"
 // SupervisorState reports whether the architect sidecar is actually there.
 func (o *Overmind) SupervisorState(ctx context.Context, projectID string) SupervisorState {
 	var st SupervisorState
-	want, err := o.db.HasOpenSupervised(ctx, projectID)
+	want, err := o.db.HasWorkForSupervisor(ctx, projectID)
 	if err != nil {
 		return SupervisorState{Error: err.Error()}
 	}
@@ -104,7 +104,7 @@ func (o *Overmind) syncSupervisorLocked(ctx context.Context, projectID string) e
 }
 
 func (o *Overmind) syncSupervisor(ctx context.Context, s *swarm, env *spawnEnv) error {
-	want, err := o.db.HasOpenSupervised(ctx, env.project.ID)
+	want, err := o.db.HasWorkForSupervisor(ctx, env.project.ID)
 	if err != nil {
 		return err
 	}
@@ -216,7 +216,7 @@ func (o *Overmind) spawnSupervisor(runCtx context.Context, s *swarm, env *spawnE
 	}
 
 	token := o.agents.MintScoped(env.project.ID, role.Name,
-		agent.CanClaim, agent.CanAsk, agent.CanDecide)
+		agent.CanClaim, agent.CanAsk, agent.CanDecide, agent.CanSplit)
 
 	configDir := ""
 	if a.Capabilities().PrivateConfigDir {
@@ -360,8 +360,22 @@ func (o *Overmind) nudgeSupervisor(ctx context.Context, projectID string, s *swa
 		return
 	}
 	d, err := o.db.NextDecision(ctx, projectID, p.cerebrate.Role().Name)
-	if err != nil || d == nil {
+	if err != nil {
 		return
+	}
+	// Match the work offered by next. HasWorkForSupervisor keeps the sidecar
+	// alive while children work, but nudging on that would spend idle turns.
+	if d == nil {
+		feature, _, err := o.db.NextFeatureToPlan(ctx, projectID)
+		if err != nil {
+			return
+		}
+		if feature == nil {
+			feature, _, err = o.db.NextFeatureToReview(ctx, projectID)
+			if err != nil || feature == nil {
+				return
+			}
+		}
 	}
 	if err := p.cerebrate.Submit(nudge); err != nil {
 		o.log.Debug("could not nudge the architect", "err", err)

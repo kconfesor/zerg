@@ -173,8 +173,13 @@ func (h *Hatchery) clearLegacyIgnore(ctx context.Context) {
 // uncommitted work included. Re-creating it on every start would throw away
 // whatever an agent was in the middle of.
 func (h *Hatchery) EnsureWorktree(ctx context.Context, role, baseBranch string) (string, error) {
-	path := h.Path(role)
-	branch := BranchPrefix + role
+	return h.EnsureWorktreeAt(ctx, role, BranchPrefix+role, baseBranch)
+}
+
+// EnsureWorktreeAt is EnsureWorktree with an explicit branch name. Feature
+// integration needs zerg-feature/<id>, which is not a role branch.
+func (h *Hatchery) EnsureWorktreeAt(ctx context.Context, name, branch, startPoint string) (string, error) {
+	path := h.Path(name)
 
 	if isWorktree(ctx, path) {
 		return path, nil
@@ -188,10 +193,10 @@ func (h *Hatchery) EnsureWorktree(ctx context.Context, role, baseBranch string) 
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return "", fmt.Errorf("creating %s: %w", filepath.Dir(path), err)
 	}
-	// -B resets the role branch to the base on each fresh creation, so a role
+	// -B resets the branch to startPoint on each fresh creation, so a role
 	// starts from current work rather than from wherever it left off weeks ago.
-	if _, err := git(ctx, h.repoPath, "worktree", "add", "--force", "-B", branch, path, baseBranch); err != nil {
-		return "", fmt.Errorf("creating a worktree for %s: %w", role, err)
+	if _, err := git(ctx, h.repoPath, "worktree", "add", "--force", "-B", branch, path, startPoint); err != nil {
+		return "", fmt.Errorf("creating a worktree for %s: %w", name, err)
 	}
 	return path, nil
 }

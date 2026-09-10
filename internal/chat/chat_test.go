@@ -5,7 +5,19 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/kconfesor/zerg/internal/store"
 )
+
+// Chat has its own system prompt; changing shared instructions cannot reach it.
+func TestChatPromptForbidsDelegationWithoutAddingThePipelineProtocol(t *testing.T) {
+	if !strings.Contains(systemPrompt, store.NoSubagentsInstruction) {
+		t.Error("chat did not receive the no-subagents rule")
+	}
+	if strings.Contains(systemPrompt, "zerg next") {
+		t.Error("chat was told to claim work without a socket or token")
+	}
+}
 
 // What the agent is actually sent when something is attached.
 //

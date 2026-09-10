@@ -164,3 +164,105 @@ func commitAll(t *testing.T, dir, message string) string {
 	run("commit", "-q", "-m", message)
 	return strings.TrimSpace(run("rev-parse", "HEAD"))
 }
+
+// A subtask runs on a branch of its own and leaves the role's alone.
+//
+// The first version of this reset the role's branch --hard to the feature head.
+// That isolates the subtask and destroys whatever the role branch was carrying,
+// which under `integration = branch` is finished work a person had not landed
+// yet and which no other ref points at.
+func TestSwitchIsolatesASubtaskWithoutLosingTheRoleBranch(t *testing.T) {
+	ctx := context.Background()
+	dir := newRepo(t)
+	kept := commitOnBranch(t, dir, "zerg-coder", "landed-by-hand.txt", "not merged yet\n")
+	feature := commitOnBranch(t, dir, "zerg-feature/f1", "feature.txt", "the feature\n")
+
+	tree := filepath.Join(dir, ".worktrees", "coder")
+	if _, err := runGit(ctx, dir, "worktree", "add", "-q", "--force", tree, "zerg-coder"); err != nil {
+		t.Fatalf("worktree add: %v", err)
+	}
+
+	// Onto the feature, then back again.
+	if err := (Git{}).Switch(ctx, tree, "zerg-subtask/coder", feature); err != nil {
+		t.Fatalf("Switch onto the feature: %v", err)
+	}
+	if head, _ := runGit(ctx, tree, "rev-parse", "HEAD"); head != feature {
+		t.Errorf("head = %s, want the feature head %s", head, feature)
+	}
+	if err := (Git{}).Switch(ctx, tree, "zerg-coder", ""); err != nil {
+		t.Fatalf("Switch back: %v", err)
+	}
+	if head, _ := runGit(ctx, tree, "rev-parse", "HEAD"); head != kept {
+		t.Errorf("head = %s, want the role branch back at %s", head, kept)
+	}
+	if _, err := runGit(ctx, dir, "cat-file", "-t", kept); err != nil {
+		t.Errorf("the role branch's unlanded commit is gone: %v", err)
+	}
+}
+
+// The guard that catches what the branch is meant to prevent: base is an
+// ancestor of a feature branch, so a commit built on top of the feature
+// fast-forwards onto base and takes every commit under it.
+func TestContainsSeesAFeatureUnderAnOrdinaryCommit(t *testing.T) {
+	ctx := context.Background()
+	dir := newRepo(t)
+	feature := commitOnBranch(t, dir, "zerg-feature/f1", "feature.txt", "the feature\n")
+
+	run := func(args ...string) string {
+		t.Helper()
+		out, err := runGit(ctx, dir, args...)
+		if err != nil {
+			t.Fatalf("git %s: %v", strings.Join(args, " "), err)
+		}
+		return out
+	}
+	run("checkout", "-q", "-B", "zerg-coder", feature)
+	write(t, dir, "ordinary.txt", "an unrelated card\n")
+	run("add", ".")
+	run("commit", "-q", "-m", "ordinary card")
+	ordinary := run("rev-parse", "HEAD")
+	run("checkout", "-q", "main")
+
+	carries, err := (Git{}).Contains(ctx, dir, ordinary, feature)
+	if err != nil {
+		t.Fatalf("Contains: %v", err)
+	}
+	if !carries {
+		t.Error("a commit built on the feature was reported as not carrying it")
+	}
+	// And --ff-only would have taken it, which is why the check exists.
+	if err := (Git{}).Merge(ctx, dir, "main", ordinary); err != nil {
+		t.Fatalf("Merge: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "feature.txt")); err != nil {
+		t.Skip("git declined the fast-forward, so there is nothing to guard against here")
+	}
+}
+
+// One conflict must not end a feature: git refuses every later merge in a
+// worktree that still has unmerged files.
+func TestAbortMergeLetsTheNextIntegrationRun(t *testing.T) {
+	ctx := context.Background()
+	dir := newRepo(t)
+	one := commitOnBranch(t, dir, "s1", "f.txt", "one\n")
+	two := commitOnBranch(t, dir, "s2", "f.txt", "two\n")
+
+	tree := filepath.Join(dir, ".worktrees", "feature-f1")
+	if _, err := runGit(ctx, dir, "worktree", "add", "-q", "-b", "zerg-feature/f1", tree, "main"); err != nil {
+		t.Fatalf("worktree add: %v", err)
+	}
+	if err := (Git{}).MergeInto(ctx, tree, one); err != nil {
+		t.Fatalf("first merge: %v", err)
+	}
+	if err := (Git{}).MergeInto(ctx, tree, two); err == nil {
+		t.Fatal("conflicting merge reported success")
+	}
+	if err := (Git{}).AbortMerge(ctx, tree); err != nil {
+		t.Fatalf("AbortMerge: %v", err)
+	}
+	// The same merge the wedged tree refused with "Merging is not possible
+	// because you have unmerged files".
+	if err := (Git{}).MergeInto(ctx, tree, one); err != nil {
+		t.Errorf("the feature worktree was left unusable: %v", err)
+	}
+}

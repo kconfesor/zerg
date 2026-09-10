@@ -796,6 +796,109 @@ func TestTheArchitectsStateIsWhetherAProcessIsRunning(t *testing.T) {
 	}
 }
 
+// Starting a sidecar is not asking it to work. The nudge used to check only
+// gates and questions, leaving a feature's planner and reviewer alive but idle.
+func TestFeaturesWakeTheArchitect(t *testing.T) {
+	for _, kind := range []string{"plan", "review"} {
+		t.Run(kind, func(t *testing.T) {
+			ctx := context.Background()
+			h := newHarness(t, &scriptedHarness{script: func(spec adapter.Spec) string {
+				if spec.Role != "supervisor" {
+					return workingAgent(spec)
+				}
+				return `set -e
+printf 'ready\n'
+while IFS= read -r _line; do
+  WORK=$("$ZERG_BIN" next --wait 0s)
+  [ -z "$WORK" ] && { printf 'turn_end\n'; continue; }
+  FEATURE=$(printf '%s' "$WORK" | sed -n 's/.*"id": "\([^"]*\)".*/\1/p' | head -1)
+  case "$WORK" in
+    *'"kind": "decide"'*)
+      APPROVAL=$(printf '%s' "$WORK" | sed -n 's/.*"approvalId": "\([^"]*\)".*/\1/p')
+      "$ZERG_BIN" approve --id "$APPROVAL" --note 'checked the subtask integration' >/dev/null ;;
+    *'"kind": "plan"'*)
+      printf '{"items":[{"name":"Implementation","body":"build it","priority":10}]}' |
+        "$ZERG_BIN" split --feature "$FEATURE" >/dev/null ;;
+    *'"kind": "review"'*)
+      HEAD=$(printf '%s' "$WORK" | sed -n 's/.*"commit": "\([^"]*\)".*/\1/p')
+      "$ZERG_BIN" review --feature "$FEATURE" --head "$HEAD" --verdict ok --note 'checked the feature' >/dev/null ;;
+  esac
+  printf 'turn_end\n'
+done`
+			}})
+			feature, err := h.db.CreateFeature(ctx, h.project.ID, "A feature", "build it")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if kind == "review" {
+				plan, err := h.db.SubmitPlan(ctx, h.project.ID, feature.ID, []store.PlanDraft{
+					{Name: "Implementation", Body: "build it", Priority: 10},
+				}, "")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := h.nyd.AcceptPlan(ctx, plan.ID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := h.over.Start(ctx, h.project.ID); err != nil {
+				t.Fatal(err)
+			}
+
+			if kind == "plan" {
+				waitFor(t, func() bool {
+					plans, err := h.db.ListPendingPlans(ctx, h.project.ID)
+					return err == nil && len(plans) == 1 && plans[0].FeatureID == feature.ID && len(plans[0].Items) == 1
+				}, 10*time.Second, "the architect never submitted the feature plan")
+				return
+			}
+			waitFor(t, func() bool {
+				review, err := h.db.CurrentReview(ctx, feature.ID)
+				return err == nil && review != nil && review.Verdict == store.ReviewOK
+			}, 20*time.Second, "the architect never reviewed the integrated feature")
+
+			// Both real pipeline CLIs ran before the review. The planned priority
+			// must survive every hop, not just the message that opened the card.
+			var wrong int
+			if err := h.db.SQL().QueryRowContext(ctx,
+				`SELECT COUNT(*) FROM messages m JOIN tasks t ON t.id = m.task_id
+				 WHERE t.parent_id = ? AND m.priority <> t.priority`, feature.ID).Scan(&wrong); err != nil {
+				t.Fatal(err)
+			}
+			if wrong != 0 {
+				t.Errorf("%d feature messages lost the planned priority", wrong)
+			}
+		})
+	}
+}
+
+// HasWorkForSupervisor keeps the process alive while children work, but that
+// is not permission to spend a turn every tick when next has nothing to offer.
+func TestAnArchitectWithoutADecisionStaysIdle(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t, &scriptedHarness{script: idleAgent})
+	if _, err := h.nyd.NewTaskWith(ctx, nydus.NewTaskOpts{
+		ProjectID: h.project.ID, Name: "In progress", Body: "do it", Supervised: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.over.Start(ctx, h.project.ID); err != nil {
+		t.Fatal(err)
+	}
+	s := h.swarm(t)
+	s.mu.Lock()
+	p := s.supervisor
+	s.mu.Unlock()
+	if p == nil {
+		t.Fatal("no architect for the supervised card")
+	}
+	waitFor(t, p.cerebrate.Idle, 5*time.Second, "the architect never became idle")
+	h.over.nudgeSupervisor(ctx, h.project.ID, s)
+	if !p.cerebrate.Idle() {
+		t.Fatal("the architect started a turn with no decision, plan or review to make")
+	}
+}
+
 // A card that asks for an architect the library cannot provide says so, rather
 // than looking like a card an architect is deciding.
 func TestASupervisedCardWithNoSupervisorRoleReportsItself(t *testing.T) {

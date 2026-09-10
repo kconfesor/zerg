@@ -63,6 +63,14 @@ func (r *recordingIntegrator) Merge(_ context.Context, _, _, commit string) erro
 	return nil
 }
 
+func (r *recordingIntegrator) Switch(_ context.Context, _, _, _ string) error { return nil }
+
+func (r *recordingIntegrator) AbortMerge(_ context.Context, _ string) error { return nil }
+
+func (r *recordingIntegrator) Contains(_ context.Context, _, _, _ string) (bool, error) {
+	return false, nil
+}
+
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
 	ctx := context.Background()

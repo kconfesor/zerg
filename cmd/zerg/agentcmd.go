@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/kconfesor/zerg/internal/agent"
+	"github.com/kconfesor/zerg/internal/store"
 )
 
 // The agent-facing side of the binary. An agent gets these five verbs and
@@ -71,7 +72,8 @@ func runSend(args []string) error {
 	commit := fs.String("commit", "", "the commit this handoff points at")
 	body := fs.String("body", "", "a short note for the recipient")
 	kind := fs.String("kind", "handoff", "handoff or note")
-	priority := fs.Int("priority", 50, "lower is sooner")
+	// A default of 50 looks like an explicit override of the card's priority.
+	priority := fs.Int("priority", 0, "lower is sooner; 0 inherits the task's priority, otherwise 50")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -157,6 +159,67 @@ func runDecide(args []string, verb string, ok bool) error {
 		return client.Approve(ctx, *id, *note, *commit)
 	}
 	return client.Reject(ctx, *id, *note, *commit)
+}
+
+func runReview(args []string) error {
+	fs := flag.NewFlagSet("review", flag.ContinueOnError)
+	feature := fs.String("feature", "", "the feature being reviewed")
+	head := fs.String("head", "", "the feature head this verdict is about, as the review envelope gave it")
+	verdict := fs.String("verdict", "", "ok or reject")
+	note := fs.String("note", "", "the rationale, required when rejecting")
+	commit := fs.String("commit", "", "the commit that recorded the review")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *feature == "" {
+		return errors.New("review needs --feature")
+	}
+	if *head == "" {
+		return errors.New("review needs --head, the feature head it is about; the review envelope names it")
+	}
+	if *verdict == "" {
+		return errors.New("review needs --verdict ok or reject")
+	}
+	client, err := agent.NewClientFromEnv()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	out, err := client.Review(ctx, *feature, *head, *verdict, *note, *commit)
+	if err != nil {
+		return err
+	}
+	return printJSON(out)
+}
+
+func runSplit(args []string) error {
+	fs := flag.NewFlagSet("split", flag.ContinueOnError)
+	feature := fs.String("feature", "", "the feature being planned")
+	commit := fs.String("commit", "", "the commit that recorded the plan prose")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *feature == "" {
+		return errors.New("split needs --feature, the feature being planned")
+	}
+	var body struct {
+		Items []store.PlanDraft `json:"items"`
+	}
+	if err := json.NewDecoder(os.Stdin).Decode(&body); err != nil {
+		return fmt.Errorf("reading the plan from stdin: %w", err)
+	}
+	client, err := agent.NewClientFromEnv()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	out, err := client.Split(ctx, *feature, *commit, body.Items)
+	if err != nil {
+		return err
+	}
+	return printJSON(out)
 }
 
 func runAnswer(args []string) error {

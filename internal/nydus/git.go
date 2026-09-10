@@ -140,6 +140,90 @@ func short(commit string) string {
 	return commit
 }
 
+// Switch puts the worktree on branch, moving that branch to startPoint when one
+// is given.
+//
+// A feature subtask runs on a branch of its own, started at the feature head,
+// because a role's worktree is reused across cards and its branch accumulates
+// everything that role has ever done. Reaching that from the role's own branch
+// meant `reset --hard`, which discards whatever the role branch was carrying:
+// under `integration = branch` that is finished work a person had not landed
+// yet, reachable from nowhere else. Switching branches keeps it and isolates
+// the subtask, which is what the reset was for.
+//
+// --force throws away modifications in the tree. They belong to a card that is
+// no longer being worked — a claim only happens with no lease open — and
+// carrying them into this one is the failure this is here to prevent.
+// Untracked files are left alone: build output lives there.
+func (Git) Switch(ctx context.Context, worktreePath, branch, startPoint string) error {
+	current, err := runGit(ctx, worktreePath, "rev-parse", "--abbrev-ref", "HEAD")
+	if err != nil {
+		return fmt.Errorf("reading the checked-out branch in %s: %w", worktreePath, err)
+	}
+	if startPoint == "" {
+		if current == branch {
+			return nil
+		}
+		if _, err := runGit(ctx, worktreePath, "checkout", "--force", branch); err != nil {
+			return fmt.Errorf("checking out %s in %s: %w", branch, worktreePath, err)
+		}
+		return nil
+	}
+	if err := verifyCommit(ctx, worktreePath, startPoint); err != nil {
+		return err
+	}
+	if _, err := runGit(ctx, worktreePath, "checkout", "--force", "-B", branch, startPoint); err != nil {
+		return fmt.Errorf("starting %s at %s in %s: %w", branch, short(startPoint), worktreePath, err)
+	}
+	return nil
+}
+
+// AbortMerge clears a merge that stopped on a conflict.
+//
+// A conflict left in a role's worktree is right: the agent is told and resolves
+// it where it happened. A conflict left in a feature's integration worktree is
+// not, because nobody is in there. Measured: the second merge reports "Merging
+// is not possible because you have unmerged files", and so does every merge
+// after it, so one conflict ends every remaining subtask of that feature.
+func (Git) AbortMerge(ctx context.Context, worktreePath string) error {
+	if _, err := runGit(ctx, worktreePath, "merge", "--abort"); err != nil {
+		return fmt.Errorf("clearing the conflicted merge in %s: %w", worktreePath, err)
+	}
+	return nil
+}
+
+// Contains reports whether commit already has ancestor in its history.
+//
+// Used to keep an ordinary card from carrying a live feature onto the base
+// branch: base is an ancestor of a feature branch, so `merge --ff-only` accepts
+// a commit built on top of the feature and takes every commit under it.
+func (Git) Contains(ctx context.Context, repoPath, commit, ancestor string) (bool, error) {
+	if err := verifyCommit(ctx, repoPath, commit); err != nil {
+		return false, err
+	}
+	if err := verifyCommit(ctx, repoPath, ancestor); err != nil {
+		return false, err
+	}
+	if _, err := runGit(ctx, repoPath, "merge-base", "--is-ancestor", ancestor, commit); err != nil {
+		return false, nil
+	}
+	return true, nil
+}
+
+// busyRepo is another process holding the repository, not a conflict.
+//
+// git does not wait for index.lock: it fails immediately with "Unable to create
+// '.../index.lock': File exists". Reported as a conflict it would mark a whole
+// feature conflicted and send an agent looking for conflict markers that were
+// never written.
+func busyRepo(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "index.lock") || strings.Contains(msg, "Another git process")
+}
+
 // MergeInto brings commit into the worktree at path.
 //
 // Not --ff-only, unlike base-branch integration: a role's branch has its own

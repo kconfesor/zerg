@@ -68,10 +68,16 @@ const (
 // somebody has edited into a state with no runner still shows them their app,
 // rather than answering a button press with a lookup failure.
 const fallbackPrompt = `You are starting this project so a person can open it and use it.
-Work out how it serves itself, bind $PORT (the only port being proxied; the
-block is in $ZERG_PORTS if it is genuinely more than one server), start it in
-the background, wait until it answers, and register it with:
-zerg artifact serve --port $PORT --label "<what it is>"`
+
+` + store.NoSubagentsInstruction + `
+
+Work out how it serves itself, bind $PORT (additional allocated ports are in
+$ZERG_PORTS if it genuinely needs several servers), start it in the background,
+wait until it answers, and register each service with:
+zerg artifact serve --port $PORT --label "<what it is>"
+
+Do not rewrite the project to make it start. You cannot claim or hand off work;
+do not use zerg next, zerg send or zerg done. Report blockers and stop.`
 
 // Manager owns one runner session per project.
 type Manager struct {

@@ -95,6 +95,14 @@ func (s DecisionScope) By() string {
 // LaneDone is the well a finished card lands in.
 const LaneDone = "done"
 
+// Task kinds. A feature groups cards and is not itself a card a role can claim:
+// Claim reads routes, and a feature has none. The board, history, rework and
+// Attention list work; a feature never appears in a lane. Issue #40.
+const (
+	TaskKindWork    = "work"
+	TaskKindFeature = "feature"
+)
+
 // Message kinds. A handoff points at a commit and carries work; a note is
 // out-of-band and never occupies a lease.
 const (
@@ -196,6 +204,25 @@ type Task struct {
 	// unattended. A property of the card, not of whoever happens to be last.
 	Supervised bool `json:"supervised,omitempty"`
 
+	// Kind is work or feature. Empty in JSON reads as work. A feature is a
+	// row in tasks so grouping, delete-cascade and the cost view come free,
+	// but it is not work and must not be drawn in a lane.
+	Kind string `json:"kind,omitempty"`
+
+	// ParentID is the feature this card belongs to. Empty for a card that
+	// stands alone and for the feature itself: a feature cannot have a parent.
+	ParentID string `json:"parentId,omitempty"`
+
+	// Priority is what every message this card produces inherits. The queue
+	// reads messages.priority, and that column was hardcoded to 50 at every
+	// write, so a plan-item priority would be lost at the first handoff.
+	Priority int `json:"priority,omitempty"`
+
+	// Blocked means a dependency has not been integrated into the feature head
+	// yet. Distinct from queued: a queued card is one a role will pick up.
+	// A column, not a new tasks.state — see schema_014.sql.
+	Blocked bool `json:"blocked,omitempty"`
+
 	// Models are the models that have actually spent tokens on this card, in
 	// the order they first did. What a role is configured with is a live value
 	// and answers a different question: this says what produced the work in
@@ -255,6 +282,8 @@ type Lease struct {
 }
 
 type Approval struct {
+	// FeatureID is a non-terminal integration destination, never a base land.
+	FeatureID string    `json:"featureId,omitempty"`
 	ID        string    `json:"id"`
 	ProjectID string    `json:"projectId"`
 	MessageID string    `json:"messageId"`
@@ -314,6 +343,7 @@ func (db *DB) CreateTask(ctx context.Context, projectID, name, body, lane string
 		Body:      body,
 		Lane:      lane,
 		State:     TaskQueued,
+		Kind:      TaskKindWork,
 		CreatedAt: time.Now().UTC(),
 	}
 	_, err := db.sql.ExecContext(ctx,
@@ -326,16 +356,43 @@ func (db *DB) CreateTask(ctx context.Context, projectID, name, body, lane string
 	return t, nil
 }
 
+// CreateFeature opens a grouping row. It is not queued for a role: a feature
+// has no route, and Claim selects from routes, so nothing will pick it up.
+// The board lists work; this row is reached through ListFeatures.
+func (db *DB) CreateFeature(ctx context.Context, projectID, name, body string) (*Task, error) {
+	if name == "" {
+		return nil, invalid("a feature needs a name; it is what the cards under it are grouped by")
+	}
+	t := &Task{
+		ID:        NewID(),
+		ProjectID: projectID,
+		Name:      name,
+		Body:      body,
+		State:     TaskQueued,
+		Kind:      TaskKindFeature,
+		CreatedAt: time.Now().UTC(),
+	}
+	_, err := db.sql.ExecContext(ctx,
+		`INSERT INTO tasks (id, project_id, name, body, lane, state, created_at, kind)
+		 VALUES (?,?,?,?,?,?,?,?)`,
+		t.ID, t.ProjectID, t.Name, t.Body, t.Lane, t.State, t.CreatedAt.Format(time.RFC3339Nano), t.Kind)
+	if err != nil {
+		return nil, fmt.Errorf("creating feature %q: %w", name, err)
+	}
+	return t, nil
+}
+
 const taskCols = `id, project_id, session_id, name, body, lane, state,
 	created_at, first_claimed_at, completed_at, active_ms, rework_count, hidden, stopped_at,
-	outcome, outcome_ref, pinned, deploy, skip, supervised`
+	outcome, outcome_ref, pinned, deploy, skip, supervised, kind, parent_id, priority, blocked`
 
 // taskColsT is the same list qualified to the tasks table, for the queries that
 // join. Unqualified names resolve today and would become ambiguous the moment a
 // joined table gained a column of the same name.
 const taskColsT = `t.id, t.project_id, t.session_id, t.name, t.body, t.lane, t.state,
 	t.created_at, t.first_claimed_at, t.completed_at, t.active_ms, t.rework_count, t.hidden,
-	t.stopped_at, t.outcome, t.outcome_ref, t.pinned, t.deploy, t.skip, t.supervised`
+	t.stopped_at, t.outcome, t.outcome_ref, t.pinned, t.deploy, t.skip, t.supervised,
+	t.kind, t.parent_id, t.priority, t.blocked`
 
 // GetTaskIn resolves a task that must belong to this project.
 //
@@ -403,7 +460,7 @@ func (db *DB) ListTasks(ctx context.Context, projectID string) ([]Task, error) {
 		              ORDER BY id DESC LIMIT 1) AS doing
 		       FROM events e1 GROUP BY task_id
 		 ) e ON e.task_id = t.id
-		 WHERE t.project_id = ? ORDER BY t.created_at DESC`, projectID)
+		 WHERE t.project_id = ? AND t.kind = ? ORDER BY t.created_at DESC`, projectID, TaskKindWork)
 	if err != nil {
 		return nil, fmt.Errorf("listing tasks: %w", err)
 	}
@@ -412,6 +469,34 @@ func (db *DB) ListTasks(ctx context.Context, projectID string) ([]Task, error) {
 	var out []Task
 	for rows.Next() {
 		t, err := scanTaskWithSummary(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *t)
+	}
+	return out, rows.Err()
+}
+
+// ListFeatures returns a project's live grouping rows, newest first. They are
+// not on the board: ListTasks is the lane query and excludes them.
+//
+// Live only. A landed or cancelled feature stayed in the strip until somebody
+// pressed the trash button on it, so the one row of the board that is meant to
+// say what is being worked on filled up with what is not.
+func (db *DB) ListFeatures(ctx context.Context, projectID string) ([]Task, error) {
+	rows, err := db.read.QueryContext(ctx,
+		`SELECT `+taskCols+` FROM tasks
+		  WHERE project_id = ? AND kind = ? AND state NOT IN (?, ?)
+		  ORDER BY created_at DESC`,
+		projectID, TaskKindFeature, TaskDone, TaskRejected)
+	if err != nil {
+		return nil, fmt.Errorf("listing features: %w", err)
+	}
+	defer rows.Close()
+
+	var out []Task
+	for rows.Next() {
+		t, err := scanTask(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -431,10 +516,12 @@ func scanTaskWithSummary(s scanner) (*Task, error) {
 		stoppedAt   sql.NullString
 	)
 	var models, skip string
-	var supervised int
+	var supervised, blocked int
+	var parent sql.NullString
 	if err := s.Scan(&t.ID, &t.ProjectID, &sessionID, &t.Name, &t.Body, &t.Lane, &t.State,
 		&created, &firstClaim, &completedAt, &t.ActiveMS, &t.ReworkCount, &t.Hidden, &stoppedAt,
-		&t.Outcome, &t.OutcomeRef, &t.Pinned, &t.Deploy, &skip, &supervised,
+		&t.Outcome, &t.OutcomeRef, &t.Pinned, &t.Deploy, &skip, &supervised, &t.Kind, &parent,
+		&t.Priority, &blocked,
 		&t.Tokens, &t.CostUSD, &models, &t.Doing); err != nil {
 		return nil, err
 	}
@@ -443,6 +530,10 @@ func scanTaskWithSummary(s scanner) (*Task, error) {
 		return nil, fmt.Errorf("task %s has an unreadable skip list: %w", t.ID, err)
 	}
 	t.Supervised = supervised != 0
+	t.Blocked = blocked != 0
+	if parent.Valid {
+		t.ParentID = parent.String
+	}
 	if models != "" {
 		t.Models = strings.Split(models, "\n")
 	}
@@ -462,10 +553,12 @@ func scanTask(s scanner) (*Task, error) {
 		stoppedAt   sql.NullString
 	)
 	var skip string
-	var supervised int
+	var supervised, blocked int
+	var parent sql.NullString
 	if err := s.Scan(&t.ID, &t.ProjectID, &sessionID, &t.Name, &t.Body, &t.Lane, &t.State,
 		&created, &firstClaim, &completedAt, &t.ActiveMS, &t.ReworkCount, &t.Hidden,
-		&stoppedAt, &t.Outcome, &t.OutcomeRef, &t.Pinned, &t.Deploy, &skip, &supervised); err != nil {
+		&stoppedAt, &t.Outcome, &t.OutcomeRef, &t.Pinned, &t.Deploy, &skip, &supervised,
+		&t.Kind, &parent, &t.Priority, &blocked); err != nil {
 		return nil, err
 	}
 	var err error
@@ -473,6 +566,10 @@ func scanTask(s scanner) (*Task, error) {
 		return nil, fmt.Errorf("task %s has an unreadable skip list: %w", t.ID, err)
 	}
 	t.Supervised = supervised != 0
+	t.Blocked = blocked != 0
+	if parent.Valid {
+		t.ParentID = parent.String
+	}
 	if err := fillTaskTimes(&t, sessionID, created, firstClaim, completedAt, stoppedAt); err != nil {
 		return nil, err
 	}
@@ -628,12 +725,12 @@ func (db *DB) ListPendingApprovals(ctx context.Context, projectID string) ([]App
 		`SELECT a.id, a.project_id, a.message_id, a.state, a.note, a.created_at,
 		        COALESCE(t.name, ''), COALESCE(m.task_id, ''), m.from_role,
 		        m.body, COALESCE(m.commit_sha, ''), m.terminal,
-		        COALESCE(t.supervised, 0), a.evidence_sha
+		        COALESCE(t.supervised, 0), a.evidence_sha, COALESCE(a.feature_id, '')
 		 FROM approvals a
 		 JOIN messages m ON m.id = a.message_id
 		 LEFT JOIN tasks t ON t.id = m.task_id
-		 WHERE a.project_id = ? AND a.state = ?
-		 ORDER BY a.created_at`, projectID, ApprovalPending)
+		 WHERE a.project_id = ? AND a.state = ? AND (t.id IS NULL OR t.kind = ?)
+		 ORDER BY a.created_at`, projectID, ApprovalPending, TaskKindWork)
 	if err != nil {
 		return nil, fmt.Errorf("listing approvals: %w", err)
 	}
@@ -650,7 +747,7 @@ func (db *DB) ListPendingApprovals(ctx context.Context, projectID string) ([]App
 		)
 		if err := rows.Scan(&a.ID, &a.ProjectID, &a.MessageID, &a.State, &note,
 			&created, &a.TaskName, &a.TaskID, &a.FromRole, &a.Body, &a.Commit,
-			&terminal, &supervised, &a.EvidenceSHA); err != nil {
+			&terminal, &supervised, &a.EvidenceSHA, &a.FeatureID); err != nil {
 			return nil, err
 		}
 		a.Terminal = terminal != 0
@@ -674,8 +771,8 @@ func (db *DB) HasOpenSupervised(ctx context.Context, projectID string) (bool, er
 	var n int
 	err := db.read.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM tasks
-		  WHERE project_id = ? AND supervised = 1 AND state NOT IN (?, ?)`,
-		projectID, TaskDone, TaskRejected).Scan(&n)
+		  WHERE project_id = ? AND kind = ? AND supervised = 1 AND state NOT IN (?, ?)`,
+		projectID, TaskKindWork, TaskDone, TaskRejected).Scan(&n)
 	if err != nil {
 		return false, fmt.Errorf("looking for supervised cards: %w", err)
 	}
@@ -995,10 +1092,17 @@ func (db *DB) ClarificationsForTask(ctx context.Context, taskID string) ([]Clari
 }
 
 // ListOpenClarifications returns what Attention must show.
+//
+// Every open question, whatever it is about. A feature is kept out of the
+// board's lanes because it is not work, and that rule was applied here too:
+// `ask --task <feature>` succeeded, the architect waited, and the question the
+// operator had to answer was on no screen at all.
 func (db *DB) ListOpenClarifications(ctx context.Context, projectID string) ([]Clarification, error) {
 	rows, err := db.read.QueryContext(ctx,
 		`SELECT `+clarificationCols+`
-		 FROM clarifications c LEFT JOIN tasks t ON t.id = c.task_id WHERE c.project_id = ? AND c.state = ? ORDER BY c.created_at`,
+		 FROM clarifications c LEFT JOIN tasks t ON t.id = c.task_id
+		 WHERE c.project_id = ? AND c.state = ?
+		 ORDER BY c.created_at`,
 		projectID, ClarificationOpen)
 	if err != nil {
 		return nil, fmt.Errorf("listing clarifications: %w", err)
@@ -1108,9 +1212,9 @@ func (db *DB) ReworkThreshold(ctx context.Context) int {
 func (db *DB) ListReworkedTasks(ctx context.Context, projectID string, threshold int) ([]Task, error) {
 	rows, err := db.read.QueryContext(ctx,
 		`SELECT `+taskCols+` FROM tasks
-		 WHERE project_id = ? AND rework_count >= ? AND state NOT IN (?, ?)
+		 WHERE project_id = ? AND kind = ? AND rework_count >= ? AND state NOT IN (?, ?)
 		 ORDER BY rework_count DESC, created_at`,
-		projectID, threshold, TaskDone, TaskRejected)
+		projectID, TaskKindWork, threshold, TaskDone, TaskRejected)
 	if err != nil {
 		return nil, fmt.Errorf("listing reworked tasks: %w", err)
 	}
@@ -1195,7 +1299,7 @@ func (db *DB) GetApproval(ctx context.Context, id string) (*Approval, error) {
 	row := db.read.QueryRowContext(ctx,
 		`SELECT a.id, a.project_id, a.message_id, a.state, a.note, a.created_at,
 		        COALESCE(t.name, ''), COALESCE(m.task_id, ''), m.from_role,
-		        m.body, COALESCE(m.commit_sha, ''), m.terminal
+		        m.body, COALESCE(m.commit_sha, ''), m.terminal, COALESCE(a.feature_id, '')
 		   FROM approvals a
 		   JOIN messages m ON m.id = a.message_id
 		   LEFT JOIN tasks t ON t.id = m.task_id
@@ -1208,7 +1312,7 @@ func (db *DB) GetApproval(ctx context.Context, id string) (*Approval, error) {
 		terminal int
 	)
 	err := row.Scan(&a.ID, &a.ProjectID, &a.MessageID, &a.State, &note, &created,
-		&a.TaskName, &a.TaskID, &a.FromRole, &a.Body, &a.Commit, &terminal)
+		&a.TaskName, &a.TaskID, &a.FromRole, &a.Body, &a.Commit, &terminal, &a.FeatureID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("approval %s: %w", id, ErrNotFound)
 	}
@@ -1276,6 +1380,98 @@ func (db *DB) SetTaskSupervised(ctx context.Context, id string, on bool) error {
 	return mustAffect(res, fmt.Sprintf("task %s", id))
 }
 
+// CloseFeature ends a grouping row: done when it landed, rejected when it was
+// cancelled. The board's strip lists live features only, so a feature that is
+// over stops taking up room in it.
+func (db *DB) CloseFeature(ctx context.Context, featureID, state string) error {
+	stopped := any(nil)
+	if state == TaskRejected {
+		stopped = time.Now().UTC().Format(time.RFC3339Nano)
+	}
+	res, err := db.sql.ExecContext(ctx,
+		`UPDATE tasks SET state = ?, stopped_at = COALESCE(?, stopped_at), completed_at = COALESCE(completed_at, ?)
+		  WHERE id = ? AND kind = ?`,
+		state, stopped, time.Now().UTC().Format(time.RFC3339Nano), featureID, TaskKindFeature)
+	if err != nil {
+		return fmt.Errorf("closing feature %s: %w", featureID, err)
+	}
+	return mustAffect(res, fmt.Sprintf("feature %s", featureID))
+}
+
+// SetTaskParent groups a card under a feature, or detaches it. The parent must
+// be a feature in the same project; a feature cannot belong to another feature.
+func (db *DB) SetTaskParent(ctx context.Context, id, parentID string) error {
+	tx, err := db.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	t, err := db.GetTask(ctx, id)
+	if err != nil {
+		return err
+	}
+	if t.Kind == TaskKindFeature {
+		return invalid("a feature cannot belong to another feature")
+	}
+	if t.ParentID == parentID {
+		return nil
+	}
+	if err := db.keepPlannedChild(ctx, id); err != nil {
+		return err
+	}
+	var parent any
+	if parentID != "" {
+		if err := db.parentFeature(ctx, t.ProjectID, parentID); err != nil {
+			return err
+		}
+		parent = parentID
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE tasks SET parent_id = ? WHERE id = ? AND kind = ?`, parent, id, TaskKindWork); err != nil {
+		return fmt.Errorf("setting parent on %s: %w", id, err)
+	}
+	return tx.Commit()
+}
+
+// Called while holding the writer, before changing membership or deleting. The
+// plan link is authoritative even for an older database with a detached child.
+func (db *DB) keepPlannedChild(ctx context.Context, id string) error {
+	var name string
+	err := db.read.QueryRowContext(ctx,
+		`SELECT f.name FROM feature_plan_items i
+		 JOIN feature_plan_revisions p ON p.id = i.revision_id
+		 JOIN feature_runs r ON r.feature_id = p.feature_id
+		 JOIN tasks f ON f.id = r.feature_id
+		 WHERE i.child_task_id = ? AND p.state = 'approved' AND r.state IN ('running','conflict')`, id).Scan(&name)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return invalid("this card is approved work for feature %q; retry it, or cancel the feature before removing it", name)
+}
+
+// parentFeature reports whether parentID is a feature in this project.
+func (db *DB) parentFeature(ctx context.Context, projectID, parentID string) error {
+	var kind string
+	err := db.read.QueryRowContext(ctx,
+		`SELECT kind FROM tasks WHERE id = ? AND project_id = ?`, parentID, projectID).Scan(&kind)
+	if errors.Is(err, sql.ErrNoRows) {
+		return invalid("that feature does not exist in this project")
+	}
+	if err != nil {
+		return fmt.Errorf("reading feature %s: %w", parentID, err)
+	}
+	if kind != TaskKindFeature {
+		return invalid("a card can only belong to a feature, not to another card")
+	}
+	// A finished feature has nowhere to put work. Joining one left the card
+	// unable to complete at all, because its last handoff is an integration
+	// into a branch that is closed.
+	return db.FeatureAccepts(ctx, parentID)
+}
+
 // StopTask parks a card: no agent will pick it up again, and its history stays.
 //
 // The lease is expired and every route that has not been delivered is closed,
@@ -1288,6 +1484,26 @@ func (db *DB) StopTask(ctx context.Context, projectID, taskID string) error {
 		return fmt.Errorf("beginning stop: %w", err)
 	}
 	defer tx.Rollback()
+
+	var kind string
+	err = tx.QueryRowContext(ctx,
+		`SELECT kind FROM tasks WHERE id = ? AND project_id = ?`, taskID, projectID).Scan(&kind)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("reading task %s: %w", taskID, err)
+	}
+	if kind == TaskKindFeature {
+		return invalid("that is a feature, not a card to stop")
+	}
+	var integrating int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM approvals a JOIN messages m ON m.id = a.message_id WHERE m.task_id = ? AND a.state = ?`, taskID, ApprovalIntegrating).Scan(&integrating); err != nil {
+		return err
+	}
+	if integrating != 0 {
+		return invalid("this card is being integrated; let that decision finish, or restart the daemon to recover it, before stopping")
+	}
 
 	stoppedAt := time.Now().UTC().Format(time.RFC3339Nano)
 	res, err := tx.ExecContext(ctx,
@@ -1352,7 +1568,36 @@ func (db *DB) DeleteTask(ctx context.Context, projectID, taskID string) error {
 		return fmt.Errorf("beginning delete: %w", err)
 	}
 	defer tx.Rollback()
-
+	if err := db.keepPlannedChild(ctx, taskID); err != nil {
+		return err
+	}
+	task, err := db.GetTaskIn(ctx, projectID, taskID)
+	if err != nil {
+		return err
+	}
+	if task.Kind == TaskKindFeature {
+		live, err := db.HasLiveChildren(ctx, taskID)
+		if err != nil {
+			return err
+		}
+		if live {
+			return invalid("that feature still has cards being worked; stop them first")
+		}
+		// And not while there is work on a branch waiting to go somewhere.
+		// Every child being done is the state a feature waits to be landed in,
+		// and deleting it there cascaded the run, the plan and the review away:
+		// the land disappeared out of Attention, and the branch it was about
+		// stayed on disk with nothing pointing at it.
+		run, err := db.GetFeatureRun(ctx, taskID)
+		if err != nil {
+			return err
+		}
+		if run != nil && (run.State == FeatureRunning || run.State == FeatureConflict) {
+			return invalid(
+				"that feature still has work on %s; land it or cancel it before deleting it",
+				run.Branch)
+		}
+	}
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM events WHERE task_id = ? AND project_id = ?`, taskID, projectID); err != nil {
 		return fmt.Errorf("deleting the transcript: %w", err)
@@ -1427,6 +1672,7 @@ func (db *DB) ListHistory(ctx context.Context, projectID string, f HistoryFilter
 		limit = 50
 	}
 
+	// Features leave the live strip when finished, not the durable history.
 	where := []string{"t.project_id = ?"}
 	// The operator is the sender of the message that opens every card, so it is
 	// on every row and says nothing about who worked on it. The trail still
@@ -1475,10 +1721,14 @@ func (db *DB) ListHistory(ctx context.Context, projectID string, f HistoryFilter
 		             GROUP BY m.from_role ORDER BY first)), '')
 		   FROM tasks t
 		   LEFT JOIN (
-		       SELECT task_id,
-		              SUM(input_tokens + cache_read_tokens + cache_write_tokens + output_tokens) AS tokens,
-		              SUM(cost_usd) AS cost
-		         FROM usage_turns GROUP BY task_id
+		       SELECT task_id, SUM(tokens) AS tokens, SUM(cost) AS cost FROM (
+		           SELECT task_id, input_tokens + cache_read_tokens + cache_write_tokens + output_tokens AS tokens,
+		                  cost_usd AS cost FROM usage_turns
+		           UNION ALL
+		           SELECT feature_id, input_tokens + cache_read_tokens + cache_write_tokens + output_tokens,
+		                  cost_usd FROM usage_turns
+		            WHERE feature_id IS NOT NULL AND (task_id IS NULL OR feature_id <> task_id)
+		       ) GROUP BY task_id
 		   ) u ON u.task_id = t.id
 		  WHERE `+strings.Join(where, " AND ")+`
 		  ORDER BY (t.completed_at IS NULL) DESC,
@@ -1501,10 +1751,13 @@ func (db *DB) ListHistory(ctx context.Context, projectID string, f HistoryFilter
 			roles       string
 			skip        string
 			supervised  int
+			parent      sql.NullString
+			blocked     int
 		)
 		if err := rows.Scan(&e.ID, &e.ProjectID, &sessionID, &e.Name, &e.Body, &e.Lane, &e.State,
 			&created, &firstClaim, &completedAt, &e.ActiveMS, &e.ReworkCount, &e.Hidden,
 			&stoppedAt, &e.Outcome, &e.OutcomeRef, &e.Pinned, &e.Deploy, &skip, &supervised,
+			&e.Kind, &parent, &e.Priority, &blocked,
 			&e.Tokens, &e.CostUSD, &e.HasTranscript, &roles); err != nil {
 			return nil, "", err
 		}
@@ -1513,6 +1766,10 @@ func (db *DB) ListHistory(ctx context.Context, projectID string, f HistoryFilter
 			return nil, "", fmt.Errorf("task %s has an unreadable skip list: %w", e.ID, err)
 		}
 		e.Supervised = supervised != 0
+		e.Blocked = blocked != 0
+		if parent.Valid {
+			e.ParentID = parent.String
+		}
 		if err := fillTaskTimes(&e.Task, sessionID, created, firstClaim, completedAt, stoppedAt); err != nil {
 			return nil, "", err
 		}

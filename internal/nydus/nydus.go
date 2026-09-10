@@ -14,10 +14,12 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/kconfesor/zerg/internal/hatchery"
@@ -53,16 +55,45 @@ type Integrator interface {
 	// Resolve turns a commit-ish into the absolute sha it names in the tree at
 	// path. Every commit that enters the system goes through this.
 	Resolve(ctx context.Context, worktreePath, ref string) (string, error)
+
+	// Switch puts the worktree on branch, moving that branch to startPoint
+	// when one is given. Feature subtasks share a role worktree, so each one
+	// runs on a branch of its own started at the feature head; without that a
+	// subtask commit contains the last card that role touched, and the card
+	// after it carries the feature.
+	Switch(ctx context.Context, worktreePath, branch, startPoint string) error
+
+	// AbortMerge clears a conflicted merge. A feature's integration worktree
+	// has no agent in it to resolve one, and git refuses every later merge
+	// until it is cleared.
+	AbortMerge(ctx context.Context, worktreePath string) error
+
+	// Contains reports whether commit already has ancestor in its history.
+	Contains(ctx context.Context, repoPath, commit, ancestor string) (bool, error)
 }
 
 // Nydus is the transport. It is safe for concurrent use: every operation that
 // changes queue state does so inside one transaction.
+//
+// Feature integration is the exception and carries its own lock. A merge is a
+// git subprocess and cannot be held inside the write transaction, so the merge
+// and the row that records where it got to are two steps; two roles finishing
+// subtasks at the same moment interleaved them and the second head write was
+// overwritten by the first. See integrate.
 type Nydus struct {
 	db         *store.DB
 	integrator Integrator
 	onTaskDone func(ctx context.Context, projectID, taskID, commit string)
 	leaseFor   time.Duration
 	now        func() time.Time
+	log        *slog.Logger
+
+	// integrate serialises merge-then-record for every feature in this
+	// process. One lock rather than one per feature: integration happens once
+	// per finished subtask and takes a git merge, so contention is not the
+	// cost worth optimising, and a map of locks is a lifetime problem.
+	// ponytail: shared across features; shard only if independent merges queue measurably.
+	integrate sync.Mutex
 }
 
 type Option func(*Nydus)
@@ -75,6 +106,11 @@ func WithClock(f func() time.Time) Option { return func(n *Nydus) { n.now = f } 
 
 // WithIntegrator supplies the merge strategy for terminal completion.
 func WithIntegrator(i Integrator) Option { return func(n *Nydus) { n.integrator = i } }
+
+// WithLogger gives nydus somewhere to report what it could not do but must not
+// fail for: preparing a worktree, mainly, which happens after a claim is
+// already committed and so has nothing to hand the error back to.
+func WithLogger(l *slog.Logger) Option { return func(n *Nydus) { n.log = l } }
 
 // WithOnTaskDone registers what to run once a task lands in Done.
 //
@@ -110,6 +146,9 @@ type NewTaskOpts struct {
 	Deploy     string
 	Skip       []string
 	Supervised bool
+	// ParentID is the feature this card belongs to. Empty means none.
+	ParentID string
+	Priority int
 }
 
 // NewTask opens a card and queues it for the first role it will visit.
@@ -124,6 +163,10 @@ func (n *Nydus) NewTask(ctx context.Context, projectID, name, body, deploy strin
 
 // NewTaskWith is NewTask with the fields a card can carry beyond its brief.
 func (n *Nydus) NewTaskWith(ctx context.Context, opts NewTaskOpts) (*store.Task, error) {
+	if opts.ParentID != "" {
+		n.integrate.Lock()
+		defer n.integrate.Unlock()
+	}
 	projectID, name, body, deploy, skip := opts.ProjectID, opts.Name, opts.Body, opts.Deploy, opts.Skip
 	team, err := n.db.ResolveTeam(ctx, projectID)
 	if err != nil {
@@ -153,6 +196,21 @@ func (n *Nydus) NewTaskWith(ctx context.Context, opts NewTaskOpts) (*store.Task,
 	if !store.ValidDeploy(deploy) {
 		return nil, invalid("%q is not somewhere this can deploy; it is local, or nothing", deploy)
 	}
+	if opts.ParentID != "" {
+		parent, err := n.db.GetTaskIn(ctx, projectID, opts.ParentID)
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, invalid("that feature does not exist in this project")
+		}
+		if err != nil {
+			return nil, err
+		}
+		if parent.Kind != store.TaskKindFeature {
+			return nil, invalid("a card can only belong to a feature, not to another card")
+		}
+		if err := n.db.FeatureAccepts(ctx, opts.ParentID); err != nil {
+			return nil, err
+		}
+	}
 
 	// The card and the message that starts it are written together. Created
 	// separately, a failure in between left a task on the board that nothing
@@ -165,6 +223,10 @@ func (n *Nydus) NewTaskWith(ctx context.Context, opts NewTaskOpts) (*store.Task,
 	defer tx.Rollback()
 
 	now := n.now()
+	priority := opts.Priority
+	if priority == 0 {
+		priority = 50
+	}
 	task := &store.Task{
 		ID:         store.NewID(),
 		ProjectID:  projectID,
@@ -172,6 +234,9 @@ func (n *Nydus) NewTaskWith(ctx context.Context, opts NewTaskOpts) (*store.Task,
 		Body:       body,
 		Lane:       first.Name,
 		State:      store.TaskQueued,
+		Kind:       store.TaskKindWork,
+		ParentID:   opts.ParentID,
+		Priority:   priority,
 		CreatedAt:  now.UTC(),
 		Deploy:     deploy,
 		Skip:       skip,
@@ -185,11 +250,15 @@ func (n *Nydus) NewTaskWith(ctx context.Context, opts NewTaskOpts) (*store.Task,
 	if opts.Supervised {
 		supervised = 1
 	}
+	var parent any
+	if opts.ParentID != "" {
+		parent = opts.ParentID
+	}
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO tasks (id, project_id, name, body, lane, state, created_at, deploy, skip, supervised)
-		 VALUES (?,?,?,?,?,?,?,?,?,?)`,
+		`INSERT INTO tasks (id, project_id, name, body, lane, state, created_at, deploy, skip, supervised, kind, parent_id, priority)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		task.ID, task.ProjectID, task.Name, task.Body, task.Lane, task.State,
-		task.CreatedAt.Format(time.RFC3339Nano), task.Deploy, skipJSON, supervised); err != nil {
+		task.CreatedAt.Format(time.RFC3339Nano), task.Deploy, skipJSON, supervised, task.Kind, parent, task.Priority); err != nil {
 		return nil, fmt.Errorf("creating task %q: %w", name, err)
 	}
 
@@ -200,7 +269,7 @@ func (n *Nydus) NewTaskWith(ctx context.Context, opts NewTaskOpts) (*store.Task,
 		TaskID:    &task.ID,
 		FromRole:  "operator",
 		Kind:      store.KindNote,
-		Priority:  50,
+		Priority:  task.Priority,
 		Body:      body,
 		CreatedAt: now,
 	}
@@ -210,7 +279,7 @@ func (n *Nydus) NewTaskWith(ctx context.Context, opts NewTaskOpts) (*store.Task,
 		FromRole:  "operator",
 		ToRoles:   []string{first.Name},
 		Kind:      store.KindNote,
-		Priority:  50,
+		Priority:  task.Priority,
 		Body:      body,
 		gate:      store.GateNone, // the operator does not gate their own request
 	}, now); err != nil {
@@ -229,7 +298,7 @@ func (n *Nydus) NewTaskWith(ctx context.Context, opts NewTaskOpts) (*store.Task,
 type SendRequest struct {
 	TaskID   string
 	Kind     string // handoff or note; defaults to handoff
-	Priority int    // 0 uses 50
+	Priority int    // 0 inherits the task's priority, or uses 50 without a task
 	Commit   string // required for a handoff
 	Body     string
 
@@ -361,6 +430,30 @@ func (n *Nydus) Send(ctx context.Context, projectID, fromRole string, req SendRe
 		if err != nil {
 			return nil, err
 		}
+		if task.ParentID != "" {
+			run, err := n.db.GetFeatureRun(ctx, task.ParentID)
+			if err != nil {
+				return nil, err
+			}
+			switch {
+			case run == nil:
+				// Grouped by hand and never planned. The card is ordinary; the
+				// feature is a label on the board and nothing more.
+			case run.State == store.FeatureCancelled:
+				return nil, invalid("that feature was cancelled")
+			case run.State == store.FeatureDone:
+				return nil, invalid("that feature has already landed")
+			}
+		}
+	}
+
+	// Resolve once for every send path. Doing this only for routed handoffs
+	// left completions at 50 even when the card carried a planned priority.
+	if req.Priority == 0 {
+		if task != nil {
+			req.Priority = task.Priority
+		}
+		req.Priority = priorityOr(req.Priority)
 	}
 
 	if req.To == "" {
@@ -371,6 +464,24 @@ func (n *Nydus) Send(ctx context.Context, projectID, fromRole string, req SendRe
 		terminal := sender.Terminal
 		if task != nil {
 			_, terminal = store.Onward(team, store.Route(team, task.Skip), sender.Name)
+		}
+		// A subtask's last hop is integration into the feature, not a land.
+		// Doing this before the gate-or-complete path is what keeps half a
+		// feature off the base branch.
+		//
+		// Only when the feature has somewhere to put the work. A card grouped
+		// under a feature nobody has planned has no integration branch, and
+		// routing it here left it unable to finish at all: the operator can
+		// group any card from the card view, and did.
+		if terminal && task != nil && task.ParentID != "" {
+			run, err := n.liveRun(ctx, task.ParentID)
+			if err != nil {
+				return nil, err
+			}
+			if run != nil {
+				// Delegation changes who decides the gate, not whether it exists.
+				return n.holdCompletion(ctx, projectID, sender, req, key, task.ParentID)
+			}
 		}
 		if !terminal {
 			return nil, invalid("role %q must name a recipient; only the terminal role finishes a task", fromRole)
@@ -388,7 +499,7 @@ func (n *Nydus) Send(ctx context.Context, projectID, fromRole string, req SendRe
 		// human". The card carries the rule, not the finishing role, because
 		// skipping that role would otherwise move the policy with it.
 		if sender.Gate == store.GateApproval || (task != nil && task.Supervised) {
-			return n.holdCompletion(ctx, projectID, sender, req, key)
+			return n.holdCompletion(ctx, projectID, sender, req, key, "")
 		}
 		return n.complete(ctx, projectID, sender, req, key)
 	}
@@ -420,10 +531,6 @@ func (n *Nydus) Send(ctx context.Context, projectID, fromRole string, req SendRe
 			recipient.Name, nextOrEnd(team, task, sender))
 	}
 
-	priority := req.Priority
-	if priority == 0 {
-		priority = 50
-	}
 	var taskID *string
 	if req.TaskID != "" {
 		taskID = &req.TaskID
@@ -435,7 +542,7 @@ func (n *Nydus) Send(ctx context.Context, projectID, fromRole string, req SendRe
 		FromRole:    fromRole,
 		ToRoles:     []string{req.To},
 		Kind:        kind,
-		Priority:    priority,
+		Priority:    req.Priority,
 		Commit:      req.Commit,
 		Body:        req.Body,
 		gate:        sender.Gate,
@@ -601,6 +708,9 @@ func (n *Nydus) complete(ctx context.Context, projectID string, sender store.Res
 	if err != nil {
 		return nil, err
 	}
+	if err := n.refuseCarryingAFeature(ctx, projectID, task.ID, task.Name, req.Commit); err != nil {
+		return nil, err
+	}
 
 	// Integrate before recording completion. If it fails the card stays where
 	// it is and the error reaches the operator, rather than the board claiming
@@ -654,7 +764,7 @@ func (n *Nydus) complete(ctx context.Context, projectID string, sender store.Res
 	now := n.now()
 	msg := &store.Message{
 		ID: store.NewID(), ProjectID: projectID, TaskID: &task.ID,
-		FromRole: sender.Name, Kind: store.KindHandoff, Priority: 50,
+		FromRole: sender.Name, Kind: store.KindHandoff, Priority: req.Priority,
 		Body: req.Body, Terminal: true, CreatedAt: now,
 	}
 	if req.Commit != "" {
@@ -745,7 +855,7 @@ func (n *Nydus) Claim(ctx context.Context, projectID, role string) (*store.Lease
 		if err := tx.Commit(); err != nil {
 			return nil, err
 		}
-		n.deliverCommits(ctx, projectID, open)
+		n.deliverCommits(ctx, projectID, open, true)
 		return open, nil
 	}
 
@@ -754,7 +864,7 @@ func (n *Nydus) Claim(ctx context.Context, projectID, role string) (*store.Lease
 	// the batch routes the same way -- so the batching rule below needs the
 	// column, and a join is one query rather than a lookup per candidate.
 	rows, err := tx.QueryContext(ctx,
-		`SELECT `+prefixedMessageCols+`, r.enqueued_at, COALESCE(t.skip, '')
+		`SELECT `+prefixedMessageCols+`, r.enqueued_at, COALESCE(t.skip, ''), COALESCE(t.parent_id, '')
 		 FROM routes r JOIN messages m ON m.id = r.message_id
 		 LEFT JOIN tasks t ON t.id = m.task_id
 		 WHERE r.to_role = ? AND r.state = ? AND m.project_id = ?
@@ -769,13 +879,14 @@ func (n *Nydus) Claim(ctx context.Context, projectID, role string) (*store.Lease
 		enqueuedAt time.Time
 		// skip is the card's list as stored, compared as a string. It is
 		// written sorted and deduplicated, so equal bytes mean an equal route.
-		skip string
+		skip   string
+		parent string
 	}
 	var candidates []candidate
 	for rows.Next() {
 		var enq sql.NullString
-		var skip string
-		m, err := scanMessageRow(rows, &enq, &skip)
+		var skip, parent string
+		m, err := scanMessageRow(rows, &enq, &skip, &parent)
 		if err != nil {
 			rows.Close()
 			return nil, err
@@ -785,7 +896,7 @@ func (n *Nydus) Claim(ctx context.Context, projectID, role string) (*store.Lease
 			rows.Close()
 			return nil, err
 		}
-		candidates = append(candidates, candidate{msg: *m, enqueuedAt: at, skip: skip})
+		candidates = append(candidates, candidate{msg: *m, enqueuedAt: at, skip: skip, parent: parent})
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
@@ -817,6 +928,11 @@ func (n *Nydus) Claim(ctx context.Context, projectID, role string) (*store.Lease
 			// Batched together, whichever card lost would be handed the
 			// other's route and hand its work to a role it was told to skip.
 			if c.skip != head.skip {
+				break
+			}
+			// Role worktrees accumulate across cards. Mixing features in one
+			// claim would put another feature's work in this one's commit.
+			if c.parent != head.parent {
 				break
 			}
 			take = append(take, c.msg)
@@ -872,7 +988,7 @@ func (n *Nydus) Claim(ctx context.Context, projectID, role string) (*store.Lease
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("committing claim: %w", err)
 	}
-	n.deliverCommits(ctx, projectID, lease)
+	n.deliverCommits(ctx, projectID, lease, false)
 	return lease, nil
 }
 
@@ -911,23 +1027,63 @@ func (n *Nydus) resolveCommit(ctx context.Context, projectID, role, ref string) 
 	return sha, nil
 }
 
-func (n *Nydus) deliverCommits(ctx context.Context, projectID string, lease *store.Lease) {
+func (n *Nydus) deliverCommits(ctx context.Context, projectID string, lease *store.Lease, resumed bool) {
 	lease.Merged = make(map[string]bool, len(lease.Items))
+	if n.integrator == nil {
+		return
+	}
 
-	var worktree string
+	project, err := n.db.GetProject(ctx, projectID)
+	if err != nil {
+		return
+	}
+	worktree := hatchery.New(project.Path).Path(lease.Role)
+	if _, err := os.Stat(worktree); err != nil {
+		return // no worktree for this role; nothing to merge into
+	}
+
+	// Which branch this claim belongs on. A feature subtask starts from the
+	// feature head on a branch of its own; anything else goes back to the
+	// role's own branch, which is where the work of a project that lands by
+	// hand is kept. Leaving a role sitting on the feature branch is how an
+	// unrelated card came to carry a whole unreviewed feature onto base.
+	branch, start := hatchery.BranchPrefix+lease.Role, ""
+	if head := n.featureHead(ctx, lease); head != "" {
+		branch, start = SubtaskBranch(lease.Role), head
+	}
+	// A resume is not a claim. Starting the branch again is `checkout --force
+	// -B <branch> <head>`, which rolls it back to the feature head and takes
+	// the agent's commits and its uncommitted edits with it. Measured against a
+	// real repository: a second `next` on a lease the role was already holding
+	// left the tree at the feature head with the subtask's file gone.
+	//
+	// So a resume asks only to be put on the branch, and falls back to creating
+	// it for the one case that needs it — a claim whose first switch never ran,
+	// where there is no branch and nothing on it to lose.
+	first := start
+	if resumed {
+		first = ""
+	}
+	err = n.integrator.Switch(ctx, worktree, branch, first)
+	if err != nil && first != start {
+		err = n.integrator.Switch(ctx, worktree, branch, start)
+	}
+	if err != nil {
+		// Best effort, like the merges below: the claim is already committed,
+		// so there is nothing to hand back to. The refusal in landApproved is
+		// what stops a wrong branch reaching the base branch, but it fires at
+		// the land, which is hours later and looks like a different bug. This
+		// is the line that names it when it happens.
+		if n.log != nil {
+			n.log.Warn("could not put a worktree on the right branch",
+				"role", lease.Role, "branch", branch, "start", start, "err", err)
+		}
+		return
+	}
+
 	for _, m := range lease.Items {
 		if m.CommitSHA == nil || *m.CommitSHA == "" {
 			continue
-		}
-		if worktree == "" {
-			project, err := n.db.GetProject(ctx, projectID)
-			if err != nil {
-				return
-			}
-			worktree = hatchery.New(project.Path).Path(lease.Role)
-			if _, err := os.Stat(worktree); err != nil {
-				return // no worktree for this role; nothing to merge into
-			}
 		}
 		if err := n.integrator.MergeInto(ctx, worktree, *m.CommitSHA); err != nil {
 			// Left false. The envelope carries the truth either way.
@@ -935,6 +1091,24 @@ func (n *Nydus) deliverCommits(ctx context.Context, projectID string, lease *sto
 		}
 		lease.Merged[m.ID] = true
 	}
+}
+
+func (n *Nydus) featureHead(ctx context.Context, lease *store.Lease) string {
+	for _, m := range lease.Items {
+		if m.TaskID == nil {
+			continue
+		}
+		task, err := n.db.GetTask(ctx, *m.TaskID)
+		if err != nil || task.ParentID == "" {
+			return ""
+		}
+		run, err := n.db.GetFeatureRun(ctx, task.ParentID)
+		if err != nil || run == nil {
+			return ""
+		}
+		return run.HeadSHA
+	}
+	return ""
 }
 
 // errRaced means another claimer took the work between selection and update.
@@ -1212,11 +1386,36 @@ func (n *Nydus) resolveEvidence(ctx context.Context, scope store.DecisionScope, 
 }
 
 func (n *Nydus) decide(ctx context.Context, scope store.DecisionScope, approvalID, decision, note, evidence string) error {
+	// Feature decisions share the integration lock with cancel and refresh.
+	// Ordinary approvals keep their existing CAS: locking them here would make
+	// a reject wait behind a running base merge instead of refusing its claim.
+	a, err := n.db.GetApproval(ctx, approvalID)
+	if err != nil {
+		return err
+	}
+	feature := a.FeatureID != ""
+	if !feature && a.TaskID != "" {
+		task, err := n.db.GetTask(ctx, a.TaskID)
+		if err != nil {
+			return err
+		}
+		if task.ParentID != "" {
+			run, err := n.db.GetFeatureRun(ctx, task.ParentID)
+			if err != nil {
+				return err
+			}
+			feature = run != nil
+		}
+	}
+	if feature {
+		n.integrate.Lock()
+		defer n.integrate.Unlock()
+	}
 	by := scope.By()
 
 	// Before the transaction: a git subprocess must never run while holding
 	// the single write lock.
-	evidence, err := n.resolveEvidence(ctx, scope, evidence)
+	evidence, err = n.resolveEvidence(ctx, scope, evidence)
 	if err != nil {
 		return err
 	}
@@ -1236,15 +1435,18 @@ func (n *Nydus) decide(ctx context.Context, scope store.DecisionScope, approvalI
 		body       string
 		projectID  string
 		supervised int
+		priority   int
+		featureID  string
+		parentID   string
 	)
 	err = tx.QueryRowContext(ctx,
 		`SELECT a.message_id, a.state, m.task_id, m.from_role,
 		        m.terminal, m.commit_sha, m.body, a.project_id,
-		        COALESCE(t.supervised, 0)
+		        COALESCE(t.supervised, 0), COALESCE(t.priority, 0), COALESCE(a.feature_id, ''), COALESCE(t.parent_id, '')
 		 FROM approvals a JOIN messages m ON m.id = a.message_id
 		 LEFT JOIN tasks t ON t.id = m.task_id
 		 WHERE a.id = ?`, approvalID).Scan(&messageID, &state, &taskID, &fromRole,
-		&terminal, &commit, &body, &projectID, &supervised)
+		&terminal, &commit, &body, &projectID, &supervised, &priority, &featureID, &parentID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("approval %s: %w", approvalID, store.ErrNotFound)
 	}
@@ -1287,6 +1489,34 @@ func (n *Nydus) decide(ctx context.Context, scope store.DecisionScope, approvalI
 		if open > 0 {
 			return invalid("%d review thread(s) are still open on this card; settle them or reject", open)
 		}
+	}
+
+	if featureID != "" && decision == store.ApprovalApproved {
+		if err := ensureOpen(ctx, tx, projectID, taskID.String); err != nil {
+			return err
+		}
+		// Keep the authority/evidence before git runs. Recovery must finish the
+		// same decision, not manufacture an operator approval after a crash.
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE approvals SET state = ?, note = ?, decided_by = ?, evidence_sha = ?,
+			 decided_model = ?, decided_harness = ? WHERE id = ? AND state = ?`,
+			store.ApprovalIntegrating, note, by, evidence, scope.Model, scope.Harness, approvalID, store.ApprovalPending); err != nil {
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		a := &store.Approval{ID: approvalID, ProjectID: projectID, TaskID: taskID.String,
+			FeatureID: featureID, Commit: commit.String}
+		merged, err := n.integrateChild(ctx, a)
+		if err != nil && !merged {
+			if _, releaseErr := n.db.SQL().ExecContext(context.WithoutCancel(ctx),
+				`UPDATE approvals SET state = ? WHERE id = ? AND state = ?`,
+				store.ApprovalPending, approvalID, store.ApprovalIntegrating); releaseErr != nil {
+				return fmt.Errorf("%w (releasing the approval: %v)", err, releaseErr)
+			}
+		}
+		return err
 	}
 
 	// Approving a completion lands it, and that happens before the decision is
@@ -1414,10 +1644,21 @@ func (n *Nydus) decide(ctx context.Context, scope store.DecisionScope, approvalI
 			if err != nil {
 				return err
 			}
+			// Rework inherits the card, not a handoff-only override or the old
+			// constant 50 that sent urgent work to the back of the queue.
+			priority = priorityOr(priority)
 			msg := &store.Message{
 				ID: store.NewID(), ProjectID: projectID, TaskID: &taskID.String,
-				FromRole: store.OperatorRole, Kind: store.KindNote, Priority: 50,
+				FromRole: store.OperatorRole, Kind: store.KindNote, Priority: priority,
 				Body: feedback, CreatedAt: at,
+			}
+			// A feature claim resets the role branch to the integrated head.
+			// Rejection must carry the unintegrated work back too, or that reset
+			// erases the very change the author was asked to repair.
+			returnCommit := ""
+			if parentID != "" && commit.Valid {
+				returnCommit = commit.String
+				msg.Kind, msg.CommitSHA = store.KindHandoff, &returnCommit
 			}
 			// sendIn moves the card as it routes, which is the same lane change
 			// this used to do by hand.
@@ -1426,8 +1667,9 @@ func (n *Nydus) decide(ctx context.Context, scope store.DecisionScope, approvalI
 				TaskID:    &taskID.String,
 				FromRole:  store.OperatorRole,
 				ToRoles:   []string{fromRole},
-				Kind:      store.KindNote,
-				Priority:  50,
+				Kind:      msg.Kind,
+				Commit:    returnCommit,
+				Priority:  priority,
 				Body:      feedback,
 				gate:      store.GateNone, // a rejection is not itself gated
 			}, at); err != nil {
@@ -1615,6 +1857,8 @@ func (n *Nydus) AckOwned(ctx context.Context, projectID, role, leaseID string) e
 // recording the decision that was already carried out; not landed means hand
 // the approval back to the operator as pending, exactly as a failed merge does.
 func (n *Nydus) ReconcileIntegrating(ctx context.Context) (settled, released int, err error) {
+	n.integrate.Lock()
+	defer n.integrate.Unlock()
 	rows, err := n.db.Read().QueryContext(ctx,
 		`SELECT a.id, a.project_id, m.task_id, m.commit_sha, m.body
 		   FROM approvals a JOIN messages m ON m.id = a.message_id
@@ -1641,6 +1885,27 @@ func (n *Nydus) ReconcileIntegrating(ctx context.Context) (settled, released int
 	}
 
 	for _, a := range pending {
+		approval, err := n.db.GetApproval(ctx, a.id)
+		if err != nil {
+			return settled, released, err
+		}
+		if approval.FeatureID != "" {
+			merged, err := n.integrateChild(ctx, approval)
+			if err == nil {
+				settled++
+				continue
+			}
+			if merged {
+				return settled, released, err
+			}
+			if _, err := n.db.SQL().ExecContext(ctx,
+				`UPDATE approvals SET state = ? WHERE id = ? AND state = ?`,
+				store.ApprovalPending, a.id, store.ApprovalIntegrating); err != nil {
+				return settled, released, err
+			}
+			released++
+			continue
+		}
 		landed := false
 		outcome, outcomeRef := "", ""
 		if n.integrator != nil && a.taskID.Valid {
@@ -1915,49 +2180,40 @@ func boolToInt(b bool) int {
 // as the roles are concerned and not yet landed, which is a real state and
 // needs to be visible as one. The card stays with the role that finished it,
 // so the board does not claim Done over work nobody has approved.
-func (n *Nydus) holdCompletion(ctx context.Context, projectID string, sender store.ResolvedRole, req SendRequest, key string) (*store.Message, error) {
-	if req.TaskID == "" {
-		return nil, invalid("completing a task requires its id")
+func (n *Nydus) holdCompletion(ctx context.Context, projectID string, sender store.ResolvedRole, req SendRequest, key, featureID string) (*store.Message, error) {
+	if req.TaskID == "" || req.Commit == "" {
+		return nil, invalid("finishing a task requires its id and the commit to integrate")
 	}
-	if req.Commit == "" {
-		return nil, invalid("finishing a task requires the commit to integrate")
-	}
-	task, err := n.db.GetTask(ctx, req.TaskID)
-	if err != nil {
-		return nil, err
-	}
-
 	now := n.now()
 	msg := &store.Message{
-		ID: store.NewID(), ProjectID: projectID, TaskID: &task.ID,
-		FromRole: sender.Name, Kind: store.KindHandoff, Priority: 50,
-		Body: req.Body, Terminal: true, CreatedAt: now,
+		ID: store.NewID(), ProjectID: projectID, TaskID: &req.TaskID,
+		FromRole: sender.Name, Kind: store.KindHandoff, Priority: req.Priority,
+		Body: req.Body, Terminal: featureID == "", CreatedAt: now, CommitSHA: &req.Commit,
 	}
-	c := req.Commit
-	msg.CommitSHA = &c
-
 	tx, err := n.db.SQL().BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("beginning held completion: %w", err)
 	}
 	defer tx.Rollback()
-
+	if err := ensureOpen(ctx, tx, projectID, req.TaskID); err != nil {
+		return nil, err
+	}
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO messages (id, project_id, task_id, from_role, kind, priority,
 		   commit_sha, body, terminal, created_at, source_lease_id, op_key)
 		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
 		msg.ID, msg.ProjectID, msg.TaskID, msg.FromRole, msg.Kind, msg.Priority,
-		msg.CommitSHA, msg.Body, true, now.Format(time.RFC3339Nano),
+		msg.CommitSHA, msg.Body, msg.Terminal, now.Format(time.RFC3339Nano),
 		nullable(req.SourceLease), nullable(key)); err != nil {
 		return nil, fmt.Errorf("recording held completion: %w", err)
 	}
-	// The approval is written in the same transaction as the message, so there
-	// is no instant where a completion exists with nothing asking about it.
+	// The feature destination is explicit. Non-terminal means the supervisor
+	// may decide it, not that the last role gets to bypass the decision.
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO approvals (id, project_id, message_id, state, created_at)
-		 VALUES (?,?,?,?,?)`,
+		`INSERT INTO approvals (id, project_id, message_id, state, created_at, feature_id)
+		 VALUES (?,?,?,?,?,?)`,
 		store.NewID(), projectID, msg.ID, store.ApprovalPending,
-		now.Format(time.RFC3339Nano)); err != nil {
+		now.Format(time.RFC3339Nano), nullable(featureID)); err != nil {
 		return nil, fmt.Errorf("recording approval: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -1978,6 +2234,61 @@ func (n *Nydus) holdCompletion(ctx context.Context, projectID string, sender sto
 // outcome, and where the work ended up. Both are recorded with the card, since
 // the project's integration setting is a live value and answers a different
 // question tomorrow than it did at the moment a task ended.
+// refuseCarryingAFeature stops a commit that contains a live feature's work
+// from reaching the base branch under some other card's name.
+//
+// The base branch is an ancestor of every feature branch, so a commit built on
+// top of a feature head fast-forwards cleanly and takes the whole feature with
+// it. Measured in a scratch repository: an ordinary card committed on a role
+// worktree left sitting on a feature branch put two unreviewed feature commits
+// on main, past the review and past the person who is meant to land it.
+//
+// The branch a claim starts on is what prevents this; this is what catches it
+// if that failed, because the failure is silent and permanent.
+func (n *Nydus) refuseCarryingAFeature(ctx context.Context, projectID, taskID, taskName, commit string) error {
+	if n.integrator == nil || commit == "" {
+		return nil
+	}
+	runs, err := n.db.LiveFeatureRuns(ctx, projectID)
+	if err != nil || len(runs) == 0 {
+		return err
+	}
+	project, err := n.db.GetProject(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	base := project.BaseBranch
+	if base == "" {
+		base = "main"
+	}
+	for _, r := range runs {
+		// The feature landing itself is the one thing that may carry it.
+		if r.FeatureID == taskID || r.HeadSHA == "" {
+			continue
+		}
+		// A feature with nothing on its branch yet has a head equal to the base
+		// it was cut from, and every ordinary commit contains that. Read as
+		// carrying the feature it refused every card in the project from the
+		// moment a plan was accepted until some subtask moved the head — and
+		// refused a second feature's land for carrying the first. Ancestry the
+		// base branch already has is not a feature's work.
+		if r.HeadSHA == r.BaseSHA {
+			continue
+		}
+		has, err := n.integrator.Contains(ctx, project.Path, commit, r.HeadSHA)
+		if err != nil {
+			return fmt.Errorf("checking whether %s carries the feature %q: %w", short(commit), r.Name, err)
+		}
+		if has {
+			return invalid(
+				"%s carries the feature %q, which has not landed, so %q cannot put it on %s. "+
+					"Commit this card's change on top of %s and send again",
+				short(commit), r.Name, taskName, base, base)
+		}
+	}
+	return nil
+}
+
 func (n *Nydus) landApproved(ctx context.Context, projectID, taskID, commit, body string) (url, outcome, ref string, err error) {
 	if n.integrator == nil {
 		return "", "", "", nil
@@ -1988,6 +2299,9 @@ func (n *Nydus) landApproved(ctx context.Context, projectID, taskID, commit, bod
 	}
 	task, err := n.db.GetTask(ctx, taskID)
 	if err != nil {
+		return "", "", "", err
+	}
+	if err := n.refuseCarryingAFeature(ctx, projectID, taskID, task.Name, commit); err != nil {
 		return "", "", "", err
 	}
 

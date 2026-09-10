@@ -15,6 +15,8 @@ import { computed, ref } from 'vue'
 
 const props = defineProps<{
   diff: string
+  /** A feature's whole-change preview has a single send-back note, not threads. */
+  readOnly?: boolean
   /** Lines that already carry a review thread, marked so a reader can see
    *  where the conversation is without opening anything. */
   discussed?: number[]
@@ -377,7 +379,7 @@ const stat = computed(() => ({
           {{ r.oldNo ?? '' }}
         </span>
         <button
-          v-if="anchor(r) && r.kind !== 'meta' && r.kind !== 'hunk'"
+          v-if="!readOnly && anchor(r) && r.kind !== 'meta' && r.kind !== 'hunk'"
           type="button"
           :class="[
             'w-8 shrink-0 text-right tabular-nums select-none',

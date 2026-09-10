@@ -14,7 +14,16 @@ import { renderMarkdown } from '@/lib/markdown'
 import { duration, taskState } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import { Switch } from '@/components/ui/switch'
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 import TaskFlow from '@/components/TaskFlow.vue'
+import FeaturePanel from '@/components/FeaturePanel.vue'
 import Artifacts from '@/components/Artifacts.vue'
 import RunPanel from '@/components/RunPanel.vue'
 import {
@@ -37,6 +46,8 @@ const props = defineProps<{
    *  is the one holding the team: the card stores template ids so that
    *  renaming a role cannot silently un-skip it. */
   skipped?: string[]
+  /** Grouping rows this card can belong to. */
+  features?: Task[]
 }>()
 const emit = defineEmits<{ close: []; updated: [task: Task] }>()
 
@@ -91,6 +102,17 @@ async function setSupervised(on: boolean) {
   }
 }
 
+async function setParent(parentId: string) {
+  const t = props.task
+  if (!t) return
+  failed.value = ''
+  try {
+    emit('updated', await api.setTaskParent(t.id, parentId === 'none' ? null : parentId))
+  } catch (e) {
+    failed.value = e instanceof Error ? e.message : String(e)
+  }
+}
+
 function money(n: number): string {
   return n >= 1 ? `$${n.toFixed(2)}` : `$${n.toFixed(4)}`
 }
@@ -115,7 +137,10 @@ function tokensOf(u: TaskDetail['usage']): number {
     <DialogContent class="min-w-0 gap-0 overflow-hidden p-0 sm:max-w-5xl">
       <DialogHeader class="hairline-b shrink-0 px-5 py-4 pr-12">
         <DialogTitle class="truncate">{{ task?.name }}</DialogTitle>
-        <DialogDescription class="flex flex-wrap items-center gap-2 text-[11px]">
+        <DialogDescription v-if="task?.kind === 'feature'" class="text-[11px]">
+          Plans, evidence, decisions and cost for the whole feature.
+        </DialogDescription>
+        <DialogDescription v-else class="flex flex-wrap items-center gap-2 text-[11px]">
           <Badge :variant="task?.stoppedAt ? 'secondary' : 'outline'">
             {{ task ? taskState(task) : '' }}
           </Badge>
@@ -145,6 +170,28 @@ function tokensOf(u: TaskDetail['usage']): number {
           <Badge v-else-if="task?.supervised" variant="secondary">
             architect supervised
           </Badge>
+          <label
+            v-if="task && features?.length"
+            class="text-muted-foreground flex items-center gap-1.5"
+          >
+            Part of
+            <Select
+              :model-value="task.parentId || 'none'"
+              @update:model-value="(v) => typeof v === 'string' && setParent(v)"
+            >
+              <SelectTrigger size="sm" class="h-6 w-36 text-[11px]">
+                <SelectValue placeholder="None" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectGroup>
+                  <SelectItem value="none">None</SelectItem>
+                  <SelectItem v-for="f in features" :key="f.id" :value="f.id">
+                    {{ f.name }}
+                  </SelectItem>
+                </SelectGroup>
+              </SelectContent>
+            </Select>
+          </label>
           <span v-if="task?.activeMs" class="text-muted-foreground">
             {{ duration(task.activeMs) }} of agent time
           </span>
@@ -157,6 +204,13 @@ function tokensOf(u: TaskDetail['usage']): number {
       </DialogHeader>
 
       <DialogBody>
+        <FeaturePanel
+          v-if="task?.kind === 'feature'"
+          :feature-id="task.id"
+          @updated="emit('updated', $event)"
+          @open-task="emit('updated', $event)"
+        />
+        <template v-else>
         <!-- Running what this card produced, after the fact.
              "What did this actually look like" is a question asked of a
              finished card at least as often as of one at a gate, and the
@@ -202,6 +256,7 @@ function tokensOf(u: TaskDetail['usage']): number {
             </p>
           </template>
         </TaskFlow>
+        </template>
       </DialogBody>
     </DialogContent>
   </Dialog>
