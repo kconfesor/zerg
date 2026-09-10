@@ -1237,9 +1237,8 @@ func TestAnAgentsAnswerIsCheckedAgainstTheQuestion(t *testing.T) {
 	}
 }
 
-// A feature is a grouping row, not a card. The board, history and rework lists
-// are what a person reads as work, and a feature in any of them would sit in a
-// lane no role will ever claim.
+// A feature is not claimable work in a lane. History is different: excluding
+// it there made the unit the operator approved disappear after landing.
 func TestAFeatureIsNotACardOnTheBoard(t *testing.T) {
 	ctx := context.Background()
 	db, p := seeded(t)
@@ -1285,10 +1284,12 @@ func TestAFeatureIsNotACardOnTheBoard(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var found bool
 	for _, e := range page {
-		if e.Kind == TaskKindFeature {
-			t.Error("a feature appeared in history")
-		}
+		found = found || e.ID == feat.ID
+	}
+	if !found {
+		t.Error("the feature is missing from history")
 	}
 
 	if _, err := db.SQL().ExecContext(ctx,

@@ -42,6 +42,7 @@ import {
   Trash2,
 } from '@lucide/vue'
 import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
 
 const props = defineProps<{
   team: ResolvedRole[]
@@ -211,9 +212,11 @@ const byLane = computed(() => {
         variant="secondary"
         class="gap-1"
       >
-        <Layers :size="10" aria-hidden="true" />
-        {{ f.name }}
-        <span class="tabular text-muted-foreground">{{ childCount(f.id) }}</span>
+        <Button variant="link" size="sm" class="h-auto max-w-full gap-1 whitespace-normal p-0 text-xs" @click="emit('open', f)">
+          <Layers :size="10" aria-hidden="true" />
+          {{ f.name }}
+          <span class="tabular text-muted-foreground">{{ childCount(f.id) }}</span>
+        </Button>
         <button
           type="button"
           title="Delete this feature"

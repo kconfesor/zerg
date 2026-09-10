@@ -201,6 +201,10 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/plans/{id}/reject", s.rejectPlan)
 	mux.HandleFunc("POST /api/tasks/{id}/retry", s.retryChild)
 	mux.HandleFunc("POST /api/tasks/{id}/waive", s.waiveDependency)
+	mux.HandleFunc("GET /api/features/{id}", s.featureDetail)
+	mux.HandleFunc("GET /api/features/{id}/files", s.featureFiles)
+	mux.HandleFunc("POST /api/features/{id}/refresh", s.refreshFeature)
+	mux.HandleFunc("POST /api/features/{id}/reject", s.rejectFeature)
 	mux.HandleFunc("POST /api/features/{id}/land", s.landFeature)
 	mux.HandleFunc("POST /api/features/{id}/cancel", s.cancelFeature)
 	mux.HandleFunc("GET /api/approvals/{id}/diff", s.approvalDiff)
@@ -1001,7 +1005,11 @@ func (s *Server) landFeature(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	if err := s.nyd.LandFeature(r.Context(), id); err != nil {
+	var req featureDecisionRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	if err := s.nyd.LandFeature(r.Context(), id, req.Head); err != nil {
 		s.fail(w, r, err)
 		return
 	}

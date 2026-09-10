@@ -1219,6 +1219,16 @@ func TestOnlyOneDecisionSurvivesARace(t *testing.T) {
 	}
 	id := pending[0].ID
 
+	// Manual grouping is still an ordinary card, not a feature run. Its reject
+	// must not wait behind the feature integration lock either.
+	feature, err := f.db.CreateFeature(ctx, f.project.ID, "Grouping only", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.SetTaskParent(ctx, task.ID, feature.ID); err != nil {
+		t.Fatal(err)
+	}
+
 	// Hold the approver inside the merge, which is precisely the window the
 	// transaction is not covering, and let the rejecter run while it is open.
 	f.git.enter = make(chan struct{})

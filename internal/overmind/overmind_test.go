@@ -813,6 +813,9 @@ while IFS= read -r _line; do
   [ -z "$WORK" ] && { printf 'turn_end\n'; continue; }
   FEATURE=$(printf '%s' "$WORK" | sed -n 's/.*"id": "\([^"]*\)".*/\1/p' | head -1)
   case "$WORK" in
+    *'"kind": "decide"'*)
+      APPROVAL=$(printf '%s' "$WORK" | sed -n 's/.*"approvalId": "\([^"]*\)".*/\1/p')
+      "$ZERG_BIN" approve --id "$APPROVAL" --note 'checked the subtask integration' >/dev/null ;;
     *'"kind": "plan"'*)
       printf '{"items":[{"name":"Implementation","body":"build it","priority":10}]}' |
         "$ZERG_BIN" split --feature "$FEATURE" >/dev/null ;;

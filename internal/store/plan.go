@@ -109,6 +109,7 @@ type FeatureReview struct {
 	Verdict     string    `json:"verdict"`
 	Note        string    `json:"note,omitempty"`
 	EvidenceSHA string    `json:"evidenceSha,omitempty"`
+	DecidedBy   string    `json:"decidedBy"`
 	CreatedAt   time.Time `json:"createdAt"`
 }
 
@@ -170,6 +171,12 @@ func (db *DB) SubmitPlan(ctx context.Context, projectID, featureID string, draft
 		return nil, fmt.Errorf("beginning plan: %w", err)
 	}
 	defer tx.Rollback()
+
+	// Offering work is not authority to write it later: cancellation can happen
+	// while the architect is still composing its split.
+	if err := db.FeatureCanPlan(ctx, featureID); err != nil {
+		return nil, err
+	}
 
 	var latestState string
 	var latestN int
@@ -236,6 +243,9 @@ func (db *DB) SubmitPlan(ctx context.Context, projectID, featureID string, draft
 			}
 		}
 	}
+	if err := RecordFeatureEvent(ctx, tx, feature, "supervisor", fmt.Sprintf("Plan revision %d submitted (%d subtasks)", rev.N, rev.ItemCount), proseSHA); err != nil {
+		return nil, err
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("committing the plan: %w", err)
 	}
@@ -259,10 +269,15 @@ func (db *DB) RejectPlan(ctx context.Context, id, note, by string) (string, erro
 	if by == "" {
 		by = OperatorRole
 	}
-	var projectID string
-	err := db.read.QueryRowContext(ctx,
-		`SELECT t.project_id FROM feature_plan_revisions r JOIN tasks t ON t.id = r.feature_id WHERE r.id = ?`,
-		id).Scan(&projectID)
+	tx, err := db.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
+	var projectID, featureID string
+	err = tx.QueryRowContext(ctx,
+		`SELECT t.project_id, t.id FROM feature_plan_revisions r JOIN tasks t ON t.id = r.feature_id WHERE r.id = ?`,
+		id).Scan(&projectID, &featureID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", invalid("that plan is not waiting for a decision")
 	}
@@ -270,7 +285,7 @@ func (db *DB) RejectPlan(ctx context.Context, id, note, by string) (string, erro
 		return "", fmt.Errorf("reading plan %s: %w", id, err)
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	res, err := db.sql.ExecContext(ctx,
+	res, err := tx.ExecContext(ctx,
 		`UPDATE feature_plan_revisions
 		    SET state = ?, note = ?, decided_at = ?, decided_by = ?
 		  WHERE id = ? AND state = ?`,
@@ -285,7 +300,11 @@ func (db *DB) RejectPlan(ctx context.Context, id, note, by string) (string, erro
 	if n == 0 {
 		return "", invalid("that plan is not waiting for a decision")
 	}
-	return projectID, nil
+	feature := &Task{ID: featureID, ProjectID: projectID}
+	if err := RecordFeatureEvent(ctx, tx, feature, by, "Plan rejected: "+note, ""); err != nil {
+		return "", err
+	}
+	return projectID, tx.Commit()
 }
 
 // ListPendingPlans is what Attention shows: splits waiting on the operator,
@@ -615,15 +634,16 @@ func planDigest(items []PlanItem, edges map[string][]string) string {
 func (db *DB) GetPlan(ctx context.Context, id string) (*PlanRevision, error) {
 	row := db.read.QueryRowContext(ctx,
 		`SELECT r.id, r.feature_id, t.name, t.body, r.n, r.digest, r.prose_sha, r.state,
-		        r.item_count, r.estimate_tokens, r.estimate_cost_usd, r.note, r.created_at
+		        r.item_count, r.estimate_tokens, r.estimate_cost_usd, r.note, r.created_at, r.decided_at, r.decided_by
 		   FROM feature_plan_revisions r
 		   JOIN tasks t ON t.id = r.feature_id
 		  WHERE r.id = ?`, id)
 	var r PlanRevision
 	var created string
+	var decided sql.NullString
 	if err := row.Scan(&r.ID, &r.FeatureID, &r.FeatureName, &r.FeatureBody, &r.N,
 		&r.Digest, &r.ProseSHA, &r.State, &r.ItemCount, &r.EstimateTokens, &r.EstimateCostUSD,
-		&r.Note, &created); err != nil {
+		&r.Note, &created, &decided, &r.DecidedBy); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("plan %s: %w", id, ErrNotFound)
 		}
@@ -632,6 +652,9 @@ func (db *DB) GetPlan(ctx context.Context, id string) (*PlanRevision, error) {
 	var err error
 	if r.CreatedAt, err = parseStored(created); err != nil {
 		return nil, fmt.Errorf("plan %s has an unreadable created_at: %w", r.ID, err)
+	}
+	if r.DecidedAt, err = nullTime(decided); err != nil {
+		return nil, err
 	}
 	items, deps, err := db.planParts(ctx, []string{r.ID})
 	if err != nil {
@@ -697,6 +720,42 @@ func (db *DB) GetFeatureRun(ctx context.Context, featureID string) (*FeatureRun,
 	return &r, nil
 }
 
+// FeatureCanPlan is checked under the writer at submission and acceptance.
+// A cancelled feature must not acquire an unanswerable pending plan.
+func (db *DB) FeatureCanPlan(ctx context.Context, featureID string) error {
+	var state string
+	var run sql.NullString
+	err := db.read.QueryRowContext(ctx,
+		`SELECT t.state, r.state FROM tasks t LEFT JOIN feature_runs r ON r.feature_id = t.id
+		  WHERE t.id = ? AND t.kind = ?`, featureID, TaskKindFeature).Scan(&state, &run)
+	if err != nil {
+		return err
+	}
+	if state == TaskDone || state == TaskRejected || run.Valid {
+		return invalid("that feature is already accepted or closed; it cannot accept a split")
+	}
+	return nil
+}
+
+// The approved items, not the surviving children, define completeness. Looking
+// only at parent_id let a detached or deleted requirement vanish from the gate.
+// t is the feature in each caller's query.
+const featureReadySQL = `EXISTS (
+    SELECT 1 FROM feature_plan_revisions p JOIN feature_plan_items i ON i.revision_id = p.id
+     WHERE p.feature_id = t.id AND p.state = 'approved'
+) AND NOT EXISTS (
+    SELECT 1 FROM feature_plan_revisions p JOIN feature_plan_items i ON i.revision_id = p.id
+      LEFT JOIN tasks c ON c.id = i.child_task_id
+     WHERE p.feature_id = t.id AND p.state = 'approved'
+       AND (c.id IS NULL OR c.parent_id IS NULL OR c.parent_id <> t.id OR c.state <> 'done')
+) AND NOT EXISTS (SELECT 1 FROM tasks c WHERE c.parent_id = t.id AND c.state <> 'done')`
+
+func (db *DB) FeatureReady(ctx context.Context, featureID string) (bool, error) {
+	var ready bool
+	err := db.read.QueryRowContext(ctx, `SELECT `+featureReadySQL+` FROM tasks t WHERE t.id = ?`, featureID).Scan(&ready)
+	return ready, err
+}
+
 // HasLiveChildren reports whether a feature still has cards queued or being worked.
 func (db *DB) HasLiveChildren(ctx context.Context, featureID string) (bool, error) {
 	var n int
@@ -717,15 +776,13 @@ func (db *DB) NextFeatureToReview(ctx context.Context, projectID string) (*Task,
 		`SELECT t.id, r.head_sha FROM tasks t
 		   JOIN feature_runs r ON r.feature_id = t.id
 		  WHERE t.project_id = ? AND t.kind = ? AND r.state = ?
-		    AND EXISTS (SELECT 1 FROM tasks c WHERE c.parent_id = t.id)
-		    AND NOT EXISTS (SELECT 1 FROM tasks c WHERE c.parent_id = t.id AND c.state IN (?, ?))
-		    AND NOT EXISTS (SELECT 1 FROM tasks c WHERE c.parent_id = t.id AND c.state = ?)
+		    AND `+featureReadySQL+`
 		    AND NOT EXISTS (
 		        SELECT 1 FROM feature_reviews v
 		         WHERE v.feature_id = t.id AND v.head_sha = r.head_sha
 		    )
 		  ORDER BY t.created_at LIMIT 1`,
-		projectID, TaskKindFeature, FeatureRunning, TaskQueued, TaskWorking, TaskRejected).Scan(&id, &head)
+		projectID, TaskKindFeature, FeatureRunning).Scan(&id, &head)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, "", nil
 	}
@@ -748,11 +805,33 @@ func (db *DB) NextFeatureToReview(ctx context.Context, projectID string) (*Task,
 // never saw it, and the operator's land then put it on the base branch. The
 // architect is told which head it is looking at, so it can say so.
 func (db *DB) SubmitReview(ctx context.Context, featureID, head, verdict, note, evidence string) (*FeatureReview, error) {
+	return db.submitReview(ctx, featureID, head, verdict, note, evidence, "supervisor")
+}
+
+func (db *DB) SubmitReviewBy(ctx context.Context, scope DecisionScope, featureID, head, verdict, note, evidence string) (*FeatureReview, error) {
+	if _, err := db.GetTaskIn(ctx, scope.ProjectID, featureID); err != nil {
+		return nil, err
+	}
+	return db.submitReview(ctx, featureID, head, verdict, note, evidence, scope.By())
+}
+
+// RejectFeatureReview is a person's request for correction, not cancellation.
+// It supersedes an architect's recommendation about this same head.
+func (db *DB) RejectFeatureReview(ctx context.Context, featureID, head, note string) (*FeatureReview, error) {
+	return db.submitReview(ctx, featureID, head, ReviewReject, note, "", OperatorRole)
+}
+
+func (db *DB) submitReview(ctx context.Context, featureID, head, verdict, note, evidence, by string) (*FeatureReview, error) {
+	tx, err := db.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
 	if verdict != ReviewOK && verdict != ReviewReject {
 		return nil, invalid("a review is ok or reject")
 	}
-	if verdict == ReviewReject && strings.TrimSpace(note) == "" {
-		return nil, invalid("rejecting a feature needs a note: what to change")
+	if strings.TrimSpace(note) == "" {
+		return nil, invalid("a feature review needs a note: what was checked, or what must change")
 	}
 	if strings.TrimSpace(head) == "" {
 		return nil, invalid("a review needs --head, the feature head it is about; " +
@@ -762,7 +841,7 @@ func (db *DB) SubmitReview(ctx context.Context, featureID, head, verdict, note, 
 	if err != nil {
 		return nil, err
 	}
-	if run == nil || run.State != FeatureRunning {
+	if run == nil || (run.State != FeatureRunning && !(by == OperatorRole && run.State == FeatureConflict)) {
 		return nil, invalid("that feature is not running")
 	}
 	if head != run.HeadSHA {
@@ -772,21 +851,12 @@ func (db *DB) SubmitReview(ctx context.Context, featureID, head, verdict, note, 
 			head[:min(10, len(head))], run.HeadSHA[:min(10, len(run.HeadSHA))],
 			run.HeadSHA[:min(10, len(run.HeadSHA))])
 	}
-	live, err := db.HasLiveChildren(ctx, featureID)
+	ready, err := db.FeatureReady(ctx, featureID)
 	if err != nil {
 		return nil, err
 	}
-	if live {
-		return nil, invalid("this feature still has cards being worked")
-	}
-	var rejected int
-	if err := db.read.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM tasks WHERE parent_id = ? AND state = ?`,
-		featureID, TaskRejected).Scan(&rejected); err != nil {
-		return nil, err
-	}
-	if rejected > 0 {
-		return nil, invalid("this feature has a failed subtask; cancel it, or retry that card")
+	if !ready {
+		return nil, invalid("this feature still has unfinished or missing planned work; retry the failed card or cancel the feature")
 	}
 	var n int
 	if err := db.read.QueryRowContext(ctx,
@@ -794,7 +864,7 @@ func (db *DB) SubmitReview(ctx context.Context, featureID, head, verdict, note, 
 		featureID, run.HeadSHA).Scan(&n); err != nil {
 		return nil, err
 	}
-	if n > 0 {
+	if n > 0 && by != OperatorRole {
 		return nil, invalid("this head has already been reviewed")
 	}
 	feat, err := db.GetTask(ctx, featureID)
@@ -803,17 +873,20 @@ func (db *DB) SubmitReview(ctx context.Context, featureID, head, verdict, note, 
 	}
 	rev := &FeatureReview{
 		ID: NewID(), FeatureID: featureID, FeatureName: feat.Name, FeatureBody: feat.Body,
-		HeadSHA: run.HeadSHA, Verdict: verdict, Note: note, EvidenceSHA: evidence,
+		HeadSHA: run.HeadSHA, Verdict: verdict, Note: note, EvidenceSHA: evidence, DecidedBy: by,
 		CreatedAt: time.Now().UTC(),
 	}
-	if _, err := db.sql.ExecContext(ctx,
-		`INSERT INTO feature_reviews (id, feature_id, head_sha, verdict, note, evidence_sha, created_at)
-		 VALUES (?,?,?,?,?,?,?)`,
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO feature_reviews (id, feature_id, head_sha, verdict, note, evidence_sha, created_at, decided_by)
+		 VALUES (?,?,?,?,?,?,?,?)`,
 		rev.ID, rev.FeatureID, rev.HeadSHA, rev.Verdict, rev.Note, rev.EvidenceSHA,
-		rev.CreatedAt.Format(time.RFC3339Nano)); err != nil {
+		rev.CreatedAt.Format(time.RFC3339Nano), by); err != nil {
 		return nil, fmt.Errorf("recording the review: %w", err)
 	}
-	return rev, nil
+	if err := RecordFeatureEvent(ctx, tx, feat, by, "Feature review ("+verdict+"): "+note, head); err != nil {
+		return nil, err
+	}
+	return rev, tx.Commit()
 }
 
 // ListFeatureGates is what Attention shows as a land: the architect looked at
@@ -822,7 +895,7 @@ func (db *DB) SubmitReview(ctx context.Context, featureID, head, verdict, note, 
 // ListFeatureStalls with the actions that answer it.
 func (db *DB) ListFeatureGates(ctx context.Context, projectID string) ([]FeatureReview, error) {
 	rows, err := db.read.QueryContext(ctx,
-		`SELECT v.id, t.id, t.name, t.body, v.head_sha, v.verdict, v.note, v.evidence_sha, v.created_at
+		`SELECT v.id, t.id, t.name, t.body, v.head_sha, v.verdict, v.note, v.evidence_sha, v.created_at, v.decided_by
 		   FROM feature_runs r
 		   JOIN tasks t ON t.id = r.feature_id
 		   JOIN feature_reviews v ON v.feature_id = t.id AND v.head_sha = r.head_sha
@@ -831,11 +904,9 @@ func (db *DB) ListFeatureGates(ctx context.Context, projectID string) ([]Feature
 		        SELECT MAX(v2.created_at) FROM feature_reviews v2
 		         WHERE v2.feature_id = t.id AND v2.head_sha = r.head_sha
 		    )
-		    AND NOT EXISTS (
-		        SELECT 1 FROM tasks c WHERE c.parent_id = t.id AND c.state IN (?, ?)
-		    )
+		    AND `+featureReadySQL+`
 		  ORDER BY v.created_at`,
-		projectID, FeatureRunning, ReviewOK, TaskQueued, TaskWorking)
+		projectID, FeatureRunning, ReviewOK)
 	if err != nil {
 		return nil, fmt.Errorf("listing feature gates: %w", err)
 	}
@@ -845,7 +916,7 @@ func (db *DB) ListFeatureGates(ctx context.Context, projectID string) ([]Feature
 		var v FeatureReview
 		var created string
 		if err := rows.Scan(&v.ID, &v.FeatureID, &v.FeatureName, &v.FeatureBody,
-			&v.HeadSHA, &v.Verdict, &v.Note, &v.EvidenceSHA, &created); err != nil {
+			&v.HeadSHA, &v.Verdict, &v.Note, &v.EvidenceSHA, &created, &v.DecidedBy); err != nil {
 			return nil, err
 		}
 		if v.CreatedAt, err = parseStored(created); err != nil {
@@ -863,12 +934,12 @@ func (db *DB) CurrentReview(ctx context.Context, featureID string) (*FeatureRevi
 		return nil, err
 	}
 	row := db.read.QueryRowContext(ctx,
-		`SELECT id, feature_id, head_sha, verdict, note, evidence_sha, created_at
+		`SELECT id, feature_id, head_sha, verdict, note, evidence_sha, created_at, decided_by
 		   FROM feature_reviews WHERE feature_id = ? AND head_sha = ?
 		   ORDER BY created_at DESC LIMIT 1`, featureID, run.HeadSHA)
 	var v FeatureReview
 	var created string
-	if err := row.Scan(&v.ID, &v.FeatureID, &v.HeadSHA, &v.Verdict, &v.Note, &v.EvidenceSHA, &created); err != nil {
+	if err := row.Scan(&v.ID, &v.FeatureID, &v.HeadSHA, &v.Verdict, &v.Note, &v.EvidenceSHA, &created, &v.DecidedBy); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -950,8 +1021,9 @@ func (db *DB) FeatureAccepts(ctx context.Context, featureID string) error {
 		return invalid("that feature has already landed; a card cannot join it now")
 	case FeatureCancelled:
 		return invalid("that feature was cancelled; a card cannot join it now")
+	default:
+		return invalid("that feature's plan is accepted; retry its planned cards rather than adding unapproved work")
 	}
-	return nil
 }
 
 // ListFeatureStalls is what Attention shows for a feature nothing will move on
@@ -1035,6 +1107,17 @@ func (db *DB) stallOf(ctx context.Context, run FeatureRun) (*FeatureStall, error
 		// Every card left is waiting for work that nothing is going to do.
 		stall.Reason = StallBlocked
 	default:
+		if moving == 0 {
+			ready, err := db.FeatureReady(ctx, run.FeatureID)
+			if err != nil {
+				return nil, err
+			}
+			if !ready {
+				stall.Reason = StallBlocked
+				stall.Note = "Approved work is missing or detached. This feature cannot land a partial plan; cancel it rather than silently dropping that requirement."
+				return stall, nil
+			}
+		}
 		// Still moving, or finished and waiting on a review. Neither is a stall.
 		review, err := db.CurrentReview(ctx, run.FeatureID)
 		if err != nil || review == nil || review.Verdict != ReviewReject {

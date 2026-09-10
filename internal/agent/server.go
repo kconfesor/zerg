@@ -375,7 +375,8 @@ type NextResponse struct {
 	// Feature names the feature this card belongs to, when finishing it
 	// integrates there rather than landing on the base branch. Empty for an
 	// ordinary card, which is most of them.
-	Feature string `json:"feature,omitempty"`
+	Feature string              `json:"feature,omitempty"`
+	Plan    *store.PlanRevision `json:"plan,omitempty"`
 }
 
 // Item is one unit of work inside a lease.
@@ -465,6 +466,12 @@ func (s *Server) next(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if !time.Now().Before(deadline) {
+			if id.allows(CanDecide) || id.allows(CanSplit) {
+				if err := s.db.TrackSidecarWork(r.Context(), id.ProjectID, id.Role, ""); err != nil {
+					s.fail(w, err)
+					return
+				}
+			}
 			// No work is not an error. An agent that is told "nothing yet"
 			// should stop, not retry in a loop of its own devising.
 			writeJSON(w, http.StatusNoContent, nil)
@@ -827,6 +834,13 @@ func (s *Server) describeDecision(ctx context.Context, id Identity) (*NextRespon
 			out.Task = task
 		}
 	}
+	taskID := ""
+	if out.Task != nil {
+		taskID = out.Task.ID
+	}
+	if err := s.db.TrackSidecarWork(ctx, id.ProjectID, id.Role, taskID); err != nil {
+		return nil, err
+	}
 	return &out, nil
 }
 
@@ -841,6 +855,9 @@ func (s *Server) describePlan(ctx context.Context, id Identity) (*NextResponse, 
 	body := fmt.Sprintf("Split this feature into subtasks. Submit with: zerg split --feature %s [--commit HEAD]. JSON on stdin: {\"items\":[{\"name\":\"...\",\"body\":\"...\",\"priority\":50,\"after\":[\"dep-name\"]}]}. Do not implement the work. Do not create the subtasks. The operator accepts the plan before anything is queued.", feature.ID)
 	if note != "" {
 		body = "The last plan was rejected: " + note + "\n\n" + body
+	}
+	if err := s.db.TrackSidecarWork(ctx, id.ProjectID, id.Role, feature.ID); err != nil {
+		return nil, err
 	}
 	return &NextResponse{
 		Kind: "plan", Role: id.Role, Terminal: false, Task: feature, Body: body,
@@ -887,9 +904,16 @@ func (s *Server) describeReview(ctx context.Context, id Identity) (*NextResponse
 	if feature == nil {
 		return nil, nil
 	}
-	body := fmt.Sprintf("Review this feature against its plan. The head is %s. Submit with: zerg review --feature %s --head %s --verdict ok|reject --note \"...\" [--commit HEAD]. --head is the commit you read: a verdict is refused if the feature moved while you were reading, because it would be approving work you never saw. You may reject. You may not land it.", head, feature.ID, head)
+	plan, err := s.db.AcceptedPlan(ctx, feature.ID)
+	if err != nil {
+		return nil, err
+	}
+	body := fmt.Sprintf("Review the original brief (task.body) AND the accepted plan attached here. The head is %s. Use an isolated checkout of that exact head to run the relevant acceptance checks. A completed plan is not proof the requested feature works: report commands, observed results, missing requirements and anything not verified. Submit with: zerg review --feature %s --head %s --verdict ok|reject --note \"evidence and limitations, or what must change\" [--commit HEAD]. You may reject. You may not land it. A verdict about a head that moved is refused.", head, feature.ID, head)
+	if err := s.db.TrackSidecarWork(ctx, id.ProjectID, id.Role, feature.ID); err != nil {
+		return nil, err
+	}
 	return &NextResponse{
-		Kind: "review", Role: id.Role, Terminal: false, Task: feature, Body: body, Commit: head,
+		Kind: "review", Role: id.Role, Terminal: false, Task: feature, Body: body, Commit: head, Plan: plan,
 	}, nil
 }
 

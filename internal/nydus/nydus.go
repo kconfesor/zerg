@@ -92,6 +92,7 @@ type Nydus struct {
 	// process. One lock rather than one per feature: integration happens once
 	// per finished subtask and takes a git merge, so contention is not the
 	// cost worth optimising, and a map of locks is a lifetime problem.
+	// ponytail: shared across features; shard only if independent merges queue measurably.
 	integrate sync.Mutex
 }
 
@@ -162,6 +163,10 @@ func (n *Nydus) NewTask(ctx context.Context, projectID, name, body, deploy strin
 
 // NewTaskWith is NewTask with the fields a card can carry beyond its brief.
 func (n *Nydus) NewTaskWith(ctx context.Context, opts NewTaskOpts) (*store.Task, error) {
+	if opts.ParentID != "" {
+		n.integrate.Lock()
+		defer n.integrate.Unlock()
+	}
 	projectID, name, body, deploy, skip := opts.ProjectID, opts.Name, opts.Body, opts.Deploy, opts.Skip
 	team, err := n.db.ResolveTeam(ctx, projectID)
 	if err != nil {
@@ -474,7 +479,8 @@ func (n *Nydus) Send(ctx context.Context, projectID, fromRole string, req SendRe
 				return nil, err
 			}
 			if run != nil {
-				return n.integrateChild(ctx, projectID, sender, req, key, run)
+				// Delegation changes who decides the gate, not whether it exists.
+				return n.holdCompletion(ctx, projectID, sender, req, key, task.ParentID)
 			}
 		}
 		if !terminal {
@@ -493,7 +499,7 @@ func (n *Nydus) Send(ctx context.Context, projectID, fromRole string, req SendRe
 		// human". The card carries the rule, not the finishing role, because
 		// skipping that role would otherwise move the policy with it.
 		if sender.Gate == store.GateApproval || (task != nil && task.Supervised) {
-			return n.holdCompletion(ctx, projectID, sender, req, key)
+			return n.holdCompletion(ctx, projectID, sender, req, key, "")
 		}
 		return n.complete(ctx, projectID, sender, req, key)
 	}
@@ -1380,11 +1386,36 @@ func (n *Nydus) resolveEvidence(ctx context.Context, scope store.DecisionScope, 
 }
 
 func (n *Nydus) decide(ctx context.Context, scope store.DecisionScope, approvalID, decision, note, evidence string) error {
+	// Feature decisions share the integration lock with cancel and refresh.
+	// Ordinary approvals keep their existing CAS: locking them here would make
+	// a reject wait behind a running base merge instead of refusing its claim.
+	a, err := n.db.GetApproval(ctx, approvalID)
+	if err != nil {
+		return err
+	}
+	feature := a.FeatureID != ""
+	if !feature && a.TaskID != "" {
+		task, err := n.db.GetTask(ctx, a.TaskID)
+		if err != nil {
+			return err
+		}
+		if task.ParentID != "" {
+			run, err := n.db.GetFeatureRun(ctx, task.ParentID)
+			if err != nil {
+				return err
+			}
+			feature = run != nil
+		}
+	}
+	if feature {
+		n.integrate.Lock()
+		defer n.integrate.Unlock()
+	}
 	by := scope.By()
 
 	// Before the transaction: a git subprocess must never run while holding
 	// the single write lock.
-	evidence, err := n.resolveEvidence(ctx, scope, evidence)
+	evidence, err = n.resolveEvidence(ctx, scope, evidence)
 	if err != nil {
 		return err
 	}
@@ -1405,15 +1436,17 @@ func (n *Nydus) decide(ctx context.Context, scope store.DecisionScope, approvalI
 		projectID  string
 		supervised int
 		priority   int
+		featureID  string
+		parentID   string
 	)
 	err = tx.QueryRowContext(ctx,
 		`SELECT a.message_id, a.state, m.task_id, m.from_role,
 		        m.terminal, m.commit_sha, m.body, a.project_id,
-		        COALESCE(t.supervised, 0), COALESCE(t.priority, 0)
+		        COALESCE(t.supervised, 0), COALESCE(t.priority, 0), COALESCE(a.feature_id, ''), COALESCE(t.parent_id, '')
 		 FROM approvals a JOIN messages m ON m.id = a.message_id
 		 LEFT JOIN tasks t ON t.id = m.task_id
 		 WHERE a.id = ?`, approvalID).Scan(&messageID, &state, &taskID, &fromRole,
-		&terminal, &commit, &body, &projectID, &supervised, &priority)
+		&terminal, &commit, &body, &projectID, &supervised, &priority, &featureID, &parentID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("approval %s: %w", approvalID, store.ErrNotFound)
 	}
@@ -1456,6 +1489,34 @@ func (n *Nydus) decide(ctx context.Context, scope store.DecisionScope, approvalI
 		if open > 0 {
 			return invalid("%d review thread(s) are still open on this card; settle them or reject", open)
 		}
+	}
+
+	if featureID != "" && decision == store.ApprovalApproved {
+		if err := ensureOpen(ctx, tx, projectID, taskID.String); err != nil {
+			return err
+		}
+		// Keep the authority/evidence before git runs. Recovery must finish the
+		// same decision, not manufacture an operator approval after a crash.
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE approvals SET state = ?, note = ?, decided_by = ?, evidence_sha = ?,
+			 decided_model = ?, decided_harness = ? WHERE id = ? AND state = ?`,
+			store.ApprovalIntegrating, note, by, evidence, scope.Model, scope.Harness, approvalID, store.ApprovalPending); err != nil {
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		a := &store.Approval{ID: approvalID, ProjectID: projectID, TaskID: taskID.String,
+			FeatureID: featureID, Commit: commit.String}
+		merged, err := n.integrateChild(ctx, a)
+		if err != nil && !merged {
+			if _, releaseErr := n.db.SQL().ExecContext(context.WithoutCancel(ctx),
+				`UPDATE approvals SET state = ? WHERE id = ? AND state = ?`,
+				store.ApprovalPending, approvalID, store.ApprovalIntegrating); releaseErr != nil {
+				return fmt.Errorf("%w (releasing the approval: %v)", err, releaseErr)
+			}
+		}
+		return err
 	}
 
 	// Approving a completion lands it, and that happens before the decision is
@@ -1591,6 +1652,14 @@ func (n *Nydus) decide(ctx context.Context, scope store.DecisionScope, approvalI
 				FromRole: store.OperatorRole, Kind: store.KindNote, Priority: priority,
 				Body: feedback, CreatedAt: at,
 			}
+			// A feature claim resets the role branch to the integrated head.
+			// Rejection must carry the unintegrated work back too, or that reset
+			// erases the very change the author was asked to repair.
+			returnCommit := ""
+			if parentID != "" && commit.Valid {
+				returnCommit = commit.String
+				msg.Kind, msg.CommitSHA = store.KindHandoff, &returnCommit
+			}
 			// sendIn moves the card as it routes, which is the same lane change
 			// this used to do by hand.
 			if err := n.sendIn(ctx, tx, msg, sendReq{
@@ -1598,7 +1667,8 @@ func (n *Nydus) decide(ctx context.Context, scope store.DecisionScope, approvalI
 				TaskID:    &taskID.String,
 				FromRole:  store.OperatorRole,
 				ToRoles:   []string{fromRole},
-				Kind:      store.KindNote,
+				Kind:      msg.Kind,
+				Commit:    returnCommit,
 				Priority:  priority,
 				Body:      feedback,
 				gate:      store.GateNone, // a rejection is not itself gated
@@ -1787,6 +1857,8 @@ func (n *Nydus) AckOwned(ctx context.Context, projectID, role, leaseID string) e
 // recording the decision that was already carried out; not landed means hand
 // the approval back to the operator as pending, exactly as a failed merge does.
 func (n *Nydus) ReconcileIntegrating(ctx context.Context) (settled, released int, err error) {
+	n.integrate.Lock()
+	defer n.integrate.Unlock()
 	rows, err := n.db.Read().QueryContext(ctx,
 		`SELECT a.id, a.project_id, m.task_id, m.commit_sha, m.body
 		   FROM approvals a JOIN messages m ON m.id = a.message_id
@@ -1813,6 +1885,27 @@ func (n *Nydus) ReconcileIntegrating(ctx context.Context) (settled, released int
 	}
 
 	for _, a := range pending {
+		approval, err := n.db.GetApproval(ctx, a.id)
+		if err != nil {
+			return settled, released, err
+		}
+		if approval.FeatureID != "" {
+			merged, err := n.integrateChild(ctx, approval)
+			if err == nil {
+				settled++
+				continue
+			}
+			if merged {
+				return settled, released, err
+			}
+			if _, err := n.db.SQL().ExecContext(ctx,
+				`UPDATE approvals SET state = ? WHERE id = ? AND state = ?`,
+				store.ApprovalPending, a.id, store.ApprovalIntegrating); err != nil {
+				return settled, released, err
+			}
+			released++
+			continue
+		}
 		landed := false
 		outcome, outcomeRef := "", ""
 		if n.integrator != nil && a.taskID.Valid {
@@ -2087,49 +2180,40 @@ func boolToInt(b bool) int {
 // as the roles are concerned and not yet landed, which is a real state and
 // needs to be visible as one. The card stays with the role that finished it,
 // so the board does not claim Done over work nobody has approved.
-func (n *Nydus) holdCompletion(ctx context.Context, projectID string, sender store.ResolvedRole, req SendRequest, key string) (*store.Message, error) {
-	if req.TaskID == "" {
-		return nil, invalid("completing a task requires its id")
+func (n *Nydus) holdCompletion(ctx context.Context, projectID string, sender store.ResolvedRole, req SendRequest, key, featureID string) (*store.Message, error) {
+	if req.TaskID == "" || req.Commit == "" {
+		return nil, invalid("finishing a task requires its id and the commit to integrate")
 	}
-	if req.Commit == "" {
-		return nil, invalid("finishing a task requires the commit to integrate")
-	}
-	task, err := n.db.GetTask(ctx, req.TaskID)
-	if err != nil {
-		return nil, err
-	}
-
 	now := n.now()
 	msg := &store.Message{
-		ID: store.NewID(), ProjectID: projectID, TaskID: &task.ID,
+		ID: store.NewID(), ProjectID: projectID, TaskID: &req.TaskID,
 		FromRole: sender.Name, Kind: store.KindHandoff, Priority: req.Priority,
-		Body: req.Body, Terminal: true, CreatedAt: now,
+		Body: req.Body, Terminal: featureID == "", CreatedAt: now, CommitSHA: &req.Commit,
 	}
-	c := req.Commit
-	msg.CommitSHA = &c
-
 	tx, err := n.db.SQL().BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("beginning held completion: %w", err)
 	}
 	defer tx.Rollback()
-
+	if err := ensureOpen(ctx, tx, projectID, req.TaskID); err != nil {
+		return nil, err
+	}
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO messages (id, project_id, task_id, from_role, kind, priority,
 		   commit_sha, body, terminal, created_at, source_lease_id, op_key)
 		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
 		msg.ID, msg.ProjectID, msg.TaskID, msg.FromRole, msg.Kind, msg.Priority,
-		msg.CommitSHA, msg.Body, true, now.Format(time.RFC3339Nano),
+		msg.CommitSHA, msg.Body, msg.Terminal, now.Format(time.RFC3339Nano),
 		nullable(req.SourceLease), nullable(key)); err != nil {
 		return nil, fmt.Errorf("recording held completion: %w", err)
 	}
-	// The approval is written in the same transaction as the message, so there
-	// is no instant where a completion exists with nothing asking about it.
+	// The feature destination is explicit. Non-terminal means the supervisor
+	// may decide it, not that the last role gets to bypass the decision.
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO approvals (id, project_id, message_id, state, created_at)
-		 VALUES (?,?,?,?,?)`,
+		`INSERT INTO approvals (id, project_id, message_id, state, created_at, feature_id)
+		 VALUES (?,?,?,?,?,?)`,
 		store.NewID(), projectID, msg.ID, store.ApprovalPending,
-		now.Format(time.RFC3339Nano)); err != nil {
+		now.Format(time.RFC3339Nano), nullable(featureID)); err != nil {
 		return nil, fmt.Errorf("recording approval: %w", err)
 	}
 	if err := tx.Commit(); err != nil {

@@ -86,12 +86,13 @@ func insertUsage(ctx context.Context, x execer, u UsageTurn) error {
 		`INSERT INTO usage_turns
 		   (id, project_id, task_id, role, ts, harness, provider, model,
 		    input_tokens, cache_write_tokens, cache_read_tokens, output_tokens,
-		    cost_usd, cost_source, billing)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		    cost_usd, cost_source, billing, feature_id)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
+		   (SELECT CASE WHEN kind = 'feature' THEN id ELSE parent_id END FROM tasks WHERE id = ?))`,
 		u.ID, u.ProjectID, u.TaskID, u.Role, u.At.Format(time.RFC3339Nano),
 		u.Harness, u.Provider, u.Model,
 		u.InputTokens, u.CacheWriteTokens, u.CacheReadTokens, u.OutputTokens,
-		u.CostUSD, u.CostSource, u.Billing)
+		u.CostUSD, u.CostSource, u.Billing, u.TaskID)
 	if err != nil {
 		return fmt.Errorf("recording usage: %w", err)
 	}
@@ -601,7 +602,7 @@ func (db *DB) UsageForTask(ctx context.Context, taskID string) (UsageTotal, erro
 		        COALESCE(SUM(cost_usd),0),
 		        COALESCE(SUM(CASE WHEN billing = 'subscription' THEN 1 ELSE 0 END),0),
 		        COALESCE(SUM(CASE WHEN cost_source = 'harness' THEN 0 ELSE 1 END),0)
-		 FROM usage_turns WHERE task_id = ?`, taskID)
+		 FROM usage_turns WHERE task_id = ? OR feature_id = ?`, taskID, taskID)
 
 	var t UsageTotal
 	t.Key = taskID
@@ -646,7 +647,11 @@ func (db *DB) TaskForAt(ctx context.Context, projectID, role string, at time.Tim
 	// compare a lease against the wall clock: leases are written with whatever
 	// clock made them, and a comparison across two clocks is a coin flip.
 	if at.IsZero() {
-		return db.openLeaseTask(ctx, projectID, role)
+		id, err := db.openLeaseTask(ctx, projectID, role)
+		if err != nil || id != nil {
+			return id, err
+		}
+		return db.sidecarTaskForAt(ctx, projectID, role, at)
 	}
 
 	var (
@@ -664,8 +669,8 @@ func (db *DB) TaskForAt(ctx context.Context, projectID, role string, at time.Tim
 		    AND l.granted_at <= ?
 		  ORDER BY l.granted_at DESC LIMIT 1`,
 		projectID, role, at.UTC().Format(time.RFC3339Nano)).Scan(&taskID, &acked, &expired, &expiresAt)
-	if errors.Is(err, sql.ErrNoRows) || !taskID.Valid {
-		return nil, nil
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && !taskID.Valid) {
+		return db.sidecarTaskForAt(ctx, projectID, role, at)
 	}
 	if err != nil {
 		return nil, err

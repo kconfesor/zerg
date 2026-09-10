@@ -88,7 +88,7 @@ func TestFinishingASubtaskIntegratesIntoTheFeatureNotBase(t *testing.T) {
 		}
 	}
 
-	if _, err := f.n.Send(ctx, f.project.ID, "reviewer", SendRequest{
+	if _, err := f.finishChild(ctx, f.project.ID, "reviewer", SendRequest{
 		TaskID: schema.ID, Commit: "aaaaaaaaaa", Body: "schema is in",
 	}); err != nil {
 		t.Fatal(err)
@@ -128,12 +128,12 @@ func TestAFeatureDoesNotLandBecauseItsChildrenFinished(t *testing.T) {
 	ctx := context.Background()
 	f := newFixture(t)
 	feat, schema := acceptOne(t, f)
-	if _, err := f.n.Send(ctx, f.project.ID, "reviewer", SendRequest{
+	if _, err := f.finishChild(ctx, f.project.ID, "reviewer", SendRequest{
 		TaskID: schema.ID, Commit: "aaaaaaaaaa", Body: "done",
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.n.LandFeature(ctx, feat.ID); err == nil {
+	if err := f.n.LandFeature(ctx, feat.ID, featureHead(t, f, feat.ID)); err == nil {
 		t.Fatal("landed without a review")
 	}
 	_, head, err := f.db.NextFeatureToReview(ctx, f.project.ID)
@@ -143,7 +143,7 @@ func TestAFeatureDoesNotLandBecauseItsChildrenFinished(t *testing.T) {
 	if _, err := f.db.SubmitReview(ctx, feat.ID, head, store.ReviewOK, "looks whole", ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.n.LandFeature(ctx, feat.ID); err != nil {
+	if err := f.n.LandFeature(ctx, feat.ID, head); err != nil {
 		t.Fatal(err)
 	}
 	if len(f.git.merges) == 0 {
@@ -162,7 +162,7 @@ func TestAStaleReviewCannotLand(t *testing.T) {
 	ctx := context.Background()
 	f := newFixture(t)
 	feat, schema := acceptOne(t, f)
-	if _, err := f.n.Send(ctx, f.project.ID, "reviewer", SendRequest{
+	if _, err := f.finishChild(ctx, f.project.ID, "reviewer", SendRequest{
 		TaskID: schema.ID, Commit: "aaaaaaaaaa", Body: "done",
 	}); err != nil {
 		t.Fatal(err)
@@ -178,7 +178,7 @@ func TestAStaleReviewCannotLand(t *testing.T) {
 		`UPDATE feature_runs SET head_sha = ? WHERE feature_id = ?`, "bbbbbbbbbb", feat.ID); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.n.LandFeature(ctx, feat.ID); err == nil {
+	if err := f.n.LandFeature(ctx, feat.ID, featureHead(t, f, feat.ID)); err == nil {
 		t.Fatal("a review of a previous head was allowed to land")
 	}
 }
@@ -226,7 +226,7 @@ func TestAFeatureSubtaskRunsOnItsOwnBranchAndTheNextCardDoesNot(t *testing.T) {
 	}
 
 	// Finish the subtask, then put an ordinary card in front of the same role.
-	if _, err := f.n.Send(ctx, f.project.ID, "reviewer", SendRequest{
+	if _, err := f.finishChild(ctx, f.project.ID, "reviewer", SendRequest{
 		TaskID: schema.ID, Commit: "aaaaaaaaaa", Body: "done",
 	}); err != nil {
 		t.Fatal(err)
@@ -254,7 +254,7 @@ func TestAConflictedIntegrationIsClearedAndSurfaced(t *testing.T) {
 	feat, schema := acceptOne(t, f)
 	f.git.intoErr = errors.New("CONFLICT (content): Merge conflict in f")
 
-	_, err := f.n.Send(ctx, f.project.ID, "reviewer", SendRequest{
+	_, err := f.finishChild(ctx, f.project.ID, "reviewer", SendRequest{
 		TaskID: schema.ID, Commit: "aaaaaaaaaa", Body: "done",
 	})
 	if err == nil {
@@ -284,7 +284,14 @@ func TestAConflictedIntegrationIsClearedAndSurfaced(t *testing.T) {
 	// Resolving it and sending again clears the conflict rather than leaving
 	// the feature marked for a problem that is gone.
 	f.git.intoErr = nil
-	if _, err := f.n.Send(ctx, f.project.ID, "reviewer", SendRequest{
+	pending, err := f.db.ListPendingApprovals(ctx, f.project.ID)
+	if err != nil || len(pending) != 1 {
+		t.Fatalf("pending integration: %v %v", pending, err)
+	}
+	if err := f.n.Reject(ctx, pending[0].ID, "merge the feature head and resolve it"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.finishChild(ctx, f.project.ID, "reviewer", SendRequest{
 		TaskID: schema.ID, Commit: "bbbbbbbbbb", Body: "merged the feature head",
 	}); err != nil {
 		t.Fatal(err)
@@ -341,7 +348,7 @@ func TestACardCarryingAFeatureCannotLand(t *testing.T) {
 	// With something on the branch: a feature whose head is still the base it
 	// was cut from has nothing unlanded to carry, and reading that as carrying
 	// it refused every card in the project.
-	if _, err := f.n.Send(ctx, f.project.ID, "reviewer", SendRequest{
+	if _, err := f.finishChild(ctx, f.project.ID, "reviewer", SendRequest{
 		TaskID: schema.ID, Commit: "aaaaaaaaaa", Body: "done",
 	}); err != nil {
 		t.Fatal(err)
@@ -518,7 +525,7 @@ func TestTwoSubtasksFinishingAtOnceKeepBothInTheHead(t *testing.T) {
 	errs := make([]error, len(board))
 	finish := func(i int, id string) {
 		defer wg.Done()
-		_, errs[i] = f.n.Send(ctx, f.project.ID, "reviewer", SendRequest{
+		_, errs[i] = f.finishChild(ctx, f.project.ID, "reviewer", SendRequest{
 			TaskID: id, Commit: "aaaaaaaaaa" + id[:2], Body: "done",
 		})
 	}
@@ -746,10 +753,15 @@ func TestDeletingAPrerequisiteLeavesItsDependentBlocked(t *testing.T) {
 		byName[c.Name] = c
 	}
 
-	if err := f.db.DeleteTask(ctx, f.project.ID, byName["Schema"].ID); err != nil {
+	if err := f.db.DeleteTask(ctx, f.project.ID, byName["Schema"].ID); err == nil {
+		t.Fatal("a live planned prerequisite could be deleted")
+	}
+	// Old installations could already have lost a prerequisite. Keep testing
+	// that damaged state even though the public mutation now refuses it.
+	if _, err := f.db.SQL().ExecContext(ctx, `DELETE FROM tasks WHERE id = ?`, byName["Schema"].ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.n.Send(ctx, f.project.ID, "reviewer", SendRequest{
+	if _, err := f.finishChild(ctx, f.project.ID, "reviewer", SendRequest{
 		TaskID: byName["Ports"].ID, Commit: "aaaaaaaaaa", Body: "done",
 	}); err != nil {
 		t.Fatal(err)
@@ -782,7 +794,7 @@ func TestARejectedFeatureCanBeRetried(t *testing.T) {
 	ctx := context.Background()
 	f := newFixture(t)
 	feat, schema := acceptOne(t, f)
-	if _, err := f.n.Send(ctx, f.project.ID, "reviewer", SendRequest{
+	if _, err := f.finishChild(ctx, f.project.ID, "reviewer", SendRequest{
 		TaskID: schema.ID, Commit: "aaaaaaaaaa", Body: "done",
 	}); err != nil {
 		t.Fatal(err)
@@ -822,7 +834,7 @@ func TestARejectedFeatureCanBeRetried(t *testing.T) {
 
 	// And the loop closes: the redone card moves the head, which is what earns
 	// the feature a review that is not the rejected one.
-	if _, err := f.n.Send(ctx, f.project.ID, "reviewer", SendRequest{
+	if _, err := f.finishChild(ctx, f.project.ID, "reviewer", SendRequest{
 		TaskID: schema.ID, Commit: "bbbbbbbbbb", Body: "fixed the schema",
 	}); err != nil {
 		t.Fatal(err)
@@ -843,7 +855,7 @@ func TestAReviewCannotApproveAHeadItDidNotSee(t *testing.T) {
 	ctx := context.Background()
 	f := newFixture(t)
 	feat, schema := acceptOne(t, f)
-	if _, err := f.n.Send(ctx, f.project.ID, "reviewer", SendRequest{
+	if _, err := f.finishChild(ctx, f.project.ID, "reviewer", SendRequest{
 		TaskID: schema.ID, Commit: "aaaaaaaaaa", Body: "done",
 	}); err != nil {
 		t.Fatal(err)
@@ -856,17 +868,16 @@ func TestAReviewCannotApproveAHeadItDidNotSee(t *testing.T) {
 		t.Fatal("no feature was offered for review")
 	}
 
-	// While the architect reads, the operator groups another card under the
-	// feature and it finishes, moving the head.
-	late, err := f.n.NewTaskWith(ctx, NewTaskOpts{
-		ProjectID: f.project.ID, Name: "Late", Body: "added while the architect read",
-		ParentID: feat.ID,
-	})
-	if err != nil {
+	// A person can request a correction while the architect is still reading.
+	// Its eventual verdict must not be assigned to the repaired head.
+	if err := f.n.RejectFeature(ctx, feat.ID, reviewed, "the operator found a missing check"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.n.Send(ctx, f.project.ID, "reviewer", SendRequest{
-		TaskID: late.ID, Commit: "bbbbbbbbbb", Body: "done",
+	if err := f.n.RetryChild(ctx, schema.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.finishChild(ctx, f.project.ID, "reviewer", SendRequest{
+		TaskID: schema.ID, Commit: "bbbbbbbbbb", Body: "done",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -885,7 +896,7 @@ func TestAReviewCannotApproveAHeadItDidNotSee(t *testing.T) {
 	if !strings.Contains(err.Error(), "moved") {
 		t.Errorf("error was %q, which does not say the head moved", err)
 	}
-	if err := f.n.LandFeature(ctx, feat.ID); err == nil {
+	if err := f.n.LandFeature(ctx, feat.ID, run.HeadSHA); err == nil {
 		t.Fatal("the feature landed on a review of a head nobody looked at")
 	}
 }

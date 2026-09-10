@@ -1,6 +1,7 @@
 # Architect orchestration
 
-A plan under argument, not a description of anything that exists. Issue [#40].
+Design record for issue [#40]. The starting-point inventory below is historical; the implemented
+contract and the failures that tightened it are recorded in [ARCHITECTURE §9.4](../ARCHITECTURE.md#94-features).
 
 One card gets a switch that turns it from a unit of work into a feature: the architect splits it,
 creates the subtasks, orders them, supervises them, and reviews the whole before a person lands it.
@@ -32,7 +33,7 @@ Kept rather than quietly fixed, in the spirit of ARCHITECTURE 6.1.
 
 ## What already exists to build on
 
-Facts, checked against the tree rather than remembered.
+Facts checked against the tree at proposal time, before this feature was implemented.
 
 | | |
 |---|---|
@@ -85,8 +86,8 @@ it finishes makes the review advisory, and leaves half a feature on base when it
 
 ### 2. A feature is a row in `tasks`, and its lifecycle is not in `tasks.state`
 
-A `kind` of `work` or `feature` and `parent_id` on subtasks give the board, the trail, history, the
-cost view, hidden, pinned, delete-cascade and rework counting for free. A feature has no route, and
+A `kind` of `work` or `feature` and `parent_id` on subtasks provide a shared identity for the board,
+trail, history and cost view, not free aggregation. A feature has no route, and
 `Claim` selects `FROM routes JOIN messages`, so it can never be handed to a role.
 
 **But `kind` plus `parent_id` is not a lifecycle.** `tasks.state` is a four-value `CHECK`, and a
@@ -104,9 +105,10 @@ in whichever query somebody writes next.
 - `feature_deps`: edges between plan items.
 - `feature_reviews`: the architect's verdict, bound to the head it reviewed.
 
-**What it still costs.** Every query that lists cards for a person must exclude features. The audit
-is `ListTasks`, the board query, history paging, `ListReworkedTasks` and the attention queries, and
-it wants a test asserting a feature never appears in a lane.
+**What it still costs.** Board and rework queries exclude features; history must retain them as
+completed deliveries. Plans, verdicts, lifecycle history and child costs are read together in the
+feature detail. Planning/review turns need sidecar ownership even though they have no pipeline
+lease. Usage snapshots its feature id so child deletion does not erase historical feature cost.
 
 ### 3. A subtask's completion is not a land, so it is not terminal
 
@@ -122,7 +124,9 @@ in a feature is the feature landing on base, which stays human exactly as #38 le
 
 The architect decides a subtask's integration the way it already decides a mid-pipeline gate. A new
 verdict type plus a weakened terminal check was the alternative and is rejected: loosening the check
-that makes "the last click stays human" true is not worth the convenience.
+that makes "the last click stays human" true is not worth the convenience. The approval records an
+explicit feature destination. Delegation must not become a shortcut that merges before any decision;
+both an explicit role gate and inherited supervision still hold the work.
 
 ### 4. The architect may reject a feature, and may not approve one
 
@@ -131,7 +135,10 @@ send a feature back on its own authority; approving stays human.
 
 **A review is about a head, not about a feature.** Any integration, base refresh or plan revision
 after it invalidates it, because the thing reviewed no longer exists. Without that binding the
-review is a claim about a moving target, which is the class of bug ARCHITECTURE 6.1 collects.
+review is a claim about a moving target, which is the class of bug ARCHITECTURE 6.1 collects. The
+operator's land also names the displayed head. A person can send that head back for correction,
+superseding an architect's OK, without cancelling the feature. The architect reads the original
+brief and accepted plan and reports observed acceptance results and what it did not verify.
 
 ### 5. A dependency is satisfied by integration, not by a child saying "done"
 
@@ -143,8 +150,10 @@ So a dependency is satisfied when its commit is integrated into the feature head
 unblocks a dependent carries the **feature head sha** rather than the dependency's own commit, so
 the dependent receives everything it depends on rather than one piece of it.
 
-Integration, dependency release and the creation of newly-ready routes happen in one transaction. A
-crash between them leaves a feature either advanced or not, never half.
+Git cannot be in the SQLite transaction. An approval is claimed as `integrating` before the merge;
+recording the resulting head, finishing the child and releasing dependent routes is one transaction.
+A crash in between leaves the claim for recovery, which replays the idempotent merge. Cancellation
+cannot discard a merge that has not finished recording.
 
 Edges are validated within one feature, self-edges and duplicates refused, and the whole DAG checked
 for cycles at write time. A cycle is work that can never start while looking queued, which is the
@@ -189,6 +198,10 @@ If a whole re-planning turn for one unwanted subtask proves to be the common cas
 is to allow editing *and* hand the architect the diff, so its review measures against the edited
 plan.
 
+Acceptance freezes execution membership too. “Part of” cannot detach an approved requirement,
+delete it or add an unapproved card. Readiness checks every accepted item, not just the surviving
+children; otherwise an apparently immutable plan could still land with half its scope missing.
+
 ### 10. A failing subtask stalls the feature, and the operator has named actions
 
 Stalling reuses the rework threshold that already surfaces a card going backward too often.
@@ -196,7 +209,8 @@ Automated re-planning is rejected: it turns one bad subtask into several new one
 doing it.
 
 **Stalling alone is not a contract.** The operator needs named actions: retry the child, waive a
-dependency with a rationale, approve a repair revision, or cancel the feature. Cancellation is soft,
+dependency with a rationale, send the whole back, refresh from base, or cancel the feature. A scope
+change/repair-plan revision is not implemented; corrections retry the accepted work. Cancellation is soft,
 and deleting a live feature hierarchy is refused rather than cascaded, because `DeleteTask` acts on
 one id and cascading it across running children would leave agents writing to rows that no longer
 exist. Every late agent write re-checks that its feature is not cancelled and that its plan revision
@@ -253,13 +267,13 @@ to go.
 
 ## Still open
 
-- Whether the plan approval is an `approvals` row. Reusing them brings Attention, the decision
-  panel, `decided_by`, `evidence_sha` and the deciding model, which all fit. An approval is tied to
-  a message and a route today, and a plan is tied to neither. Phase 2.
-- How the feature branch is refreshed from base during a long feature, and what that does to a
-  review taken before the refresh. Phase 4.
+Resolved during implementation: plan acceptance uses its own immutable revision, not a routed
+approval. Refresh merges base into the isolated feature checkout, records the new base/head and
+invalidates any verdict of a different head. A shared feature panel supplies the plan, evidence,
+whole diff, costs, history and correction controls in Attention and the board/history dialog.
+
+Still deferred:
 - Whether a subtask can itself be a feature. No, until something demands otherwise: a plan that
   plans is much harder to estimate, and the estimate is what makes decision 7 work.
 - How a feature interacts with `skip` and `deploy`, which are per card today.
-- What the board actually shows. Phase 1 exists to answer it by looking, with a number read back out
-  of a browser rather than reasoned about here.
+- Explicitly approving a change to already accepted scope, rather than repairing or cancelling it.

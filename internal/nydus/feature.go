@@ -42,12 +42,17 @@ func (n *Nydus) liveRun(ctx context.Context, featureID string) (*store.FeatureRu
 // cards, independent ones queued, the rest blocked. One step, because creating
 // the children without somewhere for their work to go puts it on base.
 func (n *Nydus) AcceptPlan(ctx context.Context, id string) (string, error) {
+	n.integrate.Lock()
+	defer n.integrate.Unlock()
 	rev, err := n.db.GetPlan(ctx, id)
 	if err != nil {
 		return "", err
 	}
 	if rev.State != store.PlanPending {
 		return "", invalid("that plan is not waiting for a decision")
+	}
+	if err := n.db.FeatureCanPlan(ctx, rev.FeatureID); err != nil {
+		return "", err
 	}
 	if err := n.db.VerifyPlanDigest(ctx, rev); err != nil {
 		return "", err
@@ -93,6 +98,16 @@ func (n *Nydus) AcceptPlan(ctx context.Context, id string) (string, error) {
 	}
 	defer tx.Rollback()
 
+	if err := n.db.FeatureCanPlan(ctx, feature.ID); err != nil {
+		return "", err
+	}
+	var grouped int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM tasks WHERE parent_id = ?`, feature.ID).Scan(&grouped); err != nil {
+		return "", err
+	}
+	if grouped != 0 {
+		return "", invalid("this feature has manually grouped cards; detach them before accepting a split so its scope is exactly the approved plan")
+	}
 	res, err := tx.ExecContext(ctx,
 		`UPDATE feature_plan_revisions SET state = ?, decided_at = ?, decided_by = ?
 		  WHERE id = ? AND state = ?`,
@@ -144,6 +159,9 @@ func (n *Nydus) AcceptPlan(ctx context.Context, id string) (string, error) {
 			return "", err
 		}
 	}
+	if err := store.RecordFeatureEvent(ctx, tx, feature, store.OperatorRole, "Plan accepted; subtasks created", base); err != nil {
+		return "", err
+	}
 	return feature.ProjectID, tx.Commit()
 }
 
@@ -177,137 +195,93 @@ func (n *Nydus) queueChild(ctx context.Context, tx *sql.Tx, projectID, taskID, b
 	}, now)
 }
 
-// integrateChild folds a finished subtask into the feature head and unblocks
-// dependents whose work is now in that head. Not a land: the project's
-// integration policy is not applied.
-func (n *Nydus) integrateChild(ctx context.Context, projectID string, sender store.ResolvedRole, req SendRequest, key string, run *store.FeatureRun) (*store.Message, error) {
-	if req.Commit == "" {
-		return nil, invalid("finishing a subtask requires the commit to integrate")
-	}
-	task, err := n.db.GetTaskIn(ctx, projectID, req.TaskID)
+// integrateChild consumes an approval already claimed as integrating. The
+// caller holds n.integrate across git and SQLite: interleaved merges once left
+// the row behind the branch and shipped a feature missing a finished subtask.
+// True means git may have changed; a recording failure must then keep the claim
+// for recovery, not let a rejection pretend that merge never happened.
+func (n *Nydus) integrateChild(ctx context.Context, a *store.Approval) (bool, error) {
+	task, err := n.db.GetTaskIn(ctx, a.ProjectID, a.TaskID)
 	if err != nil {
-		return nil, err
+		return false, err
 	}
-
-	// Everything from here to the commit is one critical section.
-	//
-	// The merge is a git subprocess and cannot run inside the write
-	// transaction, so recording where the feature got to is a second step.
-	// Two roles finishing independent subtasks at the same moment ran it
-	// interleaved: both merged, both resolved, and the later transaction
-	// wrote the earlier head. The branch held both commits and the row held
-	// one, so the review and the land shipped a feature with a subtask
-	// missing from it while that card read done. Independent subtasks in
-	// different roles are the only parallelism this has, so that is the
-	// ordinary case rather than an unlucky one.
-	n.integrate.Lock()
-	defer n.integrate.Unlock()
-
-	// Re-read under the lock: the run was fetched before it was taken, and
-	// the head it carried may be a merge behind by now.
-	run, err = n.liveRun(ctx, task.ParentID)
+	if a.Commit == "" || task.ParentID != a.FeatureID {
+		return false, invalid("the integration no longer matches this card's feature")
+	}
+	if task.State != store.TaskQueued && task.State != store.TaskWorking {
+		return false, invalid("that card is already closed; nothing more is integrated for it")
+	}
+	run, err := n.liveRun(ctx, a.FeatureID)
 	if err != nil {
-		return nil, err
+		return false, err
 	}
 	if run == nil {
-		return nil, invalid("that feature is no longer running")
+		return false, invalid("that feature is no longer running")
 	}
-	expected := run.HeadSHA
-
-	head := req.Commit
+	head := a.Commit
 	if n.integrator != nil {
-		project, err := n.db.GetProject(ctx, projectID)
+		project, err := n.db.GetProject(ctx, a.ProjectID)
 		if err != nil {
-			return nil, err
+			return false, err
 		}
-		tree := hatchery.New(project.Path).Path(FeatureWorktree(task.ParentID))
-		if err := n.integrator.MergeInto(ctx, tree, req.Commit); err != nil {
-			// A repository someone else is holding is not a conflict, and
-			// saying it is would mark the whole feature conflicted and send an
-			// agent looking for conflict markers that are not there. Measured:
-			// git does not wait for the lock, it fails with
-			// "Unable to create '.../index.lock': File exists".
+		tree := hatchery.New(project.Path).Path(FeatureWorktree(a.FeatureID))
+		if err := n.integrator.MergeInto(ctx, tree, a.Commit); err != nil {
+			// An index lock is not a merge conflict. Nobody works in this tree,
+			// so a real conflict must be aborted or it poisons every later merge.
 			if busyRepo(err) {
-				return nil, fmt.Errorf("the feature's repository is busy; try again: %w", err)
+				return false, fmt.Errorf("the feature's repository is busy; try again: %w", err)
 			}
-			// Cleared, not left. Nobody works in a feature's integration tree,
-			// and git refuses every later merge while the conflict sits in it,
-			// so one conflict would end every remaining subtask of the feature
-			// with an error none of them caused. Best effort: the merge failure
-			// below is the answer either way.
 			_ = n.integrator.AbortMerge(ctx, tree)
-			if err := n.db.SetFeatureRunState(ctx, task.ParentID, store.FeatureConflict); err != nil {
-				return nil, err
+			if err := n.db.SetFeatureRunState(ctx, a.FeatureID, store.FeatureConflict); err != nil {
+				return false, err
 			}
-			return nil, invalid(
-				"%s does not merge into the feature: %v. Merge %s into your worktree, "+
-					"resolve it there, commit, and send again",
-				short(req.Commit), err, short(run.HeadSHA))
+			return false, invalid("%s does not merge into the feature: %v. Reject this handoff with a note to merge %s and resolve it there before sending again", short(a.Commit), err, run.HeadSHA)
 		}
-		if sha, err := n.integrator.Resolve(ctx, tree, "HEAD"); err == nil && sha != "" {
-			head = sha
+		head, err = n.integrator.Resolve(ctx, tree, "HEAD")
+		if err != nil {
+			return true, fmt.Errorf("reading the integrated head: %w", err)
+		}
+		if head == "" {
+			return true, fmt.Errorf("git returned no integrated head")
 		}
 	}
 
 	now := n.now()
-	msg := &store.Message{
-		ID: store.NewID(), ProjectID: projectID, TaskID: &task.ID,
-		FromRole: sender.Name, Kind: store.KindHandoff, Priority: req.Priority,
-		Body: req.Body, CreatedAt: now,
-	}
-	c := req.Commit
-	msg.CommitSHA = &c
-
 	tx, err := n.db.SQL().BeginTx(ctx, nil)
 	if err != nil {
-		return nil, fmt.Errorf("beginning integration: %w", err)
+		return true, err
 	}
 	defer tx.Rollback()
-
-	if err := ensureOpen(ctx, tx, projectID, task.ID); err != nil {
-		return nil, err
+	if err := ensureOpen(ctx, tx, a.ProjectID, task.ID); err != nil {
+		return true, err
 	}
-	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO messages (id, project_id, task_id, from_role, kind, priority,
-		   commit_sha, body, terminal, created_at, source_lease_id, op_key)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
-		msg.ID, msg.ProjectID, msg.TaskID, msg.FromRole, msg.Kind, msg.Priority,
-		msg.CommitSHA, msg.Body, false, now.Format(time.RFC3339Nano),
-		nullable(req.SourceLease), nullable(key)); err != nil {
-		return nil, fmt.Errorf("recording integration: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE tasks SET lane = ?, state = ?, completed_at = ? WHERE id = ? AND project_id = ?`,
-		store.LaneDone, store.TaskDone, now.Format(time.RFC3339Nano), task.ID, projectID); err != nil {
-		return nil, fmt.Errorf("closing the subtask: %w", err)
-	}
-	// Back to running in the same statement that moves the head: a subtask
-	// that resolved the conflict has cleared it, and leaving the run marked
-	// conflicted would keep the feature in Attention for a problem that is
-	// gone.
-	//
-	// Guarded on the head this merge was built on. The lock above is what
-	// makes that hold; this is what says so if it ever does not, rather than
-	// letting the row quietly disagree with the branch.
 	res, err := tx.ExecContext(ctx,
-		`UPDATE feature_runs SET head_sha = ?, state = ? WHERE feature_id = ? AND head_sha = ?`,
-		head, store.FeatureRunning, task.ParentID, expected)
+		`UPDATE approvals SET state = ?, decided_at = ? WHERE id = ? AND state = ?`,
+		store.ApprovalApproved, now.Format(time.RFC3339Nano), a.ID, store.ApprovalIntegrating)
 	if err != nil {
-		return nil, fmt.Errorf("advancing the feature head: %w", err)
+		return true, err
 	}
-	if moved, err := res.RowsAffected(); err != nil {
-		return nil, err
-	} else if moved == 0 {
-		return nil, fmt.Errorf(
-			"the feature moved while %s was being integrated; nothing was recorded", short(req.Commit))
+	if count, err := res.RowsAffected(); err != nil || count != 1 {
+		return true, fmt.Errorf("the integration approval is no longer claimed: %v", err)
 	}
-	if err := n.releaseDependents(ctx, tx, projectID, task.ID, head, now); err != nil {
-		return nil, err
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE tasks SET lane = ?, state = ?, completed_at = ? WHERE id = ?`,
+		store.LaneDone, store.TaskDone, now.Format(time.RFC3339Nano), task.ID); err != nil {
+		return true, err
 	}
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("committing integration: %w", err)
+	res, err = tx.ExecContext(ctx,
+		`UPDATE feature_runs SET head_sha = ?, state = ? WHERE feature_id = ? AND head_sha = ?`,
+		head, store.FeatureRunning, a.FeatureID, run.HeadSHA)
+	if err != nil {
+		return true, err
 	}
-	return msg, nil
+	if count, err := res.RowsAffected(); err != nil || count != 1 {
+		return true, fmt.Errorf("the feature moved during integration: %v", err)
+	}
+	if err := n.releaseDependents(ctx, tx, a.ProjectID, task.ID, head, now); err != nil {
+		return true, err
+	}
+	return true, tx.Commit()
 }
 
 // releaseDependents queues the cards whose every prerequisite is now in the
@@ -325,12 +299,12 @@ func (n *Nydus) releaseDependents(ctx context.Context, tx *sql.Tx, projectID, fi
 		   JOIN feature_plan_deps d ON d.from_item = finished.id
 		   JOIN feature_plan_items item ON item.id = d.to_item
 		   JOIN tasks t ON t.id = item.child_task_id
-		  WHERE finished.child_task_id = ? AND t.blocked = 1
+		  WHERE finished.child_task_id = ? AND t.blocked = 1 AND t.state = 'queued'
 		    AND NOT EXISTS (
 		        SELECT 1 FROM feature_plan_deps d2
 		          JOIN feature_plan_items p2 ON p2.id = d2.from_item
 		          LEFT JOIN tasks t2 ON t2.id = p2.child_task_id
-		         WHERE d2.to_item = item.id AND (t2.id IS NULL OR t2.state <> ?)
+		         WHERE d2.to_item = item.id AND (t2.id IS NULL OR t2.state <> ? OR t2.parent_id IS NULL OR t2.parent_id <> t.parent_id)
 		    )`, finishedID, store.TaskDone)
 	if err != nil {
 		return fmt.Errorf("finding dependents: %w", err)
@@ -373,6 +347,8 @@ func (n *Nydus) releaseDependents(ctx context.Context, tx *sql.Tx, projectID, fi
 // reads it and none at all once the architect's worktree moves on. That is the
 // failure ARCHITECTURE records for handoffs, on a new path.
 func (n *Nydus) SubmitFeaturePlan(ctx context.Context, scope store.DecisionScope, featureID string, items []store.PlanDraft, prose string) (*store.PlanRevision, error) {
+	n.integrate.Lock()
+	defer n.integrate.Unlock()
 	prose, err := n.resolveEvidence(ctx, scope, prose)
 	if err != nil {
 		return nil, err
@@ -387,16 +363,20 @@ func (n *Nydus) SubmitFeaturePlan(ctx context.Context, scope store.DecisionScope
 // architect's worktree is not the feature's, so a ref read there would name a
 // different commit. It is compared, not translated.
 func (n *Nydus) SubmitFeatureReview(ctx context.Context, scope store.DecisionScope, featureID, head, verdict, note, evidence string) (*store.FeatureReview, error) {
+	n.integrate.Lock()
+	defer n.integrate.Unlock()
 	evidence, err := n.resolveEvidence(ctx, scope, evidence)
 	if err != nil {
 		return nil, err
 	}
-	return n.db.SubmitReview(ctx, featureID, head, verdict, note, evidence)
+	return n.db.SubmitReviewBy(ctx, scope, featureID, head, verdict, note, evidence)
 }
 
 // LandFeature merges the reviewed head onto base. The architect cannot call
 // this: ok on a review is a recommendation, not a merge.
-func (n *Nydus) LandFeature(ctx context.Context, featureID string) error {
+func (n *Nydus) LandFeature(ctx context.Context, featureID, head string) error {
+	n.integrate.Lock()
+	defer n.integrate.Unlock()
 	feat, err := n.db.GetTask(ctx, featureID)
 	if err != nil {
 		return err
@@ -411,6 +391,9 @@ func (n *Nydus) LandFeature(ctx context.Context, featureID string) error {
 	if run == nil || run.State != store.FeatureRunning {
 		return invalid("that feature is not running")
 	}
+	if head == "" || head != run.HeadSHA {
+		return invalid("the feature changed; read its current head before landing")
+	}
 	review, err := n.db.CurrentReview(ctx, featureID)
 	if err != nil {
 		return err
@@ -418,25 +401,36 @@ func (n *Nydus) LandFeature(ctx context.Context, featureID string) error {
 	if review == nil || review.Verdict != store.ReviewOK || review.HeadSHA != run.HeadSHA {
 		return invalid("this feature has no current review of this head; the architect has to look at it first")
 	}
-	live, err := n.db.HasLiveChildren(ctx, featureID)
+	ready, err := n.db.FeatureReady(ctx, featureID)
 	if err != nil {
 		return err
 	}
-	if live {
-		return invalid("this feature still has cards being worked")
+	if !ready {
+		return invalid("this feature still has unfinished or missing planned work")
 	}
 
 	_, outcome, ref, err := n.landApproved(ctx, feat.ProjectID, featureID, run.HeadSHA, review.Note)
 	if err != nil {
 		return err
 	}
+	tx, err := n.db.SQL().BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
 	now := n.now().Format(time.RFC3339Nano)
-	if _, err := n.db.SQL().ExecContext(ctx,
+	if _, err := tx.ExecContext(ctx,
 		`UPDATE tasks SET lane = ?, state = ?, completed_at = ?, outcome = ?, outcome_ref = ? WHERE id = ?`,
 		store.LaneDone, store.TaskDone, now, outcome, ref, featureID); err != nil {
 		return fmt.Errorf("closing the feature: %w", err)
 	}
-	if err := n.db.SetFeatureRunState(ctx, featureID, store.FeatureDone); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE feature_runs SET state = ? WHERE feature_id = ?`, store.FeatureDone, featureID); err != nil {
+		return err
+	}
+	if err := store.RecordFeatureEvent(ctx, tx, feat, store.OperatorRole, "Feature approved by the operator: "+outcome, run.HeadSHA); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
 		return err
 	}
 	n.retireFeatureTree(ctx, feat.ProjectID, featureID)
@@ -447,6 +441,70 @@ func (n *Nydus) LandFeature(ctx context.Context, featureID string) error {
 		n.onTaskDone(ctx, feat.ProjectID, featureID, run.HeadSHA)
 	}
 	return nil
+}
+
+// RefreshFeature folds current base into the integration checkout and records
+// the new head. A changed head requires a new review; merging by hand without
+// recording it stranded the operator behind the old reviewed SHA.
+func (n *Nydus) RefreshFeature(ctx context.Context, featureID, head string) error {
+	n.integrate.Lock()
+	defer n.integrate.Unlock()
+	feat, err := n.db.GetTask(ctx, featureID)
+	if err != nil {
+		return err
+	}
+	run, err := n.liveRun(ctx, featureID)
+	if err != nil {
+		return err
+	}
+	if run == nil || head == "" || head != run.HeadSHA {
+		return invalid("read the current head of a running feature before refreshing it")
+	}
+	if err := n.featureSettled(ctx, featureID); err != nil {
+		return err
+	}
+	if n.integrator == nil {
+		return invalid("this build cannot refresh a feature branch")
+	}
+	project, err := n.db.GetProject(ctx, feat.ProjectID)
+	if err != nil {
+		return err
+	}
+	base, err := n.integrator.Resolve(ctx, project.Path, project.BaseBranch)
+	if err != nil {
+		return err
+	}
+	tree := hatchery.New(project.Path).Path(FeatureWorktree(featureID))
+	if err := n.integrator.MergeInto(ctx, tree, base); err != nil {
+		if busyRepo(err) {
+			return fmt.Errorf("the feature repository is busy; retry the refresh: %w", err)
+		}
+		_ = n.integrator.AbortMerge(ctx, tree)
+		return invalid("refresh from %s conflicted: %v. Send the feature back and retry a card with instructions to merge %s and resolve the conflict in its worktree", project.BaseBranch, err, base)
+	}
+	updated, err := n.integrator.Resolve(ctx, tree, "HEAD")
+	if err != nil {
+		return err
+	}
+	tx, err := n.db.SQL().BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `UPDATE feature_runs SET head_sha = ?, base_sha = ? WHERE feature_id = ?`, updated, base, featureID); err != nil {
+		return err
+	}
+	if err := store.RecordFeatureEvent(ctx, tx, feat, store.OperatorRole, "Refreshed from "+project.BaseBranch+" at "+base, updated); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (n *Nydus) RejectFeature(ctx context.Context, featureID, head, note string) error {
+	n.integrate.Lock()
+	defer n.integrate.Unlock()
+	_, err := n.db.RejectFeatureReview(ctx, featureID, head, note)
+	return err
 }
 
 // retireFeatureTree removes a finished feature's integration worktree.
@@ -466,6 +524,8 @@ func (n *Nydus) retireFeatureTree(ctx context.Context, projectID, featureID stri
 // the feature row stays, so a late write can see it was cancelled rather than
 // vanishing into a cascade.
 func (n *Nydus) CancelFeature(ctx context.Context, featureID string) error {
+	n.integrate.Lock()
+	defer n.integrate.Unlock()
 	feat, err := n.db.GetTask(ctx, featureID)
 	if err != nil {
 		return err
@@ -479,6 +539,12 @@ func (n *Nydus) CancelFeature(ctx context.Context, featureID string) error {
 	}
 	if run != nil && run.State == store.FeatureDone {
 		return invalid("that feature has already landed")
+	}
+	if run != nil && run.State == store.FeatureCancelled {
+		return nil
+	}
+	if err := n.featureSettled(ctx, featureID); err != nil {
+		return err
 	}
 	children, err := n.db.ListTasks(ctx, feat.ProjectID)
 	if err != nil {
@@ -509,8 +575,32 @@ func (n *Nydus) CancelFeature(ctx context.Context, featureID string) error {
 	if err := n.db.CloseFeature(ctx, featureID, store.TaskRejected); err != nil {
 		return err
 	}
+	tx, err := n.db.SQL().BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := store.RecordFeatureEvent(ctx, tx, feat, store.OperatorRole, "Feature cancelled; work remains on its branch", ""); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
 	if run != nil {
 		n.retireFeatureTree(ctx, feat.ProjectID, featureID)
+	}
+	return nil
+}
+
+// A claimed integration may already be in git even if its SQLite write failed.
+// Cancellation or refresh must not erase that recovery boundary.
+func (n *Nydus) featureSettled(ctx context.Context, featureID string) error {
+	var pending int
+	if err := n.db.Read().QueryRowContext(ctx, `SELECT COUNT(*) FROM approvals WHERE feature_id = ? AND state = ?`, featureID, store.ApprovalIntegrating).Scan(&pending); err != nil {
+		return err
+	}
+	if pending != 0 {
+		return invalid("a subtask integration has not finished recording; restart the daemon to recover it before changing the feature")
 	}
 	return nil
 }
@@ -529,6 +619,8 @@ func (n *Nydus) CancelFeature(ctx context.Context, featureID string) error {
 // architect's reject with no action at all — not the retry the panel offered,
 // and not the one this project's own description named as the answer to it.
 func (n *Nydus) RetryChild(ctx context.Context, taskID string) error {
+	n.integrate.Lock()
+	defer n.integrate.Unlock()
 	task, err := n.db.GetTask(ctx, taskID)
 	if err != nil {
 		return err
@@ -552,7 +644,7 @@ func (n *Nydus) RetryChild(ctx context.Context, taskID string) error {
 		// The rejection travels with the card. Its own trail says it finished,
 		// so without this the role picks up work it already did and is told
 		// nothing about why it is doing it again.
-		body = "Retried by the operator to answer the architect's rejection of this feature: " +
+		body = "Retried by the operator to answer the rejection of this feature: " +
 			review.Note + "\n\nThe feature head is where this starts from."
 	default:
 		return invalid("that card has not failed; only a stopped, rejected or finished card is retried")
@@ -580,19 +672,33 @@ func (n *Nydus) RetryChild(ctx context.Context, taskID string) error {
 	}
 	defer tx.Rollback()
 
+	// Retrying a stopped blocked card is not an implicit dependency waiver.
+	blocked := false
+	if task.Blocked {
+		if err := tx.QueryRowContext(ctx,
+			`SELECT EXISTS (SELECT 1 FROM feature_plan_items i
+			 JOIN feature_plan_deps d ON d.to_item = i.id
+			 JOIN feature_plan_items p ON p.id = d.from_item
+			 LEFT JOIN tasks c ON c.id = p.child_task_id
+			 WHERE i.child_task_id = ? AND (c.id IS NULL OR c.state <> 'done' OR c.parent_id IS NULL OR c.parent_id <> ?))`, taskID, task.ParentID).Scan(&blocked); err != nil {
+			return err
+		}
+	}
 	// rework_count too: decision 10 says a stall reuses the threshold that
 	// already surfaces a card going backward too often, and only agent-driven
 	// handoffs were counted. An operator retrying the same card ten times is
 	// the same card looping, and should reach the same list.
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE tasks SET state = ?, lane = ?, blocked = 0, stopped_at = NULL,
+		`UPDATE tasks SET state = ?, lane = ?, blocked = ?, stopped_at = NULL,
 		   completed_at = NULL, rework_count = rework_count + 1
-		  WHERE id = ?`, store.TaskQueued, first.Name, taskID); err != nil {
+		  WHERE id = ?`, store.TaskQueued, first.Name, blocked, taskID); err != nil {
 		return fmt.Errorf("requeueing %s: %w", taskID, err)
 	}
-	if err := n.queueChild(ctx, tx, task.ProjectID, taskID, body, first.Name,
-		priorityOr(task.Priority), run.HeadSHA, now); err != nil {
-		return err
+	if !blocked {
+		if err := n.queueChild(ctx, tx, task.ProjectID, taskID, body, first.Name,
+			priorityOr(task.Priority), run.HeadSHA, now); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }
@@ -603,6 +709,8 @@ func (n *Nydus) RetryChild(ctx context.Context, taskID string) error {
 // role that picks it up is the one that needs to know it is starting without
 // something the plan said it would have.
 func (n *Nydus) WaiveDependency(ctx context.Context, taskID, note string) error {
+	n.integrate.Lock()
+	defer n.integrate.Unlock()
 	if strings.TrimSpace(note) == "" {
 		return invalid("waiving a dependency needs a note: why this card can start without it")
 	}

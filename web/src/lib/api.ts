@@ -352,7 +352,9 @@ export interface Approval {
   /** What the role wrote when it handed the work on. */
   body?: string
   commit?: string
-  /** The approval that performs the merge, rather than one between roles. */
+  /** A whole subtask integration, never a land on the project's base. */
+  featureId?: string
+  /** The approval that performs the base land, rather than one between roles. */
   terminal?: boolean
   createdAt: string
   /** The card asked for an architect sidecar to decide this (not the land). */
@@ -413,6 +415,7 @@ export interface PlanItem {
   body: string
   priority: number
   position: number
+  childTaskId?: string
   after?: string[]
 }
 
@@ -431,6 +434,8 @@ export interface PlanRevision {
   estimateCostUsd: number
   note?: string
   createdAt: string
+  decidedAt?: string
+  decidedBy?: string
   items?: PlanItem[]
 }
 
@@ -442,9 +447,30 @@ export interface FeatureReview {
   featureBody?: string
   headSha: string
   verdict: 'ok' | 'reject'
+  decidedBy: string
   note?: string
   evidenceSha?: string
   createdAt: string
+}
+
+export interface FeatureRun {
+  featureId: string
+  branch: string
+  baseSha: string
+  headSha: string
+  state: 'running' | 'conflict' | 'done' | 'cancelled'
+}
+
+export interface FeatureDetail {
+  task: Task
+  run: FeatureRun | null
+  plans: PlanRevision[]
+  reviews: FeatureReview[]
+  children: Task[]
+  history: TaskStep[]
+  usage: UsageTotal
+  integration: string
+  baseBranch: string
 }
 
 /** One card in a stalled feature, and what can be done about it. */
@@ -679,7 +705,19 @@ export const api = {
   approvePlan: (id: string) => call<void>(`/plans/${id}/approve`, { method: 'POST' }),
   rejectPlan: (id: string, note: string) =>
     call<void>(`/plans/${id}/reject`, { method: 'POST', body: JSON.stringify({ note }) }),
-  landFeature: (id: string) => call<void>(`/features/${id}/land`, { method: 'POST' }),
+  featureDetail: (id: string) => call<FeatureDetail>(`/features/${id}`),
+  featureFiles: (id: string, head: string, evidence = '') =>
+    call<{ files: ChangedFile[]; base: string; head: string }>(
+      `/features/${id}/files?${new URLSearchParams({ head, evidence })}`,
+    ),
+  featureFile: (id: string, head: string, base: string, path: string, evidence = '') =>
+    call<ChangedFile>(`/features/${id}/files?${new URLSearchParams({ head, base, path, evidence })}`),
+  landFeature: (id: string, head: string) =>
+    call<void>(`/features/${id}/land`, { method: 'POST', body: JSON.stringify({ head }) }),
+  refreshFeature: (id: string, head: string) =>
+    call<void>(`/features/${id}/refresh`, { method: 'POST', body: JSON.stringify({ head }) }),
+  rejectFeature: (id: string, head: string, note: string) =>
+    call<void>(`/features/${id}/reject`, { method: 'POST', body: JSON.stringify({ head, note }) }),
   retryCard: (id: string) => call<void>(`/tasks/${id}/retry`, { method: 'POST' }),
   waiveDependency: (id: string, note: string) =>
     call<void>(`/tasks/${id}/waive`, { method: 'POST', body: JSON.stringify({ note }) }),

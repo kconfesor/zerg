@@ -5,39 +5,47 @@ A multi-agent coding orchestrator. Go core, Vue 3 cockpit, pluggable agent harne
 **Everything is configured in the UI.** There are no config files or prompt files to copy. You
 define reusable teams, point zerg at a repo, and override only what that project needs.
 
-Every "why" below traces to a failure that was watched happening, not one that was imagined. Some
-were found running multi-agent orchestrators against real repositories; the rest are zerg's own,
-from its first live task (§6.1).
+zerg was motivated by experience with other coding-agent orchestrators. It borrows ideas, not code.
+
+This document distinguishes **lessons from other orchestrators** from **zerg's own failures**.
+The incidents behind thesis points 1–4 and the table in §6 predate zerg. They describe evaluated
+approaches, not earlier zerg versions or claims about every current alternative. Zerg's own
+first-run failures are recorded separately in §6.1. Elsewhere, comparisons explicitly refer to
+other orchestrators; implementation history describes zerg.
 
 ---
 
 ## 1. Thesis
 
-1. **The harness is an interface, not a branch in a switch statement.** Hardcoding a set of
-   supported backends means adding one is an edit to the launcher, in every place the set appears.
-   Adapters here are a Go interface with a registry.
+The first four principles answer drawbacks observed in other orchestrators. The fifth was
+added after zerg's own first live task.
 
-2. **Agents emit events; they do not paint screens.** An orchestrator that infers status by
-   grepping a terminal pane for a line containing `I'm`, and delivers work by injecting keystrokes
-   into a TUI, is reimplementing a protocol on top of a display. Modern harnesses expose structured
-   output (`pi --mode json|rpc`, `claude --output-format stream-json`). Consume that and the entire
-   scraping layer disappears.
+1. **The harness is an interface, not a branch in a switch statement.** An evaluated orchestrator
+   hardcoded its supported backends in the launcher, so adding one meant editing each place that
+   set appeared.
+   Zerg instead uses a Go adapter interface with a registry.
 
-3. **Configuration is a database, not a filesystem.** Config spread across a conf file, a
-   constitution, article fragments and per-role prompt files, then *snapshotted* into every
-   worktree, means editing the original after launch changes nothing, silently.
+2. **Agents emit events; they do not paint screens.** An evaluated orchestrator inferred status
+   by grepping a terminal pane for a line containing `I'm`, and delivered work by injecting
+   keystrokes into a TUI.
+   Zerg consumes structured harness output (`pi --mode json|rpc`,
+   `claude --output-format stream-json`) instead of building a protocol on top of a display.
 
-   Verified the hard way: an edit setting the project language to Rust never reached a single
-   agent, because the worktrees had been cut from a commit made before it. Six agents built the task
-   in Clojure, with no warning. That incident is why this project exists. One database, one source
-   of truth, composed fresh at every spawn.
+3. **Configuration is a database, not a filesystem.** An evaluated solution spread config across
+   a conf file, a constitution, article fragments and per-role prompt files, then snapshotted them
+   into worktrees. Editing the source after the snapshot did not update what the agents read.
 
-4. **Failure must be loud at the boundary.** A corrupted global config, a CLI too old for its
-   model, an unanswered trust dialog, a broken plugin tree. Four separate incidents in one day, all
-   presenting identically as an agent that looked alive and did nothing. All four were detectable
-   *before* spawning.
+   In one run under that orchestrator, a project-language edit to Rust reached none of the agents:
+   their worktrees had been cut from an earlier commit. Six agents built the task in Clojure, with
+   no warning. Zerg's response is to keep orchestration settings in one database and compose prompts
+   fresh at every spawn.
 
-5. **A green board must mean the work happened.** Added after §6.1, which is the record of a task
+4. **Failure must be loud at the boundary.** One day running another orchestrator produced four
+   incidents: a corrupted global config, a CLI too old for its model, an unanswered trust dialog,
+   and a broken plugin tree. Each looked like an agent that was alive but doing nothing. Those
+   detectable failures motivated zerg's preflight checks *before* spawning (§8).
+
+5. **A green board must mean the work happened.** Added after §6.1, which records a zerg task
    reaching Done over a branch that had never moved. Anything reporting success has to observe the
    thing it claims, not a proxy for it.
 
@@ -45,8 +53,10 @@ from its first live task (§6.1).
 
 ## 2. Scope boundary: provider setup
 
-zerg **does not** manage provider credentials. It never runs a login flow, stores an API key, or
-edits a harness's auth file. Users log into `pi`, `claude`, etc. themselves, using those tools.
+zerg **does not** manage provider login. It never runs a login flow, keeps API keys as zerg
+configuration, or edits the user's original harness auth file. Users log into `pi`, `claude`, etc.
+themselves. Where supported, a private per-role harness directory is seeded from those existing
+files (§8.2); it is not a separate login or a credential stored in zerg's database.
 
 zerg **does** detect credential state and say so plainly. `pi: no credentials for provider 'openai'
 run /login in pi` is a blocked role with a remedy, not a silent hang. Detection is in scope;
@@ -91,9 +101,9 @@ add your own. Editing a template changes the lowest default everywhere.
 orders and enables them, and may specialize every role field. The built-in Default team is
 coder → reviewer and is always shared, since it is where a new project starts.
 
-Teams were global to begin with, and that was wrong in a way ownership fixes rather than explains: a
-team carries the prompts, models and arguments one repository wants, so a global list put those in
-front of every other repository, where adopting one was a click and editing it changed the first
+Zerg initially made all teams global. A team carries the prompts, models and arguments one
+repository wants, so a global list put those in front of every other repository, where adopting
+one was a click and editing it changed the first
 project. `team_presets.project_id` is the separation. NULL is shared; set means that project's, and
 then it is absent from every other project's picker, refused by `SetProjectTeam` if its id is posted
 anyway, and deleted with the project. Moving a team to one project is refused while another runs it,
@@ -169,14 +179,14 @@ explicit and visible: a role showing an override is badged in the team list, so 
 quietly drifted from its reusable team is legible rather than mysterious.
 
 Plus one **shared instructions** document, global, applied to every role. That single editable
-document is the whole of it. There is no constitution file, no article fragments, no layering to
-reason about.
+document replaces the constitution and article-fragment layering seen in other solutions. Zerg
+does not copy that prompt-file hierarchy into worktrees.
 
 ### 4.3 Model discovery
 
-Typing model ids by hand is how you get `Model metadata for 'gpt-5.6-sol' not found` and
-`The 'gpt-5.6-sol' model requires a newer version of Codex`, which is twenty minutes of an agent looking
-alive while every turn 400s.
+An evaluation of another orchestrator encountered `Model metadata for 'gpt-5.6-sol' not found` and
+`The 'gpt-5.6-sol' model requires a newer version of Codex`: twenty minutes of an agent looking alive
+while every turn returned HTTP 400. These harness/model mismatches motivated discovery in zerg.
 
 So `Adapter.ListModels()` asks the harness what it can actually run (`pi --list-models`, claude's
 alias set) and the UI renders a picker. The field still accepts free text, because a harness catalog
@@ -189,14 +199,13 @@ At **every spawn**, the overmind composes `shared instructions + role prompt` fr
 a temp file and hands it to the adapter. Nothing is copied into a worktree; nothing persists between
 runs.
 
-Consequence: edit a prompt in the UI, restart the role, and the change is live. This is the direct
-fix for the snapshot staleness that silently produced a Clojure calculator when the config said Rust.
+Consequence: edit a prompt in the UI, restart the role, and the change is live. This avoids the
+worktree-snapshot staleness behind the Clojure/Rust incident in another orchestrator (§1).
 
-"Every spawn" is literal, and for a while it was not. Configuration was resolved once when the swarm
-started, so a role that crashed and respawned came back with the prompt, model and flags it had when
-the swarm went up, silently, and only for the roles that happened to crash. The supervisor now
-re-reads the role from the database immediately before each spawn, and a role no longer on the team
-stops instead of respawning.
+Zerg later had a different staleness bug of its own: configuration was resolved only when the swarm
+started. A role that crashed and respawned came back with the prompt, model and flags from that
+startup, silently. The supervisor now re-reads the role from the database immediately before each
+spawn, and a role no longer on the team stops instead of respawning.
 
 ### 4.4.1 What zerg injects, and what it leaves alone
 
@@ -251,8 +260,8 @@ agents spend output tokens on telemetry.
 ### 4.5 The built-in library
 
 Nine pipeline templates ship, covering every team shape worth presetting, plus two sidecars the
-daemon starts itself (runner, supervisor), as rows in a picker rather than as branches of the
-orchestrator you have to check out to change your team.
+daemon starts itself (runner, supervisor). They are rows in a picker, rather than team presets on
+separate git branches as seen in other solutions (§6).
 
 | Template | Model | Receive | Gate | Does |
 |---|---|---|---|---|
@@ -292,8 +301,8 @@ structural changes signed off, or on nothing at all for a repo you are happy to 
 
 ## 5. Foundations
 
-Four ideas the rest of the design is built on. They are load-bearing, and none of them is novel.
-they are here because they were tried and they held.
+Four ideas retained from experience with other orchestrators because they worked well. They are
+load-bearing commitments in zerg, not novel inventions or inherited code.
 
 - **Git worktree isolation per role.** One repo, one object store, N linked worktrees; peer commits
   resolve without a fetch. The single best structural idea available.
@@ -302,11 +311,11 @@ they are here because they were tried and they held.
 - **Human gates**: approvals and clarification requests surfaced in the UI.
 - **A board of cards moving through lanes.** The right mental model for an operator.
 
-One consequence worth stating outright: **every role gets a worktree**, and the repo root is the
-integration branch, not a workspace. Letting one role occupy the repo root makes that role special
-in the config, in routing, and on the board: a special case that has to be handled everywhere it
-appears. When the terminal role completes, the *overmind* merges to the base branch. Integration
-belongs to the orchestrator, never to whichever agent happened to be last.
+One deliberate difference: an evaluated orchestrator gave one role the repo root. Zerg gives
+**every role a worktree** and reserves the root for integration, so no role needs special treatment
+in configuration, routing or the board. When the terminal completion is approved, or is ungated, the *overmind*
+applies the project's integration policy (§9.2). Integration belongs to the orchestrator, never to
+whichever agent happened to be last.
 
 A feature (§9.4) adds one more integration checkout, `.worktrees/feature-<id>`, holding
 `zerg-feature/<id>`. Its subtasks integrate there rather than onto base, because a review that
@@ -316,10 +325,11 @@ and serialise every feature in the project.
 
 ## 6. Rejected approaches, and the failures behind them
 
-Every row is a design that was tried and observed failing, not a hypothetical. They are recorded
-because the reasoning is easy to lose once the code looks obvious.
+These are historical observations from evaluating other orchestrators, not implementations tried
+and removed from zerg. The last column records zerg's response to each drawback. This is design
+rationale, not a zerg bug history or an audit of current alternatives.
 
-| Rejected approach | Failure | What zerg does |
+| Approach observed in other orchestrators | Observed failure | Zerg's response |
 |---|---|---|
 | Config as files, snapshotted into each worktree | Post-launch edits silently invisible to every agent; a Rust config produced a Clojure implementation | Database is the only source of truth; prompts composed fresh at spawn |
 | Topology fixed by a conf file plus preset branches (`two-pack`, `four-pack`, `six-pack`) | Changing the team means checking out a different git branch of the orchestrator | Roles are rows, edited in the UI; the team *is* the config |
@@ -340,15 +350,12 @@ because the reasoning is easy to lose once the code looks obvious.
 
 ### 6.1 What the first real run broke
 
-The table above was written before an agent had ever run: every entry came
-from watching an earlier design fail. This section comes from watching *this*
-one fail, on its first live task, and it is kept because the entries share a
-shape the original list does not have.
+The table above records experience with other orchestrators before **zerg** had run a live agent.
+This section records **zerg's own first live task**.
 
-Those earlier failures were mostly **loud**: a stack trace, a stall, an
-unrecoverable state with no way forward. Zerg's first failures were all
-**quiet**: the board went green over work that had not happened. Quiet is
-worse. A stall gets investigated within the hour; a false green ships.
+Those lessons did not make zerg immune to mistakes. Its first run exposed a dangerous recurring
+pattern of its own: the board went green over work that had not happened. A visible stall prompts
+investigation; a false green can ship.
 
 | Mechanism | Failure | Fix |
 |---|---|---|
@@ -433,8 +440,9 @@ decide routing; nydus does.
 
 ### 7.2 Agent-facing protocol
 
-The agent's whole world is a handful of verbs against a unix socket. Same binary, different subcommand, so no
-PATH-synced script directory, no `.sh`/`.bb` wrapper pairs, no cwd inference.
+The agent's whole world is a handful of verbs against a unix socket. Same binary, different
+subcommand: zerg does not use the PATH-synced helper scripts, `.sh`/`.bb` wrapper pairs or cwd-based
+inbox discovery encountered in other orchestrators.
 
 ```
 zerg next [--wait 30s]   claim work (long-poll); JSON on stdout
@@ -503,7 +511,7 @@ to rejoin the route after itself. Forward into a skipped role is refused — not
 is a guess or a stale recipient, and it hands the card to the role somebody chose to leave out.
 
 **Leases.** A claim has a deadline. Ack closes it; expiry returns the work to the queue and marks the
-role degraded. This is the answer to "lost wake-up ⇒ permanent stall, no timer, no retry".
+role degraded. This answers the lost-wake-up stall observed in another orchestrator (§6).
 
 ### 7.3 Two planes
 
@@ -513,26 +521,25 @@ role degraded. This is the answer to "lost wake-up ⇒ permanent stall, no timer
 
 ### 7.4 No tmux
 
-A tmux-based design, one session per role, `send-keys` for delivery and `capture-pane` for the UI,
-is the obvious way to build this, and zerg uses none of it. Agents are ordinary child processes of
-the daemon, supervised with `os/exec`.
+An evaluated orchestrator used one tmux session per role, `send-keys` for delivery and
+`capture-pane` for observation. Zerg did not start with tmux and later remove it: its agents are
+ordinary child processes of the daemon, supervised with `os/exec`.
 
-Every job tmux was doing has a better owner once agents emit structured events:
+The responsibilities have different owners in zerg:
 
-| tmux was providing | Now |
+| Responsibility handled by tmux in other solutions | Zerg's approach |
 |---|---|
 | process supervision | `os/exec` + cerebrate. Real exit codes and signals, restart with backoff, instead of a session that stays "alive" around a process returning HTTP 400 on every turn |
-| somewhere for the TUI to live | Nothing to host in structured mode. Takeover allocates a pty directly (`creack/pty`); tmux was never needed for that |
+| somewhere for the TUI to live | Nothing to host in structured mode. Planned takeover would allocate a pty directly (§10.1) |
 | the delivery channel (`send-keys`) | Structured input over a pipe (§10.2) |
 | the observation channel (`capture-pane`) | The typed event stream (§10.1) |
 | per-project isolation via a socket path | The daemon owns every child; there is no shared namespace to collide in |
 | **surviving the operator's terminal closing** | `zerg up --detach`, plus the restart path below, which puts back what the terminal took with it |
 
-That last row is the only real loss, and tmux's version of it was weaker than it looked: it keeps a
-*process* alive, which does nothing when the orchestrator has lost its *state*. Observed: a daemon
-terminating cleanly on a missing socket file, logging "stopped" and removing its pid, indistinguishable
-from a normal shutdown, while agents sat alive and idle and mail piled up in outboxes with no error
-surfaced anywhere.
+The last row is a useful property to preserve, but keeping agent processes alive was not enough in
+one run with another orchestrator. Its daemon exited cleanly when a socket file disappeared, logging
+"stopped" and removing its pid as if shutdown were intentional. The tmux sessions survived while agents sat
+idle and mail accumulated in outboxes, with no error surfaced.
 
 zerg answers it in three pieces:
 
@@ -544,9 +551,10 @@ zerg answers it in three pieces:
   than asked is closed, so a work period does not read as one that never ended. Nothing has to be
   reattached, and nothing is silently half-delivered.
 
-  This file used to say that if the daemon dies its children die with it, and that is true only of
-  a daemon that is asked to stop. Each agent runs in a process group of its own (`Setpgid`, which
-  is what lets a bash tool call's descendants be killed as a unit), and the group is signalled from
+  Zerg has its own process-lifecycle limitation here. This file used to say that if its daemon dies
+  its children die with it, and that is true only of a daemon that is asked to stop. Each agent runs
+  in a process group of its own (`Setpgid`, which lets a bash tool call's descendants be killed as a
+  unit), and the group is signalled from
   `cmd.Cancel`, which a `SIGKILL`ed daemon never reaches. Measured: after `kill -9` on the daemon,
   a coder was still running thirty seconds later and still writing files into its worktree, and it
   exited on its own only some minutes afterwards. `zerg down` on the same swarm left nothing behind.
@@ -627,7 +635,8 @@ records itself in `zerg.pid` there, which is what `zerg down` and `zerg status` 
 a second daemon opening the same database. It is deliberately not a service manager: it does not
 restart the daemon and has no opinion about boot, which is what launchd and systemd are for.
 
-The prerequisite list shrinks accordingly: Go and a logged-in harness. No tmux, no babashka, no zsh.
+Unlike those other solutions, zerg does not require tmux, babashka or zsh. Building it still needs the
+Go/frontend toolchain and git, and running agents needs a configured harness; see the README.
 
 ### 7.5 Transports
 
@@ -667,9 +676,9 @@ so there is no HTTP/2 multiplexing to make that free. WebSockets are not subject
 
 ## 8. Preflight
 
-Four hangs in one day of running an earlier build presented identically, as an agent that looks alive
-and does nothing, and every one was detectable before spawning. Preflight is that check, promoted
-from something you do when puzzled to something that runs first.
+Four hangs in one day running another orchestrator presented identically: an agent looked alive
+and did nothing, and each cause was detectable before spawning. That experience motivated zerg's preflight.
+The Codex CLI incidents below are historical examples; zerg's shipped adapters are `claude` and `pi`.
 
 Runs before every spawn. Each check yields `ok` or `blocked(reason, remedy)`. A blocked role renders
 in **Attention** with both, never as an idle pane that happens to be doing nothing.
@@ -690,13 +699,13 @@ The same checks run at two points, because the two failures they prevent are dif
 
 **Project setup, the readiness gate.** Adding a project, or pressing Start, runs the full suite
 across **every enabled role** first, in parallel, and renders a readiness panel: one row per role,
-each check green, amber or red, with the remedy inline for anything failing. Start is disabled while
-any role is red.
+each check green, amber or red, with the remedy inline for anything failing. A red check prevents
+the team from starting; the Start control remains available to return that report (§10).
 
-This is the moment that matters. Half our lost day came from a swarm that launched *successfully*:
-six sessions up, dashboard green, board drawn, while four roles sat at a trust dialog and two more
-were dead on a config parse error. Nothing was wrong with the launch; everything was wrong with the
-agents. A team that cannot work should never reach a running board.
+This is the moment that matters. In that run with another orchestrator, launch appeared successful:
+six sessions up, dashboard green, board drawn, while four roles sat at a trust dialog and two were dead on
+a config parse error. Successful session creation did not mean working agents. Zerg's readiness
+gate is intended to catch that distinction before starting a team.
 
 Red is blocking. Amber (an unlisted model, a harness whose version could not be determined) shows a
 warning and allows Start with an explicit acknowledgement, since a catalog can lag a model that
@@ -722,14 +731,19 @@ so the spawn guard costs milliseconds.
 
 ### 8.2 Isolated harness config
 
-Observed: two codex agents launched 1.5s apart into fresh directories, both doing a non-atomic
-read-modify-write of the **global** `~/.codex/config.toml` to register trust. The writes raced,
-producing a file containing three concatenated copies of itself, which then failed to parse for every
-codex invocation on the machine, including unrelated projects.
+In an evaluation of another orchestrator, two Codex CLI agents launched 1.5s apart into fresh directories.
+Both performed a non-atomic read-modify-write of the **global** `~/.codex/config.toml` to register
+trust. The writes raced, leaving three concatenated copies of the file and breaking Codex on the
+whole machine, including unrelated projects.
 
-Each cerebrate therefore gets a private harness config directory (`CODEX_HOME`,
-`PI_CODING_AGENT_DIR`, …) seeded from the user's real one. Agents never write shared global state.
-Adapters declare which env var relocates their config.
+Zerg's response is **adapter-dependent isolation**, not a claim that every harness is isolated.
+`PrivateConfigDir` enables a per-role directory where the harness supports it. The pi adapter
+seeds existing auth/settings/model-cache files and sets `PI_CODING_AGENT_DIR`. The claude adapter
+leaves isolation disabled because relocating its config broke keychain authentication (§6.1).
+There is no shipped Codex CLI adapter using `CODEX_HOME`.
+
+These are the harness's own files, not snapshots of zerg's role prompts or project configuration.
+Those remain database rows composed at spawn (§4.4).
 
 ---
 
@@ -849,10 +863,11 @@ paragraph.
 **A supervised card holds the terminal send even if the finisher's gate is `none`.** Default is
 coder then reviewer, both ungated, so a finished card merges unattended. The flag is on the card
 (`tasks.supervised`), not on the finishing role, because skipping that role would otherwise move
-the policy with it. A feature's subtask is the exception, and deliberately: its last handoff is an
-integration into the feature, not a land, so there is nothing to hold. The only terminal event in a
-feature is the feature landing, and that stays a person. Mid-pipeline gates and questions are decided by the supervisor sidecar
-(`purpose=supervisor`, not the pipeline architect); the land stays a person.
+the policy with it. A feature's subtask has a different destination: its last handoff is held for
+integration into the feature, not for a land on base. That nonterminal approval can be decided by
+the supervisor sidecar (§9.4); delegation does not remove the gate. The only terminal event in a
+feature is the feature landing, which stays human. The sidecar (`purpose=supervisor`, not the
+pipeline architect) also decides supervised mid-pipeline gates and questions.
 `approvals.decided_by` records who actually clicked. A pipeline token never gains `decide`:
 empty `Can` means every *pipeline* verb, and approve is explicit.
 
@@ -933,8 +948,8 @@ still finished, and unhiding returns it unchanged.
 
 A feature is a row in `tasks` with `kind = 'feature'`: it groups cards, and it is not one. `Claim`
 selects `FROM routes JOIN messages`, and a feature has no route, so nothing can hand it to a role.
-Every query that lists cards for a person filters `kind = 'work'`. That rule is about lanes, not
-about attention: applied to the open clarifications as well, it left `ask --task <feature>`
+Lane and rework queries filter `kind = 'work'`; history includes finished features as delivery
+records. That rule is not for attention either: applied to the open clarifications, it left `ask --task <feature>`
 succeeding with the question on no screen at all, and the architect waiting for an answer nobody
 could see was being asked for.
 
@@ -945,9 +960,16 @@ to the head it looked at).
 
 The order matters more than the tables:
 
-- **Nothing exists until the operator accepts the plan.** The split is rows plus a prose commit,
-  with a digest binding them; accepting is what creates the branch, the worktree and every card, in
-  one transaction, and it is the step that spends the money.
+- **Execution waits for the operator's plan acceptance.** The split is rows plus an optional prose
+  commit, bound by a digest. Acceptance prepares the integration checkout, then atomically records
+  the run, cards and routes; no executable work exists until that transaction commits. Planning
+  itself already costs a turn, but it cannot silently buy several pipelines.
+- **Accepted scope is not editable grouping.** The original implementation let “Part of” detach a
+  planned card and then counted only the surviving children: accepting A+B could land just A while
+  B remained queued. A live plan's materialised children cannot be deleted or reparented, and no
+  unplanned card can be added. Acceptance also refuses an existing manual grouping. Review and land
+  check every approved item against its original attached, done child, so older damaged databases
+  cannot turn missing work into a completed plan.
 - **A live architect still needs a turn.** Starting the sidecar for a feature did not wake it:
   the nudge checked only gates and questions, so both planning and final review waited forever
   beside a running process. It now checks the same decision, plan and review queries as `next`.
@@ -960,7 +982,11 @@ The order matters more than the tables:
   priority too, rather than resetting it to 50 or carrying a handoff-only override into the retry.
 - **A subtask integrates into the feature, never onto base.** Its final handoff has a recipient,
   the feature, so it is not terminal and the operator-only check on a terminal approval never fires
-  on it. Only the feature's own landing is terminal.
+  on it. Only the feature's own landing is terminal. Nonterminal does not mean ungated: it creates
+  an approval with an explicit `feature_id`, and the architect decides it through the same delegated
+  gate as a handoff. Diff and mergeability readers compare the whole subtask to the feature head,
+  not its last commit or the project's base. The previous shortcut merged before consulting the
+  gate, which removed a decision the operator had delegated.
 - **A dependency is satisfied by integration, not by a state column.** The route that unblocks a
   dependent carries the *feature head*, so the dependent's worktree receives everything it depends
   on rather than one commit of it.
@@ -969,7 +995,7 @@ The order matters more than the tables:
   that role touched, and worse, the *next* ordinary card inherits the feature. Base is an ancestor
   of the feature branch, so `merge --ff-only` accepts such a commit and takes the whole unreviewed
   feature with it. Measured, not reasoned about. `landApproved` refuses a commit that contains a
-  live feature as the second line of defence — but only past the base it was cut from. A newly
+  live feature as the second line of defence — but only past the base it has incorporated. A newly
   accepted feature has `head_sha == base_sha`, every ordinary commit contains that, and reading it
   as carrying the feature refused every card in the project from the accept until some subtask moved
   the head. Ancestry the base branch already has is not a feature's work.
@@ -985,8 +1011,9 @@ The order matters more than the tables:
   as unfinished.
 - **A conflict is cleared, not left.** No agent works in the integration worktree, and git refuses
   every later merge while a conflict sits there, so one conflict would end every remaining subtask.
-  The run is marked `conflict`, the card that hit it is told to merge the head and resolve in its
-  own tree, and Attention says so. A repository someone else is holding is not a conflict: git does
+  The run is marked `conflict`; the reviewer rejects the held handoff so the author can merge the
+  head and resolve in its own tree, and Attention says so. Rejection carries the unintegrated commit
+  back: a note alone resets the next claim to the feature head and loses the work needing repair. A repository someone else is holding is not a conflict: git does
   not wait for `index.lock`, and reporting that as one marked the whole feature conflicted and sent
   an agent looking for conflict markers that were never written.
 - **Integration is serialised, and the head write is guarded.** The merge is a git subprocess and
@@ -995,7 +1022,11 @@ The order matters more than the tables:
   transaction wrote the earlier head: the branch held both commits, the row held one, and the land
   shipped a feature with a subtask missing while that card read done. `nydus.integrate` covers
   merge-then-record, and the update carries `WHERE head_sha = ?` so a row that disagrees with the
-  branch is an error rather than a silence.
+  branch is an error rather than a silence. Feature decisions, cancellation and refresh share that
+  lock; ordinary approvals keep their existing compare-and-set. The child approval is durably
+  claimed as `integrating` before git runs. If recording fails after the merge, recovery replays the
+  idempotent merge and atomically records the head, decision, child completion and dependency release.
+  Stop/cancel cannot discard that unfinished claim.
 - **The envelope says which of the two a completion is.** `terminal` stays true for a subtask, since
   the send omits `--to` either way, but the shared instructions read that as "merged into the
   project's branch". A subtask's envelope carries `feature`, and a sentence saying the commit is
@@ -1005,7 +1036,9 @@ The order matters more than the tables:
   rejected revision, which is how the architect is asked to try again. Deleting is refused while a
   run is `running` or `conflict`: every child being done is the state a feature waits to be landed
   in, and deleting it there cascaded the run, the plan and the review away while the branch stayed
-  on disk.
+  on disk. Split submission checks this lifecycle too, including inside its write transaction:
+  checking only when offering work let a late answer to cancelled planning create a fresh pending
+  plan, whose acceptance then failed against the existing run.
 - **What stalls is visible and has named actions.** `ListFeatureStalls` is a failed card, a
   deadlocked one, an integration conflict or an architect's rejection; the operator retries a card,
   waives a dependency with a rationale, or cancels the feature. Cancelling is soft: children are
@@ -1015,11 +1048,33 @@ The order matters more than the tables:
   so a retry that took only failed cards left the one stall the architect can cause with no action
   at all — including the one this design names as the answer to it. A done card is retried when, and
   only when, the current review of the head is a rejection, and it carries that note, since its own
-  trail says it finished and nothing else would tell the role why it is doing the work again.
+  trail says it finished and nothing else would tell the role why it is doing the work again. The
+  operator can supersede an architect's OK with a head-bound rejection rather than cancelling the
+  feature. Retrying a stopped, blocked child does not implicitly waive its dependencies.
 - **A verdict names the head it read.** `zerg review` takes `--head`, the sha the envelope handed
   out, and a verdict about anything else is refused. Assigning the head at submission time meant a
   card that integrated while the architect was reading came out approved by a review that never saw
   it, and the operator's land then put it on the base branch. §6.1's class of bug, on a new path.
+  The human's land also names the displayed head. The architect's envelope includes the original
+  brief and accepted plan, and asks for commands, observed acceptance results and unverified scope.
+- **Base advancement is ordinary, not a dead end.** A reviewed feature stopped fast-forwarding when
+  unrelated work reached main, and no supported action could update its recorded head. Refresh now
+  merges current base into the integration checkout and records both shas and a lifecycle entry.
+  A changed head needs a fresh review. Conflicts leave the checkout clean and direct the operator
+  through send-back and a child repair rather than a silent manual merge.
+- **The feature remains the accountability unit after landing.** Lifecycle entries reuse unrouted
+  messages. The feature detail joins plans, reviews, children, history and aggregate usage; it is
+  reachable from Attention, the board and history. `usage_turns.feature_id` snapshots ownership so
+  deleting a finished child cannot erase its contribution to feature cost. Sidecar work windows
+  attribute planning and review turns without inventing pipeline leases; project totals still count
+  each turn once. Whole-change previews use the recorded base sha, not today's base branch, which
+  would make the historical diff empty immediately after landing.
+- **The human's decision has a reading and correction surface.** One `FeaturePanel` shows original
+  scope, committed evidence, bounded/deferred whole diffs, costs, prior verdicts and child remedies.
+  Action errors stay in the enclosing dialog. Chromium and Firefox measurements with long evidence
+  and source lines at 390px and 1440px gave dialog `clientWidth == scrollWidth` (390 and 1024 respectively),
+  and the failed-land alert remained inside the dialog. No live-model acceptance claim follows
+  from that fixture; the executable regressions exercise SQLite, real git and the agent protocol.
 
 ## 10. Cockpit
 
@@ -1095,8 +1150,8 @@ and the first is better than the thing it replaces.
 command with its stdout and exit code, every file edit as a diff, reasoning, errors. This is the
 "what is it doing right now" view. Because it is structured rather than scraped, it is searchable,
 filterable by role or tool, linkable per event, and replayable from the `events` table after a
-reload. A terminal scrape offers none of that; the version of this question it can answer is
-"does the pane contain a line matching `I'm`".
+reload. The comparison is with another orchestrator's dashboard, which inferred activity from
+whether a pane contained a line matching `I'm`.
 
 **Raw stream**. The JSON lines as received. For debugging an adapter, not for watching work.
 
@@ -1113,10 +1168,9 @@ Both target harnesses accept **streaming structured input** alongside streaming 
 (`claude --input-format stream-json`, `pi --mode rpc`). Chat messages, clarification answers and
 follow-ups are therefore delivered as structured messages to a running agent.
 
-No keystrokes are ever injected. Keystroke delivery means sending a fixed literal to whichever pane
-happens to be focused, with hardcoded sleeps racing the TUI's paste debounce, and an exit code of 0
-that means "keys accepted" and never "the agent read it". Delivery here is a write to a pipe with a
-response event to confirm it landed.
+Zerg injects no keystrokes. Another orchestrator's wake-up sent a fixed literal to the focused pane,
+with hardcoded sleeps racing the TUI's paste debounce; tmux exit 0 meant "keys accepted", not
+"the agent read it". Zerg instead writes structured input to a pipe and observes response events.
 
 ### 10.2.1 The brief editor
 
@@ -1157,11 +1211,11 @@ them* and *how often it restarts them*, and both decide whether prompt caching w
 harness prints what it already received; the request and the completion are identical. Structured
 mode is not more expensive than a TUI.
 
-It is slightly *cheaper*, for one reason. A dashboard that reads status by grepping a pane has to
-instruct every agent to narrate its status in prose. Those are output tokens, the most expensive kind,
-spent producing telemetry for a scraper.
-Structured mode carries tool calls, usage and turn boundaries natively. **No role prompt in zerg
-should ever ask an agent to describe what it is doing for the orchestrator's benefit.**
+The relevant saving over narration-based dashboards is avoiding prose status updates, not JSON
+encoding. An evaluated orchestrator asked agents to produce status lines for its pane-scraping
+dashboard: output tokens spent on telemetry for a scraper. Structured mode carries tool calls, usage and turn
+boundaries natively. **No role prompt in zerg should ever ask an agent to describe what it is doing
+for the orchestrator's benefit.**
 
 ### 11.2 The system prompt must be byte-frozen
 
@@ -1519,12 +1573,14 @@ editor. If it reads tiring at length, that editor is the place to make an except
 
 ## 15. Build order, as built
 
-The order below is what was actually followed, and milestones 1–2 being LLM-free is the reason §6
-and §6.1 are almost entirely coordination bugs caught without spending a token.
+This is zerg's build history. Milestones 1–2 exercised coordination against a harness stub without
+LLM calls; they did not establish end-to-end correctness. The incidents in §6 came from other
+orchestrators before zerg existed, while §6.1 records what those early zerg tests missed and its
+first live task exposed.
 
 1. **store + role library + project team API**: templates as rows with the eight built-ins seeded.
-2. **nydus + board** against an in-memory harness stub: leases, claims, acks and terminal merge
-   proven with zero LLM calls.
+2. **nydus + board** against an in-memory harness stub: leases, claims, acks and completion routing
+   exercised with zero LLM calls.
 3. **adapter interface + claude adapter + preflight**: a team that cannot work never reaches a
    running board.
 4. **cerebrate** supervision, lease expiry, crash/backoff.

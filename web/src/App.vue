@@ -869,66 +869,6 @@ const act = {
       }
       await refresh()
     }),
-  acceptPlan: (id: string) =>
-    busy.run(`decide:${id}`, async () => {
-      dialogError.value = ''
-      try {
-        await api.approvePlan(id)
-      } catch (err) {
-        failIn(err)
-      }
-      await refresh()
-    }),
-  rejectPlan: (id: string, note: string) =>
-    busy.run(`decide:${id}`, async () => {
-      dialogError.value = ''
-      try {
-        await api.rejectPlan(id, note)
-      } catch (err) {
-        failIn(err)
-      }
-      await refresh()
-    }),
-  landFeature: (id: string) =>
-    busy.run(`decide:${id}`, async () => {
-      dialogError.value = ''
-      try {
-        await api.landFeature(id)
-      } catch (err) {
-        failIn(err)
-      }
-      await refresh()
-    }),
-  cancelFeature: (id: string) =>
-    busy.run(`decide:${id}`, async () => {
-      dialogError.value = ''
-      try {
-        await api.cancelFeature(id)
-      } catch (err) {
-        failIn(err)
-      }
-      await refresh()
-    }),
-  retryCard: (id: string) =>
-    busy.run(`decide:${id}`, async () => {
-      dialogError.value = ''
-      try {
-        await api.retryCard(id)
-      } catch (err) {
-        failIn(err)
-      }
-      await refresh()
-    }),
-  waiveCard: (id: string, note: string) =>
-    busy.run(`decide:${id}`, async () => {
-      dialogError.value = ''
-      try {
-        await api.waiveDependency(id, note)
-      } catch (err) {
-        failIn(err)
-      }
-      await refresh()
-    }),
   answer: (id: string, answer: string) => {
     if (!answer.trim()) return
     return busy.run(`answer:${id}`, async () => {
@@ -1385,12 +1325,8 @@ watch(current, () => (banner.value = null))
             :busy="busy.is"
             @approve="act.approve"
             @reject="act.reject"
-            @accept-plan="act.acceptPlan"
-            @reject-plan="act.rejectPlan"
-            @land-feature="act.landFeature"
-            @cancel-feature="act.cancelFeature"
-            @retry-card="act.retryCard"
-            @waive-card="act.waiveCard"
+            @feature-updated="refresh"
+            @open-task="(t) => { attentionOpen = false; openTask = t }"
             @answer="act.answer"
           />
         </DialogBody>

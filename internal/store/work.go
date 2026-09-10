@@ -282,6 +282,8 @@ type Lease struct {
 }
 
 type Approval struct {
+	// FeatureID is a non-terminal integration destination, never a base land.
+	FeatureID string    `json:"featureId,omitempty"`
 	ID        string    `json:"id"`
 	ProjectID string    `json:"projectId"`
 	MessageID string    `json:"messageId"`
@@ -723,7 +725,7 @@ func (db *DB) ListPendingApprovals(ctx context.Context, projectID string) ([]App
 		`SELECT a.id, a.project_id, a.message_id, a.state, a.note, a.created_at,
 		        COALESCE(t.name, ''), COALESCE(m.task_id, ''), m.from_role,
 		        m.body, COALESCE(m.commit_sha, ''), m.terminal,
-		        COALESCE(t.supervised, 0), a.evidence_sha
+		        COALESCE(t.supervised, 0), a.evidence_sha, COALESCE(a.feature_id, '')
 		 FROM approvals a
 		 JOIN messages m ON m.id = a.message_id
 		 LEFT JOIN tasks t ON t.id = m.task_id
@@ -745,7 +747,7 @@ func (db *DB) ListPendingApprovals(ctx context.Context, projectID string) ([]App
 		)
 		if err := rows.Scan(&a.ID, &a.ProjectID, &a.MessageID, &a.State, &note,
 			&created, &a.TaskName, &a.TaskID, &a.FromRole, &a.Body, &a.Commit,
-			&terminal, &supervised, &a.EvidenceSHA); err != nil {
+			&terminal, &supervised, &a.EvidenceSHA, &a.FeatureID); err != nil {
 			return nil, err
 		}
 		a.Terminal = terminal != 0
@@ -1297,7 +1299,7 @@ func (db *DB) GetApproval(ctx context.Context, id string) (*Approval, error) {
 	row := db.read.QueryRowContext(ctx,
 		`SELECT a.id, a.project_id, a.message_id, a.state, a.note, a.created_at,
 		        COALESCE(t.name, ''), COALESCE(m.task_id, ''), m.from_role,
-		        m.body, COALESCE(m.commit_sha, ''), m.terminal
+		        m.body, COALESCE(m.commit_sha, ''), m.terminal, COALESCE(a.feature_id, '')
 		   FROM approvals a
 		   JOIN messages m ON m.id = a.message_id
 		   LEFT JOIN tasks t ON t.id = m.task_id
@@ -1310,7 +1312,7 @@ func (db *DB) GetApproval(ctx context.Context, id string) (*Approval, error) {
 		terminal int
 	)
 	err := row.Scan(&a.ID, &a.ProjectID, &a.MessageID, &a.State, &note, &created,
-		&a.TaskName, &a.TaskID, &a.FromRole, &a.Body, &a.Commit, &terminal)
+		&a.TaskName, &a.TaskID, &a.FromRole, &a.Body, &a.Commit, &terminal, &a.FeatureID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("approval %s: %w", id, ErrNotFound)
 	}
@@ -1387,9 +1389,9 @@ func (db *DB) CloseFeature(ctx context.Context, featureID, state string) error {
 		stopped = time.Now().UTC().Format(time.RFC3339Nano)
 	}
 	res, err := db.sql.ExecContext(ctx,
-		`UPDATE tasks SET state = ?, stopped_at = COALESCE(?, stopped_at)
+		`UPDATE tasks SET state = ?, stopped_at = COALESCE(?, stopped_at), completed_at = COALESCE(completed_at, ?)
 		  WHERE id = ? AND kind = ?`,
-		state, stopped, featureID, TaskKindFeature)
+		state, stopped, time.Now().UTC().Format(time.RFC3339Nano), featureID, TaskKindFeature)
 	if err != nil {
 		return fmt.Errorf("closing feature %s: %w", featureID, err)
 	}
@@ -1399,12 +1401,23 @@ func (db *DB) CloseFeature(ctx context.Context, featureID, state string) error {
 // SetTaskParent groups a card under a feature, or detaches it. The parent must
 // be a feature in the same project; a feature cannot belong to another feature.
 func (db *DB) SetTaskParent(ctx context.Context, id, parentID string) error {
+	tx, err := db.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
 	t, err := db.GetTask(ctx, id)
 	if err != nil {
 		return err
 	}
 	if t.Kind == TaskKindFeature {
 		return invalid("a feature cannot belong to another feature")
+	}
+	if t.ParentID == parentID {
+		return nil
+	}
+	if err := db.keepPlannedChild(ctx, id); err != nil {
+		return err
 	}
 	var parent any
 	if parentID != "" {
@@ -1413,12 +1426,30 @@ func (db *DB) SetTaskParent(ctx context.Context, id, parentID string) error {
 		}
 		parent = parentID
 	}
-	res, err := db.sql.ExecContext(ctx,
-		`UPDATE tasks SET parent_id = ? WHERE id = ? AND kind = ?`, parent, id, TaskKindWork)
-	if err != nil {
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE tasks SET parent_id = ? WHERE id = ? AND kind = ?`, parent, id, TaskKindWork); err != nil {
 		return fmt.Errorf("setting parent on %s: %w", id, err)
 	}
-	return mustAffect(res, fmt.Sprintf("task %s", id))
+	return tx.Commit()
+}
+
+// Called while holding the writer, before changing membership or deleting. The
+// plan link is authoritative even for an older database with a detached child.
+func (db *DB) keepPlannedChild(ctx context.Context, id string) error {
+	var name string
+	err := db.read.QueryRowContext(ctx,
+		`SELECT f.name FROM feature_plan_items i
+		 JOIN feature_plan_revisions p ON p.id = i.revision_id
+		 JOIN feature_runs r ON r.feature_id = p.feature_id
+		 JOIN tasks f ON f.id = r.feature_id
+		 WHERE i.child_task_id = ? AND p.state = 'approved' AND r.state IN ('running','conflict')`, id).Scan(&name)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return invalid("this card is approved work for feature %q; retry it, or cancel the feature before removing it", name)
 }
 
 // parentFeature reports whether parentID is a feature in this project.
@@ -1465,6 +1496,13 @@ func (db *DB) StopTask(ctx context.Context, projectID, taskID string) error {
 	}
 	if kind == TaskKindFeature {
 		return invalid("that is a feature, not a card to stop")
+	}
+	var integrating int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM approvals a JOIN messages m ON m.id = a.message_id WHERE m.task_id = ? AND a.state = ?`, taskID, ApprovalIntegrating).Scan(&integrating); err != nil {
+		return err
+	}
+	if integrating != 0 {
+		return invalid("this card is being integrated; let that decision finish, or restart the daemon to recover it, before stopping")
 	}
 
 	stoppedAt := time.Now().UTC().Format(time.RFC3339Nano)
@@ -1525,6 +1563,14 @@ func (db *DB) StopTask(ctx context.Context, projectID, taskID string) error {
 // dropped when a card was tidied away would be a cost report that quietly
 // disagrees with the bill.
 func (db *DB) DeleteTask(ctx context.Context, projectID, taskID string) error {
+	tx, err := db.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("beginning delete: %w", err)
+	}
+	defer tx.Rollback()
+	if err := db.keepPlannedChild(ctx, taskID); err != nil {
+		return err
+	}
 	task, err := db.GetTaskIn(ctx, projectID, taskID)
 	if err != nil {
 		return err
@@ -1552,12 +1598,6 @@ func (db *DB) DeleteTask(ctx context.Context, projectID, taskID string) error {
 				run.Branch)
 		}
 	}
-	tx, err := db.sql.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("beginning delete: %w", err)
-	}
-	defer tx.Rollback()
-
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM events WHERE task_id = ? AND project_id = ?`, taskID, projectID); err != nil {
 		return fmt.Errorf("deleting the transcript: %w", err)
@@ -1632,11 +1672,12 @@ func (db *DB) ListHistory(ctx context.Context, projectID string, f HistoryFilter
 		limit = 50
 	}
 
-	where := []string{"t.project_id = ?", "t.kind = ?"}
+	// Features leave the live strip when finished, not the durable history.
+	where := []string{"t.project_id = ?"}
 	// The operator is the sender of the message that opens every card, so it is
 	// on every row and says nothing about who worked on it. The trail still
 	// shows that first message; this is the list of agents.
-	args := []any{OperatorRole, projectID, TaskKindWork}
+	args := []any{OperatorRole, projectID}
 	switch {
 	case f.Outcome == "none":
 		where = append(where, "t.outcome = ''")
@@ -1680,10 +1721,14 @@ func (db *DB) ListHistory(ctx context.Context, projectID string, f HistoryFilter
 		             GROUP BY m.from_role ORDER BY first)), '')
 		   FROM tasks t
 		   LEFT JOIN (
-		       SELECT task_id,
-		              SUM(input_tokens + cache_read_tokens + cache_write_tokens + output_tokens) AS tokens,
-		              SUM(cost_usd) AS cost
-		         FROM usage_turns GROUP BY task_id
+		       SELECT task_id, SUM(tokens) AS tokens, SUM(cost) AS cost FROM (
+		           SELECT task_id, input_tokens + cache_read_tokens + cache_write_tokens + output_tokens AS tokens,
+		                  cost_usd AS cost FROM usage_turns
+		           UNION ALL
+		           SELECT feature_id, input_tokens + cache_read_tokens + cache_write_tokens + output_tokens,
+		                  cost_usd FROM usage_turns
+		            WHERE feature_id IS NOT NULL AND (task_id IS NULL OR feature_id <> task_id)
+		       ) GROUP BY task_id
 		   ) u ON u.task_id = t.id
 		  WHERE `+strings.Join(where, " AND ")+`
 		  ORDER BY (t.completed_at IS NULL) DESC,

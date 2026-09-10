@@ -467,9 +467,14 @@ func (s *Server) approvalDiff(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	base, err := s.approvalBase(r.Context(), approval, project)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
 	var files []hatchery.ChangedFile
-	if approval.Terminal {
-		files, err = hat.RangeFiles(r.Context(), project.BaseBranch, approval.Commit, maxFile, eagerFiles)
+	if approval.Terminal || approval.FeatureID != "" {
+		files, err = hat.RangeFiles(r.Context(), base, approval.Commit, maxFile, eagerFiles)
 	} else {
 		files, err = hat.ChangedFiles(r.Context(), approval.Commit, maxFile, eagerFiles)
 	}
@@ -498,8 +503,8 @@ func (s *Server) approvalDiff(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"files": files,
 		// So the view can say whether this is one commit or a merge.
-		"range": approval.Terminal,
-		"base":  project.BaseBranch,
+		"range": approval.Terminal || approval.FeatureID != "",
+		"base":  base,
 		// Where the reader got to last time. With the files rather than in a
 		// second request: it is about these files, and an approval read on a
 		// phone and finished at a desk should open where it was left.
@@ -647,9 +652,14 @@ func (s *Server) approvalMergeable(w http.ResponseWriter, r *http.Request) {
 	// so a commit that has fallen behind the base does not land however clean
 	// the merge would be; a pull request is merged by the forge, and branch
 	// mode lands nothing.
+	base, err := s.approvalBase(r.Context(), approval, project)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
 	answer, err := hatchery.New(project.Path).MergeCheck(
-		r.Context(), project.BaseBranch, approval.Commit,
-		project.Integration == store.IntegrateMerge)
+		r.Context(), base, approval.Commit,
+		approval.FeatureID == "" && project.Integration == store.IntegrateMerge)
 	if err != nil {
 		// A ref this repository does not have is the operator's problem: a
 		// branch deleted, a worktree pruned, a clone that never had it. Every
@@ -1066,8 +1076,12 @@ func (s *Server) approvalFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	base := ""
-	if approval.Terminal {
-		base = project.BaseBranch
+	if approval.Terminal || approval.FeatureID != "" {
+		base, err = s.approvalBase(r.Context(), approval, project)
+		if err != nil {
+			s.fail(w, r, err)
+			return
+		}
 	}
 	file, err := hatchery.New(project.Path).LoadFile(r.Context(), base, approval.Commit, path, 256*1024)
 	if err != nil {
@@ -1079,6 +1093,22 @@ func (s *Server) approvalFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, file)
+}
+
+// All three readers must ask about the same destination as the actual merge.
+// A feature integration is a real merge into the feature, not a base fast-forward.
+func (s *Server) approvalBase(ctx context.Context, a *store.Approval, p *store.Project) (string, error) {
+	if a.FeatureID == "" {
+		return p.BaseBranch, nil
+	}
+	run, err := s.db.GetFeatureRun(ctx, a.FeatureID)
+	if err != nil {
+		return "", err
+	}
+	if run == nil {
+		return "", fmt.Errorf("the approval's feature run is missing")
+	}
+	return run.HeadSHA, nil
 }
 
 // markFileSeen records where a reader has got to in a diff.

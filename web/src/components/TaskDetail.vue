@@ -23,6 +23,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import TaskFlow from '@/components/TaskFlow.vue'
+import FeaturePanel from '@/components/FeaturePanel.vue'
 import Artifacts from '@/components/Artifacts.vue'
 import RunPanel from '@/components/RunPanel.vue'
 import {
@@ -136,7 +137,10 @@ function tokensOf(u: TaskDetail['usage']): number {
     <DialogContent class="min-w-0 gap-0 overflow-hidden p-0 sm:max-w-5xl">
       <DialogHeader class="hairline-b shrink-0 px-5 py-4 pr-12">
         <DialogTitle class="truncate">{{ task?.name }}</DialogTitle>
-        <DialogDescription class="flex flex-wrap items-center gap-2 text-[11px]">
+        <DialogDescription v-if="task?.kind === 'feature'" class="text-[11px]">
+          Plans, evidence, decisions and cost for the whole feature.
+        </DialogDescription>
+        <DialogDescription v-else class="flex flex-wrap items-center gap-2 text-[11px]">
           <Badge :variant="task?.stoppedAt ? 'secondary' : 'outline'">
             {{ task ? taskState(task) : '' }}
           </Badge>
@@ -167,7 +171,7 @@ function tokensOf(u: TaskDetail['usage']): number {
             architect supervised
           </Badge>
           <label
-            v-if="task && features?.length && task.kind !== 'feature'"
+            v-if="task && features?.length"
             class="text-muted-foreground flex items-center gap-1.5"
           >
             Part of
@@ -200,6 +204,13 @@ function tokensOf(u: TaskDetail['usage']): number {
       </DialogHeader>
 
       <DialogBody>
+        <FeaturePanel
+          v-if="task?.kind === 'feature'"
+          :feature-id="task.id"
+          @updated="emit('updated', $event)"
+          @open-task="emit('updated', $event)"
+        />
+        <template v-else>
         <!-- Running what this card produced, after the fact.
              "What did this actually look like" is a question asked of a
              finished card at least as often as of one at a gate, and the
@@ -245,6 +256,7 @@ function tokensOf(u: TaskDetail['usage']): number {
             </p>
           </template>
         </TaskFlow>
+        </template>
       </DialogBody>
     </DialogContent>
   </Dialog>

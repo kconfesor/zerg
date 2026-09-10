@@ -113,6 +113,18 @@ func TestSupervisorNextReturnsAPlan(t *testing.T) {
 	if work.Kind != "plan" || work.Task == nil || work.Task.ID != feat.ID {
 		t.Fatalf("kind=%q task=%v, want a plan for the feature", work.Kind, work.Task)
 	}
+	planningAt := time.Now().UTC()
+	owned, err := f.db.CurrentTaskFor(ctx, f.project.ID, "supervisor")
+	if err != nil || owned == nil || *owned != feat.ID {
+		t.Fatalf("planning ownership: %v %v", owned, err)
+	}
+	if err := f.db.RecordUsage(ctx, store.UsageTurn{ProjectID: f.project.ID, TaskID: owned, Role: "supervisor", Provider: "anthropic", Model: "test", CostUSD: 0.5, Billing: "metered", CostSource: store.CostFromHarness}); err != nil {
+		t.Fatal(err)
+	}
+	usage, err := f.db.UsageForTask(ctx, feat.ID)
+	if err != nil || usage.CostUSD != 0.5 {
+		t.Fatalf("planning spend disappeared: %+v %v", usage, err)
+	}
 	// A copied command must not turn a multi-word name into positional args.
 	if !strings.Contains(work.Body, "zerg split --feature "+feat.ID+" ") {
 		t.Errorf("split example does not use the feature's unambiguous id: %s", work.Body)
@@ -128,6 +140,12 @@ func TestSupervisorNextReturnsAPlan(t *testing.T) {
 	}
 	if _, err := sup.Next(ctx, 0); !errors.Is(err, ErrNoWork) {
 		t.Errorf("next after submitting = %v, want no work while the operator decides", err)
+	}
+	if owned, err := f.db.CurrentTaskFor(ctx, f.project.ID, "supervisor"); err != nil || owned != nil {
+		t.Fatalf("idle sidecar still owns a feature: %v %v", owned, err)
+	}
+	if owned, err := f.db.TaskForAt(ctx, f.project.ID, "supervisor", planningAt); err != nil || owned == nil || *owned != feat.ID {
+		t.Fatalf("a delayed planning event lost its owner: %v %v", owned, err)
 	}
 }
 
