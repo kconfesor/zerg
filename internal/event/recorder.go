@@ -94,7 +94,12 @@ func (r *Recorder) push(ev Event) {
 	// transcript and multiply the table by the number of words in it. Queuing
 	// them first would also spend the queue -- and the shedding that protects
 	// it -- on rows that were always going to be thrown away.
-	if ev.Kind == adapter.EventMessageDelta {
+	//
+	// EventDone the same way: it is a liveness signal for a caller waiting on
+	// a whole answer, not a fact about the conversation, and every harness
+	// emits one per turn cycle for every role -- a transcript row nobody would
+	// read, forever.
+	if ev.Kind == adapter.EventMessageDelta || ev.Kind == adapter.EventDone {
 		return
 	}
 	r.mu.Lock()

@@ -128,7 +128,7 @@ type Manager struct {
 	// when a turn ends.
 	pending map[string][]Message
 
-	// turns is the projects whose chat session is mid-turn.
+	// turns is the conversations whose chat session is mid-turn.
 	//
 	// One session answers both the chat screen and a question asked from a
 	// review, and its output is a stream with nobody's name on it. A review
@@ -136,7 +136,27 @@ type Manager struct {
 	// message's answer and recorded it on the thread, under the agent's name,
 	// as though it were about the code. There is nothing in an event to tell
 	// them apart, so they take turns instead.
-	turns map[string]bool
+	//
+	// Each claim carries a token rather than just marking the chatID taken.
+	// Stop ends a session out from under whatever was waiting on it, and a
+	// waiter whose own caller gave up keeps a reservation open in the
+	// background until the agent actually finishes (see drainAbandonedAsk) --
+	// both leave a claim outliving the code that took it, and a bare bool
+	// cannot tell that claim apart from whatever claims the same chatID next.
+	turns   map[string]turnClaim
+	turnSeq uint64
+}
+
+// turnClaim is one admitted turn on one conversation.
+//
+// cancel wakes whoever is waiting on it -- AskAndWait's own select loop --
+// the moment this specific claim ends for a reason that has nothing to do
+// with the agent answering: Stop, or a later claim superseding this one.
+// Nil for a claim nothing is synchronously waiting on (Ask's, and
+// drainAbandonedAsk's own continuation of one).
+type turnClaim struct {
+	token  uint64
+	cancel context.CancelFunc
 }
 
 // ErrClosed is returned when a conversation is being ended.
@@ -153,23 +173,42 @@ var ErrClosed = errors.New("this conversation has been closed")
 var ErrBusy = errors.New("the agent is in the middle of an answer; ask again when it finishes")
 
 // beginTurn claims a conversation for one question, or reports it taken.
-func (m *Manager) beginTurn(chatID string) bool {
+//
+// The context returned is derived from base and is what the claim's own
+// waiter must select on: it is cancelled the moment this specific claim
+// ends for a reason that has nothing to do with the agent answering --
+// Stop, or a later claim superseding it -- and only that, never an
+// unrelated chatID's turn ending. base is the caller's own ctx for a
+// synchronous waiter (AskAndWait), so a caller timeout is inherited
+// automatically, or context.Background() for a claim nothing is
+// synchronously waiting on (Ask's), whose only source of early cancellation
+// is Stop.
+func (m *Manager) beginTurn(base context.Context, chatID string) (context.Context, uint64, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.turns[chatID] {
-		return false
+	if _, busy := m.turns[chatID]; busy {
+		return nil, 0, false
 	}
 	if m.turns == nil {
-		m.turns = map[string]bool{}
+		m.turns = map[string]turnClaim{}
 	}
-	m.turns[chatID] = true
-	return true
+	m.turnSeq++
+	token := m.turnSeq
+	turnCtx, cancel := context.WithCancel(base)
+	m.turns[chatID] = turnClaim{token: token, cancel: cancel}
+	return turnCtx, token, true
 }
 
-func (m *Manager) endTurn(chatID string) {
+// endTurn releases a conversation, but only the claim named by token -- a
+// call whose own claim was already superseded (by Stop, or by a later
+// beginTurn on the same chatID once this one gave it up) must not clear
+// whatever claimed the conversation next.
+func (m *Manager) endTurn(chatID string, token uint64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	delete(m.turns, chatID)
+	if claim, ok := m.turns[chatID]; ok && claim.token == token {
+		delete(m.turns, chatID)
+	}
 }
 
 // Busy reports whether a conversation is mid-answer. Advisory: the caller that
@@ -177,7 +216,8 @@ func (m *Manager) endTurn(chatID string) {
 func (m *Manager) Busy(chatID string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.turns[chatID]
+	_, busy := m.turns[chatID]
+	return busy
 }
 
 type session struct {
@@ -314,7 +354,7 @@ func NewManager(db *store.DB, reg *adapter.Registry, bus *event.Bus, log *slog.L
 	return &Manager{
 		db: db, registry: reg, bus: bus, log: log, stateDir: stateDir,
 		sessions: map[string]*session{},
-		turns:    map[string]bool{},
+		turns:    map[string]turnClaim{},
 		pending:  map[string][]Message{},
 		closing:  map[string]bool{},
 	}
@@ -344,7 +384,11 @@ func (m *Manager) Ask(ctx context.Context, projectID, chatID string, msg Message
 	// the order it was typed, and is sent when the turn in flight ends: the
 	// alternative was refusing it, which made the screen behave unlike every
 	// chat a person has used.
-	if !m.beginTurn(chatID) {
+	// context.Background(), not ctx: nothing here waits synchronously on the
+	// claim, so its only source of early cancellation is Stop, never this
+	// request's own lifetime.
+	turnCtx, token, ok := m.beginTurn(context.Background(), chatID)
+	if !ok {
 		m.record(projectID, chatID, msg)
 		m.mu.Lock()
 		m.pending[chatID] = append(m.pending[chatID], msg)
@@ -357,12 +401,12 @@ func (m *Manager) Ask(ctx context.Context, projectID, chatID string, msg Message
 	events, cancel := m.bus.Subscribe(256)
 	if err := m.submit(ctx, projectID, chatID, msg); err != nil {
 		cancel()
-		m.endTurn(chatID)
+		m.endTurn(chatID, token)
 		return err
 	}
 	// The chat screen does not wait for its own answer, so something has to:
 	// the conversation is this question's until the agent stops talking.
-	go m.releaseAtTurnEnd(projectID, chatID, events, cancel)
+	go m.releaseAtTurnEnd(projectID, chatID, token, turnCtx, events, cancel)
 	return nil
 }
 
@@ -523,14 +567,22 @@ const turnBackstop = 5 * time.Minute
 
 // releaseAtTurnEnd frees the session when the agent stops talking, and sends
 // whatever was typed while it was.
-func (m *Manager) releaseAtTurnEnd(projectID, chatID string, events <-chan event.Event, cancel func()) {
-	defer m.drainOrRelease(projectID, chatID)
+func (m *Manager) releaseAtTurnEnd(
+	projectID, chatID string, token uint64, turnCtx context.Context,
+	events <-chan event.Event, cancel func(),
+) {
+	defer m.drainOrRelease(projectID, chatID, token, turnCtx)
 	defer cancel()
 
-	said := false
 	backstop := time.After(turnBackstop)
 	for {
 		select {
+		case <-turnCtx.Done():
+			// Stop cancelled this specific claim -- the session it belonged
+			// to is already gone, and drainOrRelease's own token check is
+			// what keeps this from touching whatever claimed the chatID
+			// next.
+			return
 		case <-backstop:
 			return
 		case ev, ok := <-events:
@@ -544,18 +596,17 @@ func (m *Manager) releaseAtTurnEnd(projectID, chatID string, events <-chan event
 				continue
 			}
 			switch ev.Kind {
-			case adapter.EventMessage:
-				said = true
 			case adapter.EventError:
 				return
-			case adapter.EventTurnEnd:
-				// Not the first turn that ends: a session emits one before the
-				// reply to this question arrives, and releasing there would let
-				// the next question start into the middle of this answer, which
-				// is the crossed wire this exists to prevent.
-				if said {
-					return
-				}
+			case adapter.EventDone:
+				// Not turn_end: pi's own turn_end fires once per model call,
+				// including the ones that only decided to call a tool, and
+				// releasing there would let the next queued question start
+				// into the middle of this answer -- the crossed wire this
+				// exists to prevent. EventDone is the harness saying nothing
+				// further is coming until something new is submitted. See
+				// EventDone's own doc.
+				return
 			}
 		}
 	}
@@ -568,30 +619,40 @@ func (m *Manager) releaseAtTurnEnd(projectID, chatID string, events <-chan event
 // re-taken: releasing first would let a review's question in between two
 // things a person typed in a row, and that question would then collect the
 // answer to theirs.
-func (m *Manager) drainOrRelease(projectID, chatID string) {
+func (m *Manager) drainOrRelease(projectID, chatID string, token uint64, turnCtx context.Context) {
 	m.mu.Lock()
+	// The claim named by token, not merely whatever is at chatID now: Stop
+	// can end this exact claim and let a fresh one take the chatID before
+	// this deferred call runs, and whatever is in m.pending by then belongs
+	// to that fresh claim, not to this one to deliver or drop.
+	if claim, ok := m.turns[chatID]; !ok || claim.token != token {
+		m.mu.Unlock()
+		return
+	}
 	queued := m.pending[chatID]
 	if len(queued) == 0 {
+		delete(m.turns, chatID)
 		m.mu.Unlock()
-		m.endTurn(chatID)
 		return
 	}
 	next := queued[0]
 	m.pending[chatID] = queued[1:]
 	m.mu.Unlock()
 
-	// Its own context and its own subscription: the turn that just ended owns
-	// neither any more.
+	// Its own subscription: the turn that just ended owns none any more.
+	// turnCtx keeps coming from the original beginTurn, not a new one --
+	// the claim it is cancelled by has not changed just because the message
+	// it is answering has.
 	events, cancel := m.bus.Subscribe(256)
 	ctx, stop := context.WithTimeout(context.Background(), time.Minute)
 	defer stop()
 	if err := m.deliver(ctx, projectID, chatID, next); err != nil {
 		m.log.Warn("could not send a queued chat message", "chat", chatID, "err", err)
 		cancel()
-		m.endTurn(chatID)
+		m.endTurn(chatID, token)
 		return
 	}
-	go m.releaseAtTurnEnd(projectID, chatID, events, cancel)
+	go m.releaseAtTurnEnd(projectID, chatID, token, turnCtx, events, cancel)
 }
 
 // ensure starts the session for a project if it is not already running.
@@ -705,6 +766,15 @@ func (m *Manager) Stop(chatID string) {
 		delete(m.sessions, chatID)
 	}
 	delete(m.pending, chatID)
+	// Cancelled, not just cleared: the session this claim belonged to no
+	// longer exists, and anything still waiting on it -- AskAndWait's own
+	// select loop, or releaseAtTurnEnd's -- needs to be told so directly
+	// rather than left blocked on events that are never coming, or worse,
+	// left running until its own unrelated timeout while a fresh claim on
+	// this same chatID is already answering a different question.
+	if claim, ok := m.turns[chatID]; ok {
+		claim.cancel()
+	}
 	delete(m.turns, chatID)
 }
 
@@ -801,8 +871,8 @@ func (m *Manager) End(ctx context.Context, projectID, chatID string) error {
 // Ask is right for the chat screen, where the reply streams into a conversation
 // somebody is watching. A question asked from inside a diff has somewhere
 // specific to land: the review thread it was asked on. So this one listens for
-// the agent's own messages until it finishes its turn, and hands back what it
-// said.
+// the agent's own messages until the whole answer is in, and hands back what
+// it said.
 //
 // One question at a time per conversation, not per daemon. Two overlapping
 // asks on the *same* chatID would each collect the other's sentences, since
@@ -814,6 +884,27 @@ func (m *Manager) End(ctx context.Context, projectID, chatID string) error {
 // conversations were never actually at risk of collecting each other's
 // sentences, only serialised for no reason. See
 // docs/design/code-explorer.md decision 8.
+//
+// Waits for EventDone, not EventTurnEnd. This used to return on the first
+// turn_end that had collected any message at all, which was the whole
+// answer for claude (its turn_end already means that) but not for pi: caught
+// live against a real run, pi's own turn_end fires once per model call, and
+// a call that only decides to read a file still carries a stopReason of
+// "toolUse", not "stop" -- there was no way to tell "the model said
+// something" apart from "the model is done" from turn_end alone. EventDone
+// is that distinction, made once in the adapter rather than guessed at here.
+//
+// The claim outlives this call on two different exits, and each hands it to
+// something else rather than dropping it: Stop cancels turnCtx directly, in
+// which case the session this call was waiting on no longer exists and there
+// is nothing further to collect; ctx (the caller's own timeout) expiring
+// while turnCtx has not means the agent underneath may still be mid-turn, so
+// the claim is handed to drainAbandonedAsk rather than released out from
+// under a session that is still about to answer -- releasing it here would
+// let a fresh question start and collect whatever this one was still
+// waiting for. Checked directly: without this, a caller's own askTimeout
+// firing freed the conversation immediately while the agent kept running,
+// and the next question in was the one that got yesterday's answer.
 func (m *Manager) AskAndWait(ctx context.Context, projectID, question string) (string, error) {
 	if question == "" {
 		return "", fmt.Errorf("nothing to ask")
@@ -828,31 +919,54 @@ func (m *Manager) AskAndWait(ctx context.Context, projectID, question string) (s
 
 	// Claims this conversation for this question, or refuses immediately: no
 	// waiting on a lock first to find out. Everything this collects has to
-	// belong to this question.
-	if !m.beginTurn(chatID) {
+	// belong to this question. Based on ctx: a caller timeout is inherited by
+	// turnCtx automatically, which is what lets the two exits below be told
+	// apart by ctx.Err() alone.
+	turnCtx, token, ok := m.beginTurn(ctx, chatID)
+	if !ok {
 		return "", ErrBusy
 	}
-	defer m.endTurn(chatID)
 
 	// Subscribed before the question is sent: a fast agent can answer before a
 	// subscription taken afterwards exists, and the answer would be lost to a
 	// caller that is still waiting for it.
 	events, cancel := m.bus.Subscribe(256)
-	defer cancel()
 
 	if err := m.submit(ctx, projectID, chatID, Message{Text: question}); err != nil {
+		cancel()
+		m.endTurn(chatID, token)
 		return "", err
 	}
 
 	var said []string
 	for {
 		select {
-		case <-ctx.Done():
-			// Whatever it managed to say is better than nothing: a long answer
-			// cut short still tells the reader something.
-			return strings.TrimSpace(strings.Join(said, "\n\n")), ctx.Err()
+		case <-turnCtx.Done():
+			if ctx.Err() != nil {
+				// The caller gave up, not the conversation. The agent may
+				// still be mid-turn and about to emit the real answer, or
+				// nothing at all if it is not -- either way, something has
+				// to keep the reservation until that is known, or a fresh
+				// question here would race whatever this one is still about
+				// to collect. Handed the live subscription rather than
+				// resubscribing fresh: a second or two between the two would
+				// be a window in which the real answer arrives and is seen
+				// by nobody, holding the reservation for the full backstop
+				// over an answer that in fact landed right away.
+				go m.drainAbandonedAsk(projectID, chatID, token, events, cancel)
+				// Whatever it managed to say is better than nothing: a long
+				// answer cut short still tells the reader something.
+				return strings.TrimSpace(strings.Join(said, "\n\n")), ctx.Err()
+			}
+			// Stop cancelled this claim directly: the session is gone, and
+			// there is nothing left to wait for or to release -- Stop
+			// already did that.
+			cancel()
+			return strings.TrimSpace(strings.Join(said, "\n\n")), turnCtx.Err()
 		case ev, ok := <-events:
 			if !ok {
+				m.endTurn(chatID, token)
+				cancel()
 				return strings.TrimSpace(strings.Join(said, "\n\n")), nil
 			}
 			if ev.ProjectID != projectID || ev.Role != Role || ev.ChatID != chatID {
@@ -863,21 +977,54 @@ func (m *Manager) AskAndWait(ctx context.Context, projectID, question string) (s
 				if text := strings.TrimSpace(ev.Text); text != "" {
 					said = append(said, text)
 				}
-			case adapter.EventTurnEnd:
-				// Not the first turn that ends: the one that carried the
-				// answer. A session emits a turn_end before this question's
-				// reply arrives, and returning there gave the thread an empty
-				// comment while the agent went on to answer perfectly well two
-				// seconds later.
-				if len(said) == 0 {
-					continue
-				}
+			case adapter.EventDone:
+				m.endTurn(chatID, token)
+				cancel()
 				return strings.TrimSpace(strings.Join(said, "\n\n")), nil
 			case adapter.EventError:
+				m.endTurn(chatID, token)
+				cancel()
 				if len(said) == 0 {
 					return "", fmt.Errorf("the agent could not answer: %s", ev.Text)
 				}
 				return strings.TrimSpace(strings.Join(said, "\n\n")), nil
+			}
+		}
+	}
+}
+
+// drainAbandonedAsk keeps one AskAndWait call's reservation held after its
+// own caller has stopped waiting, until the agent it was talking to actually
+// finishes -- so a fresh ask on the same conversation is correctly told busy
+// rather than started early and left to collect whatever this one is still
+// about to say. Same backstop as releaseAtTurnEnd, and for the same reason: a
+// harness that never emits another event must not hold a reservation for the
+// life of the daemon.
+//
+// Takes over AskAndWait's own subscription rather than opening a new one:
+// AskAndWait has already stopped reading events by the time this goroutine
+// starts, so there is exactly one reader on the channel at any moment, never
+// two racing for the same event.
+func (m *Manager) drainAbandonedAsk(
+	projectID, chatID string, token uint64, events <-chan event.Event, cancel func(),
+) {
+	defer cancel()
+	defer m.endTurn(chatID, token)
+
+	backstop := time.After(turnBackstop)
+	for {
+		select {
+		case <-backstop:
+			return
+		case ev, ok := <-events:
+			if !ok {
+				return
+			}
+			if ev.ProjectID != projectID || ev.Role != Role || ev.ChatID != chatID {
+				continue
+			}
+			if ev.Kind == adapter.EventDone || ev.Kind == adapter.EventError {
+				return
 			}
 		}
 	}

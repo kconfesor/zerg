@@ -487,7 +487,12 @@ func (a *Adapter) Parse(line []byte) ([]adapter.Event, error) {
 		// has already arrived as its own message event — carrying it again
 		// stored every answer twice, in the tier that costs the most to keep.
 		// turn_end means the turn ended; that is all anyone reads it for.
-		out = append(out, adapter.Event{Kind: adapter.EventTurnEnd})
+		//
+		// EventDone too: claude's CLI runs every internal tool-calling round
+		// itself and prints exactly one result at the very end, so turn_end
+		// already means the whole answer here -- unlike pi, which prints one
+		// per model call. See EventDone's own doc.
+		out = append(out, adapter.Event{Kind: adapter.EventTurnEnd}, adapter.Event{Kind: adapter.EventDone})
 		return out, nil
 
 	default:

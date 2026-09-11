@@ -129,16 +129,15 @@ type explainRequest struct {
 
 // noNarration is appended to both prompts below.
 //
-// AskAndWait returns on the first turn boundary that has any message in it,
-// not the one that finishes the answer -- checked directly against a real
-// run's event log: a first turn of "I'll look at the docs directory at that
-// commit." with no tool call yet was itself enough to end the wait, and the
-// three turns of actual reading and the real explanation that followed never
-// reached the caller. That is a real gap in AskAndWait shared by
-// askAboutTheChange and requestGuide too, not something safe to change here
-// -- see docs/design/code-explorer.md, Still open. This is the mitigation
-// that fits this task: told not to narrate, a model is measurably less
-// likely to spend its first turn on a sentence that says nothing yet.
+// AskAndWait used to return on the first turn boundary that had any message
+// in it, not the one that finished the answer -- a narrating first turn like
+// "I'll look at the docs directory at that commit." with no tool call yet was
+// itself enough to end the wait, cutting off the real reading and explanation
+// that followed. Fixed at the source (AskAndWait now waits for EventDone, the
+// harness's own "nothing further is coming" signal -- see
+// docs/design/code-explorer.md decision 8), so this is no longer covering for
+// a known gap. Kept anyway: an answer that opens with a throwaway sentence
+// before the substance is still worse to read than one that does not.
 const noNarration = " Do not say what you are about to do. Read everything you need first, in as " +
 	"many tool calls as it takes, and send exactly one message: the finished answer."
 

@@ -23,6 +23,14 @@ export default defineConfig({
     allowedHosts: ['.ts.net'],
   },
   build: { outDir: 'dist', emptyOutDir: true },
+  // Vite's default worker format is 'iife', which cannot code-split: every
+  // dynamic import() inside the highlighter worker (one per Shiki grammar)
+  // gets inlined into one file regardless, so opening any file at all paid
+  // for every language this app might ever highlight. 'es' lets each
+  // grammar land in its own chunk, fetched only once a file of that
+  // language is actually opened. Measured against a real build: the
+  // worker bundle dropped from 2.54 MB to 165 KB plus per-grammar chunks.
+  worker: { format: 'es' },
   test: {
     // happy-dom rather than jsdom: these tests mount components and press
     // keys, which needs a DOM, and this one starts in a fraction of the time.

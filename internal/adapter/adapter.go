@@ -375,9 +375,36 @@ const (
 	// the transcript and multiply the events table by the number of words in
 	// it. These exist to be watched and thrown away.
 	EventMessageDelta EventKind = "message_delta"
-	EventTurnEnd      EventKind = "turn_end" // finished a turn, likely idle now
-	EventError        EventKind = "error"    // harness-level failure, carries Fatal
-	EventQuota        EventKind = "quota"    // subscription usage, carries Quota
+
+	// EventTurnEnd is one turn ending: one call to the model, whether or not
+	// it decided to call a tool.
+	//
+	// For claude, that is also always the whole answer -- its CLI runs every
+	// internal tool-calling round itself and prints one result at the very
+	// end, so nothing here has ever needed to tell the two apart. pi's rpc
+	// mode is not that: it prints a turn_end after *every* model call,
+	// including the ones that only decided to call a tool and are followed by
+	// more turns. A caller of AskAndWait that stops at the first EventTurnEnd
+	// carrying a message stops at whichever comes first -- the real answer, or
+	// a stray sentence of narration before the model has read anything. See
+	// EventDone.
+	EventTurnEnd EventKind = "turn_end"
+	EventError   EventKind = "error" // harness-level failure, carries Fatal
+	EventQuota   EventKind = "quota" // subscription usage, carries Quota
+
+	// EventDone is the harness saying there is nothing further coming until
+	// the next question is submitted -- the answer, not one turn of it.
+	//
+	// Never recorded, the same as EventMessageDelta and for a related reason:
+	// it is a liveness signal for a caller waiting on a whole answer
+	// (AskAndWait), not a fact about the conversation worth a transcript row.
+	// claude emits it alongside EventTurnEnd, since claude's turn_end already
+	// means this. pi emits it only on its own agent_end frame, confirmed
+	// against a real multi-tool-call run (0.85.1): turn_end fires once per
+	// model call with the call's own stopReason ("toolUse" mid-task, "stop" at
+	// the end), and agent_end fires exactly once after the last of those,
+	// carrying the whole exchange. See docs/design/code-explorer.md decision 8.
+	EventDone EventKind = "done"
 )
 
 type Event struct {

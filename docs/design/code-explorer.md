@@ -157,6 +157,17 @@ Binary detection: sniff the first few KB for a NUL byte, the same heuristic git'
 uses. Two processes per open file is fine — this is one file, opened because a person clicked it, not
 a thirty-file eager batch.
 
+Missed on the first pass, caught by review: the type-check this decision depends on (`git cat-file -t
+<sha>:<path>`, to reject a directory before `cat-file -s` happily reports a size for one too) went
+through the shared `git()` helper and folded *any* failure into `ErrNoSuchRevision` — a cancelled
+context or a genuinely broken repository came back reading as "that path doesn't exist," the same
+blanket-400 mistake AGENTS.md already records once, for a different command. `Tree`'s `ls-tree` call
+had the identical gap. Both now bypass `git()` and classify the same way `resolveCommit` classifies a
+bad ref: only an `*exec.ExitError` — git actually running and saying no — becomes
+`ErrNoSuchRevision`. Checked locally: a missing `sha:path` exits 128 with `fatal: ...` for both
+commands, every time, so that classification is exact rather than a guess. Regression tests force a
+cancelled context through each to confirm the operational path no longer reads as a bad ref or path.
+
 ### 4. Browsing pins to the resolved commit sha, not the moving ref name, once navigation starts
 
 **Why.** A ref picker showing "main" is showing a name that can move mid-session. Without pinning,
@@ -165,9 +176,40 @@ and they can disagree. This is the first surface in the codebase that lets a per
 that moves rather than a stored, pinned commit.
 
 **What it actually costs.** `Tree` and `Blob` responses both carry the sha `resolveCommit` produced
-for the request. The frontend keeps that resolved sha in navigation state and the URL from the first
-response onward, re-resolving the ref name only on an explicit re-pick. A shared link shows "main @
-a1b2c3d" rather than a bare branch name — the useful side effect of the same mechanism.
+for the request. The frontend keeps that resolved sha in navigation state, re-resolving the ref name
+only on an explicit re-pick — `loadTree` sends `resolvedSha || selectedRef`, and only picking a new
+ref clears it. Missed on the first pass, caught by review, not by testing it: `loadTree` sent
+`selectedRef` on every call, including the ones `openDir` makes after the ref had already resolved
+once, so a directory opened after picking "main" re-resolved "main" again rather than reading the
+commit the root listing had actually pinned — a push in between the two clicks changed which commit
+a directory answered from. Fixed, with a regression test forcing the ref to move between the two
+requests.
+
+**A second race, also caught by review, in the same navigation code.** Only the file pane guarded
+against a stale response — picking "main" then "other" before "main"'s slower tree response landed
+let it overwrite what "other" was already showing, and a tree or file request left in flight when a
+person backed out of it could still land and repaint a pane nobody was looking at. Fixed by widening
+the existing `latest()` sequence guard from file loads alone to every navigation action — picking a
+ref, opening a directory, opening a file, and backing out of either — so any newer action, including
+a bare "back," invalidates whatever the previous one was still waiting on.
+
+The URL syncing this decision originally promised — "a shared link shows main @ a1b2c3d" — was
+written into the doc before it was built, and stayed unbuilt through phases 1-3 despite the doc
+saying otherwise. Built afterward, once a review asked where it was: the resolved sha and the open
+file or directory both land in the URL's query string (`router.replace`, not `push` — browsing is
+not a sequence of pages to walk back through), read back once on the way in to restore a link,
+including a manual ref/sha input for a commit or a branch the picker's own list does not show.
+Opening a link whose path could be either a file or a directory asks for it as a file first and
+falls back to a directory on a "not a tree object" — the two are told apart by asking git rather
+than guessed from the shape of the string.
+
+Building this also surfaced a bug in `web/src/main.ts`, unrelated to code explorer but load-bearing
+for it: the app mounted before `router.isReady()`, so `App.vue`'s `onMounted` read `route.name` as
+whatever the router had not yet resolved to on first load — usually nothing, which falls back to
+"board" — and wrote that back with `router.replace` as if it were the real destination. A direct
+link to any view but the board landed on the board instead, every time, which is why a shared code
+link would have been silently useless without this. Fixed by awaiting `router.isReady()` before
+mounting.
 
 ### 5. New routes: project-scoped, lazy per directory
 
@@ -214,6 +256,27 @@ worker that doesn't finish in time is terminated and the file falls back to plai
 The size cutoff stays as a cheap first-pass skip (nothing under a few hundred bytes is worth paying
 worker-startup cost for), but it is not what makes this safe — the timeout is.
 
+**A bug in that timeout, caught by review.** One worker is reused across files opened close
+together, and each request's deadline closure read the shared `worker` variable *at the moment it
+fired*, not the instance it actually sent its own request to. Two files sharing a worker, the first
+timing out and killing it, a third file starting a fresh worker before the second file's own
+(slightly later) deadline arrived: the second file's belated timeout read `worker` as the *third*
+file's brand new instance and killed that one instead — collateral damage between two files that
+had nothing to do with each other. Fixed by capturing the worker reference a request actually used
+at send time, and only tearing down (or clearing the shared variable for) that specific instance.
+Regression test forces the interleaving with fake timers and fails against the pre-fix code.
+
+**Two measured, contained wins, also from review, applied as found rather than deferred.** Vite's
+default worker build format cannot code-split, so every `import()` inside the highlighter worker —
+one per Shiki grammar — was inlined into one file regardless of whether that grammar was ever
+opened: a real production build carried one 2.54 MB worker bundle. `worker: { format: 'es' }` in
+`vite.config.ts` lets each grammar land in its own chunk instead, fetched only once a file of that
+language is actually opened — checked against a real build afterward: 165 KB plus separate
+per-grammar chunks. Separately, the line-number gutter rendered one `<div>` per line; a permitted
+120 KB file at the byte cap put roughly 60,000 of them on the page for numbers nobody reads
+individually the way a line of code is read. Replaced with a single `<pre>` holding every number as
+one text node — checked in a real browser afterward, one element regardless of file length.
+
 ### 7. A new top-level nav destination, checked at phone width from phase 1
 
 **Why.** `VIEWS` is a flat array and `App.vue` a flat `v-else-if` chain — adding "code" is additive.
@@ -256,6 +319,43 @@ queueing behind unrelated work elsewhere in the daemon. Also fix `requestGuide`'
 call `Busy(reviewChat(project.ID))` while this code is being touched, since it's the same bug in the
 same function this decision depends on. Surfaced to the person as "busy, try again," not silently
 retried or dropped.
+
+**What was still wrong after that fix, found live rather than in review.** `AskAndWait` returned on
+the first `turn_end` that had collected any message at all — correct for claude, whose CLI runs
+every internal tool-calling round itself and prints exactly one `result` at the end, so its
+`turn_end` already means the whole answer. Not correct for pi: a real capture (pi 0.85.1, asked to
+read three files) showed `turn_end` fires once per model call, each carrying that call's own
+`stopReason` ("toolUse" mid-task, "stop" at the end) — a first turn that only narrates before
+calling a tool still emits a `turn_end` with a message on it, and `AskAndWait` returned right there,
+never seeing the three further turns of actual reading and the real explanation. pi's own wire
+protocol already has the correct signal for this and this codebase was simply not reading it:
+`agent_end` fires exactly once, after the last `turn_end`, carrying the whole exchange — confirmed
+against the same capture, and previously dropped by `piharness.Parse` as noise. Fixed by adding
+`adapter.EventDone` to the shared vocabulary: pi's adapter emits it only from `agent_end`; claude's
+emits it alongside its own `EventTurnEnd`, since claude's already means that. `AskAndWait` (and
+`releaseAtTurnEnd`, the interactive chat screen's equivalent wait, which had the identical exposure)
+now wait for `EventDone`, not `EventTurnEnd`. Never recorded — like `EventMessageDelta`, a liveness
+signal for whoever is waiting on a whole answer, not a fact about the conversation worth a
+transcript row. The `noNarration` prompt addition from before this fix landed is kept, harmlessly:
+an answer that opens with a throwaway sentence is still worse to read than one that does not, even
+though it can no longer truncate the rest.
+
+**A second gap in the same admission control, also found by review.** `beginTurn`/`endTurn` keyed
+purely on chatID, with no way to tell one claim on a conversation apart from whatever claims it
+next. Two consequences, both real: `Stop` cleared the map entry outright, so a caller still blocked
+in `AskAndWait`'s select loop kept waiting on events from a session that no longer existed, and a
+fresh ask on the same chatID could start immediately and race it for the same incoming messages;
+separately, a caller's own timeout (`askTimeout`) released the reservation the moment it gave up,
+even though the agent underneath was very possibly still mid-turn and about to emit the real
+answer — a fresh question right after collected whatever the abandoned one was still waiting for.
+Fixed by giving every claim a token and a derived, cancellable context: `endTurn` only clears a
+claim whose token still matches, so a claim already superseded cannot release or act on one that
+isn't its own; `Stop` cancels the context directly, waking anything still selecting on it instead of
+leaving it to its own unrelated timeout; and a caller that stops waiting on its own hands the
+reservation to a background drain (`drainAbandonedAsk`, mirroring the chat screen's own
+`releaseAtTurnEnd`) that keeps it held until the agent's real `EventDone` or `EventError` — or the
+same `turnBackstop` that already bounds the chat screen's equivalent wait — rather than releasing it
+out from under a session still about to answer.
 
 ### 9. Explain answers are ephemeral for v1, not a `ReviewThread`
 
@@ -378,17 +478,10 @@ just the happy path a screenshot would show:
 - Binary file preview (images, fonts). v1 reports "binary, N bytes" and stops there.
 - `TaskID`/cost rollup for explain turns — deferred, the same gap chat's own turns already have.
 - Symbol/method-level explain — explicitly out of scope per the agreed v1 scope.
-- **`AskAndWait` returns on the first turn boundary that has any message in it, not the one that
-  actually finishes the answer.** Found live, not in review: asking to explain a real directory, the
-  agent's first turn was "I'll look at the docs directory at that commit." with no tool call yet --
-  `AskAndWait`'s own logic (`len(said) == 0 { continue }`, chat.go) only skips a turn with *no*
-  message, so that one sentence was enough to end the wait right there. The three further turns of
-  actual reading and the real explanation ran to completion in the background, unseen by the
-  caller that had already returned. This is not new to explain -- `askAboutTheChange` and
-  `requestGuide` share the exact same call and the exact same exposure, untested by either today.
-  Mitigated here, not fixed: both explain prompts now say not to narrate and to send exactly one
-  message when actually done, which measurably lowers the odds of tripping this, but a model that
-  opens with even one sentence before its first tool call still ends the wait early. A real fix
-  needs a better "is this genuinely the last turn" signal than a message plus a turn boundary --
-  worth its own look before assuming any AskAndWait-backed feature reliably returns a finished
-  answer.
+- ~~`AskAndWait` returns on the first turn boundary that has any message in it, not the one that
+  actually finishes the answer.~~ Fixed -- see decision 8's `EventDone` addendum. Verified live
+  afterward against the same real explain flow that first found this: the answer now carries the
+  narrating sentence *and* the full explanation that follows it, joined, rather than stopping at
+  the sentence.
+- ~~A caller that stops waiting, or `Stop`, could leave a stale claim to interfere with whatever
+  claims the same conversation next.~~ Fixed -- see decision 8's token addendum.

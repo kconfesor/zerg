@@ -6,6 +6,7 @@
  * docs/design/code-explorer.md.
  */
 import { computed, onUnmounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { api, type RepoBlob, type RepoRef, type TreeEntry } from '@/lib/api'
 import { highlight } from '@/lib/highlight'
 import { latest } from '@/lib/latest'
@@ -19,6 +20,7 @@ import {
   Tag,
 } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
 import {
   Dialog,
   DialogBody,
@@ -30,6 +32,8 @@ import {
 
 const props = defineProps<{ projectId: string }>()
 const emit = defineEmits<{ crumb: [label: string] }>()
+const route = useRoute()
+const router = useRouter()
 
 const refs = ref<RepoRef[]>([])
 const loadingRefs = ref(false)
@@ -124,6 +128,17 @@ function openRef(name: string) {
   loadTree()
 }
 
+/** A branch or tag typed by hand rather than picked from the list -- a
+ *  commit sha, or a ref this project has that the picker does not bother
+ *  filtering to (a `zerg-*` housekeeping branch, say). Same resolution as a
+ *  click: an unreal one comes back as an ordinary error, not a crash. */
+const manualRef = ref('')
+function goToManualRef() {
+  const name = manualRef.value.trim()
+  if (!name) return
+  openRef(name)
+}
+
 function openDir(path: string) {
   dir.value = path
   selectedFile.value = ''
@@ -199,6 +214,13 @@ const crumbs = computed(() => {
 })
 
 const fileLines = computed(() => blob.value?.content?.split('\n') ?? [])
+// One text node for the whole gutter rather than one element per line -- a
+// div-per-line gutter put 60,000 extra DOM nodes on the page for a file at
+// the size cap, measurably slowing layout for nothing a person ever looks
+// at individually the way a line of code is.
+const lineNumbers = computed(() =>
+  Array.from({ length: fileLines.value.length }, (_, i) => i + 1).join('\n'),
+)
 
 // Surfaced in the page header (App.vue) rather than only in the tree pane's
 // own crumb bar, which is hidden on a phone once a file is open -- the pane
@@ -313,9 +335,58 @@ function onContentMouseUp() {
   selectionPos.value = { top: rect.bottom + 6, left: rect.left }
 }
 
+// ── shareable location ──────────────────────────────────────────────────
+// The URL is where this belongs, per decision 4: a link opened later should
+// show the same commit and the same file, not whatever "main" has since
+// become. One-directional both ways rather than a live two-way binding --
+// component state writes the query, the query is only ever read back once,
+// on the way in -- so there is no loop between the two.
+
+/** Read once, on the way in: a ref (name or sha) and a path (file or
+ *  directory, told apart by asking) restored from a link, before anything
+ *  the person does themselves overwrites it. */
+async function restoreFromQuery() {
+  const ref = route.query.ref
+  const path = route.query.path
+  if (typeof ref !== 'string' || !ref) return
+
+  selectedRef.value = ref
+  resolvedSha.value = ''
+  await loadTree() // resolves ref at the repository root
+  if (typeof path !== 'string' || !path || !resolvedSha.value) return
+
+  // The link does not say whether path is a file or a directory: ask for it
+  // as a file first, since sharing "look at this file" is the case worth
+  // keeping quiet in the common path -- a directory link still resolves
+  // correctly, just behind one failed probe.
+  try {
+    await api.repoFile(props.projectId, resolvedSha.value, path)
+    openFile(path)
+  } catch {
+    openDir(path)
+  }
+}
+
+/** Written on every navigation: the resolved sha once one exists (a moving
+ *  branch name pins itself the moment it is actually opened), and whichever
+ *  of a file or a directory is open. Replace, not push -- browsing a
+ *  repository is not a sequence of pages to walk back through with the
+ *  browser's own back button, which the tree/file back buttons already do
+ *  within this view. */
+function syncQuery() {
+  const query: Record<string, string> = { ...(route.query as Record<string, string>) }
+  if (selectedRef.value) query.ref = resolvedSha.value || selectedRef.value
+  else delete query.ref
+  const path = selectedFile.value || dir.value
+  if (path) query.path = path
+  else delete query.path
+  router.replace({ query })
+}
+watch([selectedRef, resolvedSha, dir, selectedFile], syncQuery)
+
 watch(
   () => props.projectId,
-  () => {
+  async () => {
     nav() // discard anything still in flight for the project just left
     selectedRef.value = ''
     resolvedSha.value = ''
@@ -323,7 +394,8 @@ watch(
     entries.value = []
     selectedFile.value = ''
     blob.value = null
-    loadRefs()
+    await loadRefs()
+    await restoreFromQuery()
   },
   { immediate: true },
 )
@@ -341,6 +413,17 @@ watch(
       <div class="hairline-b bg-background sticky top-0 px-2 py-1.5 text-xs font-semibold tracking-wide">
         Branches &amp; tags
       </div>
+      <!-- A ref the list does not show: a commit sha, or a branch the picker
+           does not bother filtering to. Same resolution as clicking one --
+           an unreal ref comes back as an ordinary error below, not a crash. -->
+      <form class="hairline-b flex items-center gap-1 p-1.5" @submit.prevent="goToManualRef">
+        <Input
+          v-model="manualRef"
+          placeholder="Branch, tag or commit…"
+          aria-label="Go to a branch, tag or commit"
+          class="h-7 text-[11px]"
+        />
+      </form>
       <div class="min-h-0 flex-1 overflow-y-auto">
         <p v-if="loadingRefs" class="text-muted-foreground p-2 text-[11px]">Reading refs…</p>
         <p v-else-if="!refs.length" class="text-muted-foreground p-2 text-[11px]">
@@ -513,9 +596,9 @@ watch(
             {{ highlightNote }}
           </p>
           <div ref="contentEl" class="flex font-mono text-[11px] leading-snug" @mouseup="onContentMouseUp">
-            <div class="tabular text-muted-foreground shrink-0 select-none px-2 py-2 text-right">
-              <div v-for="(_, i) in fileLines" :key="i">{{ i + 1 }}</div>
-            </div>
+            <pre
+              class="tabular text-muted-foreground shrink-0 select-none px-2 py-2 text-right font-mono text-[11px] leading-snug"
+            >{{ lineNumbers }}</pre>
             <!-- Shiki's own output: it HTML-escapes the source text itself
                  before wrapping it in colour spans, so this is markup Shiki
                  built, never the repo's raw bytes rendered as markup -- the

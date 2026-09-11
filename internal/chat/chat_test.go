@@ -1,6 +1,7 @@
 package chat
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -128,29 +129,90 @@ func TestAttachmentsAreCopiedIntoTheWorktree(t *testing.T) {
 func TestBeginTurnAdmitsUnrelatedConversationsWithoutWaiting(t *testing.T) {
 	m := &Manager{}
 	a, b := ReviewChat("project-a"), ReviewChat("project-b")
+	ctx := context.Background()
 
-	if !m.beginTurn(a) {
+	_, tokenA, ok := m.beginTurn(ctx, a)
+	if !ok {
 		t.Fatal("claiming a fresh conversation should succeed")
 	}
 	if !m.Busy(a) {
 		t.Error("a claimed conversation should report busy")
 	}
 
-	if !m.beginTurn(b) {
+	_, tokenB, ok := m.beginTurn(ctx, b)
+	if !ok {
 		t.Fatal("an unrelated conversation must be admitted while a different one is mid-turn")
 	}
 
-	if m.beginTurn(a) {
+	if _, _, ok := m.beginTurn(ctx, a); ok {
 		t.Error("a second claim on an already-claimed conversation should be refused, not admitted")
 	}
 
-	m.endTurn(a)
+	m.endTurn(a, tokenA)
 	if m.Busy(a) {
 		t.Error("ending a turn should release it")
 	}
-	if !m.beginTurn(a) {
+	if _, _, ok := m.beginTurn(ctx, a); !ok {
 		t.Error("a released conversation should be claimable again")
 	}
 
-	m.endTurn(b)
+	m.endTurn(b, tokenB)
+}
+
+// The finding this guards against: a caller that outlives its own
+// reservation -- superseded by Stop, or by its own cleanup running late --
+// must not be able to release or act on a claim that has since moved on to
+// somebody else. endTurn with a stale token must be a no-op.
+func TestEndTurnIgnoresAStaleTokenOnceSomethingElseHasClaimedTheChatID(t *testing.T) {
+	m := &Manager{}
+	chatID := ReviewChat("project-a")
+	ctx := context.Background()
+
+	_, oldToken, ok := m.beginTurn(ctx, chatID)
+	if !ok {
+		t.Fatal("claiming a fresh conversation should succeed")
+	}
+	m.endTurn(chatID, oldToken)
+	if m.Busy(chatID) {
+		t.Fatal("setup: releasing the first claim should have freed the chatID")
+	}
+
+	_, newToken, ok := m.beginTurn(ctx, chatID)
+	if !ok {
+		t.Fatal("setup: a released conversation should be claimable again")
+	}
+
+	// The stale caller's own cleanup, running as if nothing had happened.
+	m.endTurn(chatID, oldToken)
+	if !m.Busy(chatID) {
+		t.Error("a stale token released a claim it no longer holds")
+	}
+
+	m.endTurn(chatID, newToken)
+}
+
+// The other half of the same finding: Stop used to only delete the map
+// entry, leaving anything still selecting on the old turnCtx (AskAndWait's
+// own loop, or releaseAtTurnEnd's) blocked until its own unrelated timeout
+// -- up to askTimeout or turnBackstop -- rather than told directly that the
+// session it was waiting on is gone.
+func TestStopCancelsTheContextALiveClaimHandedOut(t *testing.T) {
+	m := &Manager{}
+	chatID := ReviewChat("project-a")
+
+	turnCtx, _, ok := m.beginTurn(context.Background(), chatID)
+	if !ok {
+		t.Fatal("claiming a fresh conversation should succeed")
+	}
+
+	m.Stop(chatID)
+
+	select {
+	case <-turnCtx.Done():
+	default:
+		t.Error("Stop did not cancel the context handed to whoever was waiting on this claim")
+	}
+	if m.Busy(chatID) {
+		t.Error("Stop should also have freed the chatID for a fresh claim")
+	}
 }
