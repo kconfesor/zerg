@@ -115,3 +115,42 @@ func TestAttachmentsAreCopiedIntoTheWorktree(t *testing.T) {
 		t.Errorf("the second copy did not replace the first: %q", again)
 	}
 }
+
+// AskAndWait used to take a single lock covering every conversation in the
+// daemon before ever reaching beginTurn below, so a question in one project
+// waited out an unrelated one already answering in a different project --
+// serialised for no reason, since the event loop already filters on chatID
+// and two different conversations were never actually at risk of collecting
+// each other's sentences. beginTurn itself is the real admission control, and
+// this is its regression test: two different conversations must never wait
+// on each other, only the same one twice. See
+// docs/design/code-explorer.md decision 8.
+func TestBeginTurnAdmitsUnrelatedConversationsWithoutWaiting(t *testing.T) {
+	m := &Manager{}
+	a, b := ReviewChat("project-a"), ReviewChat("project-b")
+
+	if !m.beginTurn(a) {
+		t.Fatal("claiming a fresh conversation should succeed")
+	}
+	if !m.Busy(a) {
+		t.Error("a claimed conversation should report busy")
+	}
+
+	if !m.beginTurn(b) {
+		t.Fatal("an unrelated conversation must be admitted while a different one is mid-turn")
+	}
+
+	if m.beginTurn(a) {
+		t.Error("a second claim on an already-claimed conversation should be refused, not admitted")
+	}
+
+	m.endTurn(a)
+	if m.Busy(a) {
+		t.Error("ending a turn should release it")
+	}
+	if !m.beginTurn(a) {
+		t.Error("a released conversation should be claimable again")
+	}
+
+	m.endTurn(b)
+}

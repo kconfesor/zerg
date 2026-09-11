@@ -41,12 +41,17 @@ import (
 // make every one of those a string match.
 const Role = "chat"
 
-// reviewChat is the conversation a question asked from a diff runs in.
+// ReviewChat is the conversation a question asked from a diff runs in.
 //
 // Derived rather than stored, and with no row in the chats table, so it is a
 // working session and never a tab. One per project, because these questions
 // take turns anyway.
-func reviewChat(projectID string) string { return "review-" + projectID }
+//
+// Exported so a caller outside this package can ask Busy the same question
+// AskAndWait already answers with it -- requestGuide's own precheck used to
+// pass a bare project id, which never matched this and so never fired. See
+// docs/design/code-explorer.md decision 8.
+func ReviewChat(projectID string) string { return "review-" + projectID }
 
 // worktreeFor is where one conversation's agent runs.
 //
@@ -103,11 +108,6 @@ type Manager struct {
 	// have several open, and each is its own thread with its own agent.
 	mu       sync.Mutex
 	sessions map[string]*session
-
-	// asking serialises AskAndWait. The bus carries a session's output rather
-	// than a reply addressed to a caller, so two overlapping questions would
-	// each collect the other's sentences.
-	asking sync.Mutex
 
 	// closing is the conversations being torn down.
 	//
@@ -722,7 +722,7 @@ func (m *Manager) StopProject(ctx context.Context, projectID string) {
 	for _, c := range chats {
 		m.Stop(c.ID)
 	}
-	m.Stop(reviewChat(projectID))
+	m.Stop(ReviewChat(projectID))
 }
 
 // StopAll ends every session, for daemon shutdown.
@@ -804,26 +804,31 @@ func (m *Manager) End(ctx context.Context, projectID, chatID string) error {
 // the agent's own messages until it finishes its turn, and hands back what it
 // said.
 //
-// One question at a time per project. Two overlapping asks would each collect
-// the other's sentences, since the bus carries the session's output and not a
-// reply addressed to a caller.
+// One question at a time per conversation, not per daemon. Two overlapping
+// asks on the *same* chatID would each collect the other's sentences, since
+// the bus carries the session's output and not a reply addressed to a caller
+// -- beginTurn below already refuses a second one. A question asked in one
+// project used to wait out an unrelated one already answering in a different
+// project first, behind a single lock covering every conversation in the
+// daemon; the event loop below already filters on ev.ChatID, so two different
+// conversations were never actually at risk of collecting each other's
+// sentences, only serialised for no reason. See
+// docs/design/code-explorer.md decision 8.
 func (m *Manager) AskAndWait(ctx context.Context, projectID, question string) (string, error) {
 	if question == "" {
 		return "", fmt.Errorf("nothing to ask")
 	}
-	m.asking.Lock()
-	defer m.asking.Unlock()
 
 	// A conversation of its own, with no row in the tab list. A question asked
 	// from inside a diff is not one of the person's threads: its answer belongs
 	// on the review it was asked from, and putting it in a tab would mean their
 	// conversations filling with questions they did not type. The events are
 	// still tagged, so they never surface in a tab either.
-	chatID := reviewChat(projectID)
+	chatID := ReviewChat(projectID)
 
-	// Waits for the session rather than talking over it, and holds it until
-	// the answer is in hand: everything this collects has to belong to this
-	// question.
+	// Claims this conversation for this question, or refuses immediately: no
+	// waiting on a lock first to find out. Everything this collects has to
+	// belong to this question.
 	if !m.beginTurn(chatID) {
 		return "", ErrBusy
 	}

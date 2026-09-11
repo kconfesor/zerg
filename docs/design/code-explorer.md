@@ -378,3 +378,17 @@ just the happy path a screenshot would show:
 - Binary file preview (images, fonts). v1 reports "binary, N bytes" and stops there.
 - `TaskID`/cost rollup for explain turns — deferred, the same gap chat's own turns already have.
 - Symbol/method-level explain — explicitly out of scope per the agreed v1 scope.
+- **`AskAndWait` returns on the first turn boundary that has any message in it, not the one that
+  actually finishes the answer.** Found live, not in review: asking to explain a real directory, the
+  agent's first turn was "I'll look at the docs directory at that commit." with no tool call yet --
+  `AskAndWait`'s own logic (`len(said) == 0 { continue }`, chat.go) only skips a turn with *no*
+  message, so that one sentence was enough to end the wait right there. The three further turns of
+  actual reading and the real explanation ran to completion in the background, unseen by the
+  caller that had already returned. This is not new to explain -- `askAboutTheChange` and
+  `requestGuide` share the exact same call and the exact same exposure, untested by either today.
+  Mitigated here, not fixed: both explain prompts now say not to narrate and to send exactly one
+  message when actually done, which measurably lowers the odds of tripping this, but a model that
+  opens with even one sentence before its first tool call still ends the wait early. A real fix
+  needs a better "is this genuinely the last turn" signal than a message plus a turn boundary --
+  worth its own look before assuming any AskAndWait-backed feature reliably returns a finished
+  answer.

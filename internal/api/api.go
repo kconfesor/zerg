@@ -61,6 +61,9 @@ type Server struct {
 
 	// runner starts previews; see run.go.
 	runner *runner.Manager
+
+	// explain holds "explain this" answers while browsing; see code.go.
+	explain *explainJobs
 }
 
 // Deps are what the API needs to serve the cockpit.
@@ -122,6 +125,7 @@ func New(d Deps) *Server {
 		preflt: pf, over: d.Overmind, nyd: d.Nydus, bus: d.Bus, applied: d.Applied, chatMgr: d.Chat,
 		recorder: d.Recorder, ui: d.UI, tailnetHost: d.TailnetHost,
 		catalog: newCatalog(), blobs: d.Blobs, viewer: d.Viewer, runner: d.Runner,
+		explain: newExplainJobs(),
 	}
 }
 
@@ -215,6 +219,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/projects/{id}/refs", s.repoRefs)
 	mux.HandleFunc("GET /api/projects/{id}/tree", s.repoTree)
 	mux.HandleFunc("GET /api/projects/{id}/file", s.repoFile)
+	mux.HandleFunc("POST /api/projects/{id}/explain", s.repoExplain)
+	mux.HandleFunc("GET /api/projects/{id}/explain/{jobId}", s.repoExplainStatus)
 	// Artifacts: what a task produced, and its bytes. See §13.
 	// Running a project so somebody can look at it. The daemon starts an agent;
 	// it does not run the project itself.

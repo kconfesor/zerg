@@ -3,14 +3,30 @@
  * Browse any branch, tag or commit of a project's repository.
  *
  * Independent of any task, approval or feature -- see
- * docs/design/code-explorer.md. No AI explain yet (phase 3), deliberately
- * out of scope here.
+ * docs/design/code-explorer.md.
  */
-import { computed, ref, watch } from 'vue'
+import { computed, onUnmounted, ref, watch } from 'vue'
 import { api, type RepoBlob, type RepoRef, type TreeEntry } from '@/lib/api'
 import { highlight } from '@/lib/highlight'
 import { latest } from '@/lib/latest'
-import { ChevronLeft, File, Folder, GitBranch, LoaderCircle, Tag } from '@lucide/vue'
+import {
+  ChevronLeft,
+  File,
+  Folder,
+  GitBranch,
+  LoaderCircle,
+  MessageCircleQuestion,
+  Tag,
+} from '@lucide/vue'
+import { Button } from '@/components/ui/button'
+import {
+  Dialog,
+  DialogBody,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 
 const props = defineProps<{ projectId: string }>()
 
@@ -112,6 +128,7 @@ async function openFile(path: string) {
   highlightNote.value = ''
   loadingFile.value = true
   error.value = ''
+  clearSelection()
   const current = newestFile()
   try {
     // The sha the tree already resolved, not the ref name again -- decision 4.
@@ -139,6 +156,7 @@ function backToTree() {
   blob.value = null
   highlighted.value = null
   highlightNote.value = ''
+  clearSelection()
 }
 
 function backToRefs() {
@@ -161,6 +179,104 @@ const crumbs = computed(() => {
 })
 
 const fileLines = computed(() => blob.value?.content?.split('\n') ?? [])
+
+// ── explain ────────────────────────────────────────────────────────────
+// "Explain this" while browsing -- see docs/design/code-explorer.md
+// decisions 8-11. Polled for, not held open: an agent turn is tens of
+// seconds, the same reasoning the approval-review "ask" flow already uses.
+
+const explainOpen = ref(false)
+const explainTitle = ref('')
+const explainStatus = ref<'reading' | 'done' | 'error' | ''>('')
+const explainAnswer = ref('')
+const explainErrorMsg = ref('')
+let explainPoll: number | undefined
+
+function stopExplainPoll() {
+  window.clearInterval(explainPoll)
+  explainPoll = undefined
+}
+
+async function pollExplain(jobId: string) {
+  try {
+    const job = await api.repoExplainStatus(props.projectId, jobId)
+    if (job.status === 'reading') return
+    stopExplainPoll()
+    explainStatus.value = job.status
+    explainAnswer.value = job.answer ?? ''
+    explainErrorMsg.value = job.error ?? ''
+  } catch (e) {
+    stopExplainPoll()
+    explainStatus.value = 'error'
+    explainErrorMsg.value = e instanceof Error ? e.message : String(e)
+  }
+}
+
+async function runExplain(path: string, selection: string, title: string) {
+  const ref = resolvedSha.value || selectedRef.value
+  if (!ref || !path) return
+  stopExplainPoll()
+  explainTitle.value = title
+  explainAnswer.value = ''
+  explainErrorMsg.value = ''
+  explainStatus.value = 'reading'
+  explainOpen.value = true
+  try {
+    const { jobId } = await api.repoExplain(props.projectId, ref, path, selection)
+    explainPoll = window.setInterval(() => pollExplain(jobId), 1500)
+  } catch (e) {
+    explainStatus.value = 'error'
+    explainErrorMsg.value = e instanceof Error ? e.message : String(e)
+  }
+}
+
+function explainFile() {
+  if (selectedFile.value) runExplain(selectedFile.value, '', selectedFile.value)
+}
+
+function explainFolder(path: string) {
+  runExplain(path, '', path)
+}
+
+function explainSelection() {
+  if (selectedFile.value && selectionText.value) {
+    runExplain(selectedFile.value, selectionText.value, `Selection in ${selectedFile.value}`)
+  }
+  clearSelection()
+}
+
+function closeExplain() {
+  explainOpen.value = false
+  stopExplainPoll()
+}
+
+onUnmounted(stopExplainPoll)
+
+// A selection made inside the file content offers to explain just that,
+// rather than the whole file -- a person reading a specific excerpt wants an
+// answer about exactly what is highlighted. Not a per-line affordance the
+// way a diff's gutter is: at a whole file's scale that would be a button per
+// line of a document nobody asked to annotate.
+const contentEl = ref<HTMLElement | null>(null)
+const selectionText = ref('')
+const selectionPos = ref<{ top: number; left: number } | null>(null)
+
+function clearSelection() {
+  selectionText.value = ''
+  selectionPos.value = null
+}
+
+function onContentMouseUp() {
+  const sel = window.getSelection()
+  const text = sel?.toString().trim() ?? ''
+  if (!text || !contentEl.value || sel!.rangeCount === 0 || !contentEl.value.contains(sel!.anchorNode)) {
+    clearSelection()
+    return
+  }
+  const rect = sel!.getRangeAt(0).getBoundingClientRect()
+  selectionText.value = text
+  selectionPos.value = { top: rect.bottom + 6, left: rect.left }
+}
 
 watch(
   () => props.projectId,
@@ -272,26 +388,39 @@ watch(
             <Folder :size="12" class="shrink-0" aria-hidden="true" />
             ..
           </button>
-          <button
-            v-for="e in entries"
-            :key="e.path"
-            type="button"
-            :class="[
-              'hover:bg-muted focus-visible:outline-ring flex w-full items-center gap-1.5 px-2 py-1.5 text-left text-xs transition-colors focus-visible:outline-2',
-              e.path === selectedFile && 'bg-primary/[0.08] font-medium',
-            ]"
-            @click="e.kind === 'tree' ? openDir(e.path) : openFile(e.path)"
-          >
-            <Folder v-if="e.kind === 'tree'" :size="12" class="text-muted-foreground shrink-0" aria-hidden="true" />
-            <File v-else :size="12" class="text-muted-foreground shrink-0" aria-hidden="true" />
-            <span class="min-w-0 flex-1 truncate">{{ e.name }}</span>
-            <span
-              v-if="e.kind === 'blob' && e.size !== undefined"
-              class="tabular text-muted-foreground shrink-0 text-[10px]"
+          <div v-for="e in entries" :key="e.path" class="flex items-stretch">
+            <button
+              type="button"
+              :class="[
+                'hover:bg-muted focus-visible:outline-ring flex min-w-0 flex-1 items-center gap-1.5 px-2 py-1.5 text-left text-xs transition-colors focus-visible:outline-2',
+                e.path === selectedFile && 'bg-primary/[0.08] font-medium',
+              ]"
+              @click="e.kind === 'tree' ? openDir(e.path) : openFile(e.path)"
             >
-              {{ e.size.toLocaleString() }}
-            </span>
-          </button>
+              <Folder v-if="e.kind === 'tree'" :size="12" class="text-muted-foreground shrink-0" aria-hidden="true" />
+              <File v-else :size="12" class="text-muted-foreground shrink-0" aria-hidden="true" />
+              <span class="min-w-0 flex-1 truncate">{{ e.name }}</span>
+              <span
+                v-if="e.kind === 'blob' && e.size !== undefined"
+                class="tabular text-muted-foreground shrink-0 text-[10px]"
+              >
+                {{ e.size.toLocaleString() }}
+              </span>
+            </button>
+            <!-- Explain this folder, without navigating into it -- decision 10:
+                 a folder is guide-shaped exactly like a file, just naming a
+                 directory instead of a path. -->
+            <button
+              v-if="e.kind === 'tree'"
+              type="button"
+              class="hover:bg-muted hover:text-foreground focus-visible:outline-ring text-muted-foreground grid size-7 shrink-0 place-items-center transition-colors focus-visible:outline-2"
+              title="Explain this folder"
+              :aria-label="`Explain ${e.name}`"
+              @click.stop="explainFolder(e.path)"
+            >
+              <MessageCircleQuestion :size="12" aria-hidden="true" />
+            </button>
+          </div>
         </template>
       </div>
     </section>
@@ -317,6 +446,16 @@ watch(
         <span class="min-w-0 flex-1 truncate text-xs font-semibold tracking-wide">
           {{ selectedFile || 'Select a file' }}
         </span>
+        <button
+          v-if="selectedFile"
+          type="button"
+          class="hover:bg-muted hover:text-foreground focus-visible:outline-ring text-muted-foreground flex shrink-0 items-center gap-1 px-1.5 py-1 text-[11px] transition-colors focus-visible:outline-2"
+          title="Explain this file"
+          @click="explainFile"
+        >
+          <MessageCircleQuestion :size="12" aria-hidden="true" />
+          <span class="hidden sm:inline">Explain</span>
+        </button>
       </div>
       <div class="min-h-0 flex-1 overflow-auto">
         <p v-if="loadingFile" class="text-muted-foreground flex items-center gap-1.5 p-2 text-[11px]">
@@ -336,7 +475,7 @@ watch(
           <p v-if="highlightNote" class="text-muted-foreground border-b px-2 py-1 text-[10px]">
             {{ highlightNote }}
           </p>
-          <div class="flex font-mono text-[11px] leading-snug">
+          <div ref="contentEl" class="flex font-mono text-[11px] leading-snug" @mouseup="onContentMouseUp">
             <div class="tabular text-muted-foreground shrink-0 select-none px-2 py-2 text-right">
               <div v-for="(_, i) in fileLines" :key="i">{{ i + 1 }}</div>
             </div>
@@ -352,5 +491,41 @@ watch(
     </section>
 
     <p v-if="error" class="text-destructive absolute bottom-2 left-2 text-[11px]">{{ error }}</p>
+
+    <!-- A selection inside the file offers to explain just that -- appears
+         only once something is actually highlighted, positioned at it
+         rather than fixed in a corner, so it reads as attached to the
+         selection rather than as a persistent piece of chrome. -->
+    <Button
+      v-if="selectionPos"
+      size="xs"
+      class="fixed z-50 h-7 gap-1 px-2 text-[11px] shadow-md"
+      :style="{ top: `${selectionPos.top}px`, left: `${selectionPos.left}px` }"
+      @click="explainSelection"
+    >
+      <MessageCircleQuestion :size="12" aria-hidden="true" />
+      Explain selection
+    </Button>
+
+    <Dialog :open="explainOpen" @update:open="(v) => !v && closeExplain()">
+      <DialogContent variant="confirm" class="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle class="truncate">{{ explainTitle }}</DialogTitle>
+          <DialogDescription class="text-[11px]">
+            Explained by this project's own agent.
+          </DialogDescription>
+        </DialogHeader>
+        <DialogBody>
+          <p v-if="explainStatus === 'reading'" class="text-muted-foreground flex items-center gap-1.5 text-[11px]">
+            <LoaderCircle :size="12" aria-hidden="true" class="spin" />
+            Reading…
+          </p>
+          <p v-else-if="explainStatus === 'error'" class="text-destructive text-[11px]">
+            {{ explainErrorMsg }}
+          </p>
+          <p v-else class="text-[11px] leading-relaxed whitespace-pre-wrap">{{ explainAnswer }}</p>
+        </DialogBody>
+      </DialogContent>
+    </Dialog>
   </div>
 </template>
