@@ -32,6 +32,7 @@ export function highlight(path: string, code: string): Promise<HighlightResult> 
   if (code.trim().length < 20) return Promise.resolve({ html: null })
 
   worker ??= spawn()
+  const mine = worker
   const id = nextId++
   const req: Request = { id, path, code }
 
@@ -41,8 +42,12 @@ export function highlight(path: string, code: string): Promise<HighlightResult> 
       if (done) return
       done = true
       pending.delete(id)
-      worker?.terminate()
-      worker = null
+      // Terminate the worker this request actually ran on, not whatever
+      // `worker` currently points at -- a later file can already be running
+      // on a fresh worker by the time this fires, and killing that one would
+      // cut off work this timeout has nothing to do with.
+      mine.terminate()
+      if (worker === mine) worker = null
       settle({ timedOut: true })
     }, DEADLINE_MS)
 
@@ -53,6 +58,6 @@ export function highlight(path: string, code: string): Promise<HighlightResult> 
       settle(msg)
     })
 
-    worker!.postMessage(req)
+    mine.postMessage(req)
   })
 }

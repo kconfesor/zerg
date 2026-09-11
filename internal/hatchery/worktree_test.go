@@ -1018,6 +1018,27 @@ func TestTreeListsChildrenNotTheDirectoryItself(t *testing.T) {
 	}
 }
 
+// The finding this guards against: Tree used to fold every ls-tree failure
+// into ErrNoSuchRevision, including one that has nothing to do with the
+// directory not existing -- the exact blanket-400 mistake AGENTS.md already
+// records once, for a different command. A cancelled context is an
+// operational failure a person cannot fix by typing a different path, so it
+// must not come back looking like one.
+func TestTreeDistinguishesAnOperationalFailureFromAMissingDirectory(t *testing.T) {
+	h, dir := newProject(t)
+	ctx := context.Background()
+	head, err := git(ctx, dir, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := h.Tree(cancelled, head, "docs"); err == nil || errors.Is(err, ErrNoSuchRevision) {
+		t.Errorf("Tree with a cancelled context = %v, want an operational error, not %v", err, ErrNoSuchRevision)
+	}
+}
+
 // The finding this guards against: the shared git() helper TrimSpaces its
 // entire stdout. A blob's content is exact bytes, not a sha or a diff, and
 // silently trimming a file's leading blank lines and trailing whitespace
@@ -1047,6 +1068,24 @@ func TestBlobPreservesExactBytesLeadingAndTrailingWhitespace(t *testing.T) {
 	}
 	if b.Content != content {
 		t.Errorf("Blob content = %q, want %q -- whitespace was altered in transit", b.Content, content)
+	}
+}
+
+// The same finding as Tree's, checked against Blob's own type-check: a
+// cancelled context must come back as an operational failure, not as
+// ErrNoSuchRevision claiming the path was never there.
+func TestBlobDistinguishesAnOperationalFailureFromAMissingPath(t *testing.T) {
+	h, dir := newProject(t)
+	ctx := context.Background()
+	head, err := git(ctx, dir, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := h.Blob(cancelled, head, "nope.txt", 0); err == nil || errors.Is(err, ErrNoSuchRevision) {
+		t.Errorf("Blob with a cancelled context = %v, want an operational error, not %v", err, ErrNoSuchRevision)
 	}
 }
 

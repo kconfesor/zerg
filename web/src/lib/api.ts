@@ -739,6 +739,17 @@ export const api = {
     call<{ resolvedSha: string; blob: RepoBlob }>(
       `/projects/${id}/file?${new URLSearchParams({ ref, path })}`,
     ),
+  /** Starts explaining a file, a folder, or (when `selection` is given) a
+   *  range inside one. 202 with a job id -- an agent turn is tens of
+   *  seconds, so the answer is polled for with repoExplainStatus rather than
+   *  held open here. */
+  repoExplain: (id: string, ref: string, path: string, selection = '', question = '') =>
+    call<{ jobId: string }>(`/projects/${id}/explain`, {
+      method: 'POST',
+      body: JSON.stringify({ ref, path, selection, question }),
+    }),
+  repoExplainStatus: (id: string, jobId: string) =>
+    call<ExplainJob>(`/projects/${id}/explain/${jobId}`),
 
   /** The conversations a project holds, most recently used first. */
   chats: (id: string) => call<Chat[]>(`/projects/${id}/chats`),
@@ -1426,4 +1437,13 @@ export interface RepoBlob {
   size: number
   binary?: boolean
   tooLarge?: boolean
+}
+
+/** One "explain this" answer, polled for rather than held open -- and never
+ *  persisted: it does not survive a daemon restart, and there is no row for
+ *  it anywhere else in the cockpit. */
+export interface ExplainJob {
+  status: 'reading' | 'done' | 'error'
+  answer?: string
+  error?: string
 }

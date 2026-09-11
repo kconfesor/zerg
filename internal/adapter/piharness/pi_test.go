@@ -21,6 +21,10 @@ const (
 	lineUserEnd = `{"type":"message_end","message":{"role":"user","content":[{"type":"text","text":"do it"}]}}`
 	lineRPCFail = `{"type":"response","command":"prompt","success":false,"error":"Cannot read properties of undefined"}`
 	lineRPCOK   = `{"type":"response","command":"prompt","success":true}`
+	// Trimmed from a real capture against pi 0.85.1 asking it to read three
+	// files: agent_end arrived once, after three tool-calling turn_ends had
+	// already gone by, carrying the whole exchange in messages.
+	lineAgentEnd = `{"type":"agent_end","messages":[{"role":"user","content":[{"type":"text","text":"do it"}]},{"role":"assistant","content":[{"type":"text","text":"ok"}]}]}`
 )
 
 func parse(t *testing.T, line string) []adapter.Event {
@@ -76,6 +80,26 @@ func TestParseTurnEndCarriesProviderAndBilling(t *testing.T) {
 	}
 }
 
+// The finding this guards against: a caller waiting for the whole answer
+// used to have nothing but turn_end to wait on, and pi prints one of those
+// per model call, not per answer. agent_end is pi's own "nothing further is
+// coming" frame; turn_end must never also claim to be that, or the two are
+// indistinguishable again.
+func TestParseAgentEndIsWhatCarriesEventDone(t *testing.T) {
+	evs := parse(t, lineAgentEnd)
+	if len(evs) != 1 || evs[0].Kind != adapter.EventDone {
+		t.Fatalf("got %+v, want exactly one done event", evs)
+	}
+}
+
+func TestParseTurnEndNeverCarriesEventDone(t *testing.T) {
+	for _, ev := range parse(t, lineTurnEnd) {
+		if ev.Kind == adapter.EventDone {
+			t.Errorf("turn_end produced %+v; only agent_end may carry EventDone", ev)
+		}
+	}
+}
+
 func TestBillingDefaultsToMeteredForUnknownProviders(t *testing.T) {
 	// Mislabelling a real charge as an estimate is a smaller error than
 	// presenting an estimate as a bill, so unknown providers are metered.
@@ -114,7 +138,7 @@ func TestParseIgnoresStreamingNoise(t *testing.T) {
 		`{"type":"message_start","message":{"role":"assistant","content":[]}}`,
 		`{"type":"message_update","assistantMessageEvent":{"type":"text_start","contentIndex":1}}`,
 		`{"type":"message_update","assistantMessageEvent":{"type":"text_end","content":"done"}}`,
-		`{"type":"agent_end","messages":[]}`,
+		`{"type":"agent_settled"}`,
 		lineRPCOK,
 		`Warning: Model "gpt-5.6-sol" not found for provider "openai-codex".`,
 		"",

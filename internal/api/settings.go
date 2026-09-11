@@ -960,7 +960,12 @@ func (s *Server) requestGuide(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Being second in line is not a fault; say so rather than half-starting.
-	if s.chatMgr.Busy(project.ID) {
+	//
+	// chat.ReviewChat(project.ID), not the bare project id: AskAndWait keys
+	// this conversation's turn by the derived chat id, and checking Busy
+	// against the wrong key meant this precheck never actually fired -- see
+	// docs/design/code-explorer.md decision 8.
+	if s.chatMgr.Busy(chat.ReviewChat(project.ID)) {
 		writeError(w, http.StatusConflict,
 			"the agent is in the middle of an answer; ask again when it finishes")
 		return

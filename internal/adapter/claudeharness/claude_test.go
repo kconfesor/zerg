@@ -100,8 +100,8 @@ func TestParseAssistantWithToolCalls(t *testing.T) {
 // prices differ by roughly 50x, so summing them would misstate cost badly.
 func TestParseResultCarriesTheCacheSplit(t *testing.T) {
 	evs := parse(t, lineResult)
-	if len(evs) != 2 {
-		t.Fatalf("got %d events, want usage then turn_end", len(evs))
+	if len(evs) != 3 {
+		t.Fatalf("got %d events, want usage, turn_end, then done", len(evs))
 	}
 
 	u := evs[0]
@@ -126,6 +126,12 @@ func TestParseResultCarriesTheCacheSplit(t *testing.T) {
 
 	if evs[1].Kind != adapter.EventTurnEnd {
 		t.Errorf("second event is %s, want turn_end", evs[1].Kind)
+	}
+	// claude's CLI runs every internal tool-calling round itself and prints
+	// exactly one result at the very end, so turn_end already means the
+	// whole answer here -- unlike pi, which needs a separate frame to say so.
+	if evs[2].Kind != adapter.EventDone {
+		t.Errorf("third event is %s, want done", evs[2].Kind)
 	}
 }
 
