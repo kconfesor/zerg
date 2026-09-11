@@ -3,11 +3,13 @@
  * Browse any branch, tag or commit of a project's repository.
  *
  * Independent of any task, approval or feature -- see
- * docs/design/code-explorer.md. Plain text for now: no syntax highlighting
- * (phase 2) and no AI explain (phase 3), both deliberately out of scope here.
+ * docs/design/code-explorer.md. No AI explain yet (phase 3), deliberately
+ * out of scope here.
  */
 import { computed, ref, watch } from 'vue'
 import { api, type RepoBlob, type RepoRef, type TreeEntry } from '@/lib/api'
+import { highlight } from '@/lib/highlight'
+import { latest } from '@/lib/latest'
 import { ChevronLeft, File, Folder, GitBranch, LoaderCircle, Tag } from '@lucide/vue'
 
 const props = defineProps<{ projectId: string }>()
@@ -27,6 +29,15 @@ const loadingTree = ref(false)
 const selectedFile = ref('')
 const blob = ref<RepoBlob | null>(null)
 const loadingFile = ref(false)
+/** Highlighted HTML for the open file, or null for plain text -- no grammar
+ *  for this extension, the file was too small to bother, or highlighting
+ *  timed out. See lib/highlight.ts. */
+const highlighted = ref<string | null>(null)
+const highlightNote = ref('')
+// Opening one file and then another leaves the first file's highlight still
+// running; without this it can land after the second file's plain text is
+// already showing and repaint it as the wrong file, coloured.
+const newestFile = latest()
 
 const error = ref('')
 
@@ -97,22 +108,37 @@ function openParentDir() {
 async function openFile(path: string) {
   selectedFile.value = path
   blob.value = null
+  highlighted.value = null
+  highlightNote.value = ''
   loadingFile.value = true
   error.value = ''
+  const current = newestFile()
   try {
     // The sha the tree already resolved, not the ref name again -- decision 4.
     const res = await api.repoFile(props.projectId, resolvedSha.value || selectedRef.value, path)
+    if (!current()) return
     blob.value = res.blob
+    loadingFile.value = false
+    if (!res.blob.binary && !res.blob.tooLarge && res.blob.content) {
+      const result = await highlight(path, res.blob.content)
+      if (!current()) return
+      if ('html' in result) highlighted.value = result.html
+      else if ('timedOut' in result) highlightNote.value = 'Not highlighted: took too long.'
+      else highlightNote.value = 'Not highlighted: ' + result.error
+    }
   } catch (e) {
+    if (!current()) return
     error.value = e instanceof Error ? e.message : String(e)
   } finally {
-    loadingFile.value = false
+    if (current()) loadingFile.value = false
   }
 }
 
 function backToTree() {
   selectedFile.value = ''
   blob.value = null
+  highlighted.value = null
+  highlightNote.value = ''
 }
 
 function backToRefs() {
@@ -270,7 +296,8 @@ watch(
       </div>
     </section>
 
-    <!-- File: one blob's exact content, plain text until phase 2. -->
+    <!-- File: one blob's exact content, highlighted when a grammar and the
+         time budget both allow it, plain text otherwise. -->
     <section
       :class="[
         'min-w-0 flex-1 flex-col border sm:flex',
@@ -305,11 +332,21 @@ watch(
         <p v-else-if="blob?.tooLarge" class="text-muted-foreground p-2 text-[11px]">
           {{ blob.size.toLocaleString() }} bytes, too large to show here.
         </p>
-        <div v-else-if="blob" class="flex font-mono text-[11px] leading-snug">
-          <div class="tabular text-muted-foreground shrink-0 select-none px-2 py-2 text-right">
-            <div v-for="(_, i) in fileLines" :key="i">{{ i + 1 }}</div>
+        <div v-else-if="blob">
+          <p v-if="highlightNote" class="text-muted-foreground border-b px-2 py-1 text-[10px]">
+            {{ highlightNote }}
+          </p>
+          <div class="flex font-mono text-[11px] leading-snug">
+            <div class="tabular text-muted-foreground shrink-0 select-none px-2 py-2 text-right">
+              <div v-for="(_, i) in fileLines" :key="i">{{ i + 1 }}</div>
+            </div>
+            <!-- Shiki's own output: it HTML-escapes the source text itself
+                 before wrapping it in colour spans, so this is markup Shiki
+                 built, never the repo's raw bytes rendered as markup -- the
+                 v-html this app's rules warn against is the other thing. -->
+            <div v-if="highlighted" class="min-w-0 flex-1 overflow-x-auto py-2 pr-3" v-html="highlighted" />
+            <pre v-else class="min-w-0 flex-1 overflow-x-auto py-2 pr-3 whitespace-pre">{{ blob.content }}</pre>
           </div>
-          <pre class="min-w-0 flex-1 overflow-x-auto py-2 pr-3 whitespace-pre">{{ blob.content }}</pre>
         </div>
       </div>
     </section>
