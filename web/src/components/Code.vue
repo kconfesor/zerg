@@ -406,7 +406,7 @@ watch(
     <!-- Refs: branches and tags, independent of any task. -->
     <section
       :class="[
-        'min-w-0 flex-col border sm:flex sm:w-48 sm:shrink-0',
+        'min-h-0 min-w-0 flex-1 flex-col border sm:flex sm:w-48 sm:flex-none',
         mobilePane === 'refs' ? 'flex' : 'hidden',
       ]"
     >
@@ -463,7 +463,7 @@ watch(
     <!-- Tree: one directory's immediate children, fetched lazily per click. -->
     <section
       :class="[
-        'min-w-0 flex-col border sm:flex sm:w-64 sm:shrink-0',
+        'min-h-0 min-w-0 flex-1 flex-col border sm:flex sm:w-64 sm:flex-none',
         mobilePane === 'tree' ? 'flex' : 'hidden',
       ]"
     >
@@ -549,7 +549,7 @@ watch(
          time budget both allow it, plain text otherwise. -->
     <section
       :class="[
-        'min-w-0 flex-1 flex-col border sm:flex',
+        'min-h-0 min-w-0 flex-1 flex-col border sm:flex',
         mobilePane === 'file' ? 'flex' : 'hidden',
       ]"
     >

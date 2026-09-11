@@ -105,6 +105,12 @@ const route = useRoute()
 const router = useRouter()
 const view = computed<View>(() => viewOf(route.name))
 
+/** The views that scroll inside themselves rather than scrolling the page --
+ *  see the comment on <main> below for why each one is here. */
+const ownsItsScrolling = computed(
+  () => view.value === 'board' || view.value === 'chat' || view.value === 'code',
+)
+
 /** Navigate within the current project, keeping it in the path. */
 function go(v: View) {
   router.push(viewPath(current.value?.id, v))
@@ -1026,19 +1032,21 @@ watch(current, () => (banner.value = null))
            row added around it -- the agent picker, then the tabs -- pushed the
            box you type in further down until it was off the bottom of a 720px
            window. -->
+      <!-- Code is the same shape again: its file pane is a scroll container,
+           and with the page scrolling too a large file made the whole view --
+           the ref list, the tree, the header -- scroll away underneath it
+           instead of the file scrolling inside its own pane. -->
       <main
         v-else
         :class="[
           'min-h-0 flex-1',
-          view === 'board' || view === 'chat'
-            ? 'flex flex-col overflow-hidden'
-            : 'overflow-y-auto',
+          ownsItsScrolling ? 'flex flex-col overflow-hidden' : 'overflow-y-auto',
         ]"
       >
         <div
           :class="[
             'w-full p-[var(--gutter)]',
-            (view === 'board' || view === 'chat') && 'flex min-h-0 flex-1 flex-col',
+            ownsItsScrolling && 'flex min-h-0 flex-1 flex-col',
           ]"
         >
           <!-- Board -->
