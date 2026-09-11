@@ -29,6 +29,7 @@ import {
 } from '@/components/ui/dialog'
 
 const props = defineProps<{ projectId: string }>()
+const emit = defineEmits<{ crumb: [label: string] }>()
 
 const refs = ref<RepoRef[]>([])
 const loadingRefs = ref(false)
@@ -180,6 +181,18 @@ const crumbs = computed(() => {
 
 const fileLines = computed(() => blob.value?.content?.split('\n') ?? [])
 
+// Surfaced in the page header (App.vue) rather than only in the tree pane's
+// own crumb bar, which is hidden on a phone once a file is open -- the pane
+// showing the file is the one place that lost track of which ref and path
+// it belonged to.
+const headerCrumb = computed(() => {
+  if (!selectedRef.value) return ''
+  const parts = crumbs.value.map((c) => c.name)
+  if (selectedFile.value) parts.push(selectedFile.value.split('/').pop() ?? selectedFile.value)
+  return parts.join(' / ')
+})
+watch(headerCrumb, (v) => emit('crumb', v), { immediate: true })
+
 // ── explain ────────────────────────────────────────────────────────────
 // "Explain this" while browsing -- see docs/design/code-explorer.md
 // decisions 8-11. Polled for, not held open: an agent turn is tens of
@@ -250,7 +263,10 @@ function closeExplain() {
   stopExplainPoll()
 }
 
-onUnmounted(stopExplainPoll)
+onUnmounted(() => {
+  stopExplainPoll()
+  emit('crumb', '')
+})
 
 // A selection made inside the file content offers to explain just that,
 // rather than the whole file -- a person reading a specific excerpt wants an
@@ -315,7 +331,7 @@ watch(
             :key="'branch-' + b.name"
             type="button"
             :class="[
-              'hover:bg-muted focus-visible:outline-ring flex w-full items-center gap-1.5 px-2 py-1.5 text-left text-xs transition-colors focus-visible:outline-2',
+              'hover:bg-muted focus-visible:outline-ring flex w-full items-center gap-1.5 px-2 py-2.5 text-left text-xs sm:py-1.5 transition-colors focus-visible:outline-2',
               selectedRef === b.name && 'bg-primary/[0.08] font-medium',
             ]"
             @click="openRef(b.name)"
@@ -328,7 +344,7 @@ watch(
             :key="'tag-' + t.name"
             type="button"
             :class="[
-              'hover:bg-muted focus-visible:outline-ring flex w-full items-center gap-1.5 px-2 py-1.5 text-left text-xs transition-colors focus-visible:outline-2',
+              'hover:bg-muted focus-visible:outline-ring flex w-full items-center gap-1.5 px-2 py-2.5 text-left text-xs sm:py-1.5 transition-colors focus-visible:outline-2',
               selectedRef === t.name && 'bg-primary/[0.08] font-medium',
             ]"
             @click="openRef(t.name)"
@@ -382,7 +398,7 @@ watch(
           <button
             v-if="dir"
             type="button"
-            class="hover:bg-muted focus-visible:outline-ring flex w-full items-center gap-1.5 px-2 py-1.5 text-left text-xs text-muted-foreground transition-colors focus-visible:outline-2"
+            class="hover:bg-muted focus-visible:outline-ring text-muted-foreground flex w-full items-center gap-1.5 px-2 py-2.5 text-left text-xs transition-colors focus-visible:outline-2 sm:py-1.5"
             @click="openParentDir"
           >
             <Folder :size="12" class="shrink-0" aria-hidden="true" />
@@ -392,7 +408,7 @@ watch(
             <button
               type="button"
               :class="[
-                'hover:bg-muted focus-visible:outline-ring flex min-w-0 flex-1 items-center gap-1.5 px-2 py-1.5 text-left text-xs transition-colors focus-visible:outline-2',
+                'hover:bg-muted focus-visible:outline-ring flex min-w-0 flex-1 items-center gap-1.5 px-2 py-2.5 text-left text-xs transition-colors focus-visible:outline-2 sm:py-1.5',
                 e.path === selectedFile && 'bg-primary/[0.08] font-medium',
               ]"
               @click="e.kind === 'tree' ? openDir(e.path) : openFile(e.path)"
@@ -413,7 +429,7 @@ watch(
             <button
               v-if="e.kind === 'tree'"
               type="button"
-              class="hover:bg-muted hover:text-foreground focus-visible:outline-ring text-muted-foreground grid size-7 shrink-0 place-items-center transition-colors focus-visible:outline-2"
+              class="hover:bg-muted hover:text-foreground focus-visible:outline-ring text-muted-foreground grid size-9 shrink-0 place-items-center transition-colors focus-visible:outline-2 sm:size-7"
               title="Explain this folder"
               :aria-label="`Explain ${e.name}`"
               @click.stop="explainFolder(e.path)"

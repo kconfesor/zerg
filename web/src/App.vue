@@ -370,6 +370,10 @@ function toggleSkip(id: string, on: boolean) {
   taskSkip.value = on ? [...taskSkip.value, id] : taskSkip.value.filter((x) => x !== id)
 }
 const addingProject = ref(false)
+// Where the Code view's own header would otherwise sit idle on "Code" and a
+// static blurb -- shown instead once browsing starts, so a phone that only
+// ever sees one pane at a time still knows which ref and file that pane is.
+const codeCrumb = ref('')
 
 let timer: number | undefined
 
@@ -1197,10 +1201,10 @@ watch(current, () => (banner.value = null))
           <template v-else-if="view === 'code'">
             <PageHeader
               title="Code"
-              subtitle="Any branch, tag or commit of this project's repository, read for its own sake rather than because a card is open."
+              :subtitle="codeCrumb || 'Any branch, tag or commit of this project\'s repository.'"
             />
             <div class="relative flex min-h-0 flex-1 flex-col pt-4">
-              <Code v-if="current" :project-id="current.id" />
+              <Code v-if="current" :project-id="current.id" @crumb="(v) => (codeCrumb = v)" />
               <p v-else class="text-muted-foreground text-sm">Choose a project to browse its repository.</p>
             </div>
           </template>
