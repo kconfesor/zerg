@@ -9,6 +9,7 @@ import {
   GitPullRequest,
   GitPullRequestDraft,
   FolderGit2,
+  FolderTree,
   GitBranch,
   MessageSquare,
   Pencil,
@@ -332,6 +333,9 @@ const nav = computed(() => [
   { key: 'projects' as const, label: 'Projects', icon: FolderGit2, count: props.projectCount },
   { key: 'team' as const, label: 'Team', icon: Users, count: 0 },
   { key: 'chat' as const, label: 'Chat', icon: MessageSquare, count: 0 },
+  // Independent of any task, unlike everything above it: any branch or
+  // commit, read for its own sake rather than because a card is open.
+  { key: 'code' as const, label: 'Code', icon: FolderTree, count: 0 },
   // After Chat rather than beside the board: what happened is read now and
   // then, and the destinations you use while work is running come first.
   { key: 'history' as const, label: 'History', icon: ScrollText, count: 0 },

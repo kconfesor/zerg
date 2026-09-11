@@ -210,6 +210,11 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/approvals/{id}/diff", s.approvalDiff)
 	mux.HandleFunc("GET /api/approvals/{id}/mergeable", s.approvalMergeable)
 	mux.HandleFunc("GET /api/approvals/{id}/file", s.approvalFile)
+	// Code explorer: any branch or commit, not just one an approval or feature
+	// already resolved. See docs/design/code-explorer.md.
+	mux.HandleFunc("GET /api/projects/{id}/refs", s.repoRefs)
+	mux.HandleFunc("GET /api/projects/{id}/tree", s.repoTree)
+	mux.HandleFunc("GET /api/projects/{id}/file", s.repoFile)
 	// Artifacts: what a task produced, and its bytes. See §13.
 	// Running a project so somebody can look at it. The daemon starts an agent;
 	// it does not run the project itself.

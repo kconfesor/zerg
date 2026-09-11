@@ -570,6 +570,41 @@ func (h *Hatchery) resolves(ctx context.Context, ref string) (bool, error) {
 	return true, nil
 }
 
+// ResolveCommit turns a client-supplied ref into the commit it names, in one
+// call rather than a verify followed by a separate, unguarded Resolve.
+//
+// Resolve above is plain `git rev-parse <ref>` with no `--verify`: run
+// `git rev-parse docs` in this repository and it exits 0 and prints "docs",
+// not a sha or an error, because rev-parse treats an unrecognised argument as
+// a literal token when nothing else matches rather than failing. That is fine
+// for every existing caller, which only ever hands Resolve a ref this daemon
+// already trusts (a project's base branch, a resolved task). The code
+// explorer's ref comes straight off an HTTP query string, the first time
+// anywhere in this codebase that is true, so it needs the same distinction
+// resolves draws (a real exit-1-and-silent "no" from an operational failure)
+// and the sha resolves throws away. --end-of-options is git's own answer to a
+// ref that begins with a dash, confirmed locally against
+// "--upload-pack=x^{commit}", which fails closed rather than being read as a
+// flag.
+func (h *Hatchery) ResolveCommit(ctx context.Context, ref string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--verify", "--quiet", "--end-of-options", ref+"^{commit}")
+	cmd.Dir = h.repoPath
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil {
+		var exit *exec.ExitError
+		if errors.As(err, &exit) && exit.ExitCode() == 1 && stderr.Len() == 0 {
+			return "", fmt.Errorf("%w: %s in %s", ErrNoSuchRevision, ref, h.repoPath)
+		}
+		msg := strings.TrimSpace(stderr.String())
+		if msg == "" {
+			msg = err.Error()
+		}
+		return "", fmt.Errorf("resolving %s in %s: %s", ref, h.repoPath, msg)
+	}
+	return strings.TrimSpace(stdout.String()), nil
+}
+
 // load fills in one file's content and diff, or says why it did not.
 func (h *Hatchery) load(ctx context.Context, f *ChangedFile, sha, base string, maxBytes int) {
 	// Only for the files the cockpit renders as documents.
@@ -685,6 +720,193 @@ func (h *Hatchery) LoadFile(ctx context.Context, base, sha, path string, maxByte
 		return &f, nil
 	}
 	return nil, fmt.Errorf("%q is not in this change: %w", path, ErrNoSuchRevision)
+}
+
+// Ref is one branch or tag, for a picker that lets a person browse a name
+// rather than a commit an approval or feature already resolved.
+type Ref struct {
+	Name string `json:"name"` // short name: "main", "v1.2.0"
+	Kind string `json:"kind"` // "branch" | "tag"
+	SHA  string `json:"sha"`
+}
+
+// Refs lists a project's branches and tags, most recently committed first —
+// the ones somebody browsing is likeliest to want. Not filtered: this
+// project's own housekeeping branches (zerg-<role>, zerg/<task>) show up like
+// any other, left for a later decision once it is clear whether that is
+// actually in the way.
+func (h *Hatchery) Refs(ctx context.Context) ([]Ref, error) {
+	out, err := git(ctx, h.repoPath, "for-each-ref",
+		"--format=%(refname)%00%(objectname)",
+		"--sort=-committerdate",
+		"refs/heads", "refs/tags")
+	if err != nil {
+		return nil, fmt.Errorf("listing refs in %s: %w", h.repoPath, err)
+	}
+	var refs []Ref
+	for _, line := range strings.Split(out, "\n") {
+		if line == "" {
+			continue
+		}
+		fields := strings.Split(line, "\x00")
+		if len(fields) != 2 {
+			continue
+		}
+		full, sha := fields[0], fields[1]
+		var kind, name string
+		switch {
+		case strings.HasPrefix(full, "refs/heads/"):
+			kind, name = "branch", strings.TrimPrefix(full, "refs/heads/")
+		case strings.HasPrefix(full, "refs/tags/"):
+			kind, name = "tag", strings.TrimPrefix(full, "refs/tags/")
+		default:
+			continue
+		}
+		refs = append(refs, Ref{Name: name, Kind: kind, SHA: sha})
+	}
+	return refs, nil
+}
+
+// TreeEntry is one immediate child of a directory at a commit: a file, a
+// subdirectory, or a submodule.
+type TreeEntry struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
+	Kind string `json:"kind"`           // "blob" | "tree" | "commit" (submodule)
+	Size int64  `json:"size,omitempty"` // blobs only
+}
+
+// Tree lists one directory's immediate children at a commit sha. Not
+// recursive: a directory is opened because a person clicked it, and reading
+// a whole tree up front to save a later request is the eager-fetch mistake
+// commit ee1dc4c already found and reversed for diffs. dir is relative to the
+// repository root and empty for the root itself.
+//
+// git ls-tree <sha> <dir> -- the form without a colon -- does not list dir's
+// children: checked locally, it prints one line, the tree entry for dir
+// itself. Colon syntax against the resolved sha is what walks in: -l for a
+// blob's byte size (a tree gets "-", there is nothing to sum), -z because a
+// filename can itself contain the tab or newline this output would otherwise
+// use as a separator -- nameStatus above already parses -z output for the
+// same reason.
+func (h *Hatchery) Tree(ctx context.Context, sha, dir string) ([]TreeEntry, error) {
+	spec := sha + ":" + dir
+	out, err := git(ctx, h.repoPath, "ls-tree", "-l", "-z", spec)
+	if err != nil {
+		return nil, fmt.Errorf("%q is not a directory in %s: %w", dir, short(sha), ErrNoSuchRevision)
+	}
+	return parseTree(dir, out), nil
+}
+
+// parseTree reads -l -z ls-tree output: NUL between entries, a tab between
+// the metadata and the name within one.
+func parseTree(dir, out string) []TreeEntry {
+	var entries []TreeEntry
+	for _, rec := range strings.Split(out, "\x00") {
+		if rec == "" {
+			continue
+		}
+		meta, name, ok := strings.Cut(rec, "\t")
+		if !ok {
+			continue
+		}
+		fields := strings.Fields(meta) // mode, type, sha, size
+		if len(fields) < 4 {
+			continue
+		}
+		e := TreeEntry{Name: name, Path: joinPath(dir, name), Kind: fields[1]}
+		if e.Kind == "blob" {
+			if n, err := strconv.ParseInt(fields[3], 10, 64); err == nil {
+				e.Size = n
+			}
+		}
+		entries = append(entries, e)
+	}
+	return entries
+}
+
+// joinPath builds a repository-relative path the way git reports one: always
+// forward slashes, and no leading slash for a root-level name.
+func joinPath(dir, name string) string {
+	if dir == "" {
+		return name
+	}
+	return dir + "/" + name
+}
+
+// Blob is one file's exact bytes at a commit, read for the code explorer
+// rather than for a diff -- see ChangedFile for that.
+type Blob struct {
+	Path     string `json:"path"`
+	Content  string `json:"content,omitempty"`
+	Size     int64  `json:"size"`
+	Binary   bool   `json:"binary,omitempty"`
+	TooLarge bool   `json:"tooLarge,omitempty"`
+}
+
+// Blob reads one file's content at a commit sha, stat-first so a huge or
+// merely large-and-uninteresting blob is refused before it is read rather
+// than after.
+//
+// load() above reads a whole blob into memory before comparing its length to
+// the byte cap. Safe there because it only ever runs on .md/.txt files within
+// the first thirty of one commit's changes -- a small, implicitly-bounded
+// population. Here any file, at any ref, is directly addressable by URL, so
+// the size is asked for first: `git cat-file -s` answers without reading the
+// object's content at all. And unlike load(), the content this returns has
+// to be exact: it goes through a plain exec.Command rather than the shared
+// git() helper, because git() TrimSpaces its entire stdout, which every other
+// caller wants and a file's bytes cannot survive -- a file with leading blank
+// lines or no trailing newline would come back altered, silently shifting
+// every selected line number a reader picks after it.
+func (h *Hatchery) Blob(ctx context.Context, sha, path string, maxBytes int) (*Blob, error) {
+	spec := sha + ":" + path
+
+	// cat-file -s alone is not enough to reject a directory: it happily
+	// reports a number for a tree object too (checked locally, 114 for a real
+	// directory), and git show on a tree path succeeds with a human-readable
+	// listing rather than failing -- exactly the silent-wrong-answer this
+	// guards against.
+	kind, err := git(ctx, h.repoPath, "cat-file", "-t", spec)
+	if err != nil {
+		return nil, fmt.Errorf("%q is not in %s: %w", path, short(sha), ErrNoSuchRevision)
+	}
+	if kind != "blob" {
+		return nil, fmt.Errorf("%q is a %s in %s, not a file: %w", path, kind, short(sha), ErrNoSuchRevision)
+	}
+
+	sizeOut, err := git(ctx, h.repoPath, "cat-file", "-s", spec)
+	if err != nil {
+		return nil, fmt.Errorf("reading the size of %s: %w", spec, err)
+	}
+	size, err := strconv.ParseInt(sizeOut, 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("reading the size of %s: %w", spec, err)
+	}
+	b := &Blob{Path: path, Size: size}
+	if maxBytes > 0 && size > int64(maxBytes) {
+		b.TooLarge = true
+		return b, nil
+	}
+
+	cmd := exec.CommandContext(ctx, "git", "show", spec)
+	cmd.Dir = h.repoPath
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil {
+		msg := strings.TrimSpace(stderr.String())
+		if msg == "" {
+			msg = err.Error()
+		}
+		return nil, fmt.Errorf("reading %s: %s", spec, msg)
+	}
+	content := stdout.Bytes()
+	if bytes.IndexByte(content, 0) >= 0 {
+		b.Binary = true
+		return b, nil
+	}
+	b.Content = string(content)
+	return b, nil
 }
 
 // changed lists what a commit touched.
