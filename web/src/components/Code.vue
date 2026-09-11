@@ -51,10 +51,14 @@ const loadingFile = ref(false)
  *  timed out. See lib/highlight.ts. */
 const highlighted = ref<string | null>(null)
 const highlightNote = ref('')
-// Opening one file and then another leaves the first file's highlight still
-// running; without this it can land after the second file's plain text is
-// already showing and repaint it as the wrong file, coloured.
-const newestFile = latest()
+// One sequence for every navigation request -- picking a ref, opening a
+// directory, opening a file, going back. Each of those can be in flight when
+// the next one starts (a slow "main" tree response landing after "other" was
+// already picked, say), and only the request behind the newest action may
+// write what it fetched. Going back does not fetch anything itself but still
+// takes a turn, so a tree or file load already in flight when a person backs
+// out of it is discarded rather than reappearing after the fact.
+const nav = latest()
 
 const error = ref('')
 
@@ -75,12 +79,16 @@ const mobilePane = computed<'refs' | 'tree' | 'file'>(() => {
 async function loadRefs() {
   error.value = ''
   loadingRefs.value = true
+  const current = nav()
   try {
-    refs.value = await api.repoRefs(props.projectId)
+    const res = await api.repoRefs(props.projectId)
+    if (!current()) return
+    refs.value = res
   } catch (e) {
+    if (!current()) return
     error.value = e instanceof Error ? e.message : String(e)
   } finally {
-    loadingRefs.value = false
+    if (current()) loadingRefs.value = false
   }
 }
 
@@ -88,20 +96,28 @@ async function loadTree() {
   if (!selectedRef.value) return
   loadingTree.value = true
   error.value = ''
+  const current = nav()
   try {
-    const res = await api.repoTree(props.projectId, selectedRef.value, dir.value)
+    // Pinned to the sha this ref already resolved to, not the ref name again
+    // -- decision 4. Only openRef clears resolvedSha, so opening a directory
+    // underneath the ref that is already open asks about the same commit
+    // rather than re-resolving a branch that may have moved since.
+    const res = await api.repoTree(props.projectId, resolvedSha.value || selectedRef.value, dir.value)
+    if (!current()) return
     resolvedSha.value = res.resolvedSha
     entries.value = res.entries
   } catch (e) {
+    if (!current()) return
     error.value = e instanceof Error ? e.message : String(e)
     entries.value = []
   } finally {
-    loadingTree.value = false
+    if (current()) loadingTree.value = false
   }
 }
 
 function openRef(name: string) {
   selectedRef.value = name
+  resolvedSha.value = ''
   dir.value = ''
   selectedFile.value = ''
   blob.value = null
@@ -130,7 +146,7 @@ async function openFile(path: string) {
   loadingFile.value = true
   error.value = ''
   clearSelection()
-  const current = newestFile()
+  const current = nav()
   try {
     // The sha the tree already resolved, not the ref name again -- decision 4.
     const res = await api.repoFile(props.projectId, resolvedSha.value || selectedRef.value, path)
@@ -153,6 +169,7 @@ async function openFile(path: string) {
 }
 
 function backToTree() {
+  nav() // discard a file load still in flight for the file just left
   selectedFile.value = ''
   blob.value = null
   highlighted.value = null
@@ -161,7 +178,9 @@ function backToTree() {
 }
 
 function backToRefs() {
+  nav() // discard a tree or file load still in flight for the ref just left
   selectedRef.value = ''
+  resolvedSha.value = ''
   dir.value = ''
   entries.value = []
 }
@@ -297,7 +316,9 @@ function onContentMouseUp() {
 watch(
   () => props.projectId,
   () => {
+    nav() // discard anything still in flight for the project just left
     selectedRef.value = ''
+    resolvedSha.value = ''
     dir.value = ''
     entries.value = []
     selectedFile.value = ''

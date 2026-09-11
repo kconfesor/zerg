@@ -789,13 +789,35 @@ type TreeEntry struct {
 // filename can itself contain the tab or newline this output would otherwise
 // use as a separator -- nameStatus above already parses -z output for the
 // same reason.
+//
+// Bypasses the shared git() helper for the same reason resolves does: that
+// helper collapses every failure into one string, and a caller not asking
+// what kind of failure this is asks a genuinely broken repository "is this
+// directory there" and hears "no" -- exactly the blanket-400 mistake
+// AGENTS.md already records. Checked locally against a real repository: a
+// missing sha:dir exits 128 with "fatal: Not a valid object name", every
+// time -- there is no other reason ls-tree fails against an already-resolved
+// sha. Anything that is not that -- git missing from PATH, a cancelled
+// context -- never gets as far as an *exec.ExitError and is returned as the
+// operational failure it is.
 func (h *Hatchery) Tree(ctx context.Context, sha, dir string) ([]TreeEntry, error) {
 	spec := sha + ":" + dir
-	out, err := git(ctx, h.repoPath, "ls-tree", "-l", "-z", spec)
-	if err != nil {
-		return nil, fmt.Errorf("%q is not a directory in %s: %w", dir, short(sha), ErrNoSuchRevision)
+	cmd := exec.CommandContext(ctx, "git", "ls-tree", "-l", "-z", spec)
+	cmd.Dir = h.repoPath
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil {
+		var exit *exec.ExitError
+		if errors.As(err, &exit) {
+			return nil, fmt.Errorf("%q is not a directory in %s: %w", dir, short(sha), ErrNoSuchRevision)
+		}
+		msg := strings.TrimSpace(stderr.String())
+		if msg == "" {
+			msg = err.Error()
+		}
+		return nil, fmt.Errorf("listing %s in %s: %s", dir, short(sha), msg)
 	}
-	return parseTree(dir, out), nil
+	return parseTree(dir, strings.TrimSpace(stdout.String())), nil
 }
 
 // parseTree reads -l -z ls-tree output: NUL between entries, a tab between
@@ -867,10 +889,28 @@ func (h *Hatchery) Blob(ctx context.Context, sha, path string, maxBytes int) (*B
 	// directory), and git show on a tree path succeeds with a human-readable
 	// listing rather than failing -- exactly the silent-wrong-answer this
 	// guards against.
-	kind, err := git(ctx, h.repoPath, "cat-file", "-t", spec)
-	if err != nil {
-		return nil, fmt.Errorf("%q is not in %s: %w", path, short(sha), ErrNoSuchRevision)
+	//
+	// Bypasses git() for the same reason Tree does: a missing sha:path exits
+	// 128 with "fatal: path ... does not exist", checked locally, every
+	// time, and only that -- an *exec.ExitError -- is this caller's mistake.
+	// Anything else (git missing, a cancelled context) is returned as the
+	// operational failure it is rather than folded into "no such file."
+	kindCmd := exec.CommandContext(ctx, "git", "cat-file", "-t", spec)
+	kindCmd.Dir = h.repoPath
+	var kindOut, kindErr bytes.Buffer
+	kindCmd.Stdout, kindCmd.Stderr = &kindOut, &kindErr
+	if err := kindCmd.Run(); err != nil {
+		var exit *exec.ExitError
+		if errors.As(err, &exit) {
+			return nil, fmt.Errorf("%q is not in %s: %w", path, short(sha), ErrNoSuchRevision)
+		}
+		msg := strings.TrimSpace(kindErr.String())
+		if msg == "" {
+			msg = err.Error()
+		}
+		return nil, fmt.Errorf("reading the type of %s: %s", spec, msg)
 	}
+	kind := strings.TrimSpace(kindOut.String())
 	if kind != "blob" {
 		return nil, fmt.Errorf("%q is a %s in %s, not a file: %w", path, kind, short(sha), ErrNoSuchRevision)
 	}
