@@ -565,8 +565,19 @@ func (a *Adapter) Parse(line []byte) ([]adapter.Event, error) {
 		}
 		return nil, nil
 
+	case "agent_end":
+		// The frame this harness's turn_end cannot be, for a caller that needs
+		// to know the whole answer is in rather than just one model call of
+		// it -- see EventDone. Confirmed against a real run (0.85.1) asking pi
+		// to read three files: three tool-calling turn_ends went by first,
+		// each with the call's own stopReason "toolUse", before this one
+		// fired, once, carrying the entire exchange. Its own messages payload
+		// is not read: every message in it already arrived as its own event
+		// on the way here.
+		return []adapter.Event{{Kind: adapter.EventDone}}, nil
+
 	default:
-		// agent_start, turn_start, message_start, message_update, agent_end
+		// agent_start, turn_start, message_start, message_update, agent_settled
 		return nil, nil
 	}
 }

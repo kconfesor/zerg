@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kconfesor/zerg/internal/hatchery"
 )
@@ -114,5 +115,89 @@ func TestCodeExplorerBrowsesRefsTreeAndFile(t *testing.T) {
 	rec = do(t, h, http.MethodGet, "/api/projects/"+project.ID+"/file?ref=main", nil)
 	if rec.Code != 400 {
 		t.Fatalf("missing path: %d %s, want 400", rec.Code, rec.Body)
+	}
+}
+
+// newRoutingServer builds no chat.Manager, so explain has no agent to ask --
+// the same shape askAboutTheChange/requestGuide are in when a build has none.
+func TestRepoExplainWithNoAgentSaysSoRatherThanFailing(t *testing.T) {
+	h, _, project := newRoutingServer(t)
+
+	rec := do(t, h, http.MethodPost, "/api/projects/"+project.ID+"/explain",
+		map[string]string{"ref": "main", "path": "README.md"})
+	if rec.Code != http.StatusNotImplemented {
+		t.Fatalf("explain with no chat manager: %d %s, want 501", rec.Code, rec.Body)
+	}
+
+	rec = do(t, h, http.MethodGet, "/api/projects/"+project.ID+"/explain", nil)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("polling a mistyped path: %d %s, want 404", rec.Code, rec.Body)
+	}
+}
+
+func TestExplainJobsAnswerOnlyTheProjectThatStartedThem(t *testing.T) {
+	j := newExplainJobs()
+	id := j.start("project-a")
+
+	if _, ok := j.get("project-b", id); ok {
+		t.Error("a job answered for a project that did not start it")
+	}
+	if view, ok := j.get("project-a", id); !ok || view.Status != string(explainReading) {
+		t.Errorf("get = %+v, %v, want status %q", view, ok, explainReading)
+	}
+
+	j.finish(id, "it mounts the app")
+	view, ok := j.get("project-a", id)
+	if !ok || view.Status != string(explainDone) || view.Answer != "it mounts the app" {
+		t.Errorf("after finish: %+v, %v", view, ok)
+	}
+
+	other := j.start("project-a")
+	j.fail(other, "the agent is in the middle of an answer")
+	view, ok = j.get("project-a", other)
+	if !ok || view.Status != string(explainFailed) || view.Error == "" {
+		t.Errorf("after fail: %+v, %v", view, ok)
+	}
+
+	if _, ok := j.get("project-a", "no-such-job"); ok {
+		t.Error("an unknown job id was answered")
+	}
+}
+
+func TestExplainJobsForgetAnswersPastTheirTTL(t *testing.T) {
+	j := newExplainJobs()
+	id := j.start("project-a")
+	j.finish(id, "answer")
+	// Backdate it past the TTL rather than waiting for one, or mocking time.
+	j.mu.Lock()
+	j.byID[id].at = time.Now().Add(-explainJobTTL - time.Minute)
+	j.mu.Unlock()
+
+	// The sweep runs on start, not on get -- starting a new job is what a
+	// real client causes by asking another question, which is when it is
+	// safe to say the old one is gone.
+	j.start("project-a")
+	if _, ok := j.get("project-a", id); ok {
+		t.Error("an expired job was still answered")
+	}
+}
+
+func TestExplainPromptsNameWhatIsBeingExplained(t *testing.T) {
+	whole := explainPrompt("main", "src/data/paintings.ts")
+	if !strings.Contains(whole, "main") || !strings.Contains(whole, "src/data/paintings.ts") {
+		t.Errorf("explainPrompt did not name the ref and path: %q", whole)
+	}
+
+	selection := explainSelectionPrompt("main", "src/data/paintings.ts", "export const paintings = []", "")
+	if !strings.Contains(selection, "export const paintings = []") {
+		t.Errorf("explainSelectionPrompt did not embed the selection: %q", selection)
+	}
+	if !strings.Contains(selection, "Explain what this does.") {
+		t.Errorf("an empty question should fall back to a default, got: %q", selection)
+	}
+
+	asked := explainSelectionPrompt("main", "x.ts", "const x = 1", "why is this exported?")
+	if !strings.Contains(asked, "why is this exported?") {
+		t.Errorf("explainSelectionPrompt dropped the actual question: %q", asked)
 	}
 }

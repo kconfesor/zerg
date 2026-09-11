@@ -131,4 +131,12 @@ func TestFragmentsOfAnAnswerAreNotRecorded(t *testing.T) {
 	if len(r.queue) != 1 {
 		t.Errorf("%d events queued, want the whole message", len(r.queue))
 	}
+
+	// A liveness signal for whoever is waiting on a whole answer, not a fact
+	// about the conversation worth a transcript row -- every harness emits
+	// one per turn cycle, for every role, forever.
+	r.push(Event{Event: adapter.Event{Kind: adapter.EventDone}})
+	if len(r.queue) != 1 {
+		t.Errorf("%d events queued, want EventDone refused rather than recorded", len(r.queue))
+	}
 }

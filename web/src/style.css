@@ -312,6 +312,21 @@
   .hairline-t { border-top: 1px solid var(--hairline); }
   .hairline-b { border-bottom: 1px solid var(--hairline); }
   .hairline-r { border-right: 1px solid var(--hairline); }
+
+  /* Shiki's dual-theme output: the light colour is the plain inline `color`
+     every span already carries, and only the dark one needs help, as a
+     `--shiki-dark` variable meant to be switched on by a class -- the same
+     .dark class every other theme-aware element in this app already toggles
+     (lib/theme.ts) rather than a media query. There is no `--shiki-light`
+     variable to match it: overriding `color` with one in light mode was
+     itself the bug that left every file monochrome. Background is dropped
+     -- the code sits inside a panel that already has one of its own, and
+     Shiki's theme background would paint a second, mismatched one under it. */
+  .shiki, .shiki span { background-color: transparent !important; }
+  .shiki { margin: 0; }
+  html.dark .shiki, html.dark .shiki span {
+    color: var(--shiki-dark) !important;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

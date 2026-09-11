@@ -726,6 +726,68 @@ func TestStoppingAnAnswerDoesNotReadAsAFailure(t *testing.T) {
 	}
 }
 
+// The other half of it: a stopped turn has to say the answer is over, not
+// only that the turn ended.
+//
+// The error frame replaced above is the only thing a harness emits for an
+// interrupted turn -- the result that would have carried a done is the
+// successful one it never reached. Whoever is waiting on a whole answer
+// waits for done (chat's releaseAtTurnEnd, AskAndWait), so publishing only
+// turn_end here left the conversation claimed until its five-minute
+// backstop: measured, the next thing typed after pressing stop sat in the
+// queue unsent for the whole of it.
+func TestStoppingAnAnswerSaysTheAnswerIsOver(t *testing.T) {
+	// One line in, one line out, so the interrupt and the error frame it
+	// provokes are ordered by the pipe rather than by timing.
+	a := &scriptedAdapter{script: `printf 'ready\n'; read -r line; printf 'message:half an ans\n'; ` +
+		`read -r line; printf 'error:\n'; sleep 5`}
+	c, bus := newCerebrate(t, a)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	evs := make(chan []event.Event, 1)
+	go func() {
+		evs <- collect(t, bus, func(e []event.Event) bool {
+			for _, ev := range e {
+				if ev.Kind == adapter.EventDone {
+					return true
+				}
+			}
+			return false
+		}, 15*time.Second)
+	}()
+
+	go c.Run(ctx)
+	if err := c.WaitReady(ctx); err != nil {
+		t.Fatalf("WaitReady: %v", err)
+	}
+	if err := c.Submit("write me an essay"); err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	// Submit marks the turn in flight before it returns, which is the state
+	// Interrupt refuses to act without.
+	if err := c.Interrupt(); err != nil {
+		t.Fatalf("Interrupt: %v", err)
+	}
+
+	got := kinds(<-evs)
+	var sawEnd, sawDone bool
+	for _, k := range got {
+		switch k {
+		case adapter.EventError:
+			t.Errorf("a stop surfaced as an error: %v", got)
+		case adapter.EventTurnEnd:
+			sawEnd = true
+		case adapter.EventDone:
+			sawDone = true
+		}
+	}
+	if !sawEnd || !sawDone {
+		t.Errorf("got %v, want the stop to publish turn_end and done", got)
+	}
+}
+
 // Nothing to stop is not a failure either: the answer arrived while the button
 // was being pressed, which is the common case for a short turn.
 func TestInterruptingAnIdleAgentIsQuiet(t *testing.T) {

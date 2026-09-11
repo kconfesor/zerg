@@ -765,9 +765,18 @@ func (c *Cerebrate) readStream(ctx context.Context, stdout io.Reader, fingerprin
 			// happened. Without this, pressing stop put "the harness reported
 			// an error without describing it" on screen underneath the answer
 			// somebody had just chosen to cut short.
+			// EventDone as well as EventTurnEnd: a stop is exactly "nothing
+			// further is coming", and the error frame this replaces is the
+			// only thing the harness emits for an interrupted turn -- the
+			// result that would have carried a done is the successful one it
+			// never reached. Without it, whoever was waiting on the whole
+			// answer (chat's releaseAtTurnEnd, AskAndWait) kept the
+			// conversation claimed until its five-minute backstop, so the
+			// next thing typed after pressing stop sat in the queue unsent.
 			if ev.Kind == adapter.EventError && c.tookInterrupt() {
 				c.observe(adapter.Event{Kind: adapter.EventTurnEnd})
 				c.publish(adapter.Event{Kind: adapter.EventTurnEnd})
+				c.publish(adapter.Event{Kind: adapter.EventDone})
 				continue
 			}
 			c.observe(ev)
