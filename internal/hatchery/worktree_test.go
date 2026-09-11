@@ -891,3 +891,274 @@ func TestAFastForwardLandingSaysWhenTheWorkHasFallenBehind(t *testing.T) {
 		t.Errorf("work that contains the base reports %+v, want clean", ok)
 	}
 }
+
+// Resolve is plain rev-parse with no --verify: it treats an unrecognised
+// argument as a literal token rather than failing. ResolveCommit is the fix,
+// and this is the regression test for the bug it fixes -- without it, a
+// picker fed a path-shaped string instead of a ref would silently "resolve"
+// to that same string rather than erroring.
+func TestResolveCommitRejectsWhatResolveWouldSilentlyAccept(t *testing.T) {
+	h, dir := newProject(t)
+	ctx := context.Background()
+
+	if err := os.Mkdir(filepath.Join(dir, "docs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "docs", "readme.txt"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git(ctx, dir, "add", "."); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git(ctx, dir, "commit", "-m", "add docs"); err != nil {
+		t.Fatal(err)
+	}
+
+	// The bug: a path, handed to the unguarded function, "resolves" to itself.
+	if got, err := h.Resolve(ctx, "docs"); err != nil || got != "docs" {
+		t.Fatalf("Resolve(%q) = %q, %v -- expected this to demonstrate the bug, not fail", "docs", got, err)
+	}
+
+	// The fix: the same string, verified, is refused rather than echoed back.
+	if _, err := h.ResolveCommit(ctx, "docs"); !errors.Is(err, ErrNoSuchRevision) {
+		t.Errorf("ResolveCommit(%q) = %v, want %v", "docs", err, ErrNoSuchRevision)
+	}
+}
+
+// git rev-parse with no protection reads an option-shaped ref as an option.
+// --end-of-options is what stops that, and this is the regression test.
+func TestResolveCommitRejectsADashPrefixedRef(t *testing.T) {
+	h, _ := newProject(t)
+	ctx := context.Background()
+
+	if _, err := h.ResolveCommit(ctx, "--upload-pack=x"); !errors.Is(err, ErrNoSuchRevision) {
+		t.Errorf("ResolveCommit of a dash-prefixed ref = %v, want %v", err, ErrNoSuchRevision)
+	}
+}
+
+func TestResolveCommitAcceptsARealRef(t *testing.T) {
+	h, dir := newProject(t)
+	ctx := context.Background()
+
+	head, err := git(ctx, dir, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sha, err := h.ResolveCommit(ctx, "main")
+	if err != nil {
+		t.Fatalf("ResolveCommit(main): %v", err)
+	}
+	if sha != head {
+		t.Errorf("ResolveCommit(main) = %s, want %s", sha, head)
+	}
+}
+
+// The finding this guards against: git ls-tree <ref> <dir> (no colon) prints
+// the tree entry for dir itself, not what's inside it. Tree has to use colon
+// syntax, or every directory would look like it contains nothing.
+func TestTreeListsChildrenNotTheDirectoryItself(t *testing.T) {
+	h, dir := newProject(t)
+	ctx := context.Background()
+
+	if err := os.Mkdir(filepath.Join(dir, "docs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "docs", "a b.txt"), []byte("hello\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(dir, "docs", "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "docs", "sub", "c.txt"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git(ctx, dir, "add", "."); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git(ctx, dir, "commit", "-m", "add docs"); err != nil {
+		t.Fatal(err)
+	}
+	head, err := git(ctx, dir, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := h.Tree(ctx, head, "docs")
+	if err != nil {
+		t.Fatalf("Tree: %v", err)
+	}
+	by := map[string]TreeEntry{}
+	for _, e := range entries {
+		by[e.Name] = e
+	}
+	if len(by) != 2 {
+		t.Fatalf("got %d entries %+v, want 2 (a file with a space in it, and a subdirectory)", len(by), entries)
+	}
+	f, ok := by["a b.txt"]
+	if !ok || f.Kind != "blob" || f.Path != "docs/a b.txt" || f.Size != 6 {
+		t.Errorf("file entry = %+v, want blob docs/a b.txt size 6", f)
+	}
+	sub, ok := by["sub"]
+	if !ok || sub.Kind != "tree" || sub.Path != "docs/sub" {
+		t.Errorf("subdirectory entry = %+v, want tree docs/sub", sub)
+	}
+
+	root, err := h.Tree(ctx, head, "")
+	if err != nil {
+		t.Fatalf("Tree at root: %v", err)
+	}
+	found := false
+	for _, e := range root {
+		if e.Name == "docs" && e.Kind == "tree" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("root listing %+v did not carry docs as a tree entry", root)
+	}
+}
+
+// The finding this guards against: the shared git() helper TrimSpaces its
+// entire stdout. A blob's content is exact bytes, not a sha or a diff, and
+// silently trimming a file's leading blank lines and trailing whitespace
+// shifts every line number a reader selects afterwards.
+func TestBlobPreservesExactBytesLeadingAndTrailingWhitespace(t *testing.T) {
+	h, dir := newProject(t)
+	ctx := context.Background()
+
+	content := "\n\n  leading blank lines above, trailing spaces below   \nno trailing newline"
+	if err := os.WriteFile(filepath.Join(dir, "exact.txt"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git(ctx, dir, "add", "."); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git(ctx, dir, "commit", "-m", "exact bytes"); err != nil {
+		t.Fatal(err)
+	}
+	head, err := git(ctx, dir, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	b, err := h.Blob(ctx, head, "exact.txt", 0)
+	if err != nil {
+		t.Fatalf("Blob: %v", err)
+	}
+	if b.Content != content {
+		t.Errorf("Blob content = %q, want %q -- whitespace was altered in transit", b.Content, content)
+	}
+}
+
+func TestBlobRejectsADirectoryInsteadOfListingIt(t *testing.T) {
+	h, dir := newProject(t)
+	ctx := context.Background()
+
+	if err := os.Mkdir(filepath.Join(dir, "adir"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "adir", "f.txt"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git(ctx, dir, "add", "."); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git(ctx, dir, "commit", "-m", "add a dir"); err != nil {
+		t.Fatal(err)
+	}
+	head, err := git(ctx, dir, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := h.Blob(ctx, head, "adir", 0); !errors.Is(err, ErrNoSuchRevision) {
+		t.Errorf("Blob on a directory = %v, want %v -- cat-file -s alone would have accepted it and git show would have returned a tree listing as if it were file content", err, ErrNoSuchRevision)
+	}
+}
+
+func TestBlobReportsOversizeWithoutReturningContent(t *testing.T) {
+	h, dir := newProject(t)
+	ctx := context.Background()
+
+	if err := os.WriteFile(filepath.Join(dir, "big.txt"), []byte(strings.Repeat("line\n", 5000)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git(ctx, dir, "add", "."); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git(ctx, dir, "commit", "-m", "a big file"); err != nil {
+		t.Fatal(err)
+	}
+	head, err := git(ctx, dir, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	b, err := h.Blob(ctx, head, "big.txt", 1024)
+	if err != nil {
+		t.Fatalf("Blob: %v", err)
+	}
+	if !b.TooLarge || b.Content != "" {
+		t.Errorf("Blob = %+v, want TooLarge with no content read", b)
+	}
+}
+
+func TestBlobDetectsBinaryContent(t *testing.T) {
+	h, dir := newProject(t)
+	ctx := context.Background()
+
+	if err := os.WriteFile(filepath.Join(dir, "bin.dat"), []byte("abc\x00def"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git(ctx, dir, "add", "."); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git(ctx, dir, "commit", "-m", "a binary file"); err != nil {
+		t.Fatal(err)
+	}
+	head, err := git(ctx, dir, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	b, err := h.Blob(ctx, head, "bin.dat", 0)
+	if err != nil {
+		t.Fatalf("Blob: %v", err)
+	}
+	if !b.Binary || b.Content != "" {
+		t.Errorf("Blob = %+v, want Binary with no content", b)
+	}
+}
+
+func TestRefsListsBranchesAndTags(t *testing.T) {
+	h, dir := newProject(t)
+	ctx := context.Background()
+
+	if _, err := git(ctx, dir, "checkout", "-b", "feature-x"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git(ctx, dir, "checkout", "main"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git(ctx, dir, "tag", "v1.0.0"); err != nil {
+		t.Fatal(err)
+	}
+
+	refs, err := h.Refs(ctx)
+	if err != nil {
+		t.Fatalf("Refs: %v", err)
+	}
+	by := map[string]Ref{}
+	for _, r := range refs {
+		by[r.Name] = r
+	}
+	if got := by["main"]; got.Kind != "branch" || got.SHA == "" {
+		t.Errorf("main = %+v, want a branch with a sha", got)
+	}
+	if got := by["feature-x"]; got.Kind != "branch" {
+		t.Errorf("feature-x = %+v, want a branch", got)
+	}
+	if got := by["v1.0.0"]; got.Kind != "tag" {
+		t.Errorf("v1.0.0 = %+v, want a tag", got)
+	}
+}

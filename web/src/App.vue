@@ -47,6 +47,7 @@ const TaskDetail = defineAsyncComponent(() => import('@/components/TaskDetail.vu
 const Settings = defineAsyncComponent(() => import('@/components/Settings.vue'))
 const ReadinessPanel = defineAsyncComponent(() => import('@/components/Readiness.vue'))
 const TeamEditor = defineAsyncComponent(() => import('@/components/TeamEditor.vue'))
+const Code = defineAsyncComponent(() => import('@/components/Code.vue'))
 import AppSidebar from '@/components/layout/AppSidebar.vue'
 import { useRoute, useRouter } from 'vue-router'
 import { viewOf, viewPath, type View } from '@/router'
@@ -1192,6 +1193,17 @@ watch(current, () => (banner.value = null))
             </div>
           </template>
 
+          <!-- Code -->
+          <template v-else-if="view === 'code'">
+            <PageHeader
+              title="Code"
+              subtitle="Any branch, tag or commit of this project's repository, read for its own sake rather than because a card is open."
+            />
+            <div class="relative flex min-h-0 flex-1 flex-col pt-4">
+              <Code v-if="current" :project-id="current.id" />
+              <p v-else class="text-muted-foreground text-sm">Choose a project to browse its repository.</p>
+            </div>
+          </template>
 
         </div>
       </main>

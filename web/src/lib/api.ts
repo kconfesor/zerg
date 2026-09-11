@@ -726,6 +726,20 @@ export const api = {
   answer: (id: string, answer: string) =>
     call<void>(`/clarifications/${id}/answer`, { method: 'POST', body: JSON.stringify({ answer }) }),
 
+  /** A project's branches and tags, for the code explorer's ref picker. */
+  repoRefs: (id: string) => call<RepoRef[]>(`/projects/${id}/refs`),
+  /** One directory's immediate children at a ref, pinned to the commit sha it
+   *  resolved. path is '' for the repository root. */
+  repoTree: (id: string, ref: string, path: string) =>
+    call<{ resolvedSha: string; entries: TreeEntry[] }>(
+      `/projects/${id}/tree?${new URLSearchParams({ ref, path })}`,
+    ),
+  /** One file's content at a ref, pinned to the commit sha it resolved. */
+  repoFile: (id: string, ref: string, path: string) =>
+    call<{ resolvedSha: string; blob: RepoBlob }>(
+      `/projects/${id}/file?${new URLSearchParams({ ref, path })}`,
+    ),
+
   /** The conversations a project holds, most recently used first. */
   chats: (id: string) => call<Chat[]>(`/projects/${id}/chats`),
 
@@ -1380,4 +1394,36 @@ export interface ChangedFile {
   tooLarge?: boolean
   /** Listed but not read, because the change is large. Fetched when opened. */
   deferred?: boolean
+}
+
+/**
+ * A branch or tag, for the code explorer's ref picker.
+ *
+ * Independent of any task, approval or feature -- see docs/design/code-explorer.md.
+ */
+export interface RepoRef {
+  name: string
+  kind: 'branch' | 'tag'
+  sha: string
+}
+
+/** One immediate child of a directory at a commit: a file, a subdirectory, or
+ *  a submodule. Not recursive -- a directory's children are fetched when it
+ *  is opened, not with the rest of the tree. */
+export interface TreeEntry {
+  name: string
+  path: string
+  kind: 'blob' | 'tree' | 'commit'
+  /** Blobs only. */
+  size?: number
+}
+
+/** One file's exact bytes at a commit, read for the code explorer rather
+ *  than for a diff -- see ChangedFile for that. */
+export interface RepoBlob {
+  path: string
+  content?: string
+  size: number
+  binary?: boolean
+  tooLarge?: boolean
 }

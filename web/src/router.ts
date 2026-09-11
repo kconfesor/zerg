@@ -23,6 +23,7 @@ export const VIEWS = [
   'chat',
   'history',
   'team',
+  'code',
   'settings',
 ] as const
 
