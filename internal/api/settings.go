@@ -265,6 +265,12 @@ func (s *Server) taskDetail(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
+	// GetTask does not join usage_turns, so a task opened from anywhere but
+	// the board arrives with no idea which models or CLIs actually worked it.
+	if task.Models, task.Harnesses, err = s.db.TaskAttribution(r.Context(), id); err != nil {
+		s.fail(w, r, err)
+		return
+	}
 
 	// Commit subjects come from the repository, so the view can show what was
 	// committed alongside what was said about it.

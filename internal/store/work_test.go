@@ -577,7 +577,7 @@ func TestTaskTrailCarriesEachStepsTimeAndCost(t *testing.T) {
 
 // The board's own query, with a card that has spent something.
 //
-// It reads the task columns positionally and adds three of its own, so a column
+// It reads the task columns positionally and adds four of its own, so a column
 // added to the list without a destination in the scanner takes the board down
 // with "expected 20 destination arguments in Scan, not 19" and nothing else
 // notices. Twice now: once for the outcome, once for the pin.
@@ -592,15 +592,9 @@ func TestListTasksReadsEveryColumnItSelects(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := db.SQL().ExecContext(ctx,
-		`INSERT INTO usage_turns (id,project_id,task_id,role,ts,output_tokens,cost_usd)
-		 VALUES (?,?,?,'coder',?,?,?)`,
+		`INSERT INTO usage_turns (id,project_id,task_id,role,ts,harness,model,output_tokens,cost_usd)
+		 VALUES (?,?,?,'coder',?,'claude','claude-sonnet-5',?,?)`,
 		NewID(), p.ID, task.ID, time.Now().UTC().Format(time.RFC3339Nano), 4_000, 1.25); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.RecordEvent(ctx, &Event{
-		ID: NewID(), ProjectID: p.ID, TaskID: &task.ID,
-		Role: "coder", Kind: "tool_call", At: time.Now().UTC(), Tool: "Bash",
-	}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -618,8 +612,11 @@ func TestListTasksReadsEveryColumnItSelects(t *testing.T) {
 	if got.Tokens != 4_000 || got.CostUSD != 1.25 {
 		t.Errorf("the board reports %d tokens and %v, want what the card spent", got.Tokens, got.CostUSD)
 	}
-	if got.Doing != "Bash" {
-		t.Errorf("the board reports %q as the last thing done, want the tool", got.Doing)
+	if len(got.Models) != 1 || got.Models[0] != "claude-sonnet-5" {
+		t.Errorf("the board reports models %v, want [claude-sonnet-5]", got.Models)
+	}
+	if len(got.Harnesses) != 1 || got.Harnesses[0] != "claude" {
+		t.Errorf("the board reports harnesses %v, want [claude]", got.Harnesses)
 	}
 }
 

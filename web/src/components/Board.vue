@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import type { LiveService, ResolvedRole, SwarmStatus, Task } from '@/lib/api'
-import { duration, taskState } from '@/lib/utils'
+import { shortModel, taskHarness as harnessForTask, taskState } from '@/lib/utils'
 
 /**
  * "3m ago" rather than a timestamp. On a board the useful question is how long
@@ -17,16 +17,6 @@ function ago(iso?: string): string {
   return `${Math.floor(secs / 86400)}d ago`
 }
 
-function compactTokens(n: number): string {
-  if (!n) return ''
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
-  if (n >= 1_000) return `${Math.round(n / 1000)}k`
-  return String(n)
-}
-
-function money(n: number): string {
-  return n >= 1 ? `$${n.toFixed(2)}` : `$${n.toFixed(3)}`
-}
 import {
   Bell,
   Bot,
@@ -43,6 +33,7 @@ import {
 } from '@lucide/vue'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import HarnessIcon from '@/components/HarnessIcon.vue'
 
 const props = defineProps<{
   team: ResolvedRole[]
@@ -92,18 +83,6 @@ const deployFor = computed(() => (task: Task) => {
 })
 
 /**
- * The models that did the work, short enough to sit on a card.
- *
- * "claude-sonnet-5" and "gpt-5.6-sol" are the identifiers, and the vendor
- * prefix is the least interesting part of them on a board where every card
- * carries one. The full names are in the title, since the short form is
- * ambiguous the moment two vendors ship a "5".
- */
-function shortModel(model: string): string {
-  return model.replace(/^(claude|openai|anthropic|google)-/, '')
-}
-
-/**
  * The model a role is configured with, for its column heading.
  *
  * A different question from the models on a card, which say what actually did
@@ -119,6 +98,11 @@ function laneModel(lane: string): string {
   const role = props.team.find((r) => r.enabled && r.name === lane)
   if (!role?.model) return ''
   return shortModel(role.model.split('/').pop() ?? role.model)
+}
+
+/** Which CLI to draw a task's harness icon for; see lib/utils taskHarness. */
+function taskHarness(task: Task): string {
+  return harnessForTask(props.team, task)
 }
 
 /**
@@ -145,6 +129,7 @@ function deploySays(state: string): string {
   return 'Deploying'
 }
 
+/** The feature a card belongs to, for the icon's tooltip. */
 function featureName(task: Task): string {
   if (!task.parentId) return ''
   return (props.features ?? []).find((f) => f.id === task.parentId)?.name ?? ''
@@ -288,42 +273,20 @@ const byLane = computed(() => {
           >
             <div class="mb-1.5 text-xs leading-snug font-medium break-words">{{ task.name }}</div>
 
-            <!-- What is happening right now. "working" for four minutes is
-                 indistinguishable from stuck; the tool it just ran is not. -->
-            <!-- Three lines, not one. A tool call fits in one; the line an
-                 agent writes about what it just decided rarely does, and a
-                 single line ending in an ellipsis is the half of a sentence
-                 that carries the least. Clamped rather than unbounded, so one
-                 verbose card cannot push the rest of the lane off screen. -->
-            <p
-              v-if="task.doing"
-              class="text-muted-foreground mb-1.5 line-clamp-3 font-mono text-[10px] leading-snug break-words"
-              :title="task.doing"
-            >
-              {{ task.doing }}
-            </p>
             <div class="flex flex-wrap items-center gap-1.5">
-              <!-- lane says who holds the card, state says whether they are
-                   actually working it. Showing only the lane makes a card read
-                   as claimed the instant it is delivered. -->
-              <Badge
-                :variant="
-                  task.state === 'working'
-                    ? 'default'
-                    : task.stoppedAt
-                      ? 'secondary'
-                      : 'outline'
-                "
-                class="gap-1"
-              >
-                <!-- The same pulse a live role wears in the rail, so the board
-                     has one vocabulary for "this is moving" rather than a
-                     second animation that has to be learned. A still badge and
-                     a working one otherwise differ only in fill, which is a
-                     colour difference and not something you catch in passing. -->
-                <span v-if="task.state === 'working'" class="pulse-dot size-1.5 rounded-full bg-current" />
-                {{ taskState(task) }}
-              </Badge>
+              <!-- The state badge sits with the timestamp below rather than
+                   here: "done" as a badge and "done 5d ago" as text a line
+                   under it said the same word twice. Just the time up here,
+                   and it is always one of these three regardless of state. -->
+              <span class="tabular text-muted-foreground shrink-0 text-[10px]">
+                {{
+                  task.state === 'done' && task.completedAt
+                    ? ago(task.completedAt)
+                    : task.firstClaimedAt
+                      ? ago(task.firstClaimedAt)
+                      : ago(task.createdAt)
+                }}
+              </span>
               <!-- The card that is holding everything up says so on itself.
                    A count in the header tells you something is waiting; this
                    tells you which one. -->
@@ -349,29 +312,33 @@ const byLane = computed(() => {
               >
                 blocked
               </Badge>
-              <Badge
-                v-if="featureName(task)"
-                variant="outline"
-                class="gap-1"
-                :title="`part of ${featureName(task)}`"
-              >
-                <Layers :size="10" aria-hidden="true" />
-                {{ featureName(task) }}
-              </Badge>
-              <Badge
+              <!-- Rework and active-time sit in the detail dialog already;
+                   harness, architect and feature stay here as bare icons,
+                   grouped after the badges rather than between them, since a
+                   badge sitting between two icons reads as one broken chip
+                   instead of three separate signals. -->
+              <HarnessIcon
+                v-if="taskHarness(task)"
+                :harness="taskHarness(task)"
+                :pulse="task.state === 'working'"
+              />
+              <span
                 v-if="task.supervised"
-                variant="secondary"
-                class="gap-1"
+                role="img"
+                aria-label="Architect supervises this card"
                 title="Architect will decide plans and questions; you still land it"
+                class="text-muted-foreground grid size-4 shrink-0 place-items-center"
               >
-                <Bot :size="10" aria-hidden="true" />
-                architect
-              </Badge>
-              <Badge v-if="task.reworkCount > 0" variant="secondary" :title="`sent backward ${task.reworkCount} times`">
-                ↩ {{ task.reworkCount }}
-              </Badge>
-              <span v-if="task.activeMs > 0" class="tabular text-muted-foreground text-[10px]">
-                {{ duration(task.activeMs) }}
+                <Bot :size="12" aria-hidden="true" />
+              </span>
+              <span
+                v-if="featureName(task)"
+                role="img"
+                :aria-label="`Part of ${featureName(task)}`"
+                :title="`part of ${featureName(task)}`"
+                class="text-muted-foreground grid size-4 shrink-0 place-items-center"
+              >
+                <Layers :size="12" aria-hidden="true" />
               </span>
 
               <!-- Card controls. On the badge row rather than a footer of their
@@ -380,50 +347,72 @@ const byLane = computed(() => {
                    Buttons rather than the wrapper's click, so they do not open
                    the card as well — and .stop on each, because the whole card
                    body is clickable. -->
-              <span class="ml-auto flex items-center gap-0.5">
+              <span class="ml-auto flex items-center gap-1">
                 <button
                   v-if="task.state === 'queued' || task.state === 'working'"
                   type="button"
                   title="Stop, and no agent picks this up again"
                   aria-label="Stop this task"
-                  class="text-muted-foreground hover:bg-muted hover:text-destructive focus-visible:outline-ring grid size-5 place-items-center transition-colors focus-visible:outline-2"
+                  class="text-muted-foreground hover:bg-muted hover:text-destructive focus-visible:outline-ring grid size-7 place-items-center transition-colors focus-visible:outline-2"
                   @click.stop="emit('stop', task)"
                 >
-                  <Square :size="11" aria-hidden="true" />
+                  <Square :size="13" aria-hidden="true" />
+                </button>
+                <!-- Put away, next to stop rather than in a footer of its own:
+                     a done card has no stop button, so the slot is never
+                     doubled, and a row that held one button alone was the
+                     wasted space a card could not afford. -->
+                <button
+                  v-if="task.state === 'done'"
+                  type="button"
+                  :title="task.hidden ? 'Unhide this task' : 'Hide this task'"
+                  :aria-label="task.hidden ? 'Unhide this task' : 'Hide this task'"
+                  class="text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-ring grid size-7 place-items-center transition-colors focus-visible:outline-2"
+                  @click.stop="task.hidden ? emit('unhide', task) : emit('hide', task)"
+                >
+                  <component :is="task.hidden ? Eye : EyeOff" :size="13" aria-hidden="true" />
                 </button>
                 <button
                   type="button"
                   title="Activity for this task"
                   aria-label="Show this task's activity"
-                  class="text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-ring grid size-5 place-items-center transition-colors focus-visible:outline-2"
+                  class="text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-ring grid size-7 place-items-center transition-colors focus-visible:outline-2"
                   @click.stop="emit('activity', task)"
                 >
-                  <ScrollText :size="11" aria-hidden="true" />
+                  <ScrollText :size="13" aria-hidden="true" />
                 </button>
                 <button
                   type="button"
                   title="Delete this task and its transcript"
                   aria-label="Delete this task"
-                  class="text-muted-foreground hover:bg-destructive/10 hover:text-destructive focus-visible:outline-ring grid size-5 place-items-center transition-colors focus-visible:outline-2"
+                  class="text-muted-foreground hover:bg-destructive/10 hover:text-destructive focus-visible:outline-ring grid size-7 place-items-center transition-colors focus-visible:outline-2"
                   @click.stop="emit('remove', task)"
                 >
-                  <Trash2 :size="11" aria-hidden="true" />
+                  <Trash2 :size="13" aria-hidden="true" />
                 </button>
               </span>
             </div>
 
-            <!-- When, and what it cost. Both were only discoverable by opening
-                 the card, which is the wrong place for the number that tells
-                 you whether to open it. -->
-            <div
-              v-if="task.tokens || task.completedAt || task.firstClaimedAt"
-              class="text-muted-foreground mt-1.5 flex flex-wrap items-center gap-x-2 text-[10px]"
-            >
-              <span v-if="task.state === 'done' && task.completedAt">
-                done {{ ago(task.completedAt) }}
-              </span>
-              <span v-else-if="task.firstClaimedAt">started {{ ago(task.firstClaimedAt) }}</span>
-              <span v-else>queued {{ ago(task.createdAt) }}</span>
+            <!-- lane says who holds the card, state says whether they are
+                 actually working it. Showing only the lane makes a card read
+                 as claimed the instant it is delivered. -->
+            <div class="mt-1.5 flex flex-wrap items-center gap-x-2 text-[10px]">
+              <Badge
+                :variant="task.state === 'working' ? 'default' : task.stoppedAt ? 'secondary' : 'outline'"
+                :class="[
+                  'gap-1',
+                  task.state === 'done' &&
+                    'border-[var(--status-good)]/40 bg-[var(--status-good)]/10 text-[var(--status-good)]',
+                ]"
+              >
+                <!-- The same pulse a live role wears in the rail, so the board
+                     has one vocabulary for "this is moving" rather than a
+                     second animation that has to be learned. A still badge and
+                     a working one otherwise differ only in fill, which is a
+                     colour difference and not something you catch in passing. -->
+                <span v-if="task.state === 'working'" class="pulse-dot size-1.5 rounded-full bg-current" />
+                {{ taskState(task) }}
+              </Badge>
 
               <span
                 v-if="quietFor(task)"
@@ -433,52 +422,8 @@ const byLane = computed(() => {
                 <Hourglass :size="10" aria-hidden="true" />
                 {{ quietFor(task) }}
               </span>
-
-              <!-- Which models produced this. On the card because it is the
-                   card you are judging: "this came out well" and "this came
-                   out badly" are both worth attaching to what made it, and a
-                   role's configured model is a live value that will not
-                   remember. -->
-              <span
-                v-if="task.models?.length"
-                class="truncate"
-                :title="`Worked by ${task.models.join(', ')}`"
-              >
-                {{ task.models.map(shortModel).join(' · ') }}
-              </span>
             </div>
           </button>
-
-            <!-- The card's foot: putting it away, and what it cost.
-                 Together on one row because both are about the card as a whole
-                 rather than about the work in it, and the spend was taking a
-                 third of the line above while the row underneath held one
-                 word. Put away is on the card itself because finished work
-                 accumulates, and the person reading a card is the one who
-                 knows whether they will want it again -- which no age cutoff
-                 can guess. -->
-            <div
-              v-if="task.state === 'done' || task.tokens"
-              class="hairline-t text-muted-foreground flex items-center text-[11px]"
-            >
-              <button
-                v-if="task.state === 'done'"
-                type="button"
-                class="hover:bg-muted hover:text-foreground focus-visible:outline-ring flex items-center gap-1.5 px-2.5 py-1.5 text-left transition-colors focus-visible:outline-2 focus-visible:-outline-offset-2"
-                @click="task.hidden ? emit('unhide', task) : emit('hide', task)"
-              >
-                <component :is="task.hidden ? Eye : EyeOff" :size="12" aria-hidden="true" />
-                {{ task.hidden ? 'Unhide' : 'Hide' }}
-              </button>
-
-              <span
-                v-if="task.tokens"
-                class="tabular ml-auto px-2.5 py-1.5 text-[10px]"
-                :title="`${task.tokens.toLocaleString()} tokens across every role and every lap`"
-              >
-                {{ compactTokens(task.tokens) }} · {{ money(task.costUsd) }}
-              </span>
-            </div>
 
             <!-- What this card's change is doing when it is running somewhere.
                  On the card rather than in the top bar: an app running is only
@@ -510,23 +455,23 @@ const byLane = computed(() => {
                 :href="deployFor(task)!.url"
                 target="_blank"
                 rel="noopener noreferrer"
-                class="text-primary hover:bg-muted focus-visible:outline-ring ml-auto grid size-5 shrink-0 place-items-center transition-colors focus-visible:outline-2"
+                class="text-primary hover:bg-muted focus-visible:outline-ring ml-auto grid size-7 shrink-0 place-items-center transition-colors focus-visible:outline-2"
                 :title="`Open ${deployFor(task)!.label || 'it'} in a new tab`"
                 :aria-label="`Open ${deployFor(task)!.label || 'this deployment'} in a new tab`"
                 @click.stop
               >
-                <ExternalLink :size="12" aria-hidden="true" />
+                <ExternalLink :size="14" aria-hidden="true" />
               </a>
 
               <button
                 type="button"
-                class="text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-ring grid size-5 shrink-0 place-items-center transition-colors focus-visible:outline-2"
+                class="text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-ring grid size-7 shrink-0 place-items-center transition-colors focus-visible:outline-2"
                 :class="deployFor(task)!.state === 'serving' ? '' : 'ml-auto'"
                 title="Stop this deployment"
                 aria-label="Stop this deployment"
                 @click.stop="emit('stopDeploy', task)"
               >
-                <Square :size="11" aria-hidden="true" />
+                <Square :size="13" aria-hidden="true" />
               </button>
             </div>
 

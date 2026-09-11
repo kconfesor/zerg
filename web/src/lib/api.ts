@@ -211,8 +211,6 @@ export interface Task {
   /** Total tokens and cost across every role and every lap. */
   tokens: number
   costUsd: number
-  /** The most recent thing an agent did on this card. */
-  doing?: string
   /** Put away by a person. Finished work that is still finished. */
   hidden?: boolean
   /** Kept past the retention window: events are swept because they are the
@@ -229,6 +227,9 @@ export interface Task {
    *  Not what the roles are configured with now, which is a live value and a
    *  different question. */
   models?: string[]
+  /** The CLIs that actually spent tokens on this card, first use first. Same
+   *  reasoning as models, one column over. */
+  harnesses?: string[]
   /** Where this card's work gets put when it lands. Decided when the card is
    *  written: a preview costs an agent turn, and most cards are not worth
    *  looking at. Empty means nowhere. */

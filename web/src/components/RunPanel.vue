@@ -9,10 +9,19 @@
  * be able to do when it is wrong -- correct it, or start again.
  */
 import { computed, onUnmounted, ref, watch } from 'vue'
-import { ExternalLink, MessageCircleQuestion, Play, RotateCcw, Square } from '@lucide/vue'
+import { ExternalLink, Info, MessageCircleQuestion, Play, RotateCcw, Square } from '@lucide/vue'
 import { api, type RunState } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import {
+  Dialog,
+  DialogBody,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 
 const props = defineProps<{
   projectId: string | undefined
@@ -39,6 +48,10 @@ const error = ref('')
 const guidance = ref('')
 const editingNote = ref(false)
 const noteDraft = ref('')
+/** Whether "how this project runs" is open. Its own dialog rather than a
+ *  strip that sat under the buttons on every visit: what it worked out is
+ *  read once and trusted after, not something to look at again each time. */
+const showNote = ref(false)
 
 let poll: number | undefined
 
@@ -156,6 +169,19 @@ const says = computed(() => {
         {{ label }}
       </Button>
 
+      <!-- What it worked out, on request rather than under the buttons on
+           every visit: read once and trusted after. -->
+      <button
+        v-if="state?.note"
+        type="button"
+        title="How this project runs"
+        aria-label="How this project runs"
+        class="text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-ring grid size-7 place-items-center transition-colors focus-visible:outline-2"
+        @click="showNote = true"
+      >
+        <Info :size="14" aria-hidden="true" />
+      </button>
+
       <template v-if="running">
         <Button
           size="xs"
@@ -229,39 +255,45 @@ const says = computed(() => {
       </Button>
     </div>
 
+    <p v-if="error" class="text-destructive text-[11px]">{{ error }}</p>
+
     <!-- What it has worked out, which is why the second run is faster than the
          first. Editable, because the agent can be wrong and correcting it is
          cheaper than watching it fail again. -->
-    <div v-if="state?.note || editingNote" class="bg-muted/20 border p-2">
-      <p class="text-muted-foreground mb-1 flex items-center gap-1.5 text-[10px]">
-        <span>
-          how this project runs · {{ state?.noteAuthor === 'operator' ? 'you told it' : 'it worked this out' }}
-        </span>
-        <button
-          v-if="!editingNote"
-          type="button"
-          class="hover:text-foreground focus-visible:outline-ring ml-auto underline-offset-2 hover:underline focus-visible:outline-2"
-          @click="((noteDraft = state?.note ?? ''), (editingNote = true))"
-        >
-          correct it
-        </button>
-      </p>
-      <p v-if="!editingNote" class="text-[11px] leading-relaxed whitespace-pre-wrap">
-        {{ state?.note }}
-      </p>
-      <template v-else>
-        <textarea
-          v-model="noteDraft"
-          rows="4"
-          class="border-input bg-background w-full border p-2 font-mono text-[11px]"
-        />
-        <div class="mt-1 flex gap-2">
-          <Button size="xs" class="h-6" :disabled="busy" @click="saveNote">Save</Button>
-          <Button size="xs" variant="ghost" class="h-6" @click="editingNote = false">Cancel</Button>
-        </div>
-      </template>
-    </div>
-
-    <p v-if="error" class="text-destructive text-[11px]">{{ error }}</p>
+    <Dialog :open="showNote" @update:open="(v) => (showNote = v, v || (editingNote = false))">
+      <DialogContent variant="confirm" class="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>How this project runs</DialogTitle>
+          <DialogDescription>
+            {{ state?.noteAuthor === 'operator' ? 'You told it this.' : 'It worked this out.' }}
+          </DialogDescription>
+        </DialogHeader>
+        <DialogBody>
+          <p v-if="!editingNote" class="text-[11px] leading-relaxed whitespace-pre-wrap">
+            {{ state?.note }}
+          </p>
+          <textarea
+            v-else
+            v-model="noteDraft"
+            rows="6"
+            class="border-input bg-background w-full border p-2 font-mono text-[11px]"
+          />
+        </DialogBody>
+        <DialogFooter>
+          <Button
+            v-if="!editingNote"
+            size="xs"
+            variant="ghost"
+            @click="((noteDraft = state?.note ?? ''), (editingNote = true))"
+          >
+            correct it
+          </Button>
+          <template v-else>
+            <Button size="xs" :disabled="busy" @click="saveNote">Save</Button>
+            <Button size="xs" variant="ghost" @click="editingNote = false">Cancel</Button>
+          </template>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   </div>
 </template>

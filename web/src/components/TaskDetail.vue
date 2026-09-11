@@ -11,9 +11,10 @@ import { computed, ref, watch } from 'vue'
 import { api, type Project, type Task, type TaskDetail } from '@/lib/api'
 import { latest } from '@/lib/latest'
 import { renderMarkdown } from '@/lib/markdown'
-import { duration, taskState } from '@/lib/utils'
+import { duration, shortModel, taskState } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import { Switch } from '@/components/ui/switch'
+import HarnessIcon from '@/components/HarnessIcon.vue'
 import {
   Select,
   SelectContent,
@@ -140,66 +141,111 @@ function tokensOf(u: TaskDetail['usage']): number {
         <DialogDescription v-if="task?.kind === 'feature'" class="text-[11px]">
           Plans, evidence, decisions and cost for the whole feature.
         </DialogDescription>
-        <DialogDescription v-else class="flex flex-wrap items-center gap-2 text-[11px]">
-          <Badge :variant="task?.stoppedAt ? 'secondary' : 'outline'">
-            {{ task ? taskState(task) : '' }}
-          </Badge>
-          <span v-if="task?.stoppedAt" class="text-muted-foreground">
-            parked by a person, not rejected by a role
-          </span>
-          <Badge v-if="(task?.reworkCount ?? 0) > 0" variant="secondary">
-            ↩ {{ task?.reworkCount }} rework
-          </Badge>
-          <!-- Why this card's route is not the pipeline. Without it the
-               diagram below reads as a card that lost a role somewhere. -->
-          <Badge v-if="skipped?.length" variant="secondary">
-            skipped {{ skipped.join(', ') }}
-          </Badge>
-          <label
-            v-if="task && task.state !== 'done' && task.state !== 'rejected'"
-            class="text-muted-foreground flex items-center gap-1.5"
-          >
-            <Switch
-              :model-value="!!task.supervised"
-              aria-label="Architect supervises this card"
-              class="scale-90"
-              @update:model-value="setSupervised"
-            />
-            Architect supervises
-          </label>
-          <Badge v-else-if="task?.supervised" variant="secondary">
-            architect supervised
-          </Badge>
-          <label
-            v-if="task && features?.length"
-            class="text-muted-foreground flex items-center gap-1.5"
-          >
-            Part of
-            <Select
-              :model-value="task.parentId || 'none'"
-              @update:model-value="(v) => typeof v === 'string' && setParent(v)"
+        <!-- Two rows rather than one wrapped line: what this card is and what
+             it is set to do share the first, on opposite ends of it rather
+             than stacked as a badge alone on a line of its own; what it cost
+             is the second. The card upstream dropped everything below the
+             state to a glance's worth of icons — this is where the rest of
+             it lives, one click away. -->
+        <DialogDescription v-else class="flex flex-col gap-2 text-[11px]">
+          <div class="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+            <div class="flex flex-wrap items-center gap-2">
+              <Badge
+                :variant="task?.stoppedAt ? 'secondary' : 'outline'"
+                :class="task?.state === 'done' &&
+                  'border-[var(--status-good)]/40 bg-[var(--status-good)]/10 text-[var(--status-good)]'"
+              >
+                {{ task ? taskState(task) : '' }}
+              </Badge>
+              <!-- Which CLIs actually spent tokens here, first use first.
+                   Plural only because a card can cross a harness change
+                   mid-pipeline. Read from detail.task, not the task prop: a
+                   card opened from History or Attention, or handed back
+                   after an architect/parent edit, carries no attribution of
+                   its own -- GetTask does not join usage_turns, only the
+                   detail fetch does. -->
+              <HarnessIcon
+                v-for="h in detail?.task.harnesses ?? []"
+                :key="h"
+                :harness="h"
+                :label="`Worked by ${h}`"
+                :size="20"
+              />
+              <span v-if="task?.stoppedAt" class="text-muted-foreground">
+                parked by a person, not rejected by a role
+              </span>
+              <Badge v-if="(task?.reworkCount ?? 0) > 0" variant="secondary">
+                ↩ {{ task?.reworkCount }} rework
+              </Badge>
+              <!-- Why this card's route is not the pipeline. Without it the
+                   diagram below reads as a card that lost a role somewhere. -->
+              <Badge v-if="skipped?.length" variant="secondary">
+                skipped {{ skipped.join(', ') }}
+              </Badge>
+            </div>
+
+            <div
+              v-if="(task && task.state !== 'done' && task.state !== 'rejected') || task?.supervised || features?.length"
+              class="text-muted-foreground flex flex-wrap items-center gap-3"
             >
-              <SelectTrigger size="sm" class="h-6 w-36 text-[11px]">
-                <SelectValue placeholder="None" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectGroup>
-                  <SelectItem value="none">None</SelectItem>
-                  <SelectItem v-for="f in features" :key="f.id" :value="f.id">
-                    {{ f.name }}
-                  </SelectItem>
-                </SelectGroup>
-              </SelectContent>
-            </Select>
-          </label>
-          <span v-if="task?.activeMs" class="text-muted-foreground">
-            {{ duration(task.activeMs) }} of agent time
-          </span>
-          <span v-if="detail?.usage.turns" class="text-muted-foreground">
-            · {{ detail.usage.turns }} turns · {{ num.format(tokensOf(detail.usage)) }} tokens ·
-            {{ money(detail.usage.costUsd) }}
-            <span v-if="detail.usage.subscriptionTurns === detail.usage.turns">(plan)</span>
-          </span>
+              <label
+                v-if="task && task.state !== 'done' && task.state !== 'rejected'"
+                class="flex items-center gap-1.5"
+              >
+                <Switch
+                  :model-value="!!task.supervised"
+                  aria-label="Architect supervises this card"
+                  class="scale-90"
+                  @update:model-value="setSupervised"
+                />
+                Architect supervises
+              </label>
+              <Badge v-else-if="task?.supervised" variant="secondary">
+                architect supervised
+              </Badge>
+              <label
+                v-if="task && features?.length"
+                class="flex items-center gap-1.5"
+              >
+                Part of
+                <Select
+                  :model-value="task.parentId || 'none'"
+                  @update:model-value="(v) => typeof v === 'string' && setParent(v)"
+                >
+                  <SelectTrigger size="sm" class="h-6 w-36 text-[11px]">
+                    <SelectValue placeholder="None" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectGroup>
+                      <SelectItem value="none">None</SelectItem>
+                      <SelectItem v-for="f in features" :key="f.id" :value="f.id">
+                        {{ f.name }}
+                      </SelectItem>
+                    </SelectGroup>
+                  </SelectContent>
+                </Select>
+              </label>
+            </div>
+          </div>
+
+          <div
+            v-if="task?.activeMs || detail?.usage.turns || detail?.task.models?.length"
+            class="text-muted-foreground flex flex-wrap items-center gap-x-2 gap-y-1"
+          >
+            <span v-if="task?.activeMs">{{ duration(task.activeMs) }} of agent time</span>
+            <span v-if="detail?.usage.turns">
+              · {{ detail.usage.turns }} turns · {{ num.format(tokensOf(detail.usage)) }} tokens ·
+              {{ money(detail.usage.costUsd) }}
+              <span v-if="detail.usage.subscriptionTurns === detail.usage.turns">(plan)</span>
+            </span>
+            <!-- The models that actually produced this, not what the roles
+                 are configured with now -- the same distinction the card
+                 used to draw, kept here instead. Same detail.task reasoning
+                 as the harness marks above. -->
+            <span v-if="detail?.task.models?.length" :title="`Worked by ${detail.task.models.join(', ')}`">
+              · {{ detail.task.models.map(shortModel).join(' · ') }}
+            </span>
+          </div>
         </DialogDescription>
       </DialogHeader>
 
