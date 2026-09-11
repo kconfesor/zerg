@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -613,6 +614,38 @@ func (db *DB) UsageForTask(ctx context.Context, taskID string) (UsageTotal, erro
 		return t, fmt.Errorf("totalling task usage: %w", err)
 	}
 	return t, nil
+}
+
+// TaskAttribution says which models and which CLIs actually spent tokens on
+// one card, each in the order they first did.
+//
+// The same two subselects ListTasks runs for every row on the board, run once
+// here for the one task a detail dialog is asking about. GetTask does not
+// join usage_turns at all — a plain board task and one opened from History or
+// Attention, or handed back by a supervised/parent update, otherwise carry no
+// attribution though the same work happened either way.
+func (db *DB) TaskAttribution(ctx context.Context, taskID string) (models, harnesses []string, err error) {
+	var m, h string
+	err = db.read.QueryRowContext(ctx, `
+		SELECT
+		    COALESCE((SELECT group_concat(model, char(10)) FROM (
+		        SELECT model, MIN(ts) AS first FROM usage_turns
+		         WHERE task_id = ? AND model <> '' GROUP BY model ORDER BY first
+		    )), ''),
+		    COALESCE((SELECT group_concat(harness, char(10)) FROM (
+		        SELECT harness, MIN(ts) AS first FROM usage_turns
+		         WHERE task_id = ? AND harness <> '' GROUP BY harness ORDER BY first
+		    )), '')`, taskID, taskID).Scan(&m, &h)
+	if err != nil {
+		return nil, nil, fmt.Errorf("reading task %s attribution: %w", taskID, err)
+	}
+	if m != "" {
+		models = strings.Split(m, "\n")
+	}
+	if h != "" {
+		harnesses = strings.Split(h, "\n")
+	}
+	return models, harnesses, nil
 }
 
 // CurrentTaskFor is the task a role is working, or most recently worked.

@@ -175,11 +175,6 @@ type Task struct {
 	Tokens  int64   `json:"tokens"`
 	CostUSD float64 `json:"costUsd"`
 
-	// Doing is the most recent thing an agent did on this card, for cards
-	// being worked. "working" for four minutes is indistinguishable from
-	// stuck; "running cargo test" is not.
-	Doing string `json:"doing,omitempty"`
-
 	// Deploy is where this card's work should be put when it lands, decided by
 	// whoever wrote the card. Empty for most of them: a preview costs an agent
 	// turn, and only some work is worth looking at.
@@ -229,6 +224,12 @@ type Task struct {
 	// front of you, which is the one worth asking when a card came out well or
 	// badly.
 	Models []string `json:"models,omitempty"`
+
+	// Harnesses are the CLIs that have actually spent tokens on this card, in
+	// the order they first did. Same reasoning as Models, one column over: a
+	// card in the done well has left its lane, and a lane is the only other
+	// place that says which harness picked it up.
+	Harnesses []string `json:"harnesses,omitempty"`
 }
 
 // Where a finished card gets deployed. Empty is the default and means nowhere.
@@ -424,13 +425,13 @@ func (db *DB) GetTask(ctx context.Context, id string) (*Task, error) {
 
 // ListTasks returns a project's board, newest first.
 func (db *DB) ListTasks(ctx context.Context, projectID string) ([]Task, error) {
-	// Totals and the latest activity come back with the tasks rather than in a
-	// request per card: a board with twenty cards would otherwise make
-	// twenty-one round trips every two seconds.
+	// Totals come back with the tasks rather than in a request per card: a
+	// board with twenty cards would otherwise make twenty-one round trips
+	// every two seconds.
 	rows, err := db.read.QueryContext(ctx,
 		`SELECT `+taskColsT+`,
 		        COALESCE(u.tokens, 0), COALESCE(u.cost, 0), COALESCE(u.models, ''),
-		        COALESCE(e.doing, '')
+		        COALESCE(u.harnesses, '')
 		 FROM tasks t
 		 LEFT JOIN (
 		     SELECT task_id,
@@ -445,21 +446,16 @@ func (db *DB) ListTasks(ctx context.Context, projectID string) ([]Task, error) {
 		                  FROM usage_turns m
 		                 WHERE m.task_id = usage_turns.task_id AND model <> ''
 		                 GROUP BY model ORDER BY first
-		            )) AS models
+		            )) AS models,
+		            -- Same question, one column over: which CLIs did the work.
+		            (SELECT group_concat(harness, char(10)) FROM (
+		                SELECT harness, MIN(ts) AS first
+		                  FROM usage_turns h
+		                 WHERE h.task_id = usage_turns.task_id AND harness <> ''
+		                 GROUP BY harness ORDER BY first
+		            )) AS harnesses
 		       FROM usage_turns GROUP BY task_id
 		 ) u ON u.task_id = t.id
-		 LEFT JOIN (
-		     SELECT task_id,
-		            -- The newest event that says something a person can read.
-		            -- Ids are monotonic, so MAX(id) is the latest.
-		            (SELECT CASE WHEN kind = 'tool_call' THEN COALESCE(NULLIF(tool, ''), 'working')
-		                         ELSE text END
-		               FROM events e2
-		              WHERE e2.task_id = e1.task_id
-		                AND kind IN ('tool_call', 'message')
-		              ORDER BY id DESC LIMIT 1) AS doing
-		       FROM events e1 GROUP BY task_id
-		 ) e ON e.task_id = t.id
 		 WHERE t.project_id = ? AND t.kind = ? ORDER BY t.created_at DESC`, projectID, TaskKindWork)
 	if err != nil {
 		return nil, fmt.Errorf("listing tasks: %w", err)
@@ -505,7 +501,7 @@ func (db *DB) ListFeatures(ctx context.Context, projectID string) ([]Task, error
 	return out, rows.Err()
 }
 
-// scanTaskWithSummary reads a task plus the totals and activity the board shows.
+// scanTaskWithSummary reads a task plus the totals the board shows.
 func scanTaskWithSummary(s scanner) (*Task, error) {
 	var (
 		t           Task
@@ -515,14 +511,14 @@ func scanTaskWithSummary(s scanner) (*Task, error) {
 		completedAt sql.NullString
 		stoppedAt   sql.NullString
 	)
-	var models, skip string
+	var models, harnesses, skip string
 	var supervised, blocked int
 	var parent sql.NullString
 	if err := s.Scan(&t.ID, &t.ProjectID, &sessionID, &t.Name, &t.Body, &t.Lane, &t.State,
 		&created, &firstClaim, &completedAt, &t.ActiveMS, &t.ReworkCount, &t.Hidden, &stoppedAt,
 		&t.Outcome, &t.OutcomeRef, &t.Pinned, &t.Deploy, &skip, &supervised, &t.Kind, &parent,
 		&t.Priority, &blocked,
-		&t.Tokens, &t.CostUSD, &models, &t.Doing); err != nil {
+		&t.Tokens, &t.CostUSD, &models, &harnesses); err != nil {
 		return nil, err
 	}
 	var err error
@@ -536,6 +532,9 @@ func scanTaskWithSummary(s scanner) (*Task, error) {
 	}
 	if models != "" {
 		t.Models = strings.Split(models, "\n")
+	}
+	if harnesses != "" {
+		t.Harnesses = strings.Split(harnesses, "\n")
 	}
 	if err := fillTaskTimes(&t, sessionID, created, firstClaim, completedAt, stoppedAt); err != nil {
 		return nil, err

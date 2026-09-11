@@ -32,6 +32,48 @@ export function duration(ms: number): string {
 }
 
 /**
+ * The models that did the work, short enough to sit on a card.
+ *
+ * "claude-sonnet-5" and "gpt-5.6-sol" are the identifiers, and the vendor
+ * prefix is the least interesting part of them on a board where every card
+ * carries one. The full names are in the title, since the short form is
+ * ambiguous the moment two vendors ship a "5".
+ */
+export function shortModel(model: string): string {
+  return model.replace(/^(claude|openai|anthropic|google)-/, '')
+}
+
+/** The CLI that will work the next card through this lane: claude or pi. */
+export function laneHarness(
+  team: { enabled: boolean; name: string; harness: string }[],
+  lane: string,
+): string {
+  return team.find((r) => r.enabled && r.name === lane)?.harness ?? ''
+}
+
+/**
+ * Which CLI a card's harness icon should draw, and pulse when it is the one
+ * working.
+ *
+ * A queued or working card is claimed by whoever's lane it sits in right now,
+ * which can differ from the first harness that ever touched it — a card that
+ * started under claude's planner and hands off to a pi coder must not go on
+ * pulsing claude's mark while pi is the one actually spending tokens. A done
+ * (or otherwise finished) card has left every lane, so the only truth left is
+ * the last harness recorded against it — the one that produced what is on the
+ * card now, not whichever ran first.
+ */
+export function taskHarness(
+  team: { enabled: boolean; name: string; harness: string }[],
+  task: { state: string; lane: string; harnesses?: string[] },
+): string {
+  if (task.state === 'queued' || task.state === 'working') {
+    return laneHarness(team, task.lane) || task.harnesses?.[0] || ''
+  }
+  return task.harnesses?.[task.harnesses.length - 1] || laneHarness(team, task.lane)
+}
+
+/**
  * What a card's state should be called.
  *
  * `rejected` is stored for two different events — a role turned the work down,
